@@ -49,6 +49,7 @@ from agent.domain.input_value_lineage import (
     input_app_identity_compatible,
     input_screen_identity_compatible,
 )
+from agent.domain.trusted_observation import bounds_overlap
 from agent.infrastructure.windows_ocr_runtime import (
     find_text,
     recognize as recognize_ocr,
@@ -300,68 +301,43 @@ def stable_qwerty_ocr_anchors(
             for key, value in anchors.items()
             if isinstance(value, (list, tuple)) and len(value) == 2
         }
-        if set(original) != required or any(
-            not 0 <= point[0] <= 1000 for point in original.values()
-        ):
+        if set(original) != required or any(not 0 <= point[0] <= 1000 for point in original.values()):
             return None
-        model_rows = (
-            statistics.mean(original[key][1] for key in ("q", "p")),
-            statistics.mean(original[key][1] for key in ("a", "l")),
-            statistics.mean(original[key][1] for key in ("z", "m", "backspace")),
-        )
-        model_vertical_is_trusted = bool(
+        row_keys = (("q", "p"), ("a", "l"), ("z", "m", "backspace"))
+        model_rows = tuple(statistics.mean(original[key][1] for key in keys) for keys in row_keys)
+        trusted_model_y = bool(
             all(0 <= point[1] <= 1000 for point in original.values())
             and model_rows[0] < model_rows[1] < model_rows[2]
             and min(model_rows[1] - model_rows[0], model_rows[2] - model_rows[1]) >= 35
         )
         horizontal_probe = {key: list(value) for key, value in original.items()}
-        for y, keys in ((650, ("q", "p")), (750, ("a", "l")),
-                        (850, ("z", "m", "backspace"))):
+        for y, keys in zip((650, 750, 850), row_keys):
             for key in keys:
                 horizontal_probe[key][1] = y
         qwerty_keyboard_config_from_anchors(horizontal_probe)
 
         alphabets = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
 
-        def clusters(
-            hits: list[tuple[str, float | None, float]],
-            height: int,
-        ) -> list[tuple[float, int, list[tuple[str, float | None, float]]]]:
+        def clusters(hits: list[tuple[str, float | None, float]], height: int) -> list[tuple[float, int, list]]:
             groups: list[list[tuple[str, float | None, float]]] = []
             tolerance = max(8.0, height * 0.025)
             for hit in sorted(hits, key=lambda item: item[2]):
-                if (
-                    not groups
-                    or abs(hit[2] - statistics.median(item[2] for item in groups[-1]))
-                    > tolerance
-                ):
+                if not groups or abs(hit[2] - statistics.median(item[2] for item in groups[-1])) > tolerance:
                     groups.append([hit])
                 else:
                     groups[-1].append(hit)
             return [
-                (
-                    float(statistics.median(item[2] for item in group)),
-                    len({item[0] for item in group}),
-                    group,
-                )
+                (float(statistics.median(item[2] for item in group)), len({item[0] for item in group}), group)
                 for group in groups
                 if len({item[0] for item in group}) >= 2
             ]
 
-        def horizontal_fit(
-            group: list[tuple[str, float | None, float]],
-            alphabet: str,
-            width: int,
-        ) -> tuple[float, float] | None:
+        def horizontal_fit(group: list[tuple[str, float | None, float]], alphabet: str, width: int):
             centers: dict[str, list[float]] = {}
             for label, center_x, _ in group:
                 if center_x is not None and math.isfinite(center_x):
                     centers.setdefault(label, []).append(1000.0 * center_x / width)
-            points = [
-                (alphabet.index(label), statistics.median(values))
-                for label, values in centers.items()
-                if label in alphabet
-            ]
+            points = [(alphabet.index(label), statistics.median(values)) for label, values in centers.items()]
             if width <= 0 or len(points) < 3:
                 return None
             mean_index = statistics.mean(index for index, _ in points)
@@ -369,29 +345,17 @@ def stable_qwerty_ocr_anchors(
             denominator = sum((index - mean_index) ** 2 for index, _ in points)
             if denominator <= 0:
                 return None
-            pitch = sum(
-                (index - mean_index) * (x - mean_x) for index, x in points
-            ) / denominator
+            pitch = sum((index - mean_index) * (x - mean_x) for index, x in points) / denominator
             first_x = mean_x - pitch * mean_index
-            residual = max(
-                abs(x - (first_x + pitch * index)) for index, x in points
-            )
-            return (
-                (first_x, pitch)
-                if (
-                    45 <= pitch <= 130
-                    and 0 <= first_x
-                    and first_x + pitch * (len(alphabet) - 1) <= 1000
-                    and residual <= 25
-                )
-                else None
-            )
+            residual = max(abs(x - (first_x + pitch * index)) for index, x in points)
+            return (first_x, pitch) if (
+                45 <= pitch <= 130
+                and 0 <= first_x
+                and first_x + pitch * (len(alphabet) - 1) <= 1000
+                and residual <= 25
+            ) else None
 
-        def combined_fit(
-            top_group: list[tuple[str, float | None, float]],
-            bottom_group: list[tuple[str, float | None, float]],
-            width: int,
-        ) -> tuple[int, float | None, float | None] | None:
+        def combined_fit(top_group: list, bottom_group: list, width: int):
             top_fit = horizontal_fit(top_group, alphabets[0], width)
             bottom_fit = horizontal_fit(bottom_group, alphabets[2], width)
             count = int(top_fit is not None) + int(bottom_fit is not None)
@@ -400,14 +364,11 @@ def stable_qwerty_ocr_anchors(
             if top_fit and bottom_fit:
                 top_first, top_pitch = top_fit
                 bottom_first, bottom_pitch = bottom_fit
-                if (
-                    abs(top_pitch - bottom_pitch) > 18
-                    or abs(bottom_first - (top_first + 1.5 * top_pitch)) > 60
-                ):
+                if abs(top_pitch - bottom_pitch) > 18 or abs(bottom_first - (top_first + 1.5 * top_pitch)) > 60:
                     return None
-                return count, statistics.mean(
-                    (top_first, bottom_first - 1.5 * bottom_pitch)
-                ), statistics.mean((top_pitch, bottom_pitch))
+                return count, statistics.mean((top_first, bottom_first - 1.5 * bottom_pitch)), statistics.mean(
+                    (top_pitch, bottom_pitch)
+                )
             if top_fit:
                 return count, *top_fit
             if bottom_fit:
@@ -419,35 +380,24 @@ def stable_qwerty_ocr_anchors(
         for frame in frame_list:
             hits = {alphabet: [] for alphabet in alphabets}
             payload = ocr_recognizer(frame.convert("RGB"), "zh-Hans-CN", scale=3.0)
-            for line in payload.get("lines") or []:
-                for word in line.get("words") or []:
-                    label = str(word.get("text") or "").strip().casefold()
-                    if len(label) != 1 or not label.isascii() or not label.isalpha():
-                        continue
-                    left, width = word.get("left"), word.get("width")
-                    center_x = (
-                        float(left) + float(width) / 2.0
-                        if all(
-                            isinstance(value, (int, float)) and not isinstance(value, bool)
-                            for value in (left, width)
-                        )
-                        else None
-                    )
-                    hit = (
-                        label,
-                        center_x,
-                        float(word.get("top", 0)) + float(word.get("height", 0)) / 2.0,
-                    )
-                    for alphabet in alphabets:
-                        if label in alphabet:
-                            hits[alphabet].append(hit)
-                            break
-            row_clusters = [
-                clusters(hits[alphabet], frame.height) for alphabet in alphabets
-            ]
-            candidates: list[
-                tuple[int, int, int, float, float, float, float, float]
-            ] = []
+            words = (word for line in payload.get("lines") or [] for word in line.get("words") or [])
+            for word in words:
+                label = str(word.get("text") or "").strip().casefold()
+                if len(label) != 1 or not label.isascii() or not label.isalpha():
+                    continue
+                left, width = word.get("left"), word.get("width")
+                has_x = all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in (left, width))
+                hit = (
+                    label,
+                    float(left) + float(width) / 2.0 if has_x else None,
+                    float(word.get("top", 0)) + float(word.get("height", 0)) / 2.0,
+                )
+                for alphabet in alphabets:
+                    if label in alphabet:
+                        hits[alphabet].append(hit)
+                        break
+            row_clusters = [clusters(hits[alphabet], frame.height) for alphabet in alphabets]
+            candidates = []
             expected_top = frame.height * model_rows[0] / 1000.0
             expected_bottom = frame.height * model_rows[2] / 1000.0
             for top_y, top_count, top_group in row_clusters[0]:
@@ -456,55 +406,44 @@ def stable_qwerty_ocr_anchors(
                         continue
                     midpoint = (top_y + bottom_y) / 2.0
                     middle_count = max(
-                        (
-                            count for center, count, _ in row_clusters[1]
-                            if abs(center - midpoint) <= frame.height * 0.04
-                        ),
+                        (count for center, count, _ in row_clusters[1] if abs(center - midpoint) <= frame.height * 0.04),
                         default=0,
                     )
                     fitted = combined_fit(top_group, bottom_group, frame.width)
                     if fitted is None:
                         continue
                     fit_count, first_x, pitch = fitted
-                    distance = (
-                        abs(top_y - expected_top) + abs(bottom_y - expected_bottom)
-                        if model_vertical_is_trusted
-                        else 0.0
+                    distance = abs(top_y - expected_top) + abs(bottom_y - expected_bottom) if trusted_model_y else 0.0
+                    candidates.append(
+                        (
+                            fit_count,
+                            min(top_count, bottom_count),
+                            top_count + middle_count + bottom_count,
+                            -distance,
+                            top_y,
+                            bottom_y,
+                            first_x if first_x is not None else math.nan,
+                            pitch if pitch is not None else math.nan,
+                        )
                     )
-                    candidates.append((
-                        fit_count,
-                        min(top_count, bottom_count),
-                        top_count + middle_count + bottom_count,
-                        -distance,
-                        top_y,
-                        bottom_y,
-                        first_x if first_x is not None else math.nan,
-                        pitch if pitch is not None else math.nan,
-                    ))
             if candidates:
-                _, _, _, _, top_y, bottom_y, first_x, pitch = max(candidates)
-                per_frame_rows.append((
-                    top_y,
-                    bottom_y,
-                    first_x if math.isfinite(first_x) else None,
-                    pitch if math.isfinite(pitch) else None,
-                ))
+                *_, top_y, bottom_y, first_x, pitch = max(candidates)
+                per_frame_rows.append(
+                    (top_y, bottom_y, first_x if math.isfinite(first_x) else None, pitch if math.isfinite(pitch) else None)
+                )
 
         if len(per_frame_rows) < 2 or any(
-            max(item[index] for item in per_frame_rows)
-            - min(item[index] for item in per_frame_rows) > 10
+            max(row[index] for row in per_frame_rows) - min(row[index] for row in per_frame_rows) > 10
             for index in (0, 1)
         ):
             return None
         height = frame_list[-1].height
         top_y, bottom_y = (
-            round(1000 * statistics.median(item[index] for item in per_frame_rows) / height)
-            for index in (0, 1)
+            round(1000 * statistics.median(row[index] for row in per_frame_rows) / height) for index in (0, 1)
         )
-        middle_y = round((top_y + bottom_y) / 2.0)
-        span = bottom_y - top_y
+        middle_y, span = round((top_y + bottom_y) / 2.0), bottom_y - top_y
         if span <= 0 or (
-            model_vertical_is_trusted
+            trusted_model_y
             and any(
                 abs(actual - original[key][1]) > span * 1.5
                 for key, actual in (("q", top_y), ("a", middle_y), ("z", bottom_y))
@@ -514,26 +453,20 @@ def stable_qwerty_ocr_anchors(
 
         snapped = {key: list(value) for key, value in original.items()}
         horizontal = [
-            (float(first), float(pitch))
-            for _, _, first, pitch in per_frame_rows
-            if first is not None and pitch is not None
+            (float(first), float(pitch)) for _, _, first, pitch in per_frame_rows if first is not None and pitch is not None
         ]
         if len(horizontal) >= 2:
             first_values, pitch_values = zip(*horizontal)
             if max(first_values) - min(first_values) > 15 or max(pitch_values) - min(pitch_values) > 6:
                 return None
             q_x, pitch = round(statistics.median(first_values)), statistics.median(pitch_values)
-            offsets = {
-                "q": 0, "p": 9, "a": .5, "l": 8.5,
-                "z": 1.5, "m": 7.5, "backspace": 9,
-            }
+            offsets = {"q": 0, "p": 9, "a": .5, "l": 8.5, "z": 1.5, "m": 7.5, "backspace": 9}
             local_x = {key: round(q_x + offset * pitch) for key, offset in offsets.items()}
             if any(not 0 <= value <= 1000 for value in local_x.values()):
                 return None
             for key, x in local_x.items():
                 snapped[key][0] = x
-        for y, keys in ((top_y, ("q", "p")), (middle_y, ("a", "l")),
-                        (bottom_y, ("z", "m", "backspace"))):
+        for y, keys in zip((top_y, middle_y, bottom_y), row_keys):
             for key in keys:
                 snapped[key][1] = y
         qwerty_keyboard_config_from_anchors(snapped)
@@ -1390,26 +1323,13 @@ class GenericSingleActionAdapter:
         require_relative_clarity: bool = False,
         require_phone_view_identity: bool = False,
     ) -> tuple[list[Image.Image], tuple[str, ...]]:
-        """Wait for four stable, and when required relatively clear, frames.
-
-        This gate is deliberately local and cheap.  Qwen is called only after
-        the camera's outer/static UI bands have settled.  Input-surface
-        continuity actions additionally reject a stable-but-blurred window by
-        comparing its median sharpness with the fresh pre-action frames.  No
-        physical action is ever repeated while waiting.
-        """
+        """Wait locally for four stable and, when required, relatively clear frames."""
 
         frames: list[Image.Image] = []
         last_stability = None
         reference_sharpness = (
-            statistics.median(
-                measure_frame_sharpness(frame)
-                for frame in clarity_reference_frames
-            )
-            if (
-                require_relative_clarity or require_phone_view_identity
-            )
-            and clarity_reference_frames
+            statistics.median(measure_frame_sharpness(frame) for frame in clarity_reference_frames)
+            if (require_relative_clarity or require_phone_view_identity) and clarity_reference_frames
             else None
         )
         clarity_is_comparable = bool(
@@ -1434,88 +1354,39 @@ class GenericSingleActionAdapter:
                 if last_stability.stable:
                     clarity_accepted = True
                     if clarity_is_comparable:
-                        last_candidate_sharpness = statistics.median(
-                            measure_frame_sharpness(frame) for frame in frames
-                        )
-                        last_relative_sharpness = (
-                            last_candidate_sharpness / reference_sharpness
-                        )
-                        clarity_accepted = (
-                            last_relative_sharpness
-                            >= self.post_action_min_relative_sharpness
-                        )
+                        last_candidate_sharpness = statistics.median(measure_frame_sharpness(frame) for frame in frames)
+                        last_relative_sharpness = last_candidate_sharpness / reference_sharpness
+                        clarity_accepted = last_relative_sharpness >= self.post_action_min_relative_sharpness
                     phone_view_accepted = True
                     if phone_view_is_comparable:
-                        last_phone_view_delta = measure_static_band_identity_delta(
-                            clarity_reference_frames,
-                            frames,
-                        )
-                        phone_view_accepted = (
-                            last_phone_view_delta
-                            <= self.post_action_phone_view_delta_max
-                        )
+                        last_phone_view_delta = measure_static_band_identity_delta(clarity_reference_frames, frames)
+                        phone_view_accepted = last_phone_view_delta <= self.post_action_phone_view_delta_max
                     if clarity_accepted and phone_view_accepted:
-                        paths = self._save_frames(frames, evidence_dir, prefix)
-                        return list(frames), paths
-                if time.monotonic() >= deadline:
-                    paths = self._save_frames(
-                        frames,
-                        evidence_dir,
-                        f"{prefix}_timeout",
-                    )
-                    if (
-                        last_stability.stable
-                        and last_phone_view_delta is not None
-                        and last_phone_view_delta
-                        > self.post_action_phone_view_delta_max
-                    ):
-                        raise GenericActionAdapterError(
-                            "动作后画面已稳定但相机尚未回到手机取景："
-                            f"取景差异{last_phone_view_delta:.1f}，"
-                            "要求最多"
-                            f"{self.post_action_phone_view_delta_max:.1f}",
-                            evidence=paths,
-                        )
-                    if (
-                        last_stability.stable
-                        and last_relative_sharpness is not None
-                    ):
-                        raise GenericActionAdapterError(
-                            "动作后画面在限定时间内虽已稳定但仍不够清晰："
-                            f"参考清晰度{reference_sharpness:.3f}，"
-                            f"候选清晰度{last_candidate_sharpness:.3f}，"
-                            f"相对值{last_relative_sharpness:.3f}，"
-                            "要求至少"
-                            f"{self.post_action_min_relative_sharpness:.3f}",
-                            evidence=paths,
-                        )
+                        return list(frames), self._save_frames(frames, evidence_dir, prefix)
+            if time.monotonic() >= deadline:
+                paths = self._save_frames(frames, evidence_dir, f"{prefix}_timeout")
+                if (
+                    last_stability is not None
+                    and last_stability.stable
+                    and last_phone_view_delta is not None
+                    and last_phone_view_delta > self.post_action_phone_view_delta_max
+                ):
                     raise GenericActionAdapterError(
-                        "动作后画面在限定时间内没有稳定："
-                        f"{last_stability.reason}",
+                        "动作后画面已稳定但相机尚未回到手机取景："
+                        f"取景差异{last_phone_view_delta:.1f}，要求最多{self.post_action_phone_view_delta_max:.1f}",
                         evidence=paths,
                     )
-            if time.monotonic() >= deadline:
-                paths = self._save_frames(
-                    frames,
-                    evidence_dir,
-                    f"{prefix}_timeout",
-                )
-                reason = (
-                    last_stability.reason
-                    if last_stability is not None
-                    else "未能采集到连续4帧"
-                )
-                raise GenericActionAdapterError(
-                    f"动作后画面在限定时间内没有稳定：{reason}",
-                    evidence=paths,
-                )
-            if self.frame_interval:
-                time.sleep(
-                    min(
-                        self.frame_interval,
-                        max(0.0, deadline - time.monotonic()),
+                if last_stability is not None and last_stability.stable and last_relative_sharpness is not None:
+                    raise GenericActionAdapterError(
+                        "动作后画面在限定时间内虽已稳定但仍不够清晰："
+                        f"参考清晰度{reference_sharpness:.3f}，候选清晰度{last_candidate_sharpness:.3f}，"
+                        f"相对值{last_relative_sharpness:.3f}，要求至少{self.post_action_min_relative_sharpness:.3f}",
+                        evidence=paths,
                     )
-                )
+                reason = last_stability.reason if last_stability is not None else "未能采集到连续4帧"
+                raise GenericActionAdapterError(f"动作后画面在限定时间内没有稳定：{reason}", evidence=paths)
+            if self.frame_interval:
+                time.sleep(min(self.frame_interval, max(0.0, deadline - time.monotonic())))
 
     def _observe_stable_post_action_scene(
         self,
@@ -1539,115 +1410,55 @@ class GenericSingleActionAdapter:
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, action_timeout))
 
-        all_paths: tuple[str, ...] = ()
-        observation_errors: list[str] = []
-        verification_errors: list[str] = []
-        last_error: Exception | None = None
-        observation_context = _post_action_observation_context(
-            goal,
-            resolved,
-            physical_action_executed=True,
-        )
+        observation_context = _post_action_observation_context(goal, resolved, physical_action_executed=True)
         post_action_visual_context = _post_action_visual_context(resolved)
-        # This observation is the next closed-loop step: capture locally until
-        # stable, then consume exactly one current-scene Qwen response.  A mismatch is
-        # evidence for replanning, never permission for another model sample.
-        for attempt in range(1, 2):
-            attempt_deadline = time.monotonic() + action_timeout
-            try:
-                frames, paths = self._capture_stable_post_action_frames(
-                    deadline=attempt_deadline,
-                    evidence_dir=evidence_dir,
-                    prefix=f"{evidence_prefix}_after_attempt_{attempt}",
-                    clarity_reference_frames=before_frames,
-                    require_relative_clarity=(
-                        self._requires_post_action_relative_clarity(resolved)
-                    ),
-                    require_phone_view_identity=(
-                        self._requires_post_action_phone_view_identity(resolved)
-                    ),
-                )
-            except GenericActionAdapterError as exc:
-                capture_evidence = all_paths + tuple(exc.evidence)
-                prior_errors = (
-                    "；此前" + "；".join(observation_errors + verification_errors)
-                    if observation_errors or verification_errors
-                    else ""
-                )
-                raise GenericActionAdapterError(
-                    f"动作后画面采集失败：{exc}{prior_errors}",
-                    evidence=capture_evidence,
-                    observation_errors=tuple(observation_errors),
-                    verification_errors=tuple(verification_errors),
-                ) from exc
-            all_paths += paths
-            try:
-                after = self._observe_scene(
-                    frames,
-                    observation_context,
-                    input_lineage_override=input_lineage_override,
-                    post_action_context=post_action_visual_context,
-                )
-            except RuntimeError as exc:
-                last_error = exc
-                diagnostic_paths = persist_observer_failure_diagnostic(
-                    self.observer,
-                    evidence_dir=evidence_dir,
-                    prefix=f"{evidence_prefix}_after_attempt_{attempt}",
-                    error=exc,
-                )
-                all_paths += diagnostic_paths
-                observation_errors.append(
-                    f"第{attempt}轮动作后观察失败：{exc}"
-                )
-                raise GenericActionAdapterError(
-                    "通用页面观察失败："
-                    + "；".join(verification_errors + observation_errors),
-                    evidence=all_paths,
-                    observation_errors=tuple(observation_errors),
-                    verification_errors=tuple(verification_errors),
-                ) from exc
-
-            after = self._reconcile_literal_key_visual_wrap(
-                resolved,
-                before,
-                after,
+        prefix = f"{evidence_prefix}_after_attempt_1"
+        try:
+            frames, paths = self._capture_stable_post_action_frames(
+                deadline=time.monotonic() + action_timeout,
+                evidence_dir=evidence_dir,
+                prefix=prefix,
+                clarity_reference_frames=before_frames,
+                require_relative_clarity=self._requires_post_action_relative_clarity(resolved),
+                require_phone_view_identity=self._requires_post_action_phone_view_identity(resolved),
             )
-            after = self._reconcile_verified_text_horizontal_suffix(
-                resolved,
-                before,
-                after,
+        except GenericActionAdapterError as exc:
+            raise GenericActionAdapterError(
+                f"动作后画面采集失败：{exc}", evidence=tuple(exc.evidence)
+            ) from exc
+        all_paths = paths
+        try:
+            after = self._observe_scene(
+                frames,
+                observation_context,
+                input_lineage_override=input_lineage_override,
+                post_action_context=post_action_visual_context,
             )
+        except RuntimeError as exc:
+            all_paths += persist_observer_failure_diagnostic(
+                self.observer, evidence_dir=evidence_dir, prefix=prefix, error=exc
+            )
+            observation_errors = (f"第1轮动作后观察失败：{exc}",)
+            raise GenericActionAdapterError(
+                "通用页面观察失败：" + observation_errors[0],
+                evidence=all_paths,
+                observation_errors=observation_errors,
+            ) from exc
 
-            try:
-                self.controller.verify_after_action(resolved, before, after)
-                return (
-                    after,
-                    tuple(frames),
-                    paths,
-                    all_paths,
-                    tuple(observation_errors),
-                    (),
-                )
-            except UniversalActionError as exc:
-                last_error = exc
-                verification_errors.append(
-                    f"第{attempt}轮动作结果不匹配：{exc}"
-                )
-                # A stable old page, a low-confidence transitional scene, or
-                # an expected destination that is still loading can all be a
-                # legitimate intermediate state.  Re-observe at most once,
-                # with a fresh bounded capture, without repeating the action.
-                break
-
-        assert last_error is not None
+        after = self._reconcile_literal_key_visual_wrap(resolved, before, after)
+        after = self._reconcile_verified_text_horizontal_suffix(resolved, before, after)
+        try:
+            self.controller.verify_after_action(resolved, before, after)
+            verification_errors: tuple[str, ...] = ()
+        except UniversalActionError as exc:
+            verification_errors = (f"第1轮动作结果不匹配：{exc}",)
         return (
             after,
             tuple(frames),
             paths,
             all_paths,
-            tuple(observation_errors),
-            tuple(verification_errors),
+            (),
+            verification_errors,
         )
 
     @staticmethod
@@ -1672,11 +1483,7 @@ class GenericSingleActionAdapter:
         expected = states.get("expected_input_value")
         input_id = str(states.get("input_element_id") or "").strip()
         expected_state = resolved.expected_effect.get("element_state")
-        expected_states = (
-            expected_state.get("states")
-            if isinstance(expected_state, dict)
-            else None
-        )
+        expected_states = expected_state.get("states") if isinstance(expected_state, dict) else None
         if (
             not isinstance(prior, str)
             or not isinstance(key_value, str)
@@ -1716,21 +1523,13 @@ class GenericSingleActionAdapter:
             return after
         replacement = replace(
             candidate,
-            label=(
-                expected
-                if candidate.label == observed
-                else candidate.label
-            ),
+            label=expected if candidate.label == observed else candidate.label,
             states={**candidate.states, "value": expected},
-            evidence=candidate.evidence
-            + ("本地逐键回执确认该换行为控件视觉软折行",),
+            evidence=candidate.evidence + ("本地逐键回执确认该换行为控件视觉软折行",),
         )
         reconciled = replace(
             after,
-            elements=tuple(
-                replacement if element.element_id == input_id else element
-                for element in after.elements
-            ),
+            elements=tuple(replacement if element.element_id == input_id else element for element in after.elements),
         )
         reconciled.validate()
         return reconciled
@@ -1741,15 +1540,7 @@ class GenericSingleActionAdapter:
         before: UIScene,
         after: UIScene,
     ) -> UIScene:
-        """Recover one clipped single-line value from an exact typed transaction.
-
-        A focused single-line field may scroll horizontally to its caret after
-        an append.  The visual observer can then transcribe only a suffix.  The
-        suffix is sufficient only when it contains both a non-trivial suffix of
-        the previously verified value and the complete authorized fragment on
-        the same typed field.  All other partial-value observations remain
-        mismatches.
-        """
+        """Recover a clipped single-line suffix only from an exact typed transaction."""
 
         if (
             resolved.kind != "input_verified_text"
@@ -1762,11 +1553,7 @@ class GenericSingleActionAdapter:
         fragment = resolved.input_fragment
         expected = resolved.expected_input_value
         expected_state = resolved.expected_effect.get("element_state")
-        expected_states = (
-            expected_state.get("states")
-            if isinstance(expected_state, dict)
-            else None
-        )
+        expected_states = expected_state.get("states") if isinstance(expected_state, dict) else None
         if (
             not isinstance(prior, str)
             or not prior
@@ -1806,8 +1593,7 @@ class GenericSingleActionAdapter:
             and element.states.get("fully_visible") is True
             and element.states.get("focused") is True
             and element.states.get("input_multiline") is False
-            and str(element.states.get("input_field_id") or "").strip()
-            == typed_field_id
+            and str(element.states.get("input_field_id") or "").strip() == typed_field_id
             and element.states.get("keyboard_layout") == "qwerty"
             and element.states.get("keyboard_input_mode") == "direct_latin"
         )
@@ -1815,11 +1601,7 @@ class GenericSingleActionAdapter:
             return after
         candidate = candidates[0]
         observed = candidate.states.get("value")
-        visible_prior_suffix = (
-            observed[: -len(fragment)]
-            if isinstance(observed, str) and len(observed) > len(fragment)
-            else ""
-        )
+        visible_prior_suffix = observed[: -len(fragment)] if isinstance(observed, str) and len(observed) > len(fragment) else ""
         required_overlap = min(4, len(prior))
         if (
             not isinstance(observed, str)
@@ -1830,14 +1612,8 @@ class GenericSingleActionAdapter:
             or len(visible_prior_suffix) < required_overlap
             or not prior.endswith(visible_prior_suffix)
             or not any(observed in str(item) for item in candidate.evidence)
-            or not input_app_identity_compatible(
-                before.foreground_app_id,
-                after.foreground_app_id,
-            )
-            or not input_screen_identity_compatible(
-                before.screen_id,
-                after.screen_id,
-            )
+            or not input_app_identity_compatible(before.foreground_app_id, after.foreground_app_id)
+            or not input_screen_identity_compatible(before.screen_id, after.screen_id)
         ):
             return after
         replacement = replace(
@@ -1848,8 +1624,7 @@ class GenericSingleActionAdapter:
                 "value_visibility": "horizontal_suffix",
                 "value": expected,
             },
-            evidence=candidate.evidence
-            + (
+            evidence=candidate.evidence + (
                 "本地精确分段交易确认完整值：" + expected,
                 "画面仅显示横向滚动尾段：" + observed,
             ),
@@ -1857,14 +1632,185 @@ class GenericSingleActionAdapter:
         reconciled = replace(
             after,
             elements=tuple(
-                replacement
-                if element.element_id == resolved.target_element_id
-                else element
-                for element in after.elements
+                replacement if element.element_id == resolved.target_element_id else element for element in after.elements
             ),
         )
         reconciled.validate()
         return reconciled
+
+    def _prepare_keyboard_geometry(
+        self,
+        resolved: ResolvedSemanticAction,
+        scene: UIScene,
+        frames: tuple[Image.Image, ...] | list[Image.Image],
+    ) -> dict[str, Any] | None:
+        if resolved.kind not in {"input_verified_text", "clear_verified_text"}:
+            return None
+        if resolved.kind == "input_verified_text" and not resolved.text:
+            raise GenericActionAdapterError("输入动作缺少已校验文字。")
+        try:
+            input_element = scene.get_element(
+                str(resolved.target_element_id or ""), min_confidence=self.controller.min_confidence
+            )
+        except UISceneError as exc:
+            raise GenericActionAdapterError(f"当前文字输入缺少可信输入框：{exc}") from exc
+        geometry = input_element.states.get("keyboard_geometry")
+        allowed_types = {"input_verified_text": {"qwerty"}, "clear_verified_text": {"qwerty", "generic"}}
+        if (
+            not isinstance(geometry, dict)
+            or geometry.get("source") != "input_structure_audit"
+            or geometry.get("type") not in allowed_types[resolved.kind]
+        ):
+            raise GenericActionAdapterError("当前文字动作缺少本轮输入结构审计签发的键盘几何；拒绝使用静态配置。")
+        prepared = dict(geometry)
+        if geometry.get("type") == "qwerty" and self.require_local_qwerty_row_snap:
+            if not callable(self.qwerty_row_snapper):
+                raise GenericActionAdapterError("真机文字输入缺少本地 QWERTY 行中心复核器。")
+            snapped = self.qwerty_row_snapper(frames, geometry.get("anchors"))
+            if not isinstance(snapped, dict):
+                raise GenericActionAdapterError("本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。")
+            prepared.update(anchors=snapped, row_snap_source="stable_local_ocr")
+        if prepared.get("type") == "qwerty":
+            try:
+                qwerty_keyboard_config_from_anchors(prepared.get("anchors"))
+            except WorkflowNotReady as exc:
+                raise GenericActionAdapterError(f"当前 QWERTY 几何未通过动作前本地复核：{exc}") from exc
+        else:
+            backspace = (prepared.get("anchors") or {}).get("backspace")
+            if (
+                not isinstance(backspace, list)
+                or len(backspace) != 2
+                or any(
+                    isinstance(part, bool) or not isinstance(part, (int, float)) or not 0 <= float(part) <= 1000
+                    for part in backspace
+                )
+            ):
+                raise GenericActionAdapterError("非 QWERTY 清空缺少本轮完整可见退格键中心。")
+        validator = getattr(self.robot, "validate_verified_text", None)
+        if resolved.kind == "input_verified_text" and callable(validator):
+            try:
+                validator(
+                    resolved.input_fragment,
+                    dict(input_element.states),
+                    target_text=resolved.text,
+                    input_method=resolved.input_method,
+                    pinyin=resolved.input_pinyin,
+                )
+            except (UISceneError, ValueError, RuntimeError) as exc:
+                raise GenericActionAdapterError(f"当前文字输入不满足设备已验证配置：{exc}") from exc
+        if resolved.kind == "clear_verified_text" and resolved.delete_count is None:
+            raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
+        return prepared
+
+    def _arm_physical_execution(
+        self,
+        requested: SemanticAction,
+        resolved: ResolvedSemanticAction,
+        scene: UIScene,
+        frames: tuple[Image.Image, ...] | list[Image.Image],
+        paths: tuple[str, ...],
+    ) -> tuple[OrientationCredential | None, Callable[[], Any] | None]:
+        clear = getattr(self.robot, "clear_physical_execution_authorization", None)
+        if resolved.kind not in self.PHYSICAL_KINDS:
+            return None, clear if callable(clear) else None
+        arm = getattr(self.robot, "arm_physical_execution", None)
+        if not callable(arm) or not callable(clear):
+            raise GenericActionAdapterError("机械臂控制器未提供共享物理执行门禁，拒绝动作。", evidence=paths)
+        clear()
+        try:
+            credential = self._local_qwerty_orientation_credential(requested=requested, scene=scene, frames=frames)
+            diagnostic_flag = "local_qwerty_rows_verified"
+            if credential is None:
+                credential = self._single_step_scene_orientation_credential(scene=scene, frames=frames)
+                diagnostic_flag = "single_step_scene_reused"
+            selected = len(frames) - 1
+            try:
+                self.observer.last_orientation_audit_diagnostics = {
+                    "audit_source": credential.source,
+                    "model_calls": 0,
+                    diagnostic_flag: True,
+                    "selected_frame_index": selected,
+                    "scene_fingerprint": scene.fingerprint,
+                }
+            except Exception:
+                pass
+            if 0 <= selected < len(paths):
+                with Image.open(paths[selected]) as persisted:
+                    credential = replace(
+                        credential, evidence_frame_fingerprint=frame_fingerprint(persisted.convert("RGB"))
+                    )
+            hardware_action = {
+                "clear_verified_text": "input_verified_text",
+                "press_enter": "tap_semantic",
+            }.get(resolved.kind, resolved.kind)
+            credential.assert_authorizes(
+                device_id=self.device_id,
+                scene_fingerprint=scene.fingerprint,
+                frame_size=credential.frame_size,
+                action=hardware_action,
+            )
+            arm(credential, action=hardware_action, scene_fingerprint=scene.fingerprint)
+            return credential, clear
+        except (OrientationSafetyError, RuntimeError, ValueError) as exc:
+            clear()
+            raise GenericActionAdapterError(
+                f"动作前单步画面方向凭据校验失败：{exc}", evidence=paths
+            ) from exc
+
+    @staticmethod
+    def _pending_input_lineage(
+        resolved: ResolvedSemanticAction,
+        device_id: str,
+        before: UIScene,
+        hardware_receipt: dict[str, Any] | None,
+    ) -> TypedInputLineage | None:
+        values = {"device_id": device_id, "resolved_action": resolved.to_dict(), "before_scene": before.to_dict()}
+        if hardware_receipt is not None:
+            return _first_valid_lineage(
+                (
+                    build_pending_newline_lineage,
+                    build_pending_literal_lineage,
+                    build_pending_ime_candidate_lineage,
+                    build_pending_input_state_lineage,
+                ),
+                **values,
+                hardware_receipt=hardware_receipt,
+            )
+        if resolved.kind == "input_verified_text":
+            return _first_valid_lineage(
+                (build_pending_text_lineage, build_pending_chinese_preedit_lineage), **values
+            )
+        return None
+
+    def _record_verified_input_lineage(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+        after_frames: tuple[Image.Image, ...],
+        hardware_receipt: dict[str, Any] | None,
+    ) -> None:
+        store = self.input_lineage_store
+        if store is None:
+            return
+        values = {
+            "device_id": self.device_id,
+            "resolved_action": resolved.to_dict(),
+            "before_scene": before.to_dict(),
+            "after_scene": after.to_dict(),
+            "after_frames": after_frames,
+        }
+        try:
+            if resolved.kind == "input_verified_text":
+                store.record_verified_text_action(**values)
+            elif resolved.kind == "clear_verified_text":
+                store.discard(self.device_id)
+            elif resolved.kind == "press_enter" and hardware_receipt is not None:
+                store.record_verified_newline_action(**values, hardware_receipt=hardware_receipt)
+            elif hardware_receipt is not None:
+                store.record_verified_literal_action(**values, hardware_receipt=hardware_receipt)
+        except (InputValueLineageError, OSError, TypeError, ValueError):
+            pass
 
     def execute(
         self,
@@ -1977,171 +1923,10 @@ class GenericSingleActionAdapter:
                 evidence=before_paths,
             )
 
-        prepared_keyboard_geometry: dict[str, Any] | None = None
-        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
-            if resolved.kind == "input_verified_text" and not resolved.text:
-                raise GenericActionAdapterError("输入动作缺少已校验文字。")
-            try:
-                input_element = before.get_element(
-                    str(resolved.target_element_id or ""),
-                    min_confidence=self.controller.min_confidence,
-                )
-            except UISceneError as exc:
-                raise GenericActionAdapterError(
-                    f"当前文字输入缺少可信输入框：{exc}"
-                ) from exc
-            keyboard_geometry = input_element.states.get("keyboard_geometry")
-            if (
-                not isinstance(keyboard_geometry, dict)
-                or keyboard_geometry.get("source") != "input_structure_audit"
-                or (
-                    resolved.kind == "input_verified_text"
-                    and keyboard_geometry.get("type") != "qwerty"
-                )
-                or (
-                    resolved.kind == "clear_verified_text"
-                    and keyboard_geometry.get("type") not in {"qwerty", "generic"}
-                )
-            ):
-                raise GenericActionAdapterError(
-                    "当前文字动作缺少本轮输入结构审计签发的键盘几何；拒绝使用静态配置。"
-                )
-            execution_keyboard_geometry = dict(keyboard_geometry)
-            if (
-                keyboard_geometry.get("type") == "qwerty"
-                and self.require_local_qwerty_row_snap
-            ):
-                if not callable(self.qwerty_row_snapper):
-                    raise GenericActionAdapterError(
-                        "真机文字输入缺少本地 QWERTY 行中心复核器。"
-                    )
-                snapped_anchors = self.qwerty_row_snapper(
-                    before_frames,
-                    keyboard_geometry.get("anchors"),
-                )
-                if not isinstance(snapped_anchors, dict):
-                    raise GenericActionAdapterError(
-                        "本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。"
-                    )
-                execution_keyboard_geometry["anchors"] = snapped_anchors
-                execution_keyboard_geometry["row_snap_source"] = "stable_local_ocr"
-            if execution_keyboard_geometry.get("type") == "qwerty":
-                try:
-                    qwerty_keyboard_config_from_anchors(
-                        execution_keyboard_geometry.get("anchors")
-                    )
-                except WorkflowNotReady as exc:
-                    raise GenericActionAdapterError(
-                        f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
-                    ) from exc
-            else:
-                backspace = (
-                    execution_keyboard_geometry.get("anchors") or {}
-                ).get("backspace")
-                if (
-                    not isinstance(backspace, list)
-                    or len(backspace) != 2
-                    or any(
-                        isinstance(part, bool)
-                        or not isinstance(part, (int, float))
-                        or not 0 <= float(part) <= 1000
-                        for part in backspace
-                    )
-                ):
-                    raise GenericActionAdapterError(
-                        "非 QWERTY 清空缺少本轮完整可见退格键中心。"
-                    )
-            validator = getattr(self.robot, "validate_verified_text", None)
-            if resolved.kind == "input_verified_text" and callable(validator):
-                try:
-                    validator(
-                        resolved.input_fragment,
-                        dict(input_element.states),
-                        target_text=resolved.text,
-                        input_method=resolved.input_method,
-                        pinyin=resolved.input_pinyin,
-                    )
-                except (UISceneError, ValueError, RuntimeError) as exc:
-                    raise GenericActionAdapterError(
-                        f"当前文字输入不满足设备已验证配置：{exc}"
-                    ) from exc
-            if resolved.kind == "clear_verified_text" and resolved.delete_count is None:
-                raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
-            prepared_keyboard_geometry = execution_keyboard_geometry
-
-        orientation_credential: OrientationCredential | None = None
-        clear_authorization = getattr(
-            self.robot, "clear_physical_execution_authorization", None
+        prepared_keyboard_geometry = self._prepare_keyboard_geometry(resolved, before, before_frames)
+        orientation_credential, clear_authorization = self._arm_physical_execution(
+            requested_action, resolved, before, before_frames, before_paths
         )
-        if resolved.kind in self.PHYSICAL_KINDS:
-            arm = getattr(self.robot, "arm_physical_execution", None)
-            if not callable(arm) or not callable(clear_authorization):
-                raise GenericActionAdapterError(
-                    "机械臂控制器未提供共享物理执行门禁，拒绝动作。",
-                    evidence=before_paths,
-                )
-            clear_authorization()
-            try:
-                orientation_credential = self._local_qwerty_orientation_credential(
-                    requested=requested_action,
-                    scene=before,
-                    frames=before_frames,
-                )
-                diagnostic_flag = "local_qwerty_rows_verified"
-                if orientation_credential is None:
-                    orientation_credential = (
-                        self._single_step_scene_orientation_credential(
-                            scene=before,
-                            frames=before_frames,
-                        )
-                    )
-                    diagnostic_flag = "single_step_scene_reused"
-                selected_index = len(before_frames) - 1
-                try:
-                    self.observer.last_orientation_audit_diagnostics = {
-                        "audit_source": orientation_credential.source,
-                        "model_calls": 0,
-                        diagnostic_flag: True,
-                        "selected_frame_index": selected_index,
-                        "scene_fingerprint": before.fingerprint,
-                    }
-                except Exception:
-                    pass
-                if (
-                    isinstance(selected_index, int)
-                    and 0 <= selected_index < len(before_paths)
-                ):
-                    with Image.open(before_paths[selected_index]) as persisted:
-                        orientation_credential = replace(
-                            orientation_credential,
-                            evidence_frame_fingerprint=frame_fingerprint(
-                                persisted.convert("RGB")
-                            ),
-                        )
-                hardware_action = (
-                    "input_verified_text"
-                    if resolved.kind == "clear_verified_text"
-                    else "tap_semantic"
-                    if resolved.kind == "press_enter"
-                    else resolved.kind
-                )
-                orientation_credential.assert_authorizes(
-                    device_id=self.device_id,
-                    scene_fingerprint=before.fingerprint,
-                    frame_size=orientation_credential.frame_size,
-                    action=hardware_action,
-                )
-                arm(
-                    orientation_credential,
-                    action=hardware_action,
-                    scene_fingerprint=before.fingerprint,
-                )
-            except (OrientationSafetyError, RuntimeError, ValueError) as exc:
-                clear_authorization()
-                raise GenericActionAdapterError(
-                    f"动作前单步画面方向凭据校验失败：{exc}",
-                    evidence=before_paths,
-                ) from exc
 
         physical_actions = 0
         robot_result: Any = None
@@ -2208,29 +1993,8 @@ class GenericSingleActionAdapter:
             if callable(clear_authorization):
                 clear_authorization()
 
-        lineage_values = {
-            "device_id": self.device_id,
-            "resolved_action": resolved.to_dict(),
-            "before_scene": before.to_dict(),
-        }
-        pending_input_lineage = (
-            _first_valid_lineage(
-                (
-                    build_pending_newline_lineage,
-                    build_pending_literal_lineage,
-                    build_pending_ime_candidate_lineage,
-                    build_pending_input_state_lineage,
-                ),
-                **lineage_values,
-                hardware_receipt=hardware_receipt,
-            )
-            if hardware_receipt is not None
-            else _first_valid_lineage(
-                (build_pending_text_lineage, build_pending_chinese_preedit_lineage),
-                **lineage_values,
-            )
-            if resolved.kind == "input_verified_text"
-            else None
+        pending_input_lineage = self._pending_input_lineage(
+            resolved, self.device_id, before, hardware_receipt
         )
 
         try:
@@ -2256,64 +2020,23 @@ class GenericSingleActionAdapter:
                 f"单步动作后验证失败：{exc}",
                 physical_actions=physical_actions,
                 evidence=evidence,
-                observation_errors=tuple(
-                    getattr(exc, "observation_errors", ())
-                ),
-                verification_errors=tuple(
-                    getattr(exc, "verification_errors", ())
-                ),
+                observation_errors=tuple(getattr(exc, "observation_errors", ())),
+                verification_errors=tuple(getattr(exc, "verification_errors", ())),
             ) from exc
 
         controller_transition_evidence: tuple[str, ...] = ()
         if not verification_errors:
             try:
-                controller_transition_evidence = (
-                    self.controller.transition_evidence_from_verified_action(
-                        resolved,
-                        before,
-                        after,
-                    )
+                controller_transition_evidence = self.controller.transition_evidence_from_verified_action(
+                    resolved, before, after
                 )
             except UniversalActionError as exc:
                 verification_errors = verification_errors + (
                     f"控制器转换证据复核失败：{exc}",
                 )
 
-        if not verification_errors and self.input_lineage_store is not None:
-            try:
-                if resolved.kind == "input_verified_text":
-                    self.input_lineage_store.record_verified_text_action(
-                        device_id=self.device_id,
-                        resolved_action=resolved.to_dict(),
-                        before_scene=before.to_dict(),
-                        after_scene=after.to_dict(),
-                        after_frames=after_frames,
-                    )
-                elif resolved.kind == "clear_verified_text":
-                    self.input_lineage_store.discard(self.device_id)
-                elif resolved.kind == "press_enter" and hardware_receipt is not None:
-                    self.input_lineage_store.record_verified_newline_action(
-                        device_id=self.device_id,
-                        resolved_action=resolved.to_dict(),
-                        before_scene=before.to_dict(),
-                        after_scene=after.to_dict(),
-                        hardware_receipt=hardware_receipt,
-                        after_frames=after_frames,
-                    )
-                elif hardware_receipt is not None:
-                    self.input_lineage_store.record_verified_literal_action(
-                        device_id=self.device_id,
-                        resolved_action=resolved.to_dict(),
-                        before_scene=before.to_dict(),
-                        after_scene=after.to_dict(),
-                        hardware_receipt=hardware_receipt,
-                        after_frames=after_frames,
-                    )
-            except (InputValueLineageError, OSError, TypeError, ValueError):
-                # The lineage is only a future read-only disambiguation hint.
-                # Failure to persist it must not rewrite a correctly verified
-                # physical action, and it never grants action authority.
-                pass
+        if not verification_errors:
+            self._record_verified_input_lineage(resolved, before, after, after_frames, hardware_receipt)
 
         return GenericActionExecutionResult(
             requested_action=requested_action,
@@ -2325,12 +2048,8 @@ class GenericSingleActionAdapter:
             confirmation_frame_identity_verified=local_frame_identity_verified,
             confirmation_frame_delta=confirmation_frame_delta,
             physical_actions=physical_actions,
-            primary_input_confirmation_reused=(
-                primary_input_confirmation_reused
-            ),
-            action_outcome=(
-                "mismatched" if verification_errors else "matched"
-            ),
+            primary_input_confirmation_reused=primary_input_confirmation_reused,
+            action_outcome="mismatched" if verification_errors else "matched",
             verification_errors=verification_errors,
             robot_result=robot_result,
             hardware_receipt=hardware_receipt,
@@ -2357,23 +2076,17 @@ class GenericSingleActionAdapter:
         fresh_app = fresh_scene.foreground_app_id
         if (
             not local_frame_identity_verified
-            and
-            planned_app != "unknown"
+            and planned_app != "unknown"
             and fresh_app != "unknown"
             and planned_app != fresh_app
         ):
-            raise GenericActionAdapterError(
-                f"确认时前台 App 已变化：{planned_app} -> {fresh_app}"
-            )
+            raise GenericActionAdapterError(f"确认时前台 App 已变化：{planned_app} -> {fresh_app}")
         if (
             not local_frame_identity_verified
-            and
-            planned_scene.screen_id != "unknown"
+            and planned_scene.screen_id != "unknown"
             and planned_scene.screen_id != fresh_scene.screen_id
         ):
-            raise GenericActionAdapterError(
-                f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}"
-            )
+            raise GenericActionAdapterError(f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}")
         single_element_actions = {
             "tap_semantic",
             "dismiss_overlay",
@@ -2387,10 +2100,6 @@ class GenericSingleActionAdapter:
             return requested
 
         def stable_rebind_states(states: dict[str, Any]) -> dict[str, Any]:
-            # goal_relevant is a task-context annotation produced by the visual
-            # observer, not part of the control's stable identity. A fresh
-            # confirmation observation may legitimately omit or recompute it.
-            # Keep all physical/actionability attestations fail-closed.
             return {
                 key: value
                 for key, value in states.items()
@@ -2401,32 +2110,8 @@ class GenericSingleActionAdapter:
                 )
             }
 
-        def compatible_rebind_states(
-            original_states: dict[str, Any],
-            current_states: dict[str, Any],
-        ) -> tuple[dict[str, Any], dict[str, Any]]:
-            """Return comparable state views without treating unknown as fact.
-
-            ``keyboard_case_mode=unknown`` is an explicit lack of an
-            observation, not a claim that the keyboard has a third case mode.
-            A subsequent local audit may resolve it to ``lower`` or ``upper``
-            while every action-relevant input precondition remains unchanged.
-            Only that originally unknown field is removed from the fresh view;
-            known case changes and every other stable state still fail closed.
-            """
-
-            original_stable = stable_rebind_states(original_states)
-            current_stable = stable_rebind_states(current_states)
-            if str(
-                original_states.get("keyboard_case_mode") or ""
-            ).strip().casefold() == "unknown":
-                current_stable.pop("keyboard_case_mode", None)
-            return original_stable, current_stable
-
         def rebind_element(prefix: str = "") -> UIElement:
-            original_id = str(
-                requested.params.get(f"{prefix}element_id") or ""
-            ).strip()
+            original_id = str(requested.params.get(f"{prefix}element_id") or "").strip()
             try:
                 original = planned_scene.get_element(original_id)
             except UISceneError as exc:
@@ -2436,64 +2121,35 @@ class GenericSingleActionAdapter:
                 role=original.role,
                 states=stable_rebind_states(dict(original.states)),
             )
-            # Text-styled controls are routinely described as either ``button``
-            # or ``text`` across two otherwise identical visual reads.  Exact
-            # visible label, stable states and geometry remain authoritative.
             selector_roles = {"button", "tab", "list_item", "text"}
-            if (
-                not matches
-                and requested.action
-                in {"tap_semantic", "dismiss_overlay", "double_tap"}
-                and prefix == ""
-                and original.label
-                and original.role in selector_roles
-            ):
-                role_agnostic_matches = fresh_scene.find_elements(
-                    label=original.label,
-                    states=stable_rebind_states(dict(original.states)),
-                )
-                if (
-                    len(role_agnostic_matches) == 1
-                    and role_agnostic_matches[0].role in selector_roles
-                ):
-                    matches = role_agnostic_matches
-            # The same unlabeled glyph is commonly described as either an
-            # icon or a button across two reads of identical pixels.  Rebind
-            # only when its exact meaning and stable states still identify one
-            # unlabeled control; fresh-frame overlap remains mandatory.
-            if (
-                not matches
-                and requested.action
-                in {"tap_semantic", "dismiss_overlay", "double_tap"}
-                and prefix == ""
-                and not original.label
-                and original.role in {"icon", "button"}
-            ):
-                role_agnostic_matches = tuple(
-                    element
-                    for element in fresh_scene.find_elements(
-                        meaning=original.meaning,
-                        states=stable_rebind_states(dict(original.states)),
+            if not matches and requested.action in {"tap_semantic", "dismiss_overlay", "double_tap"} and prefix == "":
+                stable_states = stable_rebind_states(dict(original.states))
+                if original.label and original.role in selector_roles:
+                    aliases = tuple(
+                        element
+                        for element in fresh_scene.find_elements(label=original.label, states=stable_states)
+                        if element.role in selector_roles
                     )
-                    if element.role in {"icon", "button"} and not element.label
-                )
-                if len(role_agnostic_matches) == 1:
-                    matches = role_agnostic_matches
+                elif not original.label and original.role in {"icon", "button"}:
+                    aliases = tuple(
+                        element
+                        for element in fresh_scene.find_elements(meaning=original.meaning, states=stable_states)
+                        if element.role in {"icon", "button"} and not element.label
+                    )
+                else:
+                    aliases = ()
+                if len(aliases) == 1:
+                    matches = aliases
             if len(matches) != 1:
                 raise GenericActionAdapterError(
                     "确认时目标语义不再严格唯一："
                     f"{original.meaning}，匹配{len(matches)}个"
                 )
             current = matches[0]
-            # ``meaning`` is explanatory model wording, not a second action
-            # identity authority.  A uniquely rebound target is identified by
-            # its visible label/role/stable state and fresh-frame geometry.
-            (
-                original_stable_states,
-                current_stable_states,
-            ) = compatible_rebind_states(
-                dict(original.states), dict(current.states)
-            )
+            original_stable_states = stable_rebind_states(dict(original.states))
+            current_stable_states = stable_rebind_states(dict(current.states))
+            if str(original.states.get("keyboard_case_mode") or "").strip().casefold() == "unknown":
+                current_stable_states.pop("keyboard_case_mode", None)
             states_match = current_stable_states == original_stable_states
             if (
                 not states_match
@@ -2509,52 +2165,24 @@ class GenericSingleActionAdapter:
                 raise GenericActionAdapterError(
                     "确认时目标标签或状态已经变化，旧确认失效。"
                 )
-            left = max(original.bounds[0], current.bounds[0])
-            top = max(original.bounds[1], current.bounds[1])
-            right = min(original.bounds[2], current.bounds[2])
-            bottom = min(original.bounds[3], current.bounds[3])
-            intersection = max(0.0, right - left) * max(0.0, bottom - top)
-            original_area = max(
-                0.0, original.bounds[2] - original.bounds[0]
-            ) * max(0.0, original.bounds[3] - original.bounds[1])
-            current_area = max(
-                0.0, current.bounds[2] - current.bounds[0]
-            ) * max(0.0, current.bounds[3] - current.bounds[1])
-            union = original_area + current_area - intersection
-            overlap = intersection / union if union > 0 else 0.0
-            smaller_area = min(original_area, current_area)
-            smaller_coverage = (
-                intersection / smaller_area if smaller_area > 0 else 0.0
-            )
-            original_width = max(0.0, original.bounds[2] - original.bounds[0])
-            original_height = max(0.0, original.bounds[3] - original.bounds[1])
-            current_width = max(0.0, current.bounds[2] - current.bounds[0])
-            current_height = max(0.0, current.bounds[3] - current.bounds[1])
-            center_delta_x = abs(
-                (original.bounds[0] + original.bounds[2]) / 2.0
-                - (current.bounds[0] + current.bounds[2]) / 2.0
-            )
-            center_delta_y = abs(
-                (original.bounds[1] + original.bounds[3]) / 2.0
-                - (current.bounds[1] + current.bounds[3]) / 2.0
-            )
-            tight_loose_same_target = bool(
-                intersection > 0
-                and smaller_coverage >= 0.50
-                and center_delta_x
-                <= max(0.03, 0.25 * max(original_width, current_width))
-                and center_delta_y
-                <= max(0.02, 0.50 * max(original_height, current_height))
+            overlap = bounds_overlap(original.bounds, current.bounds)
+            widths = (original.bounds[2] - original.bounds[0], current.bounds[2] - current.bounds[0])
+            heights = (original.bounds[3] - original.bounds[1], current.bounds[3] - current.bounds[1])
+            center_delta = tuple(abs(left - right) for left, right in zip(original.center, current.center))
+            tight_loose_same_target = (
+                overlap["intersection_over_smaller"] >= 0.50
+                and center_delta[0] <= max(0.03, 0.25 * max(widths))
+                and center_delta[1] <= max(0.02, 0.50 * max(heights))
             )
             if (
                 require_geometry_overlap
-                and overlap < 0.60
+                and overlap["iou"] < 0.60
                 and not tight_loose_same_target
             ):
                 raise GenericActionAdapterError(
                     "确认时目标区域已明显移动，旧确认失效："
-                    f"iou={overlap:.3f}, smaller_coverage={smaller_coverage:.3f}, "
-                    f"center_delta=({center_delta_x:.3f},{center_delta_y:.3f})。"
+                    f"iou={overlap['iou']:.3f}, smaller_coverage={overlap['intersection_over_smaller']:.3f}, "
+                    f"center_delta=({center_delta[0]:.3f},{center_delta[1]:.3f})。"
                 )
             return current
 

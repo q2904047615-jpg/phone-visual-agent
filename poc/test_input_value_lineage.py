@@ -792,11 +792,25 @@ class TypedInputLineageTests(unittest.TestCase):
             "_resolve_verified_input_surface",
         ):
             self.assertEqual(1, source.count(f"def {resolver}("))
+        shared_builders = {
+            "_pending_lineage": "_resolve_pending_input_surface",
+            "_verified_lineage": "_resolve_verified_input_surface",
+        }
+        for helper, resolver in shared_builders.items():
+            direct_calls = [
+                call
+                for call in ast.walk(functions[helper])
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            ]
+            call_names = [call.func.id for call in direct_calls]
+            self.assertIn(resolver, call_names)
+            self.assertEqual(1, call_names.count("_build_input_lineage"))
+            self.assertNotIn("TypedInputLineage", call_names)
         for name in builder_names:
-            resolver = (
-                "_resolve_pending_input_surface"
+            helper = (
+                "_pending_lineage"
                 if name.startswith("build_pending_")
-                else "_resolve_verified_input_surface"
+                else "_verified_lineage"
             )
             direct_calls = [
                 call
@@ -805,8 +819,8 @@ class TypedInputLineageTests(unittest.TestCase):
             ]
             call_names = [call.func.id for call in direct_calls]
             with self.subTest(builder=name):
-                self.assertIn(resolver, call_names)
-                self.assertEqual(1, call_names.count("_build_input_lineage"))
+                self.assertEqual(1, call_names.count(helper))
+                self.assertNotIn("_build_input_lineage", call_names)
                 self.assertNotIn("TypedInputLineage", call_names)
 
     def test_compact_input_value_shadow_authority_is_physically_absent(self) -> None:

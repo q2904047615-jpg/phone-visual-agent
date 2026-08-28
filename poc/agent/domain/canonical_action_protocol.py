@@ -13,8 +13,8 @@ from .task_semantic_ir import (
     TaskSemanticIR,
 )
 from .semantic_action import SemanticAction
-from .canonical_action_kinds import CANONICAL_ACTION_KINDS
-from .ui_scene import UIElement, UIScene, scene_surface_kind
+from .canonical_action_kinds import CANONICAL_ACTION_KINDS, expected_idempotent_system_surface_kind
+from .ui_scene import UIElement, UIScene, scene_matches_target_app_surface, scene_surface_kind
 from .verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_from_input_states,
@@ -22,19 +22,6 @@ from .verified_text_transaction import (
 
 
 CANONICAL_ACTION_PROTOCOL = "2026-08-20-canonical-action-v1"
-
-_IDEMPOTENT_SYSTEM_ACTION_SURFACE_KINDS = {
-    "home": "launcher",
-    "open_recent_apps": "recent_tasks",
-}
-
-
-def expected_idempotent_system_surface_kind(action_kind: str) -> str | None:
-    """Return the canonical surface that makes a system action a no-op."""
-
-    return _IDEMPOTENT_SYSTEM_ACTION_SURFACE_KINDS.get(
-        str(action_kind or "").strip()
-    )
 
 _EFFECT_CONTROL_MEANINGS = {
     "send_message": frozenset({"send_message"}),
@@ -922,83 +909,6 @@ def _unique_directional_swipe_presence(scene: UIScene) -> UIElement | None:
     if not any(str(item).strip() for item in target.evidence):
         return None
     return target
-
-
-def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
-    """Bind a typed App surface to one structured foreground identity.
-
-    Android package IDs, product IDs, and user-facing App names are not always
-    lexical aliases (for example ``com.vendor.runtime`` versus a product
-    name).  ``screen_id`` is already a typed fact about the current foreground
-    surface, so its bounded identity terms may bridge that gap.  Child labels,
-    summaries, and ordinary body text remain ineligible and therefore cannot
-    turn a launcher icon into foreground-App proof.
-    """
-
-    def identity_terms(*values: Any) -> frozenset[str]:
-        generic = {
-            "android", "app", "application", "com", "current", "foreground",
-            "home", "interface", "list", "main", "page", "screen", "the",
-            "view", "应用", "程序", "当前", "主页", "主界面", "列表", "页面",
-            "界面", "画面", "屏幕",
-        }
-        text = " ".join(
-            str(value or "").casefold().replace("_", " ").replace("-", " ")
-            for value in values
-        )
-        terms = {
-            token
-            for token in re.findall(r"[a-z0-9]{3,}", text)
-            if token not in generic
-        }
-        for run in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-            for size in range(2, min(6, len(run)) + 1):
-                terms.update(
-                    run[index:index + size]
-                    for index in range(0, len(run) - size + 1)
-                )
-        return frozenset(term for term in terms if term not in generic)
-
-    foreground = str(scene.foreground_app_id or "").strip().casefold()
-    target_app_id = str(getattr(target_surface, "app_id", "") or "").strip().casefold()
-    if not foreground or foreground == "unknown" or not target_app_id:
-        return False
-    if foreground == target_app_id:
-        return True
-
-    foreground_parts = tuple(part for part in foreground.split(".") if part)
-    target_parts = tuple(part for part in target_app_id.split(".") if part)
-    # A package suffix such as ``app`` is not an App identity.  Leaf matching is
-    # only valid when one side is an intentionally unqualified identifier
-    # (for example ``settings`` versus ``com.android.settings``).
-    if foreground_parts and target_parts and (
-        (len(foreground_parts) == 1 and foreground_parts[0] == target_parts[-1])
-        or (len(target_parts) == 1 and target_parts[0] == foreground_parts[-1])
-    ):
-        return True
-
-    app_name = str(getattr(target_surface, "app_name", "") or "").strip().casefold()
-    target_terms = identity_terms(target_app_id, app_name)
-    screen_terms = identity_terms(scene.screen_id)
-    if target_terms and screen_terms.intersection(target_terms):
-        return True
-    if not app_name:
-        return False
-    if foreground == app_name:
-        return True
-    title_matches = tuple(
-        element
-        for element in scene.elements
-        if element.role in {"text", "container"}
-        and any(
-            marker in str(element.meaning or "").strip().casefold()
-            for marker in ("page_title", "title", "heading", "app_header")
-        )
-        and str(element.label or "").strip().casefold() == app_name
-        and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE
-        and element.states.get("fully_visible") is True
-    )
-    return len(title_matches) == 1
 
 
 def _exact_tap_text_target_eligible(element: UIElement) -> bool:

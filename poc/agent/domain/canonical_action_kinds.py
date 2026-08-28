@@ -21,3 +21,9 @@ CANONICAL_ACTION_KINDS = frozenset(
         "wait_for_change",
     }
 )
+
+_IDEMPOTENT_SYSTEM_SURFACES = {"home": "launcher", "open_recent_apps": "recent_tasks"}
+
+
+def expected_idempotent_system_surface_kind(action_kind: str) -> str | None:
+    return _IDEMPOTENT_SYSTEM_SURFACES.get(str(action_kind or "").strip())

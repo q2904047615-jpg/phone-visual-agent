@@ -20,10 +20,8 @@ from agent.domain.task_graph import (
     ObservedState,
     VerifiedActionTransition,
     VisualClaimEvidenceRef,
-    _named_visual_identity_anchor,
     build_exact_action_task_graph,
     build_exact_input_task_graph,
-    named_visual_identity_is_grounded,
 )
 from agent.application.runtime_session import (
     CORRECTIVE_RETRY_PROTOCOL_VERSION,
@@ -46,19 +44,16 @@ from agent.application.action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapterPort,
 )
-from agent.domain.generic_goal import GenericIntentDraft
+from agent.domain.generic_goal import GenericIntentDraft, VisibleGoalEvidence
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
     GenericStepProposal,
-    expected_idempotent_system_surface_kind,
-    scene_matches_target_app_surface,
 )
 from agent.domain.trusted_observation import TrustedObservation
 from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UISceneError,
-    scene_surface_kind,
 )
 from agent.domain.task_semantic_ir import (
     TaskSemanticIRError,
@@ -1371,623 +1366,77 @@ class UniversalAgentOrchestrator:
             session.confirmation_authority = None
         return decision
 
-    @staticmethod
-    def _is_idempotent_app_foreground_completion(value: Any) -> bool:
-        """Recognize one completed App-foreground state, never an action receipt."""
-
-        text = str(value or "").strip().casefold()
-        if not text or len(text) > 96:
-            return False
-        chinese = re.fullmatch(
-            r"[\w\u4e00-\u9fff·._ -]{1,64}(?:应用|程序)"
-            r"(?:已经|已)?(?:打开|启动|在前台|处于前台)(?:可见)?[。.]?",
-            text,
-        )
-        english = re.fullmatch(
-            r"[a-z0-9][a-z0-9 ._-]{0,63}\s+(?:app|application)\s+"
-            r"(?:is\s+)?(?:open|opened|launched|in the foreground|foreground)"
-            r"(?:\s+and\s+visible)?[.]?",
-            text,
-        )
-        return bool(chinese or english)
+    _is_idempotent_app_foreground_completion = staticmethod(VisibleGoalEvidence.idempotent_app_foreground)
+    _is_presence_only_read_only_subgoal = staticmethod(VisibleGoalEvidence.presence_only)
+    _candidate_has_unresolved_conflict = staticmethod(VisibleGoalEvidence.has_conflict)
 
     @staticmethod
-    def _is_presence_only_read_only_subgoal(subgoal: Any) -> bool:
-        """Classify a completion condition as current-frame presence only."""
-
-        conditions = tuple(
-            str(item or "").strip()
-            for item in getattr(subgoal, "completion_conditions", ()) or ()
-            if str(item or "").strip()
-        )
-        if len(conditions) == 1 and (
-            UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
-                conditions[0]
-            )
-        ):
-            return True
-        completion = " ".join(conditions).casefold()
-        text = " ".join(
-            (str(getattr(subgoal, "objective", "") or ""), completion)
-        ).casefold()
-        if not text or not re.search(
-            r"定位|找到|寻找|识别|可见|存在|\blocat(?:e|ed)\b|\bfind\b|"
-            r"\bidentif(?:y|ied)\b|\bvisible\b|\bpresent\b|\bexists?\b",
-            text,
-        ):
-            return False
-        # Exact values, read-outs, transitions and absence need their dedicated
-        # typed evidence; a current screenshot can only prove positive presence.
-        if re.search(
-            r"内容|文字|文本|数值|字段值|包含|等于|是否为|状态为|验证|核对|读取|"
-            r"刷新|重新(?:加载|载入|获取|读取|连接)|(?:加载|更新|同步)完成|"
-            r"不可见|不存在|缺失|消失|移除|"
-            r"\b(?:content|value|verify|contains?|equals?|read the|refresh|reload(?:ed)?|"
-            r"updated|synchronized|not visible|absent|missing|disappear|remove|"
-            r"retrieved|refetched|reconnected)\b",
-            text,
-        ):
-            return False
-        if completion:
-            return True
-        return not re.search(
-            r"导航|跳转|进入|返回|切换|打开|启动|收起|隐藏|关闭|"
-            r"\b(?:navigate|redirect|enter|return|switch|open|launch|dismiss|hide|close)\w*\b",
-            text,
-        )
-
-    @staticmethod
-    def _candidate_has_unresolved_conflict(
-        trusted_observation: Any,
-        element_id: str,
-    ) -> bool:
-        for conflict in getattr(trusted_observation, "candidate_conflicts", ()) or ():
-            if not isinstance(conflict, Mapping):
-                if element_id in str(conflict):
-                    return True
-                continue
-            conflict_ids = conflict.get("element_ids") or []
-            resolved_duplicate = (
-                conflict.get("kind") == "duplicate_visual_object_collapsed"
-                and conflict.get("canonical_element_id") == element_id
-                and element_id in conflict_ids
-            )
-            if not resolved_duplicate and (
-                element_id in conflict_ids or element_id in str(conflict)
-            ):
-                return True
-        return False
-
-    @classmethod
     def _safe_visible_element(
-        cls,
         item: Any,
         trusted_observation: Any,
         *,
         roles: frozenset[str] | None = None,
         goal_relevant: bool | None = None,
     ) -> bool:
-        states = getattr(item, "states", {}) or {}
-        left, top, right, bottom = getattr(item, "bounds", (0, 0, 0, 0))
-        return bool(
-            (roles is None or str(getattr(item, "role", "")) in roles)
-            and (goal_relevant is None or states.get("goal_relevant") is goal_relevant)
-            and states.get("visible") is not False
-            and states.get("fully_visible") is True
-            and float(getattr(item, "confidence", 0.0)) >= MIN_TARGET_CONFIDENCE
-            and 0.02 <= left < right <= 0.98
-            and 0.02 <= top < bottom <= 0.98
-            and not cls._candidate_has_unresolved_conflict(
-                trusted_observation,
-                str(getattr(item, "element_id", "") or ""),
-            )
+        return VisibleGoalEvidence.safe_element(
+            item,
+            trusted_observation,
+            roles=roles,
+            goal_relevant=goal_relevant,
         )
 
-    @classmethod
-    def _verified_focused_input_fact(
-        cls,
-        trusted_observation: Any,
-    ) -> str | None:
-        """Return one local fact only when focus is uniquely scene-proven."""
-
-        scene = getattr(trusted_observation, "scene", None)
-        if scene is None:
-            return None
-        candidates = [
-            item
-            for item in getattr(scene, "elements", ()) or ()
-            if (getattr(item, "states", {}) or {}).get("focused") is True
-            and cls._safe_visible_element(
-                item,
-                trusted_observation,
-                roles=frozenset({"input"}),
-                goal_relevant=True,
-            )
-        ]
-        if len(candidates) != 1:
-            return None
-        item = candidates[0]
-        return (
-            "当前可信画面的局部控件状态："
-            f"element_id={item.element_id}, role=input, focused=true。"
-        )
-
-    @classmethod
-    def _zero_action_visible_state_fact(
-        cls,
-        subgoal: Any,
-        trusted_observation: Any,
-    ) -> str | None:
-        """Bind the sole zero-action local state: one focused input."""
-        conditions = tuple(
-            str(item or "").strip().casefold()
-            for item in getattr(subgoal, "completion_conditions", ()) or ()
-            if str(item or "").strip()
-        )
-        focus = re.compile(
-            r"(?:输入框|文本框|输入区域).{0,10}(?:聚焦|焦点)|"
-            r"焦点.{0,10}(?:输入框|文本框|输入区域)|"
-            r"(?:input|textbox|text field).{0,20}(?:focused|focus)"
-        )
-        if not conditions or any(not focus.search(item) for item in conditions):
-            return None
-        return cls._verified_focused_input_fact(trusted_observation)
+    _verified_focused_input_fact = staticmethod(VisibleGoalEvidence.focused_input_fact)
+    _zero_action_visible_state_fact = staticmethod(VisibleGoalEvidence.zero_action_fact)
+    _presence_binding_terms = staticmethod(VisibleGoalEvidence.binding_terms)
+    _presence_title_prefixes = staticmethod(VisibleGoalEvidence.title_prefixes)
+    _presence_surface_classes = staticmethod(VisibleGoalEvidence.surface_classes)
+    _target_app_identity_terms = staticmethod(VisibleGoalEvidence.target_app_terms)
+    _compact_app_surface_phrase = staticmethod(VisibleGoalEvidence.compact_app_phrase)
+    _presence_names_only_target_app_surface = staticmethod(VisibleGoalEvidence.names_only_target_app)
+    _presence_references_target_app_identity = staticmethod(VisibleGoalEvidence.references_target_app)
+    _subgoal_targets_launcher_surface = staticmethod(VisibleGoalEvidence.subgoal_targets_launcher)
+    _typed_idempotent_system_surface_fact = staticmethod(VisibleGoalEvidence.typed_system_surface_fact)
 
     @staticmethod
-    def _presence_binding_terms(*values: Any) -> frozenset[str]:
-        """Return bounded literal terms for a zero-action presence check."""
-
-        text = " ".join(
-            str(value or "").casefold().replace("_", " ") for value in values
-        )
-        generic = {
-            "action", "button", "control", "current", "display", "element",
-            "foreground", "image", "item", "page", "screen", "show", "stable",
-            "target", "view", "visible", "当前", "前台", "页面", "画面", "目标",
-            "元素", "控件", "可见", "出现", "显示", "稳定", "完整", "唯一",
-        }
-        terms = {
-            token
-            for token in re.findall(r"[a-z0-9]{3,}", text)
-            if token not in generic
-        }
-        for run in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-            for size in range(2, min(6, len(run)) + 1):
-                terms.update(
-                    run[index:index + size]
-                    for index in range(0, len(run) - size + 1)
-                )
-        return frozenset(term for term in terms if term not in generic)
-
-    @staticmethod
-    def _presence_title_prefixes(*values: Any) -> tuple[str, ...]:
-        """Extract explicit visible title-prefix selectors, never infer one."""
-
-        text = " ".join(str(value or "").strip() for value in values)
-        selectors: list[str] = []
-        patterns = (
-            re.compile(
-                r"标题(?:文字)?(?:开头|起始)(?:为|是|[:：])?\s*[“\"']?"
-                r"([A-Za-z0-9\u4e00-\u9fff·._-]{1,64}?)"
-                r"(?=的(?:唯一)?(?:卡片|列表项|条目|按钮|菜单项)|[”\"'，,。；;]|$)"
-            ),
-            re.compile(
-                r"title\s+(?:starts?|begins?)\s+with\s+[\"']?"
-                r"([A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}?)"
-                r"(?=(?:\s+(?:card|item|button|entry))|[\"',.;]|$)",
-                re.IGNORECASE,
-            ),
-        )
-        for pattern in patterns:
-            for match in pattern.finditer(text):
-                value = match.group(1).strip().casefold()
-                if value and value not in selectors:
-                    selectors.append(value)
-        return tuple(selectors)
-
-    @classmethod
-    def _presence_surface_classes(cls, *values: Any) -> frozenset[str]:
-        """Keep destination/container nouns from collapsing into ordinal overlap."""
-
-        text = " ".join(
-            str(value or "").casefold().replace("_", " ").replace("-", " ")
-            for value in values
-        )
-        markers = {
-            "page": ("页面", "网页", "界面", "首页", " page", "screen", "view", "interface", "app home"),
-            "title": ("标题", "题头", "title", "heading"),
-            "list": ("列表", "清单", " list"),
-            "input": ("输入框", "文本框", "input field", "textbox"),
-            "menu": ("菜单", " menu"),
-            "dialog": ("对话框", "弹窗", "dialog", "modal"),
-            "destination": ("对应页面", "目标页面", "下一页", "详情", "destination page", "target page", "next page", "detail"),
-            "foreground_app": ("应用在前台", "前台应用", "前台可见", "foreground app", "in the foreground", "is foreground"),
-        }
-        classes = {name for name, words in markers.items() if any(word in text for word in words)}
-        if any(cls._is_idempotent_app_foreground_completion(value) for value in values):
-            classes.add("foreground_app")
-        return frozenset(classes)
-
-    @classmethod
-    def _target_app_identity_terms(cls, *values: Any) -> frozenset[str]:
-        return cls._presence_binding_terms(*values).difference(
-            {"app", "application", "android", "com", "应用", "程序"}
-        )
-
-    @staticmethod
-    def _compact_app_surface_phrase(value: Any) -> str:
-        return "".join(
-            re.findall(
-                r"[a-z0-9]+|[\u4e00-\u9fff]+",
-                str(value or "").casefold(),
-            )
-        )
-
-    @classmethod
-    def _presence_names_only_target_app_surface(
-        cls,
-        presence_text: str,
-        target_app: Any,
-    ) -> bool:
-        """Bind App foreground only when no named child surface remains.
-
-        Full App names/IDs may be followed by generic state words such as
-        ``main screen`` or ``visible``.  If removing those identities leaves a
-        recipient, order, settings section or any other named qualifier, App
-        foreground cannot prove that more specific destination page.
-        """
-
-        compact = cls._compact_app_surface_phrase(presence_text)
-        identities = tuple(
-            dict.fromkeys(
-                identity
-                for identity in (
-                    cls._compact_app_surface_phrase(
-                        getattr(target_app, "app_id", "")
-                    ),
-                    cls._compact_app_surface_phrase(
-                        getattr(target_app, "app_name", "")
-                    ),
-                )
-                if identity
-                and identity not in {"app", "application", "应用", "程序"}
-            )
-        )
-        if not compact or not identities or not any(
-            identity in compact for identity in identities
-        ):
-            return False
-        residual = compact
-        for identity in sorted(identities, key=len, reverse=True):
-            residual = residual.replace(identity, "")
-        generic_state_tokens = (
-            "处于前台", "已经打开", "已经启动", "应用程序", "主界面", "主页面",
-            "当前", "目标", "应用", "程序", "主页", "首页", "页面", "界面",
-            "屏幕", "视图", "打开", "启动", "进入", "前台", "可见", "显示",
-            "已经", "已", "在", "的", "并", "and", "application", "foreground",
-            "launched", "opened", "visible", "current", "target", "screen",
-            "interface", "page", "view", "home", "main", "launch", "open",
-            "app", "is", "in", "the",
-        )
-        for token in sorted(generic_state_tokens, key=len, reverse=True):
-            residual = residual.replace(token, "")
-        return not residual
-
-    @classmethod
-    def _presence_references_target_app_identity(
-        cls,
-        presence_text: str,
-        target_app: Any,
-    ) -> bool:
-        """Return whether the text contains one complete target-App identity."""
-
-        compact = cls._compact_app_surface_phrase(presence_text)
-        identities = (
-            cls._compact_app_surface_phrase(getattr(target_app, "app_id", "")),
-            cls._compact_app_surface_phrase(getattr(target_app, "app_name", "")),
-        )
-        return bool(
-            compact
-            and any(
-                identity in compact
-                for identity in identities
-                if identity
-                and identity not in {"app", "application", "应用", "程序"}
-            )
-        )
-
-    @staticmethod
-    def _subgoal_targets_launcher_surface(
-        graph: DynamicTaskGraph,
-        subgoal_id: str,
-    ) -> bool:
-        """Use the formal semantic surface to distinguish a Launcher destination."""
-
-        if not str(subgoal_id or "").strip():
-            return False
-        try:
-            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
-        except TaskSemanticIRError:
-            return False
-        typed_subgoal = next(
-            (
-                item
-                for item in semantic_ir.subgoals
-                if item.subgoal_id == subgoal_id
-            ),
-            None,
-        )
-        if typed_subgoal is None:
-            return False
-        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
-        surface = surfaces.get(typed_subgoal.surface_ref)
-        return bool(surface is not None and surface.kind == "launcher")
-
-    @staticmethod
-    def _typed_idempotent_system_surface_fact(
-        graph: DynamicTaskGraph,
-        subgoal_id: str,
-        scene: Any,
-    ) -> str | None:
-        """Bind one canonical system action to its already-reached surface."""
-
-        if not str(subgoal_id or "").strip():
-            return None
-        try:
-            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
-            actual_surface_kind = scene_surface_kind(scene)
-        except (TaskSemanticIRError, UISceneError):
-            return None
-        typed_subgoal = next(
-            (
-                item
-                for item in semantic_ir.subgoals
-                if item.subgoal_id == subgoal_id
-            ),
-            None,
-        )
-        if typed_subgoal is None:
-            return None
-        constraints_by_id = {
-            item.constraint_id: item for item in semantic_ir.constraints
-        }
-        required_actions = {
-            str(constraints_by_id[constraint_ref].value)
-            for constraint_ref in typed_subgoal.constraint_refs
-            if constraint_ref in constraints_by_id
-            and constraints_by_id[constraint_ref].kind == "required_action"
-        }
-        if len(required_actions) != 1:
-            return None
-        action_kind = next(iter(required_actions))
-        expected_surface_kind = expected_idempotent_system_surface_kind(
-            action_kind
-        )
-        if (
-            expected_surface_kind is None
-            or actual_surface_kind != expected_surface_kind
-        ):
-            return None
-        return json.dumps(
-            {
-                "action_kind": action_kind,
-                "operator": "equals",
-                "predicate": "surface.kind",
-                "source": "canonical_action_protocol",
-                "value": actual_surface_kind,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-    @classmethod
     def _referenced_target_app_pages(
-        cls,
         *,
         graph: DynamicTaskGraph,
         presence_text: str,
         subgoal_id: str = "",
     ) -> tuple[Any, ...]:
-        """Return target Apps whose named page is the claimed visible state.
+        return VisibleGoalEvidence.referenced_target_apps(graph, presence_text, subgoal_id)
 
-        A launcher affordance labelled with an App name proves that the App can
-        be opened; it does not prove that the named App page is already in the
-        foreground.  Keep the binding structural and graph-derived so the same
-        rule applies to every App and every natural-language goal.
-        """
-
-        if cls._subgoal_targets_launcher_surface(graph, subgoal_id):
-            return ()
-        required_surfaces = cls._presence_surface_classes(presence_text)
-        if not required_surfaces.intersection({"page", "foreground_app"}):
-            return ()
-        referenced = []
-        for target_app in graph.goal.target_apps:
-            if str(target_app.app_id or "").strip().casefold() == "current_foreground":
-                continue
-            if cls._presence_references_target_app_identity(
-                presence_text,
-                target_app,
-            ):
-                referenced.append(target_app)
-        return tuple(referenced)
-
-    @classmethod
+    @staticmethod
     def _scene_foreground_matches_target_app_page(
-        cls,
         *,
         scene: Any,
         target_apps: tuple[Any, ...],
     ) -> bool:
-        # The canonical action protocol owns App-surface identity.  Reuse that
-        # exact contract for zero-action task progress so DeepSeek/Qwen cannot
-        # disagree about whether the current structured surface is the target.
-        return any(
-            scene_matches_target_app_surface(scene, target_app)
-            for target_app in target_apps
-        )
+        return VisibleGoalEvidence.foreground_matches(scene, target_apps)
+
+    _scene_page_identity_facts = staticmethod(VisibleGoalEvidence.page_identity_facts)
 
     @staticmethod
-    def _scene_page_identity_facts(scene: Any) -> tuple[str, ...]:
-        facts = [
-            json.dumps(
-                {
-                    "app_id": str(getattr(scene, "app_id", "") or ""),
-                    "foreground_app_id": str(
-                        getattr(scene, "foreground_app_id", "") or ""
-                    ),
-                    "screen_id": str(getattr(scene, "screen_id", "") or ""),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        ]
-        for element in tuple(getattr(scene, "elements", ()) or ()):
-            role = str(getattr(element, "role", "") or "").casefold()
-            meaning = str(getattr(element, "meaning", "") or "").casefold()
-            if role not in {"text", "container"}:
-                continue
-            if role != "container" and not any(
-                marker in meaning
-                for marker in ("page", "screen", "view", "home", "title", "heading")
-            ):
-                continue
-            facts.append(
-                json.dumps(
-                    {
-                        "role": role,
-                        "meaning": meaning,
-                        "label": str(getattr(element, "label", "") or ""),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            )
-        return tuple(facts)
-
-    @classmethod
     def _scene_named_presence_is_grounded(
-        cls,
         *,
         scene: Any,
         texts: tuple[str, ...],
     ) -> bool:
-        return named_visual_identity_is_grounded(
-            texts,
-            cls._scene_page_identity_facts(scene),
-        )
+        return VisibleGoalEvidence.named_presence_grounded(scene, texts)
 
-    @classmethod
-    def _intrinsic_presence_surface_classes(cls, item: Any) -> frozenset[str]:
-        """Return surface types owned by an element, not words near it."""
+    _intrinsic_presence_surface_classes = staticmethod(VisibleGoalEvidence.intrinsic_surface_classes)
 
-        role = str(getattr(item, "role", "") or "").casefold()
-        classes = set(
-            cls._presence_surface_classes(
-                role,
-                getattr(item, "meaning", ""),
-            )
-        )
-        role_classes = {
-            "input": "input",
-            "textbox": "input",
-            "text_input": "input",
-            "list": "list",
-            "list_item": "list",
-            "menu": "menu",
-            "menu_item": "menu",
-            "dialog": "dialog",
-            "modal": "dialog",
-            "title": "title",
-            "heading": "title",
-        }
-        if role in role_classes:
-            classes.add(role_classes[role])
-        return frozenset(classes)
-
+    @staticmethod
     def _multi_presence_candidates(
-        self,
         *,
         subgoal: Any,
         scene: Any,
         trusted_observation: Any,
     ) -> tuple[Any, ...] | None:
-        """Bind two to four explicitly conjoined visible objects, fail closed."""
+        return VisibleGoalEvidence.multi_candidates(subgoal, scene, trusted_observation)
 
-        text = " ".join(map(str, (
-            getattr(subgoal, "objective", ""),
-            *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
-        ))).casefold()
-        if not self._is_explicit_multi_presence_text(text):
-            return None
-        text_terms = self._presence_binding_terms(text)
-        if not text_terms:
-            return None
-        matched = [
-            (item, self._presence_binding_terms(item.label, item.meaning, *item.evidence).intersection(text_terms))
-            for item in scene.elements
-        ]
-        matched = [(item, terms) for item, terms in matched if terms]
-        if any(not self._safe_visible_element(item, trusted_observation) for item, _ in matched):
-            return None
-        # An instruction card may repeat every endpoint name. It is aggregate
-        # evidence, not either endpoint. Drop it when two peers cover its terms.
-        reduced = []
-        for index, item in enumerate(matched):
-            terms = item[1]
-            peers = [other_terms for other_index, (_, other_terms) in enumerate(matched) if other_index != index]
-            aggregate = any(
-                left.union(right).issubset(terms)
-                for left_index, left in enumerate(peers)
-                for right in peers[left_index + 1:]
-            )
-            if not aggregate:
-                reduced.append(item)
-        if not 2 <= len(reduced) <= 4:
-            return None
-        terms = [item[1] for item in reduced]
-        if any(not item.difference(frozenset().union(*(terms[:index] + terms[index + 1:]))) for index, item in enumerate(terms)):
-            return None
-        return tuple(item[0] for item in reduced)
-
-    @staticmethod
-    def _is_explicit_multi_presence_text(text: str) -> bool:
-        return bool(
-            re.search(
-                r"(?:和|与|及|同时|均|都|两者|两个|多个|分别|"
-                r"\bboth\b|\band\b|\ball\b|\btwo\b|\bmultiple\b)",
-                str(text or "").casefold(),
-            )
-        )
-
-    @staticmethod
-    def _is_visible_text_read_subgoal(subgoal: Any) -> bool:
-        if str(getattr(subgoal, "external_impact", "")) != "read_only":
-            return False
-        text = " ".join(
-            (
-                str(getattr(subgoal, "objective", "") or ""),
-                *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
-            )
-        ).casefold()
-        read_markers = ("读取", "获取", "读出", "read", "report", "get the")
-        value_markers = (
-            "标题", "题头", "错误提示", "错误信息", "状态提示",
-            "title", "heading", "error message", "status message",
-        )
-        exact_markers = (
-            "等于", "包含", "逐字", "指定文字", "是否为",
-            "equals", "contains", "exactly", "whether",
-        )
-        return (
-            any(marker in text for marker in read_markers)
-            and any(marker in text for marker in value_markers)
-            and not any(marker in text for marker in exact_markers)
-        )
-
+    _is_explicit_multi_presence_text = staticmethod(VisibleGoalEvidence.is_multi_text)
+    _is_visible_text_read_subgoal = staticmethod(VisibleGoalEvidence.visible_text_read)
     def _try_advance_visible_text_read_subgoal(
         self,
         session: UniversalAgentSessionState,
@@ -2074,215 +1523,16 @@ class UniversalAgentOrchestrator:
             )
         return revised
 
-    @classmethod
-    def _unique_presence_candidate(
-        cls,
-        scene: Any,
-        trusted_observation: Any,
-    ) -> Any | None:
-        candidate = scene.unique_trusted_goal_element(
-            min_confidence=MIN_TARGET_CONFIDENCE,
-        )
-        if candidate is not None:
-            return candidate
-        reader = getattr(scene, "trusted_completion_evidence", None)
-        candidates = tuple(reader(min_confidence=MIN_TARGET_CONFIDENCE)) if callable(reader) else ()
-        if len(candidates) != 1:
-            return None
-        candidate = candidates[0]
-        competing = any(
-            item.element_id != candidate.element_id
-            and item.states.get("goal_relevant") is True
-            and float(item.confidence) >= MIN_TARGET_CONFIDENCE
-            for item in getattr(scene, "elements", ()) or ()
-        )
-        return None if competing else candidate
+    _unique_presence_candidate = staticmethod(VisibleGoalEvidence.unique_candidate)
 
+    @staticmethod
     def _visible_presence_evidence(
-        self,
         *,
         graph: DynamicTaskGraph,
         subgoal: Any,
         trusted_observation: Any,
     ) -> tuple[str, ...] | None:
-        """Match one positive presence state against this observation only."""
-
-        scene = getattr(trusted_observation, "scene", None)
-        if scene is None:
-            return None
-        conditions = tuple(
-            str(item or "").strip()
-            for item in getattr(subgoal, "completion_conditions", ()) or ()
-            if str(item or "").strip()
-        )
-        presence_text = " ".join((str(subgoal.objective), *conditions))
-        required_surfaces = self._presence_surface_classes(*conditions)
-        typed_surface = self._typed_idempotent_system_surface_fact(
-            graph,
-            subgoal.subgoal_id,
-            scene,
-        )
-        target_apps = self._referenced_target_app_pages(
-            graph=graph,
-            presence_text=presence_text,
-            subgoal_id=subgoal.subgoal_id,
-        )
-        app_matches = bool(
-            target_apps
-            and self._scene_foreground_matches_target_app_page(
-                scene=scene,
-                target_apps=target_apps,
-            )
-        )
-        if target_apps and not app_matches:
-            return None
-
-        page_facts = self._scene_page_identity_facts(scene)
-        named_surface = self._scene_named_presence_is_grounded(
-            scene=scene,
-            texts=conditions,
-        )
-        destination = bool(
-            subgoal.external_impact == "navigation_only"
-            and required_surfaces
-            and required_surfaces.issubset({"page", "destination", "foreground_app"})
-        )
-        app_destination = bool(
-            app_matches
-            and any(
-                self._presence_names_only_target_app_surface(presence_text, app)
-                for app in target_apps
-            )
-        )
-        if destination:
-            if not (
-                app_destination
-                or (
-                    _named_visual_identity_anchor(conditions)
-                    and named_surface
-                )
-                or typed_surface
-            ):
-                return None
-            return (
-                scene.summary,
-                *page_facts,
-                *((typed_surface,) if typed_surface else ()),
-            )
-
-        if (
-            subgoal.external_impact == "read_only"
-            and not required_surfaces
-            and not _named_visual_identity_anchor(conditions)
-            and not self._is_explicit_multi_presence_text(presence_text)
-            and named_surface
-        ):
-            return (scene.summary, *page_facts)
-
-        if self._is_explicit_multi_presence_text(presence_text):
-            candidates = self._multi_presence_candidates(
-                subgoal=subgoal,
-                scene=scene,
-                trusted_observation=trusted_observation,
-            )
-            if not candidates:
-                return None
-        else:
-            candidate = self._unique_presence_candidate(scene, trusted_observation)
-            candidates = ()
-            if candidate is not None:
-                terms = self._presence_binding_terms(*conditions)
-                candidate_terms = self._presence_binding_terms(
-                    candidate.label,
-                    candidate.meaning,
-                    *candidate.evidence,
-                )
-                scene_terms = self._presence_binding_terms(scene.screen_id, scene.summary)
-                prefixes = self._presence_title_prefixes(
-                    subgoal.objective,
-                    *conditions,
-                )
-                prefix_matches = bool(
-                    prefixes
-                    and all(candidate.label.casefold().startswith(item) for item in prefixes)
-                )
-                scene_surfaces = self._presence_surface_classes(
-                    scene.screen_id,
-                    scene.summary,
-                ).intersection({"page"})
-                if app_matches:
-                    scene_surfaces = scene_surfaces.union({"foreground_app"})
-                element_surfaces = required_surfaces.difference(scene_surfaces)
-                if "title" in element_surfaces and prefix_matches:
-                    element_surfaces = element_surfaces.difference({"title"})
-                if (
-                    not self._safe_visible_element(candidate, trusted_observation)
-                    or not terms
-                    or not (
-                        prefix_matches
-                        if prefixes
-                        else terms.intersection(candidate_terms.union(scene_terms))
-                    )
-                    or not element_surfaces.issubset(
-                        self._intrinsic_presence_surface_classes(candidate)
-                    )
-                ):
-                    return None
-                candidates = (candidate,)
-            elif subgoal.external_impact == "navigation_only":
-                terms = self._presence_binding_terms(presence_text)
-                scene_terms = self._presence_binding_terms(scene.summary)
-                scene_surfaces = self._presence_surface_classes(
-                    scene.screen_id,
-                    scene.summary,
-                ).intersection({"page"})
-                if app_matches:
-                    scene_surfaces = scene_surfaces.union({"foreground_app"})
-                element_surfaces = required_surfaces.difference(scene_surfaces)
-                matched = tuple(
-                    item
-                    for item in scene.elements
-                    if terms.intersection(
-                        self._presence_binding_terms(
-                            item.label,
-                            item.meaning,
-                            *item.evidence,
-                        )
-                    )
-                    and element_surfaces.issubset(
-                        self._intrinsic_presence_surface_classes(item)
-                    )
-                )
-                if (
-                    not terms.intersection(scene_terms)
-                    or not 1 <= len(matched) <= 4
-                    or any(
-                        not self._safe_visible_element(item, trusted_observation)
-                        for item in matched
-                    )
-                ):
-                    return None
-                candidates = matched
-            elif not (app_matches or named_surface):
-                return None
-
-        facts = tuple(
-            "当前可信画面的目标元素："
-            f"element_id={item.element_id}, role={item.role}, "
-            f"label={item.label or '[empty]'}, meaning={item.meaning}, "
-            f"confidence={float(item.confidence):.3f}, fully_visible=true, "
-            "bounds_inside_safe_frame=true。"
-            for item in candidates
-        )
-        focus = self._verified_focused_input_fact(trusted_observation)
-        return (
-            scene.summary,
-            *((focus,) if focus else ()),
-            *facts,
-            *(fact for item in candidates for fact in item.evidence),
-            *((*page_facts, typed_surface) if typed_surface else ()),
-        )
-
+        return VisibleGoalEvidence.evidence(graph, subgoal, trusted_observation)
     @staticmethod
     def _validate_visible_replan_shape(
         previous: DynamicTaskGraph,

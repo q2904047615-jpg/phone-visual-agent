@@ -39,9 +39,6 @@ REVEAL_SYSTEM_NAVIGATION_EFFECT = {
     "system_ui": {"navigation_bar_visible": True}
 }
 
-# The seller batch accepts only the deterministic lowercase-and-space fragment
-# minted by verified_text_transaction. Digits, uppercase and symbols continue
-# through their independently audited visible-key paths.
 GESTURE_EDGE_MARGIN = 0.02
 TARGETED_SWIPE_EDGE_MARGIN = 0.08
 MIN_DRAG_DISTANCE = 0.08
@@ -70,14 +67,10 @@ class LocalPointGrounding:
     inspected_frames: int
 
     @staticmethod
-    def _validate_point(
-        value: tuple[float, float],
-        *,
-        label: str,
-    ) -> tuple[float, float]:
+    def _normalized_numbers(value: tuple[float, ...], length: int, label: str) -> tuple[float, ...]:
         if (
             not isinstance(value, tuple)
-            or len(value) != 2
+            or len(value) != length
             or any(
                 isinstance(part, bool)
                 or not isinstance(part, (int, float))
@@ -86,33 +79,12 @@ class LocalPointGrounding:
             )
         ):
             raise UniversalActionError(f"{label}格式无效。")
-        point = (float(value[0]), float(value[1]))
-        if not all(0.0 <= part <= 1.0 for part in point):
+        numbers = tuple(float(part) for part in value)
+        if not all(0.0 <= part <= 1.0 for part in numbers):
             raise UniversalActionError(f"{label}超出归一化画面。")
-        return point
-
-    @staticmethod
-    def _validate_bounds(
-        value: tuple[float, float, float, float],
-        *,
-        label: str,
-    ) -> tuple[float, float, float, float]:
-        if (
-            not isinstance(value, tuple)
-            or len(value) != 4
-            or any(
-                isinstance(part, bool)
-                or not isinstance(part, (int, float))
-                or not math.isfinite(float(part))
-                for part in value
-            )
-        ):
-            raise UniversalActionError(f"{label}格式无效。")
-        bounds = tuple(float(part) for part in value)
-        left, top, right, bottom = bounds
-        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+        if length == 4 and not (numbers[0] < numbers[2] and numbers[1] < numbers[3]):
             raise UniversalActionError(f"{label}超出归一化画面。")
-        return bounds
+        return numbers
 
     def validate_for(self, scene: UIScene, element: UIElement) -> None:
         if self.source != LOCAL_POINT_GROUNDING_SOURCE:
@@ -137,19 +109,10 @@ class LocalPointGrounding:
             or element.meaning.startswith(("input_", "ime_", "switch_keyboard_"))
         ):
             raise UniversalActionError("输入事务目标不允许使用普通文字落点修正。")
-        model_bounds = self._validate_bounds(self.model_bounds, label="模型目标框")
-        grounded_bounds = self._validate_bounds(
-            self.grounded_bounds,
-            label="本地文字框",
-        )
-        proposed = self._validate_point(
-            self.proposed_point,
-            label="模型提议落点",
-        )
-        grounded = self._validate_point(
-            self.grounded_point,
-            label="本地修正落点",
-        )
+        model_bounds = self._normalized_numbers(self.model_bounds, 4, "模型目标框")
+        grounded_bounds = self._normalized_numbers(self.grounded_bounds, 4, "本地文字框")
+        proposed = self._normalized_numbers(self.proposed_point, 2, "模型提议落点")
+        grounded = self._normalized_numbers(self.grounded_point, 2, "本地修正落点")
         if any(
             abs(actual - expected) > 1e-9
             for actual, expected in zip(model_bounds, element.bounds)
@@ -187,18 +150,10 @@ class LocalPointGrounding:
             raise UniversalActionError("本地文字框与模型目标框不属于同一邻近区域。")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "scene_fingerprint": self.scene_fingerprint,
-            "element_id": self.element_id,
-            "label": self.label,
-            "model_bounds": list(self.model_bounds),
-            "proposed_point": list(self.proposed_point),
-            "grounded_bounds": list(self.grounded_bounds),
-            "grounded_point": list(self.grounded_point),
-            "matched_frames": self.matched_frames,
-            "inspected_frames": self.inspected_frames,
-        }
+        value = asdict(self)
+        for key in ("model_bounds", "proposed_point", "grounded_bounds", "grounded_point"):
+            value[key] = list(value[key])
+        return value
 
 
 @dataclass(frozen=True)
@@ -231,16 +186,11 @@ class ResolvedSemanticAction:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        if self.normalized_point is not None:
-            value["normalized_point"] = list(self.normalized_point)
-        if self.normalized_end_point is not None:
-            value["normalized_end_point"] = list(self.normalized_end_point)
-        if self.proposed_normalized_point is not None:
-            value["proposed_normalized_point"] = list(
-                self.proposed_normalized_point
-            )
-        else:
-            value.pop("proposed_normalized_point", None)
+        for key in ("normalized_point", "normalized_end_point", "proposed_normalized_point"):
+            if value[key] is not None:
+                value[key] = list(value[key])
+            elif key == "proposed_normalized_point":
+                value.pop(key)
         if self.point_grounding is None:
             value.pop("point_grounding", None)
         return value
@@ -474,15 +424,8 @@ class UniversalActionController:
                 and input_step.current_text == ""
                 and is_direct_latin_segment(input_step.segment)
             ):
-                # Backward-compatible stage-1 authority: the first certified
-                # profile already bound an empty direct-Latin field and exact
-                # lowercase segment. Derive, rather than guess, its postcondition.
-                expected_effect = {
-                    **expected_effect,
-                    "element_state": {
-                        "meaning": element.meaning,
-                        "states": expected_states,
-                    },
+                expected_effect["element_state"] = {
+                    "meaning": element.meaning, "states": expected_states,
                 }
             if expected_effect.get("element_state") != {
                 "meaning": element.meaning,
@@ -1029,21 +972,10 @@ class UniversalActionController:
 
     @staticmethod
     def _require_hidden_immersive_navigation(scene: UIScene) -> Any:
-        system_ui = getattr(scene, "system_ui", None)
-        if system_ui is None:
-            raise UniversalActionError(
-                "系统导航栏唤出动作缺少结构化 scene.system_ui。"
-            )
-        immersive = getattr(system_ui, "immersive_or_fullscreen", None)
-        navigation_visible = getattr(system_ui, "navigation_bar_visible", None)
-        if isinstance(system_ui, Mapping):
-            if immersive is None:
-                immersive = system_ui.get("immersive_or_fullscreen")
-            if navigation_visible is None:
-                navigation_visible = system_ui.get("navigation_bar_visible")
+        system_ui = scene.system_ui
         if (
-            immersive is not True
-            or navigation_visible is not False
+            system_ui.immersive_or_fullscreen is not True
+            or system_ui.navigation_bar_visible is not False
         ):
             raise UniversalActionError(
                 "系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"
@@ -1059,18 +991,8 @@ class UniversalActionController:
         self._require_hidden_immersive_navigation(before)
         if resolved.expected_effect != REVEAL_SYSTEM_NAVIGATION_EFFECT:
             raise UniversalActionError("系统导航栏唤出动作的结构化后置条件无效。")
-        system_ui = getattr(after, "system_ui", None)
-        navigation_visible = (
-            getattr(system_ui, "navigation_bar_visible", None)
-            if system_ui is not None
-            else None
-        )
-        if isinstance(system_ui, Mapping) and navigation_visible is None:
-            navigation_visible = system_ui.get("navigation_bar_visible")
-        if navigation_visible is not True:
-            raise UniversalActionError(
-                "动作后缺少结构化导航栏可见证据。"
-            )
+        if after.system_ui.navigation_bar_visible is not True:
+            raise UniversalActionError("动作后缺少结构化导航栏可见证据。")
 
     @staticmethod
     def _validate_gesture_point(point: tuple[float, float], *, label: str) -> None:
@@ -1504,73 +1426,52 @@ class UniversalActionController:
             predicate = str(expectation.get("predicate") or "")
             operator = str(expectation.get("operator") or "")
             value = expectation.get("value")
-            if predicate == "surface.kind" and operator == "equals":
+            key = (predicate, operator)
+            if key == ("surface.kind", "equals"):
                 actual = scene_surface_kind(after)
                 if actual != value:
                     raise UniversalActionError("typed surface.kind 后置状态未满足。")
-            elif predicate == "surface.overlay_present" and operator == "equals":
+            elif key == ("surface.overlay_present", "equals"):
                 if bool(after.overlays) is not bool(value):
                     raise UniversalActionError("typed overlay 后置状态未满足。")
-            elif predicate == "element.exists" and operator == "absent":
+            elif key == ("element.exists", "absent"):
                 self._verify_expected_element_absent(resolved, before, after)
-            elif predicate == "system_ui.navigation_bar_visible" and operator == "equals":
+            elif key == ("system_ui.navigation_bar_visible", "equals"):
                 if after.system_ui.navigation_bar_visible is not value:
                     raise UniversalActionError("typed system_ui 后置状态未满足。")
-            elif predicate == "element.state.value" and operator == "equals":
+            elif key == ("element.state.value", "equals"):
                 expected_transition_value = (
                     resolved.prior_input_value
-                    if (
-                        resolved.kind == "input_verified_text"
-                        and resolved.input_method == "chinese_pinyin"
-                    )
+                    if resolved.kind == "input_verified_text" and resolved.input_method == "chinese_pinyin"
                     else resolved.expected_input_value
                 )
                 if expected_transition_value != value and resolved.text != value:
                     raise UniversalActionError("typed input value 与已验证事务不一致。")
-            elif (
-                predicate == "element.state.ime_preedit_text"
-                and operator == "equals"
-            ):
+            elif key == ("element.state.ime_preedit_text", "equals"):
                 if (
                     resolved.kind != "input_verified_text"
                     or resolved.input_method != "chinese_pinyin"
                     or resolved.input_pinyin != value
                 ):
-                    raise UniversalActionError(
-                        "typed 拼音组合状态与已验证中文事务不一致。"
-                    )
-            elif (
-                predicate == "element.state.ime_preedit_text"
-                and operator == "absent"
-            ):
+                    raise UniversalActionError("typed 拼音组合状态与已验证中文事务不一致。")
+            elif key == ("element.state.ime_preedit_text", "absent"):
                 if resolved.kind != "clear_verified_text":
-                    raise UniversalActionError(
-                        "typed 预编辑清空后置状态未绑定清空动作。"
-                    )
-            elif (
-                predicate == "element.state.ime_exact_candidate_text"
-                and operator == "equals"
-            ):
+                    raise UniversalActionError("typed 预编辑清空后置状态未绑定清空动作。")
+            elif key == ("element.state.ime_exact_candidate_text", "equals"):
                 if (
                     resolved.kind != "input_verified_text"
                     or resolved.input_method != "chinese_pinyin"
                     or resolved.input_fragment != value
                 ):
-                    raise UniversalActionError(
-                        "typed 中文候选状态与已验证中文事务不一致。"
-                    )
-            elif predicate in {
-                "element.state.keyboard_layout",
-                "element.state.keyboard_input_mode",
-                "element.state.keyboard_case_mode",
-            } and operator == "equals":
+                    raise UniversalActionError("typed 中文候选状态与已验证中文事务不一致。")
+            elif key in {
+                ("element.state.keyboard_layout", "equals"),
+                ("element.state.keyboard_input_mode", "equals"),
+                ("element.state.keyboard_case_mode", "equals"),
+            }:
                 state_key = predicate.removeprefix("element.state.")
                 expected_element = resolved.expected_effect.get("element_state")
-                expected_states = (
-                    expected_element.get("states")
-                    if isinstance(expected_element, dict)
-                    else None
-                )
+                expected_states = expected_element.get("states") if isinstance(expected_element, dict) else None
                 input_element_id = str(resolved.input_element_id or "").strip()
                 if (
                     resolved.kind != "tap_semantic"
@@ -1579,62 +1480,54 @@ class UniversalActionController:
                     or not value
                     or not isinstance(expected_states, dict)
                     or expected_states.get(state_key) != value
-                    or expected_states.get("value")
-                    != resolved.expected_input_value
+                    or expected_states.get("value") != resolved.expected_input_value
                 ):
-                    raise UniversalActionError(
-                        f"typed {state_key} 与已验证输入辅助动作不一致。"
-                    )
-                matches = tuple(
-                    item
+                    raise UniversalActionError(f"typed {state_key} 与已验证输入辅助动作不一致。")
+                match_count = sum(
+                    1
                     for item in after.elements
                     if item.element_id == input_element_id
                     and item.role == "input"
                     and item.states.get(state_key) == value
-                    and item.states.get("value")
-                    == resolved.expected_input_value
+                    and item.states.get("value") == resolved.expected_input_value
                     and float(item.confidence) >= MIN_TARGET_CONFIDENCE
                     and item.states.get("visible") is not False
                 )
-                if len(matches) != 1:
-                    raise UniversalActionError(
-                        f"typed {state_key} 后置状态未满足。"
-                    )
-            elif predicate == "effect.applied" and operator == "equals":
+                if match_count != 1:
+                    raise UniversalActionError(f"typed {state_key} 后置状态未满足。")
+            elif key == ("effect.applied", "equals"):
                 if value is not True or before.fingerprint == after.fingerprint:
                     raise UniversalActionError("typed effect receipt 缺少动作后变化证据。")
-            elif predicate in {
-                "surface.active_ref",
-                "surface.focused_entity_ref",
-            } and operator == "equals":
+            elif key in {
+                ("surface.active_ref", "equals"),
+                ("surface.focused_entity_ref", "equals"),
+            }:
                 if before.fingerprint == after.fingerprint:
                     raise UniversalActionError("typed surface 目标没有产生新观察。")
-            elif predicate in {
-                "surface.navigation_depth",
-                "surface.viewport",
-                "observation.changed",
-                "scene.changed",
-                "element.state.interaction_result",
-                "element.state.location_relation",
-            } and operator == "changed":
+            elif key in {
+                ("surface.navigation_depth", "changed"),
+                ("surface.viewport", "changed"),
+                ("observation.changed", "changed"),
+                ("scene.changed", "changed"),
+                ("element.state.interaction_result", "changed"),
+                ("element.state.location_relation", "changed"),
+            }:
                 if before.fingerprint == after.fingerprint:
                     raise UniversalActionError("typed changed 后置状态未满足。")
-            elif predicate in {
-                "element.state.focused",
-            } and operator == "equals":
+            elif key == ("element.state.focused", "equals"):
                 target_id = str(resolved.target_element_id or "")
                 matches = [item for item in after.elements if item.element_id == target_id]
                 if len(matches) == 1 and matches[0].states.get("focused") is value:
                     continue
-                focus_only_sources = tuple(
-                    item
+                focus_only_source_count = sum(
+                    1
                     for item in before.elements
                     if item.element_id == target_id
                     and item.role == "input"
                     and item.states.get("focus_only_input_surface") is True
                 )
-                audited_focus_matches = tuple(
-                    item
+                audited_focus_count = sum(
+                    1
                     for item in after.elements
                     if item.role == "input"
                     and item.meaning == "application_text_input"
@@ -1648,22 +1541,14 @@ class UniversalActionController:
                     not in {"", "unknown"}
                     and float(item.confidence) >= self.min_confidence
                 )
-                focus_only_transition_verified = bool(
+                if not (
                     value is True
-                    and len(focus_only_sources) == 1
-                    and len(audited_focus_matches) == 1
-                    and input_app_identity_compatible(
-                        before.foreground_app_id,
-                        after.foreground_app_id,
-                    )
-                    and input_screen_identity_compatible(
-                        before.screen_id,
-                        after.screen_id,
-                    )
-                )
-                if not focus_only_transition_verified:
+                    and focus_only_source_count == audited_focus_count == 1
+                    and input_app_identity_compatible(before.foreground_app_id, after.foreground_app_id)
+                    and input_screen_identity_compatible(before.screen_id, after.screen_id)
+                ):
                     raise UniversalActionError("typed focused 后置状态未满足。")
-            elif predicate == "input_field.focused" and operator == "equals":
+            elif key == ("input_field.focused", "equals"):
                 executed_targets = [
                     item for item in before.elements
                     if item.element_id == resolved.target_element_id
@@ -1674,19 +1559,17 @@ class UniversalActionController:
                     if len(executed_targets) == 1
                     else ""
                 )
-                matches = [
-                    item for item in after.elements
+                match_count = sum(
+                    1 for item in after.elements
                     if item.role == "input"
                     and item.states.get("input_field_id") == expectation.get("subject_ref")
                     and item.states.get("input_field_label") == target_label
                     and item.states.get("focused") is value
                     and float(item.confidence) >= MIN_TARGET_CONFIDENCE
-                ]
-                if value is not True or len(matches) != 1:
-                    raise UniversalActionError(
-                        "typed目标字段聚焦后置状态未满足。"
-                    )
-            elif predicate == "element.state.location_relation" and operator == "equals":
+                )
+                if value is not True or match_count != 1:
+                    raise UniversalActionError("typed目标字段聚焦后置状态未满足。")
+            elif key == ("element.state.location_relation", "equals"):
                 if (
                     resolved.kind != "drag"
                     or not resolved.target_element_id
@@ -1695,8 +1578,6 @@ class UniversalActionController:
                     or not value
                 ):
                     raise UniversalActionError("typed drag relation 与已解析动作不一致。")
-                # The concrete spatial outcome is verified by
-                # _verify_drag_result immediately after this contract check.
             else:
                 raise UniversalActionError(
                     f"尚未实现的 typed transition expectation：{predicate}/{operator}"

@@ -78,12 +78,6 @@ ELEMENT_ACTION_ROLES = frozenset(
 RELATION_KINDS = frozenset(
     {
         "on_surface",
-        "contains",
-        "overlaps",
-        "above",
-        "below",
-        "left_of",
-        "right_of",
         "exact_literal_match",
         "binds_effect_target",
         "binds_effect_payload",
@@ -184,144 +178,75 @@ class GenericStepProposal:
     def validate(self, scene: UIScene) -> None:
         scene.validate()
         if self.status not in {"action", "blocked"}:
-            raise CanonicalActionProtocolError(
-                f"不支持的单步状态：{self.status}"
-            )
-        if self.status == "action":
-            if self.action is None:
-                raise CanonicalActionProtocolError("action 状态缺少唯一动作。")
-            if self.action.action not in CANONICAL_ACTION_KINDS:
-                raise CanonicalActionProtocolError(
-                    f"单步动作不在 canonical 动作集合：{self.action.action}"
-                )
-            if self.action.action in {
-                "tap_semantic",
-                "dismiss_overlay",
-                "input_verified_text",
-                "press_enter",
-                "clear_verified_text",
-                "double_tap",
-                "long_press",
-            }:
-                element_id = str(
-                    self.action.params.get("element_id") or ""
-                ).strip()
-                if not element_id:
-                    raise CanonicalActionProtocolError(
-                        "元素动作必须引用当前场景 element_id。"
-                    )
-                scene.get_element(element_id)
-            if self.action.action == "input_verified_text":
-                text = self.action.params.get("text")
-                if (
-                    not isinstance(text, str)
-                    or not text
-                    or len(text) > 4000
-                    or "\r" in text
-                ):
-                    raise CanonicalActionProtocolError(
-                        "输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。"
-                    )
-                if (
-                    scene.get_element(str(self.action.params["element_id"])).role
-                    != "input"
-                ):
-                    raise CanonicalActionProtocolError(
-                        "输入动作必须绑定 input 元素。"
-                    )
-            if self.action.action == "clear_verified_text":
-                unexpected = set(self.action.params) - {
-                    "element_id",
-                    "target",
-                    "role",
-                    "label",
-                    "states",
-                    "expected_effect",
-                } - _FORMAL_AUTHORITY_PARAMS
-                if unexpected:
-                    raise CanonicalActionProtocolError(
-                        "清空动作包含协议外参数：" + ", ".join(sorted(unexpected))
-                    )
-                if (
-                    scene.get_element(str(self.action.params["element_id"])).role
-                    != "input"
-                ):
-                    raise CanonicalActionProtocolError(
-                        "清空动作必须绑定 input 元素。"
-                    )
-            if self.action.action == "long_press":
-                duration_ms = self.action.params.get("duration_ms", 800)
-                if (
-                    isinstance(duration_ms, bool)
-                    or not isinstance(duration_ms, (int, float))
-                    or not 500 <= float(duration_ms) <= 2000
-                ):
-                    raise CanonicalActionProtocolError(
-                        "长按 duration_ms 必须在500～2000之间。"
-                    )
-            if self.action.action == "drag":
-                source_id = str(
-                    self.action.params.get("source_element_id") or ""
-                ).strip()
-                destination_id = str(
-                    self.action.params.get("destination_element_id") or ""
-                ).strip()
-                if not source_id or not destination_id or source_id == destination_id:
-                    raise CanonicalActionProtocolError(
-                        "拖动必须绑定两个不同的可信元素。"
-                    )
-                scene.get_element(source_id)
-                scene.get_element(destination_id)
-            if self.action.action == "swipe":
-                direction = str(
-                    self.action.params.get("direction") or ""
-                ).strip()
-                if direction not in {"up", "down", "left", "right"}:
-                    raise CanonicalActionProtocolError("滑动动作方向无效。")
-            if self.action.action == "reveal_system_navigation":
-                unexpected = (
-                    set(self.action.params)
-                    - {"expected_effect"}
-                    - _FORMAL_AUTHORITY_PARAMS
-                )
-                if unexpected:
-                    raise CanonicalActionProtocolError(
-                        "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"
-                    )
-                system_ui = getattr(scene, "system_ui", None)
-                if system_ui is None:
-                    raise CanonicalActionProtocolError(
-                        "系统导航栏唤出动作缺少结构化 scene.system_ui。"
-                    )
-                immersive = getattr(system_ui, "immersive_or_fullscreen", None)
-                navigation_visible = getattr(
-                    system_ui,
-                    "navigation_bar_visible",
-                    None,
-                )
-                if isinstance(system_ui, Mapping):
-                    if immersive is None:
-                        immersive = system_ui.get("immersive_or_fullscreen")
-                    if navigation_visible is None:
-                        navigation_visible = system_ui.get(
-                            "navigation_bar_visible"
-                        )
-                if immersive is not True or navigation_visible is not False:
-                    raise CanonicalActionProtocolError(
-                        "系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"
-                    )
-                if self.action.params.get("expected_effect") != {
-                    "system_ui": {"navigation_bar_visible": True}
-                }:
-                    raise CanonicalActionProtocolError(
-                        "系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。"
-                    )
-        elif self.action is not None:
-            raise CanonicalActionProtocolError(
-                "blocked 状态不能携带动作。"
-            )
-        if self.status == "blocked" and not self.reason.strip():
-            raise CanonicalActionProtocolError("阻塞报告必须说明原因。")
+            raise CanonicalActionProtocolError(f"不支持的单步状态：{self.status}")
+        if self.status == "blocked":
+            if self.action is not None:
+                raise CanonicalActionProtocolError("blocked 状态不能携带动作。")
+            if not self.reason.strip():
+                raise CanonicalActionProtocolError("阻塞报告必须说明原因。")
+            return
+        if self.action is None:
+            raise CanonicalActionProtocolError("action 状态缺少唯一动作。")
+
+        kind, params = self.action.action, self.action.params
+        if kind not in CANONICAL_ACTION_KINDS:
+            raise CanonicalActionProtocolError(f"单步动作不在 canonical 动作集合：{kind}")
+        element_actions = {
+            "tap_semantic", "dismiss_overlay", "input_verified_text", "press_enter",
+            "clear_verified_text", "double_tap", "long_press",
+        }
+        element = None
+        if kind in element_actions:
+            element_id = str(params.get("element_id") or "").strip()
+            if not element_id:
+                raise CanonicalActionProtocolError("元素动作必须引用当前场景 element_id。")
+            element = scene.get_element(element_id)
+
+        if kind == "input_verified_text":
+            text = params.get("text")
+            if not isinstance(text, str) or not text or len(text) > 4000 or "\r" in text:
+                raise CanonicalActionProtocolError("输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。")
+            if element.role != "input":
+                raise CanonicalActionProtocolError("输入动作必须绑定 input 元素。")
+        elif kind == "clear_verified_text":
+            allowed = {
+                "element_id", "target", "role", "label", "states", "expected_effect",
+                *_FORMAL_AUTHORITY_PARAMS,
+            }
+            unexpected = set(params) - allowed
+            if unexpected:
+                raise CanonicalActionProtocolError("清空动作包含协议外参数：" + ", ".join(sorted(unexpected)))
+            if element.role != "input":
+                raise CanonicalActionProtocolError("清空动作必须绑定 input 元素。")
+        elif kind == "long_press":
+            duration_ms = params.get("duration_ms", 800)
+            if (
+                isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float))
+                or not 500 <= float(duration_ms) <= 2000
+            ):
+                raise CanonicalActionProtocolError("长按 duration_ms 必须在500～2000之间。")
+        elif kind == "drag":
+            source_id = str(params.get("source_element_id") or "").strip()
+            destination_id = str(params.get("destination_element_id") or "").strip()
+            if not source_id or not destination_id or source_id == destination_id:
+                raise CanonicalActionProtocolError("拖动必须绑定两个不同的可信元素。")
+            scene.get_element(source_id)
+            scene.get_element(destination_id)
+        elif kind == "swipe":
+            if str(params.get("direction") or "").strip() not in {"up", "down", "left", "right"}:
+                raise CanonicalActionProtocolError("滑动动作方向无效。")
+        elif kind == "reveal_system_navigation":
+            unexpected = set(params) - {"expected_effect"} - _FORMAL_AUTHORITY_PARAMS
+            if unexpected:
+                raise CanonicalActionProtocolError("系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。")
+            system_ui = scene.system_ui
+            if (
+                system_ui.immersive_or_fullscreen is not True
+                or system_ui.navigation_bar_visible is not False
+            ):
+                raise CanonicalActionProtocolError("系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。")
+            if params.get("expected_effect") != {"system_ui": {"navigation_bar_visible": True}}:
+                raise CanonicalActionProtocolError("系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。")
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -831,22 +756,6 @@ def _affordance(subject_ref: str, action_kind: str, support_claim_ids: Iterable[
     )
 
 
-def _relation_between(first: UIElement, second: UIElement) -> str:
-    al, at, ar, ab = first.bounds
-    bl, bt, br, bb = second.bounds
-    if al <= bl and at <= bt and ar >= br and ab >= bb:
-        return "contains"
-    overlap_x = max(0.0, min(ar, br) - max(al, bl))
-    overlap_y = max(0.0, min(ab, bb) - max(at, bt))
-    if overlap_x > 0 and overlap_y > 0:
-        return "overlaps"
-    acx, acy = (al + ar) / 2.0, (at + ab) / 2.0
-    bcx, bcy = (bl + br) / 2.0, (bt + bb) / 2.0
-    if abs(acx - bcx) >= abs(acy - bcy):
-        return "left_of" if acx < bcx else "right_of"
-    return "above" if acy < bcy else "below"
-
-
 def _element_eligible(element: UIElement) -> bool:
     return (
         element.role in ELEMENT_ACTION_ROLES
@@ -935,69 +844,26 @@ def _swipe_directions_for_viewport(element: UIElement) -> tuple[str, ...]:
     return (forward, backward)
 
 
-_EXPLICIT_SWIPE_DIRECTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
-    "up": (
-        re.compile(r"(?:向|往|朝)\s*上(?!方)"),
-        re.compile(r"上\s*(?:滑|划|拖|推)"),
-        re.compile(r"\b(?:swipe|flick|drag)\s+up\b", re.IGNORECASE),
+def _swipe_direction_patterns(chinese: str, english: str) -> tuple[re.Pattern[str], ...]:
+    long_form = rf"{english}ward(?:s)?"
+    action = r"(?:swipe|flick|drag)"
+    return (
+        re.compile(rf"(?:向|往|朝)\s*{chinese}(?!方)"),
+        re.compile(rf"{chinese}\s*(?:滑|划|拖|推)"),
+        re.compile(rf"\b{action}\s+{english}\b", re.IGNORECASE),
+        re.compile(rf"\b{action}\b[^.;!?\n]{{0,80}}\b{long_form}\b", re.IGNORECASE),
         re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}"
-            r"\b(?:upward|upwards)\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bup\b"
+            rf"\b{action}\b[^.;!?\n]{{0,80}}\b{english}\b"
             r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
             re.IGNORECASE,
         ),
-        re.compile(r"\b(?:upward|upwards)\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
-    ),
-    "down": (
-        re.compile(r"(?:向|往|朝)\s*下(?!方)"),
-        re.compile(r"下\s*(?:滑|划|拖|推)"),
-        re.compile(r"\b(?:swipe|flick|drag)\s+down\b", re.IGNORECASE),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}"
-            r"\b(?:downward|downwards)\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bdown\b"
-            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
-            re.IGNORECASE,
-        ),
-        re.compile(r"\b(?:downward|downwards)\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
-    ),
-    "left": (
-        re.compile(r"(?:向|往|朝)\s*左(?!方)"),
-        re.compile(r"左\s*(?:滑|划|拖|推)"),
-        re.compile(r"\b(?:swipe|flick|drag)\s+left\b", re.IGNORECASE),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bleftward\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bleft\b"
-            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
-            re.IGNORECASE,
-        ),
-        re.compile(r"\bleftward\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
-    ),
-    "right": (
-        re.compile(r"(?:向|往|朝)\s*右(?!方)"),
-        re.compile(r"右\s*(?:滑|划|拖|推)"),
-        re.compile(r"\b(?:swipe|flick|drag)\s+right\b", re.IGNORECASE),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\brightward\b",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bright\b"
-            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
-            re.IGNORECASE,
-        ),
-        re.compile(r"\brightward\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
-    ),
+        re.compile(rf"\b{long_form}\s+{action}\b", re.IGNORECASE),
+    )
+
+
+_EXPLICIT_SWIPE_DIRECTION_PATTERNS = {
+    direction: _swipe_direction_patterns(chinese, direction)
+    for direction, chinese in {"up": "上", "down": "下", "left": "左", "right": "右"}.items()
 }
 
 
@@ -1377,20 +1243,6 @@ def compile_canonical_action_catalog(
                 element_claim_ids[element.element_id],
             )
         )
-    for index, first in enumerate(sorted_elements):
-        for second in sorted_elements[index + 1 :]:
-            relations.append(
-                _relation(
-                    _element_ref(first.element_id),
-                    _relation_between(first, second),
-                    _element_ref(second.element_id),
-                    (
-                        element_claim_by_predicate[(first.element_id, "element.exists")],
-                        element_claim_by_predicate[(second.element_id, "element.exists")],
-                    ),
-                )
-            )
-
     entity_by_id = {item.entity_id: item for item in semantic_ir.entities}
     active_input_payload_entities = tuple(
         entity_by_id[ref]
@@ -1454,7 +1306,6 @@ def compile_canonical_action_catalog(
         for entity in semantic_ir.entities
         if entity.role == "input_text" and isinstance(entity.value, str)
     )
-    direct_payload_bindings: set[tuple[str, str, str]] = set()
     if len(focused_inputs) == 1 and len(input_payload_entities) == 1:
         element = focused_inputs[0]
         entity = input_payload_entities[0]
@@ -1473,9 +1324,6 @@ def compile_canonical_action_catalog(
                 support,
                 entity_id=entity.entity_id,
             )
-            direct_payload_bindings.add(
-                (element.element_id, effect.effect_id, entity.entity_id)
-            )
     if len(active_input_fields) == 1 and len(predecessor_input_field_ids) == 1:
         active_field = active_input_fields[0]
         predecessor_field_id = next(iter(predecessor_input_field_ids))
@@ -1492,22 +1340,21 @@ def compile_canonical_action_catalog(
             and predecessor_payload.role == "input_text"
             and item.states.get("value") == predecessor_payload.value
         ]
-        for element in sorted_elements:
-            if not (
-                len(focused_predecessors) == 1
-                and _element_eligible(element)
-                and element.meaning == "input_next_field_key"
-                and element.role == "button"
-                and element.states.get("input_next_field_key") is True
-                and element.states.get("key_action") == "next"
-                and element.states.get("source_input_field_id") == predecessor_field_id
-                and element.states.get("target_input_field_id") == active_field.field_id
-                and element.states.get("target_input_field_label") == active_field.field_label
-            ):
-                continue
-            support = tuple(element_claim_ids[element.element_id])
+        next_keys = tuple(
+            element for element in sorted_elements
+            if len(focused_predecessors) == 1 and _element_eligible(element)
+            and element.meaning == "input_next_field_key" and element.role == "button"
+            and element.states.get("input_next_field_key") is True
+            and element.states.get("key_action") == "next"
+            and element.states.get("source_input_field_id") == predecessor_field_id
+            and element.states.get("target_input_field_id") == active_field.field_id
+            and element.states.get("target_input_field_label") == active_field.field_label
+        )
+        if len(next_keys) == 1:
+            element = next_keys[0]
             bind_element(
-                element, "binds_next_input_field", active_field.field_id, support
+                element, "binds_next_input_field", active_field.field_id,
+                element_claim_ids[element.element_id],
             )
     exact_tap_authority = bool(
         active_subgoal.subgoal_id == "exact_tap_semantic"
@@ -1531,23 +1378,19 @@ def compile_canonical_action_catalog(
             and matches[0].role == "text"
         ):
             exact_tap_text_element_ids.add(matches[0].element_id)
-        for element in matches:
-            literal_claims = tuple(
-                claim_id
-                for predicate in ("element.label", "element.state.value")
-                if (claim_id := element_claim_by_predicate.get((element.element_id, predicate)))
-            )
+        if len(matches) != 1:
+            continue
+        element = matches[0]
+        literal_claims = tuple(
+            claim_id for predicate in ("element.label", "element.state.value")
+            if (claim_id := element_claim_by_predicate.get((element.element_id, predicate)))
+        )
+        bind_element(element, "exact_literal_match", entity.entity_id, literal_claims)
+        for effect, relation_kind in effect_by_entity.get(entity.entity_id, ()):
             bind_element(
-                element, "exact_literal_match", entity.entity_id, literal_claims
+                element, relation_kind, effect.effect_id, literal_claims,
+                entity_id=entity.entity_id,
             )
-            for effect, relation_kind in effect_by_entity.get(entity.entity_id, ()):
-                bind_element(
-                    element,
-                    relation_kind,
-                    effect.effect_id,
-                    literal_claims,
-                    entity_id=entity.entity_id,
-                )
 
     for surface in semantic_ir.surfaces:
         if surface.kind != "app" or not surface.app_name:
@@ -1558,11 +1401,11 @@ def compile_canonical_action_catalog(
             if _element_eligible(element)
             and element.label.strip().casefold() == surface.app_name.casefold()
         )
-        for element in matches:
+        if len(matches) == 1:
+            element = matches[0]
             label_claim = element_claim_by_predicate.get((element.element_id, "element.label"))
-            if not label_claim:
-                continue
-            bind_element(element, "binds_surface", surface.surface_id, (label_claim,))
+            if label_claim:
+                bind_element(element, "binds_surface", surface.surface_id, (label_claim,))
 
     relation_by_id = {item.relation_id: item for item in relations}
     relations = sorted(relation_by_id.values(), key=lambda item: item.relation_id)
@@ -1593,31 +1436,36 @@ def compile_canonical_action_catalog(
         if target_swipe_presence is not None
         else ()
     )
+
+    def matches_active_input_field(element: UIElement, *, ambiguous: bool = False) -> bool:
+        if len(active_input_fields) != 1:
+            return ambiguous and active_targets_input
+        field = active_input_fields[0]
+        return bool(
+            element.states.get("input_field_id") == field.field_id
+            and (not field.field_label or element.states.get("input_field_label") == field.field_label)
+            or len(semantic_ir.input_fields) == 1 and not field.field_label
+        )
+
     affordances: list[Affordance] = []
-    for action_kind in sorted(available):
-        if action_kind in {
-            "back",
-            "home",
-            "open_recent_apps",
-            "reveal_system_navigation",
-            "swipe",
-            "wait_for_change",
-        }:
-            if action_kind == "swipe" and not swipe_directions:
-                continue
-            if action_kind == "reveal_system_navigation" and not (
-                scene.system_ui.immersive_or_fullscreen is True
-                and scene.system_ui.navigation_bar_visible is False
-            ):
-                continue
-            support_claim_ids = (
-                tuple(surface_claim_ids) + target_swipe_claim_ids
-                if action_kind == "swipe" and target_swipe_presence is not None
-                else surface_claim_ids
-            )
-            affordances.append(
-                _affordance(surface_ref, action_kind, support_claim_ids)
-            )
+    system_actions = {
+        "back", "home", "open_recent_apps", "reveal_system_navigation",
+        "swipe", "wait_for_change",
+    }
+    for action_kind in sorted(available & system_actions):
+        if action_kind == "swipe" and not swipe_directions:
+            continue
+        if action_kind == "reveal_system_navigation" and not (
+            scene.system_ui.immersive_or_fullscreen is True
+            and scene.system_ui.navigation_bar_visible is False
+        ):
+            continue
+        support = (
+            (*surface_claim_ids, *target_swipe_claim_ids)
+            if action_kind == "swipe" and target_swipe_presence is not None
+            else surface_claim_ids
+        )
+        affordances.append(_affordance(surface_ref, action_kind, support))
     for element in sorted_elements:
         normally_actionable = _element_eligible(element)
         exact_tap_text_target = element.element_id in exact_tap_text_element_ids
@@ -1627,47 +1475,14 @@ def compile_canonical_action_catalog(
             element.role == "input"
             and element.states.get("focus_only_input_surface") is True
         )
-        supported: set[str] = set()
-        if "tap_semantic" in available:
-            supported.add("tap_semantic")
-        if (
-            normally_actionable
-            and not focus_only_input_surface
-            and "double_tap" in available
-        ):
-            supported.add("double_tap")
-        if (
-            normally_actionable
-            and not focus_only_input_surface
-            and "long_press" in available
-        ):
-            supported.add("long_press")
-        if normally_actionable and not focus_only_input_surface and "drag" in available:
-            supported.add("drag")
+        supported = set(available & {"tap_semantic"})
+        if normally_actionable and not focus_only_input_surface:
+            supported.update(available & {"double_tap", "long_press", "drag"})
         if element.role == "input" and element.states.get("focused") is True:
-            active_field = active_input_fields[0] if len(active_input_fields) == 1 else None
-            field_identity_matches = bool(
-                active_field is not None
-                and (
-                    (
-                        element.states.get("input_field_id")
-                        == active_field.field_id
-                        and (
-                            not active_field.field_label
-                            or element.states.get("input_field_label")
-                            == active_field.field_label
-                        )
-                    )
-                    or (
-                        len(semantic_ir.input_fields) == 1
-                        and not active_field.field_label
-                    )
-                )
-            )
             if (
                 "input_verified_text" in available
                 and len(active_input_payload_entities) == 1
-                and field_identity_matches
+                and matches_active_input_field(element)
                 and _verified_text_affordance_ready(
                     element,
                     active_input_payload_entities[0].value,
@@ -1845,64 +1660,16 @@ def compile_canonical_action_catalog(
         )
         return (expectation, *extra), effect_ref, exploratory
 
-    # Element candidates require a unique exact entity/surface binding. A model
-    # boolean such as goal_relevant never grants eligibility here.
     for element in sorted_elements:
         element_ref = _element_ref(element.element_id)
-        relation_ids = tuple(sorted(set(relation_ids_by_element.get(element.element_id, ()))))
-        if not relation_ids:
-            continue
-        unique_relation_ids: list[str] = []
-        bound_entity_ids: list[str] = []
-        for relation_id in relation_ids:
-            relation = relation_by_id[relation_id]
-            if relation.relation == "exact_literal_match":
-                matches = exact_elements_by_entity.get(relation.object_ref, ())
-                if len(matches) != 1:
-                    continue
-                bound_entity_ids.append(relation.object_ref)
-                unique_relation_ids.append(relation_id)
-            elif relation.relation == "binds_surface":
-                same_surface_matches = [
-                    item
-                    for item in relations
-                    if item.relation == "binds_surface"
-                    and item.object_ref == relation.object_ref
-                ]
-                if len(same_surface_matches) != 1:
-                    continue
-                unique_relation_ids.append(relation_id)
-            elif relation.relation in {"binds_effect_target", "binds_effect_payload"}:
-                # These are retained only when their exact entity binding is unique.
-                related_entities = [
-                    entity_id
-                    for effect_id, entity_id, kind in relation_effects_by_element.get(
-                        element.element_id, ()
-                    )
-                    if effect_id == relation.object_ref and kind == relation.relation
-                ]
-                if any(
-                    len(exact_elements_by_entity.get(entity_id, ())) == 1
-                    or (
-                        relation.relation == "binds_effect_payload"
-                        and (element.element_id, relation.object_ref, entity_id)
-                        in direct_payload_bindings
-                    )
-                    for entity_id in related_entities
-                ):
-                    unique_relation_ids.append(relation_id)
-            elif relation.relation == "binds_next_input_field":
-                same_bindings = [
-                    item for item in relations
-                    if item.relation == "binds_next_input_field"
-                    and item.object_ref == relation.object_ref
-                ]
-                if len(same_bindings) == 1:
-                    unique_relation_ids.append(relation_id)
-            elif relation.relation == "on_surface":
-                unique_relation_ids.append(relation_id)
+        unique_relation_ids = tuple(sorted(set(relation_ids_by_element.get(element.element_id, ()))))
         if not unique_relation_ids:
             continue
+        bound_entity_ids = tuple(
+            relation_by_id[relation_id].object_ref
+            for relation_id in unique_relation_ids
+            if relation_by_id[relation_id].relation == "exact_literal_match"
+        )
 
         tap_affordance = affordance_by_pair.get((element_ref, "tap_semantic"))
         if (
@@ -2102,75 +1869,22 @@ def compile_canonical_action_catalog(
         if target_swipe_presence is not None
         else ""
     )
-    swipe_specs = tuple(
-        (
-            "swipe",
-            (
-                StateExpectation(
-                    target_swipe_ref,
-                    "element.exists",
-                    "absent",
-                ),
-            )
-            if target_swipe_presence is not None
-            else (
-                StateExpectation(
-                    surface_ref,
-                    "surface.viewport",
-                    "changed",
-                ),
-            ),
-            target_swipe_presence is None,
-            {
-                "direction": direction,
-                **(
-                    {"element_id": target_swipe_presence.element_id}
-                    if target_swipe_presence is not None
-                    else {}
-                ),
-            },
-        )
-        for direction in swipe_directions
-    )
-    system_specs: tuple[tuple[str, tuple[StateExpectation, ...], bool, dict[str, Any]], ...] = (
+    system_specs = [
         (
             "open_recent_apps",
-            (
-                StateExpectation(
-                    surface_ref,
-                    "surface.kind",
-                    "equals",
-                    expected_idempotent_system_surface_kind(
-                        "open_recent_apps"
-                    ),
-                ),
-            ),
+            (StateExpectation(surface_ref, "surface.kind", "equals", expected_idempotent_system_surface_kind("open_recent_apps")),),
             False,
             {},
         ),
         (
             "home",
-            (
-                StateExpectation(
-                    surface_ref,
-                    "surface.kind",
-                    "equals",
-                    expected_idempotent_system_surface_kind("home"),
-                ),
-            ),
+            (StateExpectation(surface_ref, "surface.kind", "equals", expected_idempotent_system_surface_kind("home")),),
             False,
             {},
         ),
         (
             "reveal_system_navigation",
-            (
-                StateExpectation(
-                    surface_ref,
-                    "system_ui.navigation_bar_visible",
-                    "equals",
-                    True,
-                ),
-            ),
+            (StateExpectation(surface_ref, "system_ui.navigation_bar_visible", "equals", True),),
             False,
             {},
         ),
@@ -2180,14 +1894,29 @@ def compile_canonical_action_catalog(
             True,
             {},
         ),
-        *swipe_specs,
         (
             "wait_for_change",
             (StateExpectation(surface_ref, "observation.changed", "changed"),),
             True,
             {},
         ),
-    )
+    ]
+    for direction in swipe_directions:
+        anchored = target_swipe_presence is not None
+        swipe_subject = target_swipe_ref if anchored else surface_ref
+        swipe_predicate = "element.exists" if anchored else "surface.viewport"
+        swipe_operator = "absent" if anchored else "changed"
+        system_specs.append(
+            (
+                "swipe",
+                (StateExpectation(swipe_subject, swipe_predicate, swipe_operator),),
+                not anchored,
+                {
+                    "direction": direction,
+                    **({"element_id": target_swipe_presence.element_id} if anchored else {}),
+                },
+            )
+        )
     for action_kind, expectations, exploratory, parameters in system_specs:
         affordance = surface_affordance.get(action_kind)
         if affordance is None:
@@ -2249,6 +1978,11 @@ def compile_canonical_action_catalog(
     surfaces_by_id = {item.surface_id: item for item in semantic_ir.surfaces}
     target_surface = surfaces_by_id.get(active_subgoal.surface_ref)
     current_surface_kind = _surface_kind(scene)
+    target_is_app = target_surface is not None and target_surface.kind == "app"
+    wrong_app_surface = bool(
+        target_is_app and current_surface_kind != "launcher"
+        and not scene_matches_target_app_surface(scene, target_surface)
+    )
     required_system_action = {
         "launcher": "home",
         "recent_tasks": "open_recent_apps",
@@ -2261,6 +1995,10 @@ def compile_canonical_action_catalog(
         "switch_keyboard_case",
         "switch_keyboard_input_mode",
         "input_next_field_key",
+    }
+    navigation_actions = {
+        "back", "open_recent_apps", "swipe", "reveal_system_navigation",
+        "wait_for_change",
     }
 
     def candidate_element(candidate: CanonicalActionCandidate) -> UIElement | None:
@@ -2343,12 +2081,7 @@ def compile_canonical_action_catalog(
         element = candidate_element(candidate)
         if element is None:
             return False
-        if (
-            target_surface is not None
-            and target_surface.kind == "app"
-            and current_surface_kind != "launcher"
-            and not scene_matches_target_app_surface(scene, target_surface)
-        ):
+        if wrong_app_surface:
             return False
         if element.meaning == "input_next_field_key":
             return has_relation(
@@ -2362,31 +2095,16 @@ def compile_canonical_action_catalog(
                 and active_input_payload_refs
             )
         if element.role == "input":
-            if element.states.get("focused") is True:
-                return False
-            if len(active_input_fields) != 1:
-                return active_targets_input
-            active_field = active_input_fields[0]
             return bool(
-                (
-                    element.states.get("input_field_id") == active_field.field_id
-                    and (
-                        not active_field.field_label
-                        or element.states.get("input_field_label")
-                        == active_field.field_label
-                    )
-                )
-                or (
-                    len(semantic_ir.input_fields) == 1
-                    and not active_field.field_label
-                )
+                element.states.get("focused") is not True
+                and matches_active_input_field(element, ambiguous=True)
             )
-        if target_surface is not None and target_surface.kind == "app":
+        if target_is_app:
             if current_surface_kind == "launcher":
                 return has_relation(
                     candidate, "binds_surface", (active_subgoal.surface_ref,)
                 )
-            if not scene_matches_target_app_surface(scene, target_surface):
+            if wrong_app_surface:
                 return False
         return bool(
             has_relation(candidate, "binds_surface", (active_subgoal.surface_ref,))
@@ -2411,11 +2129,7 @@ def compile_canonical_action_catalog(
             )
         if not matches_required_action(candidate):
             return False
-        if action_kind in {
-            "input_verified_text",
-            "press_enter",
-            "clear_verified_text",
-        }:
+        if action_kind in {"input_verified_text", "press_enter", "clear_verified_text"}:
             if action_kind == "clear_verified_text":
                 return bool(active_input_payload_refs) or bool(
                     "clear_verified_text" in active_required_actions
@@ -2446,38 +2160,18 @@ def compile_canonical_action_catalog(
                 return False
             if target_surface.kind == "launcher":
                 return current_surface_kind != "launcher"
-            return bool(
-                target_surface.kind == "app"
-                and current_surface_kind != "launcher"
-                and not scene_matches_target_app_surface(scene, target_surface)
+            return wrong_app_surface
+        if action_kind in navigation_actions:
+            if active_input_fields:
+                return action_kind in active_required_actions
+            if wrong_app_surface:
+                return False
+            allowed_impact = (
+                {"read_only", "navigation_only"}
+                if action_kind == "wait_for_change"
+                else {"navigation_only"}
             )
-        if action_kind == "wait_for_change":
-            if active_input_fields:
-                return action_kind in active_required_actions
-            if (
-                target_surface is not None
-                and target_surface.kind == "app"
-                and current_surface_kind != "launcher"
-                and not scene_matches_target_app_surface(scene, target_surface)
-            ):
-                return False
-            return active_subgoal.external_impact in {"read_only", "navigation_only"}
-        if action_kind in {
-            "back",
-            "open_recent_apps",
-            "swipe",
-            "reveal_system_navigation",
-        }:
-            if active_input_fields:
-                return action_kind in active_required_actions
-            if (
-                target_surface is not None
-                and target_surface.kind == "app"
-                and current_surface_kind != "launcher"
-                and not scene_matches_target_app_surface(scene, target_surface)
-            ):
-                return False
-            return active_subgoal.external_impact == "navigation_only"
+            return active_subgoal.external_impact in allowed_impact
         return False
 
     unique_candidates = {

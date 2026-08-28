@@ -22,7 +22,6 @@ from agent.application.qwen_visual_decision import (
     _identity_text_candidate_block,
     _hydrate_canonical_selection,
     _launcher_app_entry_candidate_ids,
-    _required_exact_candidate_ids,
     _deterministic_exact_selection_payload,
     _selection_choices,
 )

@@ -308,6 +308,17 @@ class UniversalActionController:
                 "结构化 system_ui 后置条件只允许用于系统导航栏唤出动作。"
             )
 
+        def resolved(kind: str | None = None, **values: Any) -> ResolvedSemanticAction:
+            return ResolvedSemanticAction(
+                node_id=action.node_id,
+                kind=kind or action.action,
+                before_fingerprint=scene.fingerprint,
+                expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
+                **values,
+            )
+
         if action.action == "tap_semantic":
             element = self._resolve_target(action, scene)
             if element.states.get("local_text_clear") is True:
@@ -506,9 +517,8 @@ class UniversalActionController:
                 raise UniversalActionError(
                     "精确文字输入要求当前画面只有一个符合安全条件的目标输入框。"
                 )
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind="input_verified_text",
+            return resolved(
+                "input_verified_text",
                 normalized_point=element.center,
                 text=text,
                 input_fragment=input_step.segment,
@@ -517,10 +527,6 @@ class UniversalActionController:
                 prior_input_value=input_step.current_text,
                 expected_input_value=input_step.expected_value,
                 target_element_id=element.element_id,
-                before_fingerprint=scene.fingerprint,
-                expected_effect=expected_effect,
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
             )
         if action.action == "clear_verified_text":
             element = self._resolve_target(action, scene, required_role="input")
@@ -584,17 +590,12 @@ class UniversalActionController:
                 or expected_state.get("states") != {"value": ""}
             ):
                 raise UniversalActionError("清空文字的后置条件必须精确绑定原输入框空值。")
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind="clear_verified_text",
+            return resolved(
+                "clear_verified_text",
                 normalized_point=element.center,
                 text="",
                 delete_count=delete_count,
                 target_element_id=element.element_id,
-                before_fingerprint=scene.fingerprint,
-                expected_effect=expected_effect,
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
             )
         if action.action == "double_tap":
             element = self._resolve_target(action, scene)
@@ -658,19 +659,14 @@ class UniversalActionController:
                     f"{MIN_DRAG_DISTANCE:.2f}～{MAX_DRAG_DISTANCE:.2f}个归一化屏幕单位之间。"
                 )
             self._require_visual_postcondition("drag", expected_effect, scene)
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind="drag",
+            return resolved(
+                "drag",
                 normalized_point=source.center,
                 normalized_end_point=destination.center,
                 target_element_id=source.element_id,
                 destination_element_id=destination.element_id,
                 hold_seconds=DRAG_DURATION_SECONDS,
                 path_distance=distance,
-                before_fingerprint=scene.fingerprint,
-                expected_effect=expected_effect,
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
             )
         if action.action == "reveal_system_navigation":
             unexpected = set(action.params) - {
@@ -688,14 +684,7 @@ class UniversalActionController:
                 raise UniversalActionError(
                     "系统导航栏唤出动作必须精确声明导航栏可见后置条件。"
                 )
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind="reveal_system_navigation",
-                before_fingerprint=scene.fingerprint,
-                expected_effect=expected_effect,
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
-            )
+            return resolved("reveal_system_navigation")
         if action.action == "swipe":
             direction = str(action.params.get("direction") or "").strip().lower()
             if direction not in {"up", "down", "left", "right"}:
@@ -710,62 +699,27 @@ class UniversalActionController:
                 )
                 start, end = self._targeted_swipe_path(element, direction)
                 distance = math.dist(start, end)
-                return ResolvedSemanticAction(
-                    node_id=action.node_id,
-                    kind="swipe",
+                return resolved(
+                    "swipe",
                     normalized_point=start,
                     normalized_end_point=end,
                     direction=direction,
                     hold_seconds=DRAG_DURATION_SECONDS,
                     path_distance=distance,
                     target_element_id=element.element_id,
-                    before_fingerprint=scene.fingerprint,
-                    expected_effect=expected_effect,
-                    formal_candidate_id=formal_candidate_id,
-                    formal_transition=formal_transition,
                 )
             if absence is not None:
                 raise UniversalActionError(
                     "元素消失后置条件必须绑定同一 swipe element_id。"
                 )
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind="swipe",
-                direction=direction,
-                before_fingerprint=scene.fingerprint,
-                expected_effect=expected_effect,
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
-            )
+            return resolved("swipe", direction=direction)
         if action.action in {
             "back",
             "home",
             "open_recent_apps",
-            "observe",
             "wait_for_change",
-            "verify",
-            "finish",
         }:
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind=action.action,
-                before_fingerprint=scene.fingerprint,
-                expected_effect=expected_effect,
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
-            )
-        if action.action == "ensure_app":
-            app_id = str(action.params.get("app_id") or "").strip().lower()
-            if not app_id:
-                raise UniversalActionError("ensure_app 缺少 app_id。")
-            return ResolvedSemanticAction(
-                node_id=action.node_id,
-                kind="ensure_app",
-                before_fingerprint=scene.fingerprint,
-                expected_effect={"app_id": app_id, **expected_effect},
-                formal_candidate_id=formal_candidate_id,
-                formal_transition=formal_transition,
-            )
+            return resolved()
         raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
 
     def _validate_local_text_clear(
@@ -961,7 +915,7 @@ class UniversalActionController:
     ) -> None:
         before.validate()
         after.validate()
-        if resolved.kind not in {"observe", "verify", "finish", "wait_for_change"}:
+        if resolved.kind != "wait_for_change":
             if not resolved.before_fingerprint:
                 raise UniversalActionError("动作缺少执行前场景 fingerprint。")
             if resolved.before_fingerprint != before.fingerprint:
@@ -977,7 +931,7 @@ class UniversalActionController:
         if not after.stable or float(after.confidence) < self.min_confidence:
             raise UniversalActionError("动作后的页面不稳定或置信度不足。")
         if (
-            resolved.kind not in {"observe", "verify", "finish", "wait_for_change"}
+            resolved.kind != "wait_for_change"
             and resolved.kind != "reveal_system_navigation"
             and resolved.expected_effect.get("allow_unchanged") is not True
             and (

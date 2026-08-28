@@ -1328,24 +1328,16 @@ def compile_canonical_action_catalog(
     surface_ref = "surface_current"
     source = _scene_source(scene)
     scene_digest = _digest(source)
+    surface_facts = {
+        "surface.kind": _surface_kind(scene),
+        "surface.foreground_app_id": scene.foreground_app_id,
+        "surface.screen_id": scene.screen_id,
+        "surface.stable": scene.stable,
+        "surface.overlay_present": bool(scene.overlays),
+    }
     claims: list[VisualClaim] = [
-        _claim(surface_ref, "surface.kind", _surface_kind(scene), scene.confidence, source),
-        _claim(
-            surface_ref,
-            "surface.foreground_app_id",
-            scene.foreground_app_id,
-            scene.confidence,
-            source,
-        ),
-        _claim(surface_ref, "surface.screen_id", scene.screen_id, scene.confidence, source),
-        _claim(surface_ref, "surface.stable", scene.stable, scene.confidence, source),
-        _claim(
-            surface_ref,
-            "surface.overlay_present",
-            bool(scene.overlays),
-            scene.confidence,
-            source,
-        ),
+        _claim(surface_ref, predicate, value, scene.confidence, source)
+        for predicate, value in surface_facts.items()
     ]
     element_claim_ids: dict[str, list[str]] = {}
     element_claim_by_predicate: dict[tuple[str, str], str] = {}
@@ -1353,26 +1345,19 @@ def compile_canonical_action_catalog(
     for element in sorted_elements:
         element_ref = _element_ref(element.element_id)
         typed_source = _typed_element_source(element)
-        element_claims = [
-            _claim(element_ref, "element.exists", True, element.confidence, typed_source),
-            _claim(element_ref, "element.role", element.role, element.confidence, typed_source),
-            _claim(element_ref, "element.meaning", element.meaning, element.confidence, typed_source),
+        element_facts = [
+            ("element.exists", True),
+            ("element.role", element.role),
+            ("element.meaning", element.meaning),
+            *((("element.label", element.label),) if element.label else ()),
+            *((f"element.state.{key}", value)
+              for key, value in sorted(element.states.items())
+              if key in _SAFE_STATE_KEYS),
         ]
-        if element.label:
-            element_claims.append(
-                _claim(element_ref, "element.label", element.label, element.confidence, typed_source)
-            )
-        for key, value in sorted(element.states.items()):
-            if key in _SAFE_STATE_KEYS:
-                element_claims.append(
-                    _claim(
-                        element_ref,
-                        f"element.state.{key}",
-                        value,
-                        element.confidence,
-                        typed_source,
-                    )
-                )
+        element_claims = [
+            _claim(element_ref, predicate, value, element.confidence, typed_source)
+            for predicate, value in element_facts
+        ]
         claims.extend(element_claims)
         element_claim_ids[element.element_id] = [item.claim_id for item in element_claims]
         for item in element_claims:
@@ -1435,6 +1420,28 @@ def compile_canonical_action_catalog(
                     relation.relation_id
                 )
     relation_effects_by_element: dict[str, list[tuple[str, str, str]]] = {}
+
+    def bind_element(
+        element: UIElement,
+        relation_kind: str,
+        object_ref: str,
+        support: Iterable[str],
+        *,
+        entity_id: str = "",
+    ) -> VisualRelation:
+        binding = _relation(
+            _element_ref(element.element_id), relation_kind, object_ref, support
+        )
+        relations.append(binding)
+        relation_ids_by_element.setdefault(element.element_id, []).append(
+            binding.relation_id
+        )
+        if entity_id:
+            relation_effects_by_element.setdefault(element.element_id, []).append(
+                (object_ref, entity_id, relation_kind)
+            )
+        return binding
+
     focused_inputs = tuple(
         element
         for element in sorted_elements
@@ -1459,18 +1466,12 @@ def compile_canonical_action_catalog(
         for effect, relation_kind in effect_by_entity.get(entity.entity_id, ()):
             if relation_kind != "binds_effect_payload":
                 continue
-            binding = _relation(
-                _element_ref(element.element_id),
+            bind_element(
+                element,
                 relation_kind,
                 effect.effect_id,
                 support,
-            )
-            relations.append(binding)
-            relation_ids_by_element.setdefault(element.element_id, []).append(
-                binding.relation_id
-            )
-            relation_effects_by_element.setdefault(element.element_id, []).append(
-                (effect.effect_id, entity.entity_id, relation_kind)
+                entity_id=entity.entity_id,
             )
             direct_payload_bindings.add(
                 (element.element_id, effect.effect_id, entity.entity_id)
@@ -1505,15 +1506,8 @@ def compile_canonical_action_catalog(
             ):
                 continue
             support = tuple(element_claim_ids[element.element_id])
-            binding = _relation(
-                _element_ref(element.element_id),
-                "binds_next_input_field",
-                active_field.field_id,
-                support,
-            )
-            relations.append(binding)
-            relation_ids_by_element.setdefault(element.element_id, []).append(
-                binding.relation_id
+            bind_element(
+                element, "binds_next_input_field", active_field.field_id, support
             )
     exact_tap_authority = bool(
         active_subgoal.subgoal_id == "exact_tap_semantic"
@@ -1543,29 +1537,16 @@ def compile_canonical_action_catalog(
                 for predicate in ("element.label", "element.state.value")
                 if (claim_id := element_claim_by_predicate.get((element.element_id, predicate)))
             )
-            exact_relation = _relation(
-                _element_ref(element.element_id),
-                "exact_literal_match",
-                entity.entity_id,
-                literal_claims,
-            )
-            relations.append(exact_relation)
-            relation_ids_by_element.setdefault(element.element_id, []).append(
-                exact_relation.relation_id
+            bind_element(
+                element, "exact_literal_match", entity.entity_id, literal_claims
             )
             for effect, relation_kind in effect_by_entity.get(entity.entity_id, ()):
-                binding = _relation(
-                    _element_ref(element.element_id),
+                bind_element(
+                    element,
                     relation_kind,
                     effect.effect_id,
                     literal_claims,
-                )
-                relations.append(binding)
-                relation_ids_by_element.setdefault(element.element_id, []).append(
-                    binding.relation_id
-                )
-                relation_effects_by_element.setdefault(element.element_id, []).append(
-                    (effect.effect_id, entity.entity_id, relation_kind)
+                    entity_id=entity.entity_id,
                 )
 
     for surface in semantic_ir.surfaces:
@@ -1581,16 +1562,7 @@ def compile_canonical_action_catalog(
             label_claim = element_claim_by_predicate.get((element.element_id, "element.label"))
             if not label_claim:
                 continue
-            binding = _relation(
-                _element_ref(element.element_id),
-                "binds_surface",
-                surface.surface_id,
-                (label_claim,),
-            )
-            relations.append(binding)
-            relation_ids_by_element.setdefault(element.element_id, []).append(
-                binding.relation_id
-            )
+            bind_element(element, "binds_surface", surface.surface_id, (label_claim,))
 
     relation_by_id = {item.relation_id: item for item in relations}
     relations = sorted(relation_by_id.values(), key=lambda item: item.relation_id)
@@ -1751,6 +1723,128 @@ def compile_canonical_action_catalog(
         ]
         if len(matches) == 1:
             unique_effect_control_by_ref[effect_ref] = matches[0]
+
+    def append_element_candidate(
+        element: UIElement,
+        relation_ids: Iterable[str],
+        action_kind: str,
+        expectations: Iterable[StateExpectation],
+        *,
+        exploratory: bool = False,
+        effect_ref: str = "",
+    ) -> bool:
+        element_ref = _element_ref(element.element_id)
+        affordance = affordance_by_pair.get((element_ref, action_kind))
+        if affordance is None:
+            return False
+        candidates.append(
+            _candidate(
+                action_kind=action_kind,
+                subject_refs=(element_ref,),
+                affordance_ids=(affordance.affordance_id,),
+                relation_ids=tuple(sorted(set(relation_ids))),
+                precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
+                expectations=tuple(expectations),
+                exploratory=exploratory,
+                parameters={"element_id": element.element_id},
+                effect_ref=effect_ref,
+            )
+        )
+        return True
+
+    element_by_id = {item.element_id: item for item in sorted_elements}
+
+    def tap_transition(
+        element: UIElement,
+        relation_ids: Iterable[str],
+        bound_entity_ids: Iterable[str],
+    ) -> tuple[tuple[StateExpectation, ...], str, bool] | None:
+        element_ref = _element_ref(element.element_id)
+        relations_for_element = tuple(relation_by_id[value] for value in relation_ids)
+        surface_binding = next(
+            (item for item in relations_for_element if item.relation == "binds_surface"),
+            None,
+        )
+        extra: tuple[StateExpectation, ...] = ()
+        if surface_binding is not None:
+            expectation = StateExpectation(
+                surface_ref, "surface.active_ref", "equals", surface_binding.object_ref
+            )
+        elif element.meaning == "input_next_field_key":
+            field_id = str(element.states.get("target_input_field_id") or "").strip()
+            if not any(
+                item.relation == "binds_next_input_field" and item.object_ref == field_id
+                for item in relations_for_element
+            ):
+                return None
+            expectation = StateExpectation(
+                field_id, "input_field.focused", "equals", True
+            )
+        elif element.meaning in {
+            "ime_exact_candidate", "input_exact_literal_key", "input_exact_enter_key",
+            "switch_keyboard_layout", "switch_keyboard_case",
+            "switch_keyboard_input_mode",
+        }:
+            direct_value = element.meaning in {
+                "ime_exact_candidate", "input_exact_literal_key", "input_exact_enter_key"
+            }
+            value = element.states.get(
+                "expected_input_value" if direct_value else "prior_input_value"
+            )
+            if not isinstance(value, str):
+                return None
+            subject = _element_ref(
+                element_by_id.get(
+                    str(element.states.get("input_element_id") or "")
+                ).element_id
+            ) if str(element.states.get("input_element_id") or "") in element_by_id else element_ref
+            expectation = StateExpectation(
+                subject, "element.state.value", "equals", value
+            )
+            switch_specs = {
+                "switch_keyboard_layout": ("element.state.keyboard_layout", "target_layout"),
+                "switch_keyboard_case": ("element.state.keyboard_case_mode", "target_mode"),
+                "switch_keyboard_input_mode": ("element.state.keyboard_input_mode", "target_mode"),
+            }
+            if element.meaning in switch_specs:
+                predicate, state_key = switch_specs[element.meaning]
+                target = element.states.get(state_key)
+                if isinstance(target, str) and target:
+                    extra = (StateExpectation(subject, predicate, "equals", target),)
+        elif element.role == "input":
+            expectation = StateExpectation(
+                element_ref, "element.state.focused", "equals", True
+            )
+        else:
+            entity_ref = next(iter(sorted(set(bound_entity_ids))), "")
+            expectation = (
+                StateExpectation(
+                    surface_ref, "surface.focused_entity_ref", "equals", entity_ref
+                )
+                if entity_ref
+                else StateExpectation(surface_ref, "surface.navigation_depth", "changed")
+            )
+        effect_ref = next(
+            (ref for ref, element_id in unique_effect_control_by_ref.items()
+             if element_id == element.element_id),
+            "",
+        )
+        if effect_ref:
+            expectation = StateExpectation(
+                effect_ref, "effect.applied", "equals", True
+            )
+        exploratory = bool(
+            not effect_ref
+            and surface_binding is None
+            and element.role != "input"
+            and element.meaning not in {
+                "ime_exact_candidate", "input_exact_literal_key", "input_exact_enter_key",
+                "switch_keyboard_layout", "switch_keyboard_case",
+                "switch_keyboard_input_mode", "input_next_field_key",
+            }
+        )
+        return (expectation, *extra), effect_ref, exploratory
+
     # Element candidates require a unique exact entity/surface binding. A model
     # boolean such as goal_relevant never grants eligibility here.
     for element in sorted_elements:
@@ -1811,203 +1905,42 @@ def compile_canonical_action_catalog(
             continue
 
         tap_affordance = affordance_by_pair.get((element_ref, "tap_semantic"))
-        if element.role == "input" and element.states.get("focused") is True:
-            # The typed focus postcondition is already satisfied.  Keeping a
-            # tap candidate here lets Qwen spend a physical action on a no-op
-            # instead of choosing the bound input transaction.
-            tap_affordance = None
-        if tap_affordance is not None:
-            extra_expectations: tuple[StateExpectation, ...] = ()
-            surface_binding = next(
-                (
-                    relation_by_id[value]
-                    for value in unique_relation_ids
-                    if relation_by_id[value].relation == "binds_surface"
-                ),
-                None,
-            )
-            if surface_binding is not None:
-                expectation = StateExpectation(
-                    surface_ref,
-                    "surface.active_ref",
-                    "equals",
-                    surface_binding.object_ref,
-                )
-            elif element.meaning == "input_next_field_key":
-                target_field_id = str(
-                    element.states.get("target_input_field_id") or ""
-                ).strip()
-                if not any(
-                    relation_by_id[value].relation == "binds_next_input_field"
-                    and relation_by_id[value].object_ref == target_field_id
-                    for value in unique_relation_ids
-                ):
-                    continue
-                expectation = StateExpectation(
-                    target_field_id,
-                    "input_field.focused",
-                    "equals",
-                    True,
-                )
-            elif element.meaning in {
-                "ime_exact_candidate",
-                "input_exact_literal_key",
-                "input_exact_enter_key",
-                "switch_keyboard_layout",
-                "switch_keyboard_case",
-                "switch_keyboard_input_mode",
-            }:
-                expected_input_value = (
-                    element.states.get("expected_input_value")
-                    if element.meaning
-                    in {"ime_exact_candidate", "input_exact_literal_key"}
-                    or element.meaning == "input_exact_enter_key"
-                    else element.states.get("prior_input_value")
-                )
-                if not isinstance(expected_input_value, str):
-                    continue
-                expected_element_id = str(
-                    element.states.get("input_element_id") or element.element_id
-                ).strip()
-                expected_element = next(
-                    (
-                        item
-                        for item in sorted_elements
-                        if item.element_id == expected_element_id
-                    ),
-                    None,
-                )
-                expected_subject_ref = (
-                    _element_ref(expected_element.element_id)
-                    if expected_element is not None
-                    else element_ref
-                )
-                expectation = StateExpectation(
-                    expected_subject_ref,
-                    "element.state.value",
-                    "equals",
-                    expected_input_value,
-                )
-                switch_predicate = {
-                    "switch_keyboard_layout": "element.state.keyboard_layout",
-                    "switch_keyboard_case": "element.state.keyboard_case_mode",
-                    "switch_keyboard_input_mode": "element.state.keyboard_input_mode",
-                }.get(element.meaning)
-                switch_value = (
-                    element.states.get("target_layout")
-                    if element.meaning == "switch_keyboard_layout"
-                    else element.states.get("target_mode")
-                )
-                if switch_predicate and isinstance(switch_value, str) and switch_value:
-                    extra_expectations = (
-                        StateExpectation(
-                            expected_subject_ref,
-                            switch_predicate,
-                            "equals",
-                            switch_value,
-                        ),
-                    )
-            elif element.role == "input":
-                expectation = StateExpectation(
-                    element_ref,
-                    "element.state.focused",
-                    "equals",
-                    True,
-                )
-            else:
-                entity_ref = sorted(set(bound_entity_ids))[0] if bound_entity_ids else ""
-                expectation = (
-                    StateExpectation(
-                        surface_ref,
-                        "surface.focused_entity_ref",
-                        "equals",
-                        entity_ref,
-                    )
-                    if entity_ref
-                    else StateExpectation(
-                        surface_ref,
-                        "surface.navigation_depth",
-                        "changed",
-                    )
-                )
-            effect_ref = next(
-                (
-                    active_effect_ref
-                    for active_effect_ref, control_element_id in
-                    unique_effect_control_by_ref.items()
-                    if control_element_id == element.element_id
-                ),
-                "",
-            )
-            if effect_ref:
-                expectation = StateExpectation(
-                    effect_ref,
-                    "effect.applied",
-                    "equals",
-                    True,
-                )
-            candidates.append(
-                _candidate(
-                    action_kind="tap_semantic",
-                    subject_refs=(element_ref,),
-                    affordance_ids=(tap_affordance.affordance_id,),
-                    relation_ids=tuple(sorted(set(unique_relation_ids))),
-                    precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=(expectation, *extra_expectations),
-                    effect_ref=effect_ref,
-                    parameters={"element_id": element.element_id},
-                    exploratory=(
-                        not effect_ref
-                        and surface_binding is None
-                        and element.role != "input"
-                        and element.meaning
-                        not in {
-                            "ime_exact_candidate",
-                            "input_exact_literal_key",
-                            "input_exact_enter_key",
-                            "switch_keyboard_layout",
-                            "switch_keyboard_case",
-                            "switch_keyboard_input_mode",
-                            "input_next_field_key",
-                        }
-                    ),
-                )
+        if (
+            tap_affordance is not None
+            and not (element.role == "input" and element.states.get("focused") is True)
+        ):
+            tap_spec = tap_transition(element, unique_relation_ids, bound_entity_ids)
+            if tap_spec is None:
+                continue
+            expectations, effect_ref, exploratory = tap_spec
+            append_element_candidate(
+                element,
+                unique_relation_ids,
+                "tap_semantic",
+                expectations,
+                exploratory=exploratory,
+                effect_ref=effect_ref,
             )
 
-        enter_affordance = affordance_by_pair.get((element_ref, "press_enter"))
-        if enter_affordance is not None:
+        if affordance_by_pair.get((element_ref, "press_enter")) is not None:
             expected_value = element.states.get("expected_input_value")
-            input_element_id = str(
-                element.states.get("input_element_id") or ""
-            ).strip()
+            input_element_id = str(element.states.get("input_element_id") or "").strip()
             input_element = next(
-                (
-                    item
-                    for item in sorted_elements
-                    if item.element_id == input_element_id and item.role == "input"
-                ),
+                (item for item in sorted_elements
+                 if item.element_id == input_element_id and item.role == "input"),
                 None,
             )
             if isinstance(expected_value, str) and input_element is not None:
-                candidates.append(
-                    _candidate(
-                        action_kind="press_enter",
-                        subject_refs=(element_ref,),
-                        affordance_ids=(enter_affordance.affordance_id,),
-                        relation_ids=tuple(sorted(set(unique_relation_ids))),
-                        precondition_claim_ids=tuple(
-                            element_claim_ids[element.element_id]
-                        ),
-                        expectations=(
-                            StateExpectation(
-                                _element_ref(input_element.element_id),
-                                "element.state.value",
-                                "equals",
-                                expected_value,
-                            ),
-                        ),
-                        parameters={"element_id": element.element_id},
-                    )
+                append_element_candidate(
+                    element,
+                    unique_relation_ids,
+                    "press_enter",
+                    (StateExpectation(
+                        _element_ref(input_element.element_id),
+                        "element.state.value",
+                        "equals",
+                        expected_value,
+                    ),),
                 )
 
         input_affordance = affordance_by_pair.get((element_ref, "input_verified_text"))
@@ -2066,97 +1999,33 @@ def compile_canonical_action_catalog(
                     )
                 )
 
-        clear_affordance = affordance_by_pair.get((element_ref, "clear_verified_text"))
-        if clear_affordance is not None:
+        if affordance_by_pair.get((element_ref, "clear_verified_text")) is not None:
             clear_expectations = [
-                StateExpectation(
-                    element_ref,
-                    "element.state.value",
-                    "equals",
-                    "",
-                )
+                StateExpectation(element_ref, "element.state.value", "equals", "")
             ]
             if element.states.get("ime_preedit_text"):
                 clear_expectations.append(
-                    StateExpectation(
-                        element_ref,
-                        "element.state.ime_preedit_text",
-                        "absent",
-                    )
+                    StateExpectation(element_ref, "element.state.ime_preedit_text", "absent")
                 )
-            candidates.append(
-                _candidate(
-                    action_kind="clear_verified_text",
-                    subject_refs=(element_ref,),
-                    affordance_ids=(clear_affordance.affordance_id,),
-                    relation_ids=tuple(sorted(set(unique_relation_ids))),
-                    precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=tuple(clear_expectations),
-                    parameters={"element_id": element.element_id},
-                )
+            append_element_candidate(
+                element, unique_relation_ids, "clear_verified_text", clear_expectations
             )
 
-        dismiss_affordance = affordance_by_pair.get((element_ref, "dismiss_overlay"))
-        if dismiss_affordance is not None:
-            candidates.append(
-                _candidate(
-                    action_kind="dismiss_overlay",
-                    subject_refs=(element_ref,),
-                    affordance_ids=(dismiss_affordance.affordance_id,),
-                    relation_ids=tuple(sorted(set(unique_relation_ids))),
-                    precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=(
-                        StateExpectation(
-                            surface_ref,
-                            "surface.overlay_present",
-                            "equals",
-                            False,
-                        ),
-                    ),
-                    parameters={"element_id": element.element_id},
-                )
-            )
-
-        long_press_affordance = affordance_by_pair.get((element_ref, "long_press"))
-        if long_press_affordance is not None:
-            candidates.append(
-                _candidate(
-                    action_kind="long_press",
-                    subject_refs=(element_ref,),
-                    affordance_ids=(long_press_affordance.affordance_id,),
-                    relation_ids=tuple(sorted(set(unique_relation_ids))),
-                    precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=(
-                        StateExpectation(
-                            element_ref,
-                            "element.state.interaction_result",
-                            "changed",
-                        ),
-                    ),
-                    exploratory=True,
-                    parameters={"element_id": element.element_id},
-                )
-            )
-
-        double_tap_affordance = affordance_by_pair.get((element_ref, "double_tap"))
-        if double_tap_affordance is not None:
-            candidates.append(
-                _candidate(
-                    action_kind="double_tap",
-                    subject_refs=(element_ref,),
-                    affordance_ids=(double_tap_affordance.affordance_id,),
-                    relation_ids=tuple(sorted(set(unique_relation_ids))),
-                    precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=(
-                        StateExpectation(
-                            element_ref,
-                            "element.state.interaction_result",
-                            "changed",
-                        ),
-                    ),
-                    exploratory=True,
-                    parameters={"element_id": element.element_id},
-                )
+        append_element_candidate(
+            element,
+            unique_relation_ids,
+            "dismiss_overlay",
+            (StateExpectation(surface_ref, "surface.overlay_present", "equals", False),),
+        )
+        for action_kind in ("long_press", "double_tap"):
+            append_element_candidate(
+                element,
+                unique_relation_ids,
+                action_kind,
+                (StateExpectation(
+                    element_ref, "element.state.interaction_result", "changed"
+                ),),
+                exploratory=True,
             )
 
     source_roles = {"drag_source", "source", "item"}
@@ -2377,129 +2246,171 @@ def compile_canonical_action_catalog(
     }
     unique_candidates = {item.candidate_id: item for item in candidates}
     element_by_id = {item.element_id: item for item in sorted_elements}
+    surfaces_by_id = {item.surface_id: item for item in semantic_ir.surfaces}
+    target_surface = surfaces_by_id.get(active_subgoal.surface_ref)
+    current_surface_kind = _surface_kind(scene)
+    required_system_action = {
+        "launcher": "home",
+        "recent_tasks": "open_recent_apps",
+    }.get(target_surface.kind if target_surface is not None else "")
+    input_auxiliary_meanings = {
+        "ime_exact_candidate",
+        "input_exact_literal_key",
+        "input_exact_enter_key",
+        "switch_keyboard_layout",
+        "switch_keyboard_case",
+        "switch_keyboard_input_mode",
+        "input_next_field_key",
+    }
 
-    def clears_nonprefix_active_input(candidate: CanonicalActionCandidate) -> bool:
-        if candidate.action_kind != "clear_verified_text":
-            return False
-        element = element_by_id.get(
-            str(candidate.parameters.get("element_id") or "")
-        )
-        if element is None or len(active_input_payload_entities) != 1:
-            return False
+    def candidate_element(candidate: CanonicalActionCandidate) -> UIElement | None:
+        return element_by_id.get(str(candidate.parameters.get("element_id") or ""))
+
+    def clear_input_disposition(
+        candidate: CanonicalActionCandidate,
+    ) -> tuple[bool, bool]:
+        """Return (must_clear_nonprefix, preserves_useful_preedit)."""
+
+        element = candidate_element(candidate)
+        if (
+            candidate.action_kind != "clear_verified_text"
+            or element is None
+            or len(active_input_payload_entities) != 1
+        ):
+            return False, False
         current_value = element.states.get("value")
         current_preedit = element.states.get("ime_preedit_text")
         exact_candidate = element.states.get("ime_exact_candidate_text")
         authorized_value = active_input_payload_entities[0].value
         if not isinstance(current_value, str) or not isinstance(authorized_value, str):
-            return False
-        if isinstance(current_preedit, str) and current_preedit:
-            useful_exact_candidate = bool(
-                isinstance(exact_candidate, str)
-                and exact_candidate
-                and authorized_value.startswith(current_value + exact_candidate)
-            )
-            # A raw IME preedit is not committed application text.  Its glyphs
-            # merely forming a prefix of the authorized payload cannot make it
-            # reusable, because the current IME mode may assign different
-            # semantics to that composition.  Preserve it only when the same
-            # scene binds an exact, verifiable candidate that can commit the
-            # authorized next value; otherwise clearing is the sole recovery.
-            return not useful_exact_candidate
-        return bool(current_value and not authorized_value.startswith(current_value))
-
-    def clears_useful_active_preedit(candidate: CanonicalActionCandidate) -> bool:
-        if candidate.action_kind != "clear_verified_text":
-            return False
-        element = element_by_id.get(
-            str(candidate.parameters.get("element_id") or "")
-        )
-        if element is None or len(active_input_payload_entities) != 1:
-            return False
-        current_value = element.states.get("value")
-        current_preedit = element.states.get("ime_preedit_text")
-        exact_candidate = element.states.get("ime_exact_candidate_text")
-        authorized_value = active_input_payload_entities[0].value
-        return bool(
-            isinstance(current_value, str)
-            and isinstance(current_preedit, str)
+            return False, False
+        useful_preedit = bool(
+            isinstance(current_preedit, str)
             and current_preedit
-            and isinstance(authorized_value, str)
             and isinstance(exact_candidate, str)
             and exact_candidate
             and authorized_value.startswith(current_value + exact_candidate)
         )
+        must_clear = (
+            not useful_preedit
+            if isinstance(current_preedit, str) and current_preedit
+            else bool(current_value and not authorized_value.startswith(current_value))
+        )
+        return must_clear, useful_preedit
 
-    def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
-        if candidate.effect_ref:
-            return candidate.effect_ref in active_effect_refs
+    def has_relation(
+        candidate: CanonicalActionCandidate,
+        relation_kind: str,
+        object_refs: Iterable[str],
+    ) -> bool:
+        allowed_refs = frozenset(object_refs)
+        return any(
+            relation_by_id[relation_id].relation == relation_kind
+            and relation_by_id[relation_id].object_ref in allowed_refs
+            for relation_id in candidate.relation_ids
+        )
+
+    def matches_required_action(candidate: CanonicalActionCandidate) -> bool:
         action_kind = candidate.action_kind
-        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
-        target_surface = surfaces.get(active_subgoal.surface_ref)
-        current_surface_kind = _surface_kind(scene)
-        required_system_action = {
-            "launcher": "home",
-            "recent_tasks": "open_recent_apps",
-        }.get(target_surface.kind if target_surface is not None else "")
+        must_clear, useful_preedit = clear_input_disposition(candidate)
         if (
-            required_system_action is not None
-            and current_surface_kind != target_surface.kind
-        ):
-            # The current screenshot has not reached the subgoal's typed
-            # system surface. Only the coordinate-free transition into that
-            # surface belongs to this step; visible targets and viewports on
-            # the old page cannot authorize a later-page action.
-            return bool(
-                active_subgoal.external_impact == "navigation_only"
-                and action_kind == required_system_action
-            )
-        if (
-            action_kind == "clear_verified_text"
-            and clears_useful_active_preedit(candidate)
+            useful_preedit
             and not (
                 "clear_verified_text" in active_required_actions
                 and "input_verified_text" not in active_required_actions
             )
         ):
             return False
-        if active_required_actions:
-            if "input_verified_text" in active_required_actions:
-                if action_kind == "input_verified_text":
-                    pass
-                elif (
-                    action_kind == "press_enter"
-                    and "press_enter" in active_required_actions
-                ):
-                    pass
-                elif action_kind == "tap_semantic":
-                    required_element = element_by_id.get(
-                        str(candidate.parameters.get("element_id") or "")
-                    )
-                    if required_element is None or not (
-                        required_element.role == "input"
-                        or required_element.meaning
-                        in {
-                            "ime_exact_candidate",
-                            "input_exact_literal_key",
-                            "input_exact_enter_key",
-                            "switch_keyboard_layout",
-                            "switch_keyboard_case",
-                            "switch_keyboard_input_mode",
-                            "input_next_field_key",
-                        }
-                    ):
-                        return False
-                elif (
-                    action_kind == "clear_verified_text"
-                    and (
-                        "clear_verified_text" in active_required_actions
-                        or clears_nonprefix_active_input(candidate)
-                    )
-                ):
-                    pass
-                else:
-                    return False
-            elif action_kind not in active_required_actions:
+        if not active_required_actions:
+            return True
+        if "input_verified_text" not in active_required_actions:
+            return action_kind in active_required_actions
+        if action_kind == "input_verified_text":
+            return True
+        if action_kind == "press_enter":
+            return "press_enter" in active_required_actions
+        if action_kind == "clear_verified_text":
+            return "clear_verified_text" in active_required_actions or must_clear
+        if action_kind != "tap_semantic":
+            return False
+        element = candidate_element(candidate)
+        return bool(
+            element is not None
+            and (element.role == "input" or element.meaning in input_auxiliary_meanings)
+        )
+
+    def tap_belongs(candidate: CanonicalActionCandidate) -> bool:
+        element = candidate_element(candidate)
+        if element is None:
+            return False
+        if (
+            target_surface is not None
+            and target_surface.kind == "app"
+            and current_surface_kind != "launcher"
+            and not scene_matches_target_app_surface(scene, target_surface)
+        ):
+            return False
+        if element.meaning == "input_next_field_key":
+            return has_relation(
+                candidate,
+                "binds_next_input_field",
+                (item.field_id for item in active_input_fields),
+            )
+        if element.meaning in input_auxiliary_meanings:
+            return bool(
+                element.meaning != "input_exact_enter_key"
+                and active_input_payload_refs
+            )
+        if element.role == "input":
+            if element.states.get("focused") is True:
                 return False
+            if len(active_input_fields) != 1:
+                return active_targets_input
+            active_field = active_input_fields[0]
+            return bool(
+                (
+                    element.states.get("input_field_id") == active_field.field_id
+                    and (
+                        not active_field.field_label
+                        or element.states.get("input_field_label")
+                        == active_field.field_label
+                    )
+                )
+                or (
+                    len(semantic_ir.input_fields) == 1
+                    and not active_field.field_label
+                )
+            )
+        if target_surface is not None and target_surface.kind == "app":
+            if current_surface_kind == "launcher":
+                return has_relation(
+                    candidate, "binds_surface", (active_subgoal.surface_ref,)
+                )
+            if not scene_matches_target_app_surface(scene, target_surface):
+                return False
+        return bool(
+            has_relation(candidate, "binds_surface", (active_subgoal.surface_ref,))
+            or has_relation(candidate, "exact_literal_match", active_entity_refs)
+            or (
+                active_subgoal.external_impact == "navigation_only"
+                and element.meaning not in _ALL_EFFECT_CONTROL_MEANINGS
+            )
+        )
+
+    def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
+        if candidate.effect_ref:
+            return candidate.effect_ref in active_effect_refs
+        action_kind = candidate.action_kind
+        if (
+            required_system_action is not None
+            and current_surface_kind != target_surface.kind
+        ):
+            return bool(
+                active_subgoal.external_impact == "navigation_only"
+                and action_kind == required_system_action
+            )
+        if not matches_required_action(candidate):
+            return False
         if action_kind in {
             "input_verified_text",
             "press_enter",
@@ -2511,136 +2422,46 @@ def compile_canonical_action_catalog(
                     and active_targets_input
                 )
             if action_kind == "press_enter":
-                enter_element = element_by_id.get(
-                    str(candidate.parameters.get("element_id") or "")
-                )
-                enter_field_id = str(
-                    enter_element.states.get("input_field_id")
-                    if enter_element is not None
-                    else ""
+                element = candidate_element(candidate)
+                field_id = str(
+                    element.states.get("input_field_id") if element is not None else ""
                 ).strip()
                 return bool(
                     active_input_payload_refs
                     or (
                         "press_enter" in active_required_actions
                         and len(enter_input_field_ids) == 1
-                        and enter_field_id in enter_input_field_ids
+                        and field_id in enter_input_field_ids
                     )
                 )
             return bool(active_input_payload_refs)
         if action_kind == "tap_semantic":
-            element_id = str(candidate.parameters.get("element_id") or "")
-            element = element_by_id.get(element_id)
-            if element is None:
-                return False
-            current_kind = current_surface_kind
-            if (
-                target_surface is not None
-                and target_surface.kind == "app"
-                and current_kind != "launcher"
-                and not scene_matches_target_app_surface(scene, target_surface)
-            ):
-                return False
-            if element.meaning == "input_next_field_key":
-                return any(
-                    relation_by_id[relation_id].relation
-                    == "binds_next_input_field"
-                    and relation_by_id[relation_id].object_ref
-                    in {item.field_id for item in active_input_fields}
-                    for relation_id in candidate.relation_ids
-                )
-            if element.meaning in {
-                "ime_exact_candidate",
-                "input_exact_literal_key",
-                "input_exact_enter_key",
-                "switch_keyboard_layout",
-                "switch_keyboard_case",
-                "switch_keyboard_input_mode",
-            }:
-                if element.meaning == "input_exact_enter_key":
-                    return False
-                return bool(active_input_payload_refs)
-            if element.role == "input":
-                if element.states.get("focused") is True:
-                    # A focused field already satisfies the navigation
-                    # affordance.  Advertising another tap beside the typed
-                    # input transaction creates two candidates for the same
-                    # target and may move the caret away from the verified end
-                    # position.  Only the deterministic input action remains.
-                    return False
-                if len(active_input_fields) == 1:
-                    active_field = active_input_fields[0]
-                    return bool(
-                        (
-                            element.states.get("input_field_id")
-                            == active_field.field_id
-                            and (
-                                not active_field.field_label
-                                or element.states.get("input_field_label")
-                                == active_field.field_label
-                            )
-                        )
-                        or (
-                            len(semantic_ir.input_fields) == 1
-                            and not active_field.field_label
-                        )
-                    )
-                return active_targets_input
-            if target_surface is not None and target_surface.kind == "app":
-                if current_kind == "launcher":
-                    return any(
-                        relation_by_id[relation_id].relation == "binds_surface"
-                        and relation_by_id[relation_id].object_ref
-                        == active_subgoal.surface_ref
-                        for relation_id in candidate.relation_ids
-                    )
-                if not scene_matches_target_app_surface(scene, target_surface):
-                    return False
-            for relation_id in candidate.relation_ids:
-                relation = relation_by_id[relation_id]
-                if (
-                    relation.relation == "binds_surface"
-                    and relation.object_ref == active_subgoal.surface_ref
-                ):
-                    return True
-                if (
-                    relation.relation == "exact_literal_match"
-                    and relation.object_ref in active_entity_refs
-                ):
-                    return True
-            return bool(
-                active_subgoal.external_impact == "navigation_only"
-                and element.meaning not in _ALL_EFFECT_CONTROL_MEANINGS
-            )
+            return tap_belongs(candidate)
         if action_kind == "dismiss_overlay":
             return active_subgoal.external_impact == "navigation_only"
         if action_kind in {"double_tap", "long_press", "drag"}:
             return action_kind in active_required_actions
         if action_kind == "home":
-            target = target_surface
-            current_kind = _surface_kind(scene)
-            if target is None:
+            if target_surface is None:
                 return False
-            if target.kind == "launcher":
-                return current_kind != "launcher"
-            if target.kind != "app" or current_kind == "launcher":
-                return False
-            return not scene_matches_target_app_surface(scene, target)
+            if target_surface.kind == "launcher":
+                return current_surface_kind != "launcher"
+            return bool(
+                target_surface.kind == "app"
+                and current_surface_kind != "launcher"
+                and not scene_matches_target_app_surface(scene, target_surface)
+            )
         if action_kind == "wait_for_change":
             if active_input_fields:
                 return action_kind in active_required_actions
-            target = target_surface
             if (
-                target is not None
-                and target.kind == "app"
-                and _surface_kind(scene) != "launcher"
-                and not scene_matches_target_app_surface(scene, target)
+                target_surface is not None
+                and target_surface.kind == "app"
+                and current_surface_kind != "launcher"
+                and not scene_matches_target_app_surface(scene, target_surface)
             ):
                 return False
-            return active_subgoal.external_impact in {
-                "read_only",
-                "navigation_only",
-            }
+            return active_subgoal.external_impact in {"read_only", "navigation_only"}
         if action_kind in {
             "back",
             "open_recent_apps",
@@ -2649,16 +2470,12 @@ def compile_canonical_action_catalog(
         }:
             if active_input_fields:
                 return action_kind in active_required_actions
-            target = target_surface
             if (
-                target is not None
-                and target.kind == "app"
-                and _surface_kind(scene) != "launcher"
-                and not scene_matches_target_app_surface(scene, target)
+                target_surface is not None
+                and target_surface.kind == "app"
+                and current_surface_kind != "launcher"
+                and not scene_matches_target_app_surface(scene, target_surface)
             ):
-                # A stable non-target App must use the canonical Home reset.
-                # Back, scroll or passive waiting cannot establish the unique
-                # launcher checkpoint required before choosing the target App.
                 return False
             return active_subgoal.external_impact == "navigation_only"
         return False

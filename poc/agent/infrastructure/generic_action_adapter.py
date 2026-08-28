@@ -143,6 +143,18 @@ _VISUAL_FOCUS_KEYS = frozenset(
 )
 
 
+def _first_valid_lineage(
+    builders: tuple[Callable[..., TypedInputLineage], ...],
+    **values: Any,
+) -> TypedInputLineage | None:
+    for builder in builders:
+        try:
+            return builder(**values)
+        except (InputValueLineageError, TypeError, ValueError):
+            continue
+    return None
+
+
 def _sanitized_visual_focus(value: Any) -> dict[str, Any] | None:
     """Accept only the bridge-owned shallow visual-focus shape."""
 
@@ -276,14 +288,10 @@ def stable_qwerty_ocr_anchors(
     *,
     ocr_recognizer: Any = recognize_ocr,
 ) -> dict[str, list[int]] | None:
-    """Snap QWERTY row heights to stable local OCR glyph centers.
-
-    Qwen supplies the semantic keyboard contract and coarse row endpoints.
-    Local OCR contributes only the three vertical row centers. It cannot add
-    characters, choose text, or authorize an input action.
-    """
+    """Refine a QWERTY contract with stable local OCR row geometry."""
 
     frame_list = list(frames)[-3:]
+    required = {"q", "p", "a", "l", "z", "m", "backspace"}
     if len(frame_list) != 3 or not isinstance(anchors, dict):
         return None
     try:
@@ -292,322 +300,242 @@ def stable_qwerty_ocr_anchors(
             for key, value in anchors.items()
             if isinstance(value, (list, tuple)) and len(value) == 2
         }
-        if set(original) != {"q", "p", "a", "l", "z", "m", "backspace"}:
+        if set(original) != required or any(
+            not 0 <= point[0] <= 1000 for point in original.values()
+        ):
             return None
-        if any(not 0 <= point[0] <= 1000 for point in original.values()):
-            return None
-        model_top_y = (original["q"][1] + original["p"][1]) / 2.0
-        model_middle_y = (original["a"][1] + original["l"][1]) / 2.0
-        model_bottom_y = (
-            original["z"][1]
-            + original["m"][1]
-            + original["backspace"][1]
-        ) / 3.0
+        model_rows = (
+            statistics.mean(original[key][1] for key in ("q", "p")),
+            statistics.mean(original[key][1] for key in ("a", "l")),
+            statistics.mean(original[key][1] for key in ("z", "m", "backspace")),
+        )
         model_vertical_is_trusted = bool(
             all(0 <= point[1] <= 1000 for point in original.values())
-            and model_top_y < model_middle_y < model_bottom_y
-            and model_middle_y - model_top_y >= 35
-            and model_bottom_y - model_middle_y >= 35
+            and model_rows[0] < model_rows[1] < model_rows[2]
+            and min(model_rows[1] - model_rows[0], model_rows[2] - model_rows[1]) >= 35
         )
-        # Validate Qwen's horizontal QWERTY evidence independently from its row
-        # heights.  The latter are exactly what local OCR is responsible for
-        # correcting, so requiring them to pass first would make the correction
-        # path unreachable for vertically compressed model geometry.
         horizontal_probe = {key: list(value) for key, value in original.items()}
-        for key in ("q", "p"):
-            horizontal_probe[key][1] = 650
-        for key in ("a", "l"):
-            horizontal_probe[key][1] = 750
-        for key in ("z", "m", "backspace"):
-            horizontal_probe[key][1] = 850
+        for y, keys in ((650, ("q", "p")), (750, ("a", "l")),
+                        (850, ("z", "m", "backspace"))):
+            for key in keys:
+                horizontal_probe[key][1] = y
         qwerty_keyboard_config_from_anchors(horizontal_probe)
-        per_frame_rows: list[
-            tuple[float, float, float | None, float | None]
-        ] = []
-        top_letters = set("qwertyuiop")
-        middle_letters = set("asdfghjkl")
-        bottom_letters = set("zxcvbnm")
 
-        def row_clusters(
+        alphabets = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+
+        def clusters(
             hits: list[tuple[str, float | None, float]],
-            *,
-            frame_height: int,
+            height: int,
         ) -> list[tuple[float, int, list[tuple[str, float | None, float]]]]:
-            tolerance = max(8.0, frame_height * 0.025)
-            clusters: list[list[tuple[str, float | None, float]]] = []
+            groups: list[list[tuple[str, float | None, float]]] = []
+            tolerance = max(8.0, height * 0.025)
             for hit in sorted(hits, key=lambda item: item[2]):
-                if not clusters or abs(
-                    hit[2] - statistics.median(item[2] for item in clusters[-1])
-                ) > tolerance:
-                    clusters.append([hit])
+                if (
+                    not groups
+                    or abs(hit[2] - statistics.median(item[2] for item in groups[-1]))
+                    > tolerance
+                ):
+                    groups.append([hit])
                 else:
-                    clusters[-1].append(hit)
-            resolved: list[
-                tuple[float, int, list[tuple[str, float | None, float]]]
-            ] = []
-            for cluster in clusters:
-                labels = {item[0] for item in cluster}
-                if len(labels) >= 2:
-                    resolved.append(
-                        (
-                            float(statistics.median(item[2] for item in cluster)),
-                            len(labels),
-                            cluster,
-                        )
-                    )
-            return resolved
-
-        def fit_row_horizontal_geometry(
-            cluster: list[tuple[str, float | None, float]],
-            *,
-            alphabet: str,
-            frame_width: int,
-        ) -> tuple[float, float] | None:
-            if frame_width <= 0:
-                return None
-            centers: dict[str, list[float]] = {}
-            for label, center_x, _center_y in cluster:
-                if center_x is None or not math.isfinite(center_x):
-                    continue
-                centers.setdefault(label, []).append(
-                    1000.0 * center_x / frame_width
+                    groups[-1].append(hit)
+            return [
+                (
+                    float(statistics.median(item[2] for item in group)),
+                    len({item[0] for item in group}),
+                    group,
                 )
+                for group in groups
+                if len({item[0] for item in group}) >= 2
+            ]
+
+        def horizontal_fit(
+            group: list[tuple[str, float | None, float]],
+            alphabet: str,
+            width: int,
+        ) -> tuple[float, float] | None:
+            centers: dict[str, list[float]] = {}
+            for label, center_x, _ in group:
+                if center_x is not None and math.isfinite(center_x):
+                    centers.setdefault(label, []).append(1000.0 * center_x / width)
             points = [
                 (alphabet.index(label), statistics.median(values))
                 for label, values in centers.items()
                 if label in alphabet
             ]
-            if len(points) < 3:
+            if width <= 0 or len(points) < 3:
                 return None
-            mean_index = statistics.mean(point[0] for point in points)
-            mean_x = statistics.mean(point[1] for point in points)
-            denominator = sum(
-                (point[0] - mean_index) ** 2 for point in points
-            )
+            mean_index = statistics.mean(index for index, _ in points)
+            mean_x = statistics.mean(x for _, x in points)
+            denominator = sum((index - mean_index) ** 2 for index, _ in points)
             if denominator <= 0:
                 return None
             pitch = sum(
-                (index - mean_index) * (center_x - mean_x)
-                for index, center_x in points
+                (index - mean_index) * (x - mean_x) for index, x in points
             ) / denominator
             first_x = mean_x - pitch * mean_index
-            maximum_residual = max(
-                abs(center_x - (first_x + pitch * index))
-                for index, center_x in points
+            residual = max(
+                abs(x - (first_x + pitch * index)) for index, x in points
             )
-            if not (
-                45 <= pitch <= 130
-                and 0 <= first_x <= 1000
-                and first_x + pitch * (len(alphabet) - 1) <= 1000
-                and maximum_residual <= 25
-            ):
-                return None
-            return first_x, pitch
+            return (
+                (first_x, pitch)
+                if (
+                    45 <= pitch <= 130
+                    and 0 <= first_x
+                    and first_x + pitch * (len(alphabet) - 1) <= 1000
+                    and residual <= 25
+                )
+                else None
+            )
 
+        def combined_fit(
+            top_group: list[tuple[str, float | None, float]],
+            bottom_group: list[tuple[str, float | None, float]],
+            width: int,
+        ) -> tuple[int, float | None, float | None] | None:
+            top_fit = horizontal_fit(top_group, alphabets[0], width)
+            bottom_fit = horizontal_fit(bottom_group, alphabets[2], width)
+            count = int(top_fit is not None) + int(bottom_fit is not None)
+            if any(item[1] is not None for item in (*top_group, *bottom_group)) and not count:
+                return None
+            if top_fit and bottom_fit:
+                top_first, top_pitch = top_fit
+                bottom_first, bottom_pitch = bottom_fit
+                if (
+                    abs(top_pitch - bottom_pitch) > 18
+                    or abs(bottom_first - (top_first + 1.5 * top_pitch)) > 60
+                ):
+                    return None
+                return count, statistics.mean(
+                    (top_first, bottom_first - 1.5 * bottom_pitch)
+                ), statistics.mean((top_pitch, bottom_pitch))
+            if top_fit:
+                return count, *top_fit
+            if bottom_fit:
+                first, pitch = bottom_fit
+                return count, first - 1.5 * pitch, pitch
+            return count, None, None
+
+        per_frame_rows: list[tuple[float, float, float | None, float | None]] = []
         for frame in frame_list:
-            payload = ocr_recognizer(
-                frame.convert("RGB"),
-                "zh-Hans-CN",
-                scale=3.0,
-            )
-            top_hits: list[tuple[str, float | None, float]] = []
-            middle_hits: list[tuple[str, float | None, float]] = []
-            bottom_hits: list[tuple[str, float | None, float]] = []
+            hits = {alphabet: [] for alphabet in alphabets}
+            payload = ocr_recognizer(frame.convert("RGB"), "zh-Hans-CN", scale=3.0)
             for line in payload.get("lines") or []:
                 for word in line.get("words") or []:
-                    text = str(word.get("text") or "").strip().casefold()
-                    if len(text) != 1 or not text.isascii() or not text.isalpha():
+                    label = str(word.get("text") or "").strip().casefold()
+                    if len(label) != 1 or not label.isascii() or not label.isalpha():
                         continue
-                    center_y = float(word.get("top", 0)) + float(
-                        word.get("height", 0)
-                    ) / 2.0
-                    left = word.get("left")
-                    width = word.get("width")
+                    left, width = word.get("left"), word.get("width")
                     center_x = (
                         float(left) + float(width) / 2.0
-                        if isinstance(left, (int, float))
-                        and not isinstance(left, bool)
-                        and isinstance(width, (int, float))
-                        and not isinstance(width, bool)
+                        if all(
+                            isinstance(value, (int, float)) and not isinstance(value, bool)
+                            for value in (left, width)
+                        )
                         else None
                     )
-                    if text in top_letters:
-                        top_hits.append((text, center_x, center_y))
-                    if text in middle_letters:
-                        middle_hits.append((text, center_x, center_y))
-                    if text in bottom_letters:
-                        bottom_hits.append((text, center_x, center_y))
-            top_clusters = row_clusters(top_hits, frame_height=frame.height)
-            middle_clusters = row_clusters(middle_hits, frame_height=frame.height)
-            bottom_clusters = row_clusters(bottom_hits, frame_height=frame.height)
+                    hit = (
+                        label,
+                        center_x,
+                        float(word.get("top", 0)) + float(word.get("height", 0)) / 2.0,
+                    )
+                    for alphabet in alphabets:
+                        if label in alphabet:
+                            hits[alphabet].append(hit)
+                            break
+            row_clusters = [
+                clusters(hits[alphabet], frame.height) for alphabet in alphabets
+            ]
             candidates: list[
                 tuple[int, int, int, float, float, float, float, float]
             ] = []
-            expected_top = frame.height * model_top_y / 1000.0
-            expected_bottom = frame.height * model_bottom_y / 1000.0
-            for top_y, top_count, top_cluster in top_clusters:
-                for bottom_y, bottom_count, bottom_cluster in bottom_clusters:
-                    gap = bottom_y - top_y
-                    if not frame.height * 0.08 <= gap <= frame.height * 0.22:
+            expected_top = frame.height * model_rows[0] / 1000.0
+            expected_bottom = frame.height * model_rows[2] / 1000.0
+            for top_y, top_count, top_group in row_clusters[0]:
+                for bottom_y, bottom_count, bottom_group in row_clusters[2]:
+                    if not frame.height * 0.08 <= bottom_y - top_y <= frame.height * 0.22:
                         continue
                     midpoint = (top_y + bottom_y) / 2.0
                     middle_count = max(
                         (
-                            count
-                            for center, count, _cluster in middle_clusters
+                            count for center, count, _ in row_clusters[1]
                             if abs(center - midpoint) <= frame.height * 0.04
                         ),
                         default=0,
                     )
-                    top_fit = fit_row_horizontal_geometry(
-                        top_cluster,
-                        alphabet="qwertyuiop",
-                        frame_width=frame.width,
-                    )
-                    bottom_fit = fit_row_horizontal_geometry(
-                        bottom_cluster,
-                        alphabet="zxcvbnm",
-                        frame_width=frame.width,
-                    )
-                    local_first_x: float | None = None
-                    local_pitch: float | None = None
-                    horizontal_fit_count = int(top_fit is not None) + int(
-                        bottom_fit is not None
-                    )
-                    has_local_horizontal_centers = any(
-                        item[1] is not None
-                        for item in (*top_cluster, *bottom_cluster)
-                    )
-                    if has_local_horizontal_centers and horizontal_fit_count == 0:
+                    fitted = combined_fit(top_group, bottom_group, frame.width)
+                    if fitted is None:
                         continue
-                    if top_fit is not None and bottom_fit is not None:
-                        top_first, top_pitch = top_fit
-                        bottom_first, bottom_pitch = bottom_fit
-                        if (
-                            abs(top_pitch - bottom_pitch) > 18
-                            or abs(
-                                bottom_first
-                                - (top_first + 1.5 * top_pitch)
-                            )
-                            > 60
-                        ):
-                            continue
-                        local_first_x = statistics.mean(
-                            (top_first, bottom_first - 1.5 * bottom_pitch)
-                        )
-                        local_pitch = statistics.mean(
-                            (top_pitch, bottom_pitch)
-                        )
-                    elif top_fit is not None:
-                        local_first_x, local_pitch = top_fit
-                    elif bottom_fit is not None:
-                        bottom_first, local_pitch = bottom_fit
-                        local_first_x = bottom_first - 1.5 * local_pitch
-                    model_distance = (
+                    fit_count, first_x, pitch = fitted
+                    distance = (
                         abs(top_y - expected_top) + abs(bottom_y - expected_bottom)
                         if model_vertical_is_trusted
                         else 0.0
                     )
-                    candidates.append(
-                        (
-                            horizontal_fit_count,
-                            min(top_count, bottom_count),
-                            top_count + middle_count + bottom_count,
-                            -model_distance,
-                            top_y,
-                            bottom_y,
-                            local_first_x if local_first_x is not None else math.nan,
-                            local_pitch if local_pitch is not None else math.nan,
-                        )
-                    )
-            if not candidates:
-                # OCR can drop an otherwise stable keyboard row in one of the
-                # three near-identical frames.  Keep collecting independent
-                # frames; authority is minted only when at least two frames
-                # below agree on both row centers.
-                continue
-            candidates.sort(reverse=True)
-            (
-                _horizontal_fit_count,
-                _balanced_count,
-                _total_count,
-                _distance,
-                top_y,
-                bottom_y,
-                local_first_x,
-                local_pitch,
-            ) = candidates[0]
-            per_frame_rows.append(
-                (
+                    candidates.append((
+                        fit_count,
+                        min(top_count, bottom_count),
+                        top_count + middle_count + bottom_count,
+                        -distance,
+                        top_y,
+                        bottom_y,
+                        first_x if first_x is not None else math.nan,
+                        pitch if pitch is not None else math.nan,
+                    ))
+            if candidates:
+                _, _, _, _, top_y, bottom_y, first_x, pitch = max(candidates)
+                per_frame_rows.append((
                     top_y,
                     bottom_y,
-                    local_first_x if math.isfinite(local_first_x) else None,
-                    local_pitch if math.isfinite(local_pitch) else None,
-                )
-            )
+                    first_x if math.isfinite(first_x) else None,
+                    pitch if math.isfinite(pitch) else None,
+                ))
 
-        if len(per_frame_rows) < 2 or (
-            max(item[0] for item in per_frame_rows)
-            - min(item[0] for item in per_frame_rows)
-            > 10
-            or max(item[1] for item in per_frame_rows)
-            - min(item[1] for item in per_frame_rows)
-            > 10
+        if len(per_frame_rows) < 2 or any(
+            max(item[index] for item in per_frame_rows)
+            - min(item[index] for item in per_frame_rows) > 10
+            for index in (0, 1)
         ):
             return None
         height = frame_list[-1].height
-        top_y = round(1000 * statistics.median(item[0] for item in per_frame_rows) / height)
-        bottom_y = round(
-            1000 * statistics.median(item[1] for item in per_frame_rows) / height
+        top_y, bottom_y = (
+            round(1000 * statistics.median(item[index] for item in per_frame_rows) / height)
+            for index in (0, 1)
         )
         middle_y = round((top_y + bottom_y) / 2.0)
-        discovered_span = bottom_y - top_y
-        if discovered_span <= 0 or (
+        span = bottom_y - top_y
+        if span <= 0 or (
             model_vertical_is_trusted
             and any(
-                abs(discovered - original[key][1]) > discovered_span * 1.5
-                for key, discovered in (
-                    ("q", top_y),
-                    ("a", middle_y),
-                    ("z", bottom_y),
-                )
+                abs(actual - original[key][1]) > span * 1.5
+                for key, actual in (("q", top_y), ("a", middle_y), ("z", bottom_y))
             )
         ):
             return None
+
         snapped = {key: list(value) for key, value in original.items()}
-        local_horizontal = [
-            (item[2], item[3])
-            for item in per_frame_rows
-            if item[2] is not None and item[3] is not None
+        horizontal = [
+            (float(first), float(pitch))
+            for _, _, first, pitch in per_frame_rows
+            if first is not None and pitch is not None
         ]
-        if len(local_horizontal) >= 2:
-            first_values = [float(item[0]) for item in local_horizontal]
-            pitch_values = [float(item[1]) for item in local_horizontal]
-            if max(first_values) - min(first_values) > 15 or (
-                max(pitch_values) - min(pitch_values) > 6
-            ):
+        if len(horizontal) >= 2:
+            first_values, pitch_values = zip(*horizontal)
+            if max(first_values) - min(first_values) > 15 or max(pitch_values) - min(pitch_values) > 6:
                 return None
-            q_x = round(statistics.median(first_values))
-            pitch = float(statistics.median(pitch_values))
-            local_x = {
-                "q": q_x,
-                "p": round(q_x + 9.0 * pitch),
-                "a": round(q_x + 0.5 * pitch),
-                "l": round(q_x + 8.5 * pitch),
-                "z": round(q_x + 1.5 * pitch),
-                "m": round(q_x + 7.5 * pitch),
-                "backspace": round(q_x + 9.0 * pitch),
+            q_x, pitch = round(statistics.median(first_values)), statistics.median(pitch_values)
+            offsets = {
+                "q": 0, "p": 9, "a": .5, "l": 8.5,
+                "z": 1.5, "m": 7.5, "backspace": 9,
             }
+            local_x = {key: round(q_x + offset * pitch) for key, offset in offsets.items()}
             if any(not 0 <= value <= 1000 for value in local_x.values()):
                 return None
-            for key, value in local_x.items():
-                snapped[key][0] = value
-        for key in ("q", "p"):
-            snapped[key][1] = top_y
-        for key in ("a", "l"):
-            snapped[key][1] = middle_y
-        for key in ("z", "m", "backspace"):
-            snapped[key][1] = bottom_y
+            for key, x in local_x.items():
+                snapped[key][0] = x
+        for y, keys in ((top_y, ("q", "p")), (middle_y, ("a", "l")),
+                        (bottom_y, ("z", "m", "backspace"))):
+            for key in keys:
+                snapped[key][1] = y
         qwerty_keyboard_config_from_anchors(snapped)
         return snapped
     except Exception:
@@ -2159,37 +2087,26 @@ class GenericSingleActionAdapter:
                     scene=before,
                     frames=before_frames,
                 )
-                selected_index: int | None = None
-                if orientation_credential is not None:
-                    selected_index = len(before_frames) - 1
-                    try:
-                        self.observer.last_orientation_audit_diagnostics = {
-                            "audit_source": orientation_credential.source,
-                            "model_calls": 0,
-                            "local_qwerty_rows_verified": True,
-                            "selected_frame_index": selected_index,
-                            "scene_fingerprint": before.fingerprint,
-                        }
-                    except Exception:
-                        pass
-                else:
+                diagnostic_flag = "local_qwerty_rows_verified"
+                if orientation_credential is None:
                     orientation_credential = (
                         self._single_step_scene_orientation_credential(
                             scene=before,
                             frames=before_frames,
                         )
                     )
-                    selected_index = len(before_frames) - 1
-                    try:
-                        self.observer.last_orientation_audit_diagnostics = {
-                            "audit_source": orientation_credential.source,
-                            "model_calls": 0,
-                            "single_step_scene_reused": True,
-                            "selected_frame_index": selected_index,
-                            "scene_fingerprint": before.fingerprint,
-                        }
-                    except Exception:
-                        pass
+                    diagnostic_flag = "single_step_scene_reused"
+                selected_index = len(before_frames) - 1
+                try:
+                    self.observer.last_orientation_audit_diagnostics = {
+                        "audit_source": orientation_credential.source,
+                        "model_calls": 0,
+                        diagnostic_flag: True,
+                        "selected_frame_index": selected_index,
+                        "scene_fingerprint": before.fingerprint,
+                    }
+                except Exception:
+                    pass
                 if (
                     isinstance(selected_index, int)
                     and 0 <= selected_index < len(before_paths)
@@ -2291,57 +2208,30 @@ class GenericSingleActionAdapter:
             if callable(clear_authorization):
                 clear_authorization()
 
-        pending_input_lineage: TypedInputLineage | None = None
-        if hardware_receipt is not None:
-            try:
-                pending_input_lineage = build_pending_newline_lineage(
-                    device_id=self.device_id,
-                    resolved_action=resolved.to_dict(),
-                    before_scene=before.to_dict(),
-                    hardware_receipt=hardware_receipt,
-                )
-            except (InputValueLineageError, TypeError, ValueError):
-                try:
-                    pending_input_lineage = build_pending_literal_lineage(
-                        device_id=self.device_id,
-                        resolved_action=resolved.to_dict(),
-                        before_scene=before.to_dict(),
-                        hardware_receipt=hardware_receipt,
-                    )
-                except (InputValueLineageError, TypeError, ValueError):
-                    try:
-                        pending_input_lineage = build_pending_ime_candidate_lineage(
-                            device_id=self.device_id,
-                            resolved_action=resolved.to_dict(),
-                            before_scene=before.to_dict(),
-                            hardware_receipt=hardware_receipt,
-                        )
-                    except (InputValueLineageError, TypeError, ValueError):
-                        try:
-                            pending_input_lineage = build_pending_input_state_lineage(
-                                device_id=self.device_id,
-                                resolved_action=resolved.to_dict(),
-                                before_scene=before.to_dict(),
-                                hardware_receipt=hardware_receipt,
-                            )
-                        except (InputValueLineageError, TypeError, ValueError):
-                            pending_input_lineage = None
-        elif resolved.kind == "input_verified_text":
-            try:
-                pending_input_lineage = build_pending_text_lineage(
-                    device_id=self.device_id,
-                    resolved_action=resolved.to_dict(),
-                    before_scene=before.to_dict(),
-                )
-            except (InputValueLineageError, TypeError, ValueError):
-                try:
-                    pending_input_lineage = build_pending_chinese_preedit_lineage(
-                        device_id=self.device_id,
-                        resolved_action=resolved.to_dict(),
-                        before_scene=before.to_dict(),
-                    )
-                except (InputValueLineageError, TypeError, ValueError):
-                    pending_input_lineage = None
+        lineage_values = {
+            "device_id": self.device_id,
+            "resolved_action": resolved.to_dict(),
+            "before_scene": before.to_dict(),
+        }
+        pending_input_lineage = (
+            _first_valid_lineage(
+                (
+                    build_pending_newline_lineage,
+                    build_pending_literal_lineage,
+                    build_pending_ime_candidate_lineage,
+                    build_pending_input_state_lineage,
+                ),
+                **lineage_values,
+                hardware_receipt=hardware_receipt,
+            )
+            if hardware_receipt is not None
+            else _first_valid_lineage(
+                (build_pending_text_lineage, build_pending_chinese_preedit_lineage),
+                **lineage_values,
+            )
+            if resolved.kind == "input_verified_text"
+            else None
+        )
 
         try:
             (

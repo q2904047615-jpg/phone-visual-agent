@@ -1360,179 +1360,48 @@ class UniversalAgentOrchestrator:
 
     @staticmethod
     def _is_presence_only_read_only_subgoal(subgoal: Any) -> bool:
-        """Allow zero-action completion only for locating one visible object.
+        """Classify a completion condition as current-frame presence only."""
 
-        A visible element can prove that an object exists, but it cannot prove
-        its exact value, text, state, or a result produced elsewhere.  Keep the
-        lexical gate deliberately narrow so ambiguous read-only work fails
-        closed and can be retried with a fresh observation instead.
-        """
-
+        conditions = tuple(
+            str(item or "").strip()
+            for item in getattr(subgoal, "completion_conditions", ()) or ()
+            if str(item or "").strip()
+        )
+        if len(conditions) == 1 and (
+            UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
+                conditions[0]
+            )
+        ):
+            return True
+        completion = " ".join(conditions).casefold()
         text = " ".join(
-            str(item or "").strip()
-            for item in (
-                getattr(subgoal, "objective", ""),
-                *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
-            )
-            if str(item or "").strip()
+            (str(getattr(subgoal, "objective", "") or ""), completion)
         ).casefold()
-        if not text:
+        if not text or not re.search(
+            r"定位|找到|寻找|识别|可见|存在|\blocat(?:e|ed)\b|\bfind\b|"
+            r"\bidentif(?:y|ied)\b|\bvisible\b|\bpresent\b|\bexists?\b",
+            text,
+        ):
             return False
-        presence_markers = (
-            "定位",
-            "找到",
-            "寻找",
-            "识别",
-            "可见",
-            "存在",
-            "locate",
-            "find",
-            "identify",
-            "visible",
-            "present",
-            "exists",
-        )
-        value_verification_markers = (
-            "内容",
-            "文字",
-            "文本",
-            "数值",
-            "字段值",
-            "包含",
-            "等于",
-            "是否为",
-            "状态为",
-            "验证",
-            "核对",
-            "读取",
-            "content",
-            "text equals",
-            "contains",
-            "value",
-            "verify",
-            "read the",
-        )
-        transition_markers = (
-            "刷新",
-            "重新加载",
-            "重新载入",
-            "重新获取",
-            "重新读取",
-            "重新连接",
-            "加载完成",
-            "更新完成",
-            "同步完成",
-            "导航",
-            "跳转",
-            "进入",
-            "返回",
-            "切换",
-            "打开",
-            "启动",
-            "收起",
-            "隐藏",
-            "关闭",
-            "消失",
-            "移除",
-            "不可见",
-            "不存在",
-            "缺失",
-            "refresh",
-            "reload",
-            "reloaded",
-            "updated",
-            "synchronized",
-            "navigated",
-            "redirected",
-            "entered",
-            "returned",
-            "switched",
-            "opened",
-            "launched",
-            "dismiss",
-            "hide",
-            "hidden",
-            "close",
-            "closed",
-            "disappear",
-            "remove",
-            "not visible",
-            "absent",
-            "missing",
-            "retrieved",
-            "refetched",
-            "reconnected",
-        )
-        completion_text = " ".join(
-            str(item or "").strip()
-            for item in tuple(
-                getattr(subgoal, "completion_conditions", ()) or ()
-            )
-            if str(item or "").strip()
-        ).casefold()
-        completion_conditions = tuple(
-            str(item or "").strip()
-            for item in tuple(
-                getattr(subgoal, "completion_conditions", ()) or ()
-            )
-            if str(item or "").strip()
-        )
-        if (
-            len(completion_conditions) == 1
-            and UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
-                completion_conditions[0]
-            )
+        # Exact values, read-outs, transitions and absence need their dedicated
+        # typed evidence; a current screenshot can only prove positive presence.
+        if re.search(
+            r"内容|文字|文本|数值|字段值|包含|等于|是否为|状态为|验证|核对|读取|"
+            r"刷新|重新(?:加载|载入|获取|读取|连接)|(?:加载|更新|同步)完成|"
+            r"不可见|不存在|缺失|消失|移除|"
+            r"\b(?:content|value|verify|contains?|equals?|read the|refresh|reload(?:ed)?|"
+            r"updated|synchronized|not visible|absent|missing|disappear|remove|"
+            r"retrieved|refetched|reconnected)\b",
+            text,
         ):
+            return False
+        if completion:
             return True
-        occurrence_or_absence_markers = (
-            "刷新",
-            "重新加载",
-            "重新载入",
-            "重新获取",
-            "重新读取",
-            "重新连接",
-            "加载完成",
-            "更新完成",
-            "同步完成",
-            "不可见",
-            "不存在",
-            "缺失",
-            "消失",
-            "移除",
-            "refresh",
-            "reload",
-            "reloaded",
-            "updated",
-            "synchronized",
-            "not visible",
-            "absent",
-            "missing",
-            "disappear",
-            "remove",
-            "retrieved",
-            "refetched",
-            "reconnected",
+        return not re.search(
+            r"导航|跳转|进入|返回|切换|打开|启动|收起|隐藏|关闭|"
+            r"\b(?:navigate|redirect|enter|return|switch|open|launch|dismiss|hide|close)\w*\b",
+            text,
         )
-        if (
-            completion_text
-            and any(marker in completion_text for marker in presence_markers)
-            and not any(
-                marker in completion_text for marker in value_verification_markers
-            )
-            and not any(
-                marker in completion_text
-                for marker in occurrence_or_absence_markers
-            )
-        ):
-            # An already-visible destination may satisfy an idempotent
-            # navigation node such as opening an App or returning Home.  The
-            # caller still requires grounded named-surface identity and unique
-            # current visual evidence.  Occurrence claims such as refresh and
-            # negative/absence states remain ineligible.
-            return True
-        return any(marker in text for marker in presence_markers) and not any(
-            marker in text for marker in value_verification_markers
-        ) and not any(marker in text for marker in transition_markers)
 
     @staticmethod
     def _candidate_has_unresolved_conflict(
@@ -1557,6 +1426,31 @@ class UniversalAgentOrchestrator:
         return False
 
     @classmethod
+    def _safe_visible_element(
+        cls,
+        item: Any,
+        trusted_observation: Any,
+        *,
+        roles: frozenset[str] | None = None,
+        goal_relevant: bool | None = None,
+    ) -> bool:
+        states = getattr(item, "states", {}) or {}
+        left, top, right, bottom = getattr(item, "bounds", (0, 0, 0, 0))
+        return bool(
+            (roles is None or str(getattr(item, "role", "")) in roles)
+            and (goal_relevant is None or states.get("goal_relevant") is goal_relevant)
+            and states.get("visible") is not False
+            and states.get("fully_visible") is True
+            and float(getattr(item, "confidence", 0.0)) >= MIN_TARGET_CONFIDENCE
+            and 0.02 <= left < right <= 0.98
+            and 0.02 <= top < bottom <= 0.98
+            and not cls._candidate_has_unresolved_conflict(
+                trusted_observation,
+                str(getattr(item, "element_id", "") or ""),
+            )
+        )
+
+    @classmethod
     def _verified_focused_input_fact(
         cls,
         trusted_observation: Any,
@@ -1566,23 +1460,17 @@ class UniversalAgentOrchestrator:
         scene = getattr(trusted_observation, "scene", None)
         if scene is None:
             return None
-        candidates = []
-        for item in tuple(getattr(scene, "elements", ()) or ()):
-            states = getattr(item, "states", {}) or {}
-            left, top, right, bottom = getattr(item, "bounds", (0, 0, 0, 0))
-            if (
-                str(getattr(item, "role", "") or "") == "input"
-                and states.get("goal_relevant") is True
-                and states.get("focused") is True
-                and float(getattr(item, "confidence", 0.0)) >= 0.90
-                and 0.02 <= left < right <= 0.98
-                and 0.02 <= top < bottom <= 0.98
-                and not cls._candidate_has_unresolved_conflict(
-                    trusted_observation,
-                    str(getattr(item, "element_id", "") or ""),
-                )
-            ):
-                candidates.append(item)
+        candidates = [
+            item
+            for item in getattr(scene, "elements", ()) or ()
+            if (getattr(item, "states", {}) or {}).get("focused") is True
+            and cls._safe_visible_element(
+                item,
+                trusted_observation,
+                roles=frozenset({"input"}),
+                goal_relevant=True,
+            )
+        ]
         if len(candidates) != 1:
             return None
         item = candidates[0]
@@ -1597,38 +1485,18 @@ class UniversalAgentOrchestrator:
         subgoal: Any,
         trusted_observation: Any,
     ) -> str | None:
-        """Bind a safe state-only checkpoint to an exact local scene fact.
-
-        This deliberately recognizes only focus as a reversible, structured UI
-        state.  Input values, keyboard modes, external results, and other state
-        claims keep their existing dedicated evidence contracts.
-        """
-
+        """Bind the sole zero-action local state: one focused input."""
         conditions = tuple(
             str(item or "").strip().casefold()
-            for item in tuple(getattr(subgoal, "completion_conditions", ()) or ())
+            for item in getattr(subgoal, "completion_conditions", ()) or ()
             if str(item or "").strip()
         )
-        if not conditions:
-            return None
-        focus_patterns = (
-            re.compile(
-                r"(?:输入框|文本框|输入区域).{0,10}"
-                r"(?:已|处于|保持|获得)?(?:聚焦|焦点)"
-            ),
-            re.compile(
-                r"焦点.{0,10}(?:位于|保持在|处于)?"
-                r"(?:输入框|文本框|输入区域)"
-            ),
-            re.compile(
-                r"(?:input|textbox|text field).{0,20}"
-                r"(?:is |remains |has )?(?:focused|focus)"
-            ),
+        focus = re.compile(
+            r"(?:输入框|文本框|输入区域).{0,10}(?:聚焦|焦点)|"
+            r"焦点.{0,10}(?:输入框|文本框|输入区域)|"
+            r"(?:input|textbox|text field).{0,20}(?:focused|focus)"
         )
-        if any(
-            not any(pattern.search(condition) for pattern in focus_patterns)
-            for condition in conditions
-        ):
+        if not conditions or any(not focus.search(item) for item in conditions):
             return None
         return cls._verified_focused_input_fact(trusted_observation)
 
@@ -1640,9 +1508,10 @@ class UniversalAgentOrchestrator:
             str(value or "").casefold().replace("_", " ") for value in values
         )
         generic = {
-            "action", "button", "control", "current", "element", "image",
-            "item", "page", "screen", "target", "view", "visible",
-            "当前", "页面", "画面", "目标", "元素", "控件", "可见", "出现",
+            "action", "button", "control", "current", "display", "element",
+            "foreground", "image", "item", "page", "screen", "show", "stable",
+            "target", "view", "visible", "当前", "前台", "页面", "画面", "目标",
+            "元素", "控件", "可见", "出现", "显示", "稳定", "完整", "唯一",
         }
         terms = {
             token
@@ -1691,49 +1560,17 @@ class UniversalAgentOrchestrator:
             str(value or "").casefold().replace("_", " ").replace("-", " ")
             for value in values
         )
-        classes = {
-            name
-            for name, markers in {
-                "page": (
-                    "页面",
-                    "网页",
-                    "界面",
-                    "首页",
-                    "主界面",
-                    " page",
-                    "screen",
-                    "view",
-                    "interface",
-                    "app home",
-                ),
-                "title": ("标题", "题头", "title", "heading"),
-                "list": ("列表", "清单", " list"),
-                "input": ("输入框", "文本框", "input field", "textbox"),
-                "menu": ("菜单", " menu"),
-                "dialog": ("对话框", "弹窗", "dialog", "modal"),
-                "destination": (
-                    "对应页面",
-                    "目标页面",
-                    "下一页",
-                    "详情页",
-                    "详情",
-                    "destination page",
-                    "target page",
-                    "next page",
-                    "detail page",
-                    "details",
-                ),
-                "foreground_app": (
-                    "应用在前台",
-                    "前台应用",
-                    "前台可见",
-                    "foreground app",
-                    "in the foreground",
-                    "is foreground",
-                ),
-            }.items()
-            if any(marker in text for marker in markers)
+        markers = {
+            "page": ("页面", "网页", "界面", "首页", " page", "screen", "view", "interface", "app home"),
+            "title": ("标题", "题头", "title", "heading"),
+            "list": ("列表", "清单", " list"),
+            "input": ("输入框", "文本框", "input field", "textbox"),
+            "menu": ("菜单", " menu"),
+            "dialog": ("对话框", "弹窗", "dialog", "modal"),
+            "destination": ("对应页面", "目标页面", "下一页", "详情", "destination page", "target page", "next page", "detail"),
+            "foreground_app": ("应用在前台", "前台应用", "前台可见", "foreground app", "in the foreground", "is foreground"),
         }
+        classes = {name for name, words in markers.items() if any(word in text for word in words)}
         if any(cls._is_idempotent_app_foreground_completion(value) for value in values):
             classes.add("foreground_app")
         return frozenset(classes)
@@ -2047,80 +1884,41 @@ class UniversalAgentOrchestrator:
     ) -> tuple[Any, ...] | None:
         """Bind two to four explicitly conjoined visible objects, fail closed."""
 
-        text = " ".join(
-            str(item or "").strip()
-            for item in (
-                getattr(subgoal, "objective", ""),
-                *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
-            )
-            if str(item or "").strip()
-        ).casefold()
+        text = " ".join(map(str, (
+            getattr(subgoal, "objective", ""),
+            *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
+        ))).casefold()
         if not self._is_explicit_multi_presence_text(text):
             return None
         text_terms = self._presence_binding_terms(text)
         if not text_terms:
             return None
-        matched: list[tuple[Any, frozenset[str]]] = []
-        for candidate in scene.elements:
-            terms = self._presence_binding_terms(
-                candidate.label,
-                candidate.meaning,
-                *candidate.evidence,
-            ).intersection(text_terms)
-            if not terms:
-                continue
-            if (
-                float(candidate.confidence) < MIN_TARGET_CONFIDENCE
-                or candidate.states.get("visible") is False
-                or candidate.states.get("fully_visible") is False
-                or self._candidate_has_unresolved_conflict(
-                    trusted_observation,
-                    candidate.element_id,
-                )
-            ):
-                return None
-            left, top, right, bottom = candidate.bounds
-            if not (
-                0.02 <= left < right <= 0.98
-                and 0.02 <= top < bottom <= 0.98
-            ):
-                return None
-            matched.append((candidate, frozenset(terms)))
+        matched = [
+            (item, self._presence_binding_terms(item.label, item.meaning, *item.evidence).intersection(text_terms))
+            for item in scene.elements
+        ]
+        matched = [(item, terms) for item, terms in matched if terms]
+        if any(not self._safe_visible_element(item, trusted_observation) for item, _ in matched):
+            return None
         # An instruction card may repeat every endpoint name. It is aggregate
-        # evidence, not either endpoint. Remove it only when two or more
-        # smaller candidates together cover all of its bound terms.
-        reduced: list[tuple[Any, frozenset[str]]] = []
+        # evidence, not either endpoint. Drop it when two peers cover its terms.
+        reduced = []
         for index, item in enumerate(matched):
-            _candidate, terms = item
-            others = [
-                other_terms
-                for other_index, (_other, other_terms) in enumerate(matched)
-                if other_index != index and other_terms.intersection(terms)
-            ]
-            aggregate = False
-            if len(others) >= 2:
-                for first in range(len(others)):
-                    for second in range(first + 1, len(others)):
-                        combined = others[first].union(others[second])
-                        if combined and combined.issubset(terms):
-                            aggregate = True
-                            break
-                    if aggregate:
-                        break
+            terms = item[1]
+            peers = [other_terms for other_index, (_, other_terms) in enumerate(matched) if other_index != index]
+            aggregate = any(
+                left.union(right).issubset(terms)
+                for left_index, left in enumerate(peers)
+                for right in peers[left_index + 1:]
+            )
             if not aggregate:
                 reduced.append(item)
         if not 2 <= len(reduced) <= 4:
             return None
-        goal_candidates = tuple(item[0] for item in reduced)
-        candidate_terms = [item[1] for item in reduced]
-        for index, terms in enumerate(candidate_terms):
-            other_terms = frozenset().union(
-                *(item for other_index, item in enumerate(candidate_terms)
-                  if other_index != index)
-            )
-            if not terms.difference(other_terms):
-                return None
-        return goal_candidates
+        terms = [item[1] for item in reduced]
+        if any(not item.difference(frozenset().union(*(terms[:index] + terms[index + 1:]))) for index, item in enumerate(terms)):
+            return None
+        return tuple(item[0] for item in reduced)
 
     @staticmethod
     def _is_explicit_multi_presence_text(text: str) -> bool:
@@ -2168,26 +1966,21 @@ class UniversalAgentOrchestrator:
         scene = getattr(trusted_observation, "scene", None)
         if current is None or scene is None or not self._is_visible_text_read_subgoal(current):
             return None
-        allowed_meanings = ("title", "heading", "error", "status_message")
-        candidates = []
-        for item in tuple(getattr(scene, "elements", ()) or ()):
-            meaning = str(getattr(item, "meaning", "") or "").casefold()
-            label = str(getattr(item, "label", "") or "").strip()
-            left, top, right, bottom = getattr(item, "bounds", (0, 0, 0, 0))
-            if (
-                str(getattr(item, "role", "")) in {"text", "dialog", "container"}
-                and any(marker in meaning for marker in allowed_meanings)
-                and label
-                and item.states.get("goal_relevant") is True
-                and item.states.get("fully_visible") is True
-                and float(item.confidence) >= MIN_TARGET_CONFIDENCE
-                and not self._candidate_has_unresolved_conflict(
-                    trusted_observation, item.element_id
-                )
-                and 0.02 <= left < right <= 0.98
-                and 0.02 <= top < bottom <= 0.98
-            ):
-                candidates.append(item)
+        candidates = [
+            item
+            for item in scene.elements
+            if str(item.label or "").strip()
+            and any(
+                marker in str(item.meaning or "").casefold()
+                for marker in ("title", "heading", "error", "status_message")
+            )
+            and self._safe_visible_element(
+                item,
+                trusted_observation,
+                roles=frozenset({"text", "dialog", "container"}),
+                goal_relevant=True,
+            )
+        ]
         if len(candidates) != 1:
             return None
         item = candidates[0]
@@ -2204,26 +1997,16 @@ class UniversalAgentOrchestrator:
         )
         lineage = session.verified_app_surface_lineage
         if lineage is not None:
-            lineage_fact = json.dumps(
-                {
-                    "source": "verified_app_surface_lineage",
-                    "app_id": lineage.app_id,
-                    "app_name": lineage.app_name,
-                    "surface_id": lineage.surface_id,
-                    "functional_foreground_app_id": (
-                        lineage.functional_foreground_app_id
-                    ),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            lineage_fact = json.dumps({
+                "source": "verified_app_surface_lineage",
+                "app_id": lineage.app_id,
+                "app_name": lineage.app_name,
+                "surface_id": lineage.surface_id,
+                "functional_foreground_app_id": lineage.functional_foreground_app_id,
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             observed = replace(
                 observed,
-                grounded_visual_facts=(
-                    *observed.grounded_visual_facts,
-                    lineage_fact,
-                ),
+                grounded_visual_facts=(*observed.grounded_visual_facts, lineage_fact),
             )
         revised = self.deepseek_planner.replan(
             graph,
@@ -2244,9 +2027,8 @@ class UniversalAgentOrchestrator:
             verified_app_surface_lineage=session.verified_app_surface_lineage,
             physical_actions=session.physical_actions,
         )
-        old = graph.active_subgoal()
         new_old = next(
-            (candidate for candidate in revised.subgoals if candidate.subgoal_id == old.subgoal_id),
+            (item for item in revised.subgoals if item.subgoal_id == current.subgoal_id),
             None,
         )
         if (
@@ -2259,6 +2041,351 @@ class UniversalAgentOrchestrator:
             )
         return revised
 
+    @classmethod
+    def _unique_presence_candidate(
+        cls,
+        scene: Any,
+        trusted_observation: Any,
+    ) -> Any | None:
+        candidate = scene.unique_trusted_goal_element(
+            min_confidence=MIN_TARGET_CONFIDENCE,
+        )
+        if candidate is not None:
+            return candidate
+        reader = getattr(scene, "trusted_completion_evidence", None)
+        candidates = tuple(reader(min_confidence=MIN_TARGET_CONFIDENCE)) if callable(reader) else ()
+        if len(candidates) != 1:
+            return None
+        candidate = candidates[0]
+        competing = any(
+            item.element_id != candidate.element_id
+            and item.states.get("goal_relevant") is True
+            and float(item.confidence) >= MIN_TARGET_CONFIDENCE
+            for item in getattr(scene, "elements", ()) or ()
+        )
+        return None if competing else candidate
+
+    def _visible_presence_evidence(
+        self,
+        *,
+        graph: DynamicTaskGraph,
+        subgoal: Any,
+        trusted_observation: Any,
+    ) -> tuple[str, ...] | None:
+        """Match one positive presence state against this observation only."""
+
+        scene = getattr(trusted_observation, "scene", None)
+        if scene is None:
+            return None
+        conditions = tuple(
+            str(item or "").strip()
+            for item in getattr(subgoal, "completion_conditions", ()) or ()
+            if str(item or "").strip()
+        )
+        presence_text = " ".join((str(subgoal.objective), *conditions))
+        required_surfaces = self._presence_surface_classes(*conditions)
+        typed_surface = self._typed_idempotent_system_surface_fact(
+            graph,
+            subgoal.subgoal_id,
+            scene,
+        )
+        target_apps = self._referenced_target_app_pages(
+            graph=graph,
+            presence_text=presence_text,
+            subgoal_id=subgoal.subgoal_id,
+        )
+        app_matches = bool(
+            target_apps
+            and self._scene_foreground_matches_target_app_page(
+                scene=scene,
+                target_apps=target_apps,
+            )
+        )
+        if target_apps and not app_matches:
+            return None
+
+        page_facts = self._scene_page_identity_facts(scene)
+        named_surface = self._scene_named_presence_is_grounded(
+            scene=scene,
+            texts=conditions,
+        )
+        destination = bool(
+            subgoal.external_impact == "navigation_only"
+            and required_surfaces
+            and required_surfaces.issubset({"page", "destination", "foreground_app"})
+        )
+        app_destination = bool(
+            app_matches
+            and any(
+                self._presence_names_only_target_app_surface(presence_text, app)
+                for app in target_apps
+            )
+        )
+        if destination:
+            if not (
+                app_destination
+                or (
+                    _named_visual_identity_anchor(conditions)
+                    and named_surface
+                )
+                or typed_surface
+            ):
+                return None
+            return (
+                scene.summary,
+                *page_facts,
+                *((typed_surface,) if typed_surface else ()),
+            )
+
+        if (
+            subgoal.external_impact == "read_only"
+            and not required_surfaces
+            and not _named_visual_identity_anchor(conditions)
+            and not self._is_explicit_multi_presence_text(presence_text)
+            and named_surface
+        ):
+            return (scene.summary, *page_facts)
+
+        if self._is_explicit_multi_presence_text(presence_text):
+            candidates = self._multi_presence_candidates(
+                subgoal=subgoal,
+                scene=scene,
+                trusted_observation=trusted_observation,
+            )
+            if not candidates:
+                return None
+        else:
+            candidate = self._unique_presence_candidate(scene, trusted_observation)
+            candidates = ()
+            if candidate is not None:
+                terms = self._presence_binding_terms(*conditions)
+                candidate_terms = self._presence_binding_terms(
+                    candidate.label,
+                    candidate.meaning,
+                    *candidate.evidence,
+                )
+                scene_terms = self._presence_binding_terms(scene.screen_id, scene.summary)
+                prefixes = self._presence_title_prefixes(
+                    subgoal.objective,
+                    *conditions,
+                )
+                prefix_matches = bool(
+                    prefixes
+                    and all(candidate.label.casefold().startswith(item) for item in prefixes)
+                )
+                scene_surfaces = self._presence_surface_classes(
+                    scene.screen_id,
+                    scene.summary,
+                ).intersection({"page"})
+                if app_matches:
+                    scene_surfaces = scene_surfaces.union({"foreground_app"})
+                element_surfaces = required_surfaces.difference(scene_surfaces)
+                if "title" in element_surfaces and prefix_matches:
+                    element_surfaces = element_surfaces.difference({"title"})
+                if (
+                    not self._safe_visible_element(candidate, trusted_observation)
+                    or not terms
+                    or not (
+                        prefix_matches
+                        if prefixes
+                        else terms.intersection(candidate_terms.union(scene_terms))
+                    )
+                    or not element_surfaces.issubset(
+                        self._intrinsic_presence_surface_classes(candidate)
+                    )
+                ):
+                    return None
+                candidates = (candidate,)
+            elif subgoal.external_impact == "navigation_only":
+                terms = self._presence_binding_terms(presence_text)
+                scene_terms = self._presence_binding_terms(scene.summary)
+                scene_surfaces = self._presence_surface_classes(
+                    scene.screen_id,
+                    scene.summary,
+                ).intersection({"page"})
+                if app_matches:
+                    scene_surfaces = scene_surfaces.union({"foreground_app"})
+                element_surfaces = required_surfaces.difference(scene_surfaces)
+                matched = tuple(
+                    item
+                    for item in scene.elements
+                    if terms.intersection(
+                        self._presence_binding_terms(
+                            item.label,
+                            item.meaning,
+                            *item.evidence,
+                        )
+                    )
+                    and element_surfaces.issubset(
+                        self._intrinsic_presence_surface_classes(item)
+                    )
+                )
+                if (
+                    not terms.intersection(scene_terms)
+                    or not 1 <= len(matched) <= 4
+                    or any(
+                        not self._safe_visible_element(item, trusted_observation)
+                        for item in matched
+                    )
+                ):
+                    return None
+                candidates = matched
+            elif not (app_matches or named_surface):
+                return None
+
+        facts = tuple(
+            "当前可信画面的目标元素："
+            f"element_id={item.element_id}, role={item.role}, "
+            f"label={item.label or '[empty]'}, meaning={item.meaning}, "
+            f"confidence={float(item.confidence):.3f}, fully_visible=true, "
+            "bounds_inside_safe_frame=true。"
+            for item in candidates
+        )
+        focus = self._verified_focused_input_fact(trusted_observation)
+        return (
+            scene.summary,
+            *((focus,) if focus else ()),
+            *facts,
+            *(fact for item in candidates for fact in item.evidence),
+            *((*page_facts, typed_surface) if typed_surface else ()),
+        )
+
+    @staticmethod
+    def _validate_visible_replan_shape(
+        previous: DynamicTaskGraph,
+        revised: DynamicTaskGraph,
+        observed: ObservedState,
+    ) -> None:
+        if revised.revision != previous.revision + 1:
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进必须且只能产生一个新 revision。"
+            )
+        if tuple(item.subgoal_id for item in previous.subgoals) != tuple(
+            item.subgoal_id for item in revised.subgoals
+        ):
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进不得增加、删除或重排子目标。"
+            )
+        if (
+            revised.goal != previous.goal
+            or revised.constraints != previous.constraints
+            or revised.risk_actions != previous.risk_actions
+        ):
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进不得修改目标、约束或效果定义。"
+            )
+        immutable = (
+            "objective",
+            "depends_on",
+            "constraints",
+            "completion_conditions",
+            "risk_action_ids",
+            "external_impact",
+        )
+        for old, new in zip(previous.subgoals, revised.subgoals):
+            if any(getattr(old, name) != getattr(new, name) for name in immutable):
+                raise UniversalAgentOrchestratorError(
+                    "可见状态证据推进只能改变子目标状态和完成证据。"
+                )
+        _validate_visible_completion_condition_progress(previous, revised, observed)
+
+    def _validated_visible_prefix(
+        self,
+        *,
+        previous: DynamicTaskGraph,
+        revised: DynamicTaskGraph,
+        current: Any,
+        trusted_observation: Any,
+    ) -> DynamicTaskGraph:
+        old = {item.subgoal_id: item for item in previous.subgoals}
+        new = {item.subgoal_id: item for item in revised.subgoals}
+        completed_before = {
+            item.subgoal_id for item in previous.subgoals if item.status == "completed"
+        }
+        newly_completed = tuple(
+            item.subgoal_id
+            for item in previous.subgoals
+            if item.status != "completed" and new[item.subgoal_id].status == "completed"
+        )
+        accepted: list[str] = []
+        unsupported = ""
+        for subgoal_id in newly_completed:
+            source, result = old[subgoal_id], new[subgoal_id]
+            dependencies_ready = all(
+                dependency in completed_before or dependency in accepted
+                for dependency in source.depends_on
+            )
+            state_fact = self._zero_action_visible_state_fact(
+                source,
+                trusted_observation,
+            )
+            eligible = (
+                subgoal_id == current.subgoal_id
+                or self._is_presence_only_read_only_subgoal(source)
+                or bool(state_fact and state_fact in result.completion_evidence)
+            )
+            if (
+                not accepted and subgoal_id != current.subgoal_id
+                or source.external_impact not in {"read_only", "navigation_only"}
+                or not dependencies_ready
+                or not eligible
+                or not result.completion_evidence
+            ):
+                unsupported = subgoal_id
+                break
+            accepted.append(subgoal_id)
+
+        if not accepted or accepted[0] != current.subgoal_id or unsupported:
+            narrowed = self._narrow_unproven_visible_successor(
+                previous=previous,
+                revised=revised,
+                current_subgoal_id=current.subgoal_id,
+                accepted_prefix=tuple(accepted),
+                unsupported_subgoal_id=unsupported,
+            )
+            if narrowed is None:
+                raise UniversalAgentOrchestratorError(
+                    "可见状态证据只能完成从当前节点开始、依赖连续且逐项有证据的安全前缀。"
+                )
+            revised = narrowed
+            new = {item.subgoal_id: item for item in revised.subgoals}
+            newly_completed = tuple(
+                subgoal_id
+                for subgoal_id, item in old.items()
+                if item.status != "completed" and new[subgoal_id].status == "completed"
+            )
+
+        for subgoal_id, source in old.items():
+            status = new[subgoal_id].status
+            if source.status == "completed" and status != "completed":
+                raise UniversalAgentOrchestratorError(
+                    "可见状态证据推进不得回退已完成子目标。"
+                )
+            if (
+                source.status == "pending"
+                and subgoal_id not in newly_completed
+                and status not in {"pending", "active"}
+            ):
+                raise UniversalAgentOrchestratorError(
+                    "可见状态证据推进不得越过后续子目标。"
+                )
+        newly_active = tuple(
+            subgoal_id
+            for subgoal_id, source in old.items()
+            if source.status == "pending" and new[subgoal_id].status == "active"
+        )
+        if len(newly_active) > 1 or (
+            revised.status != "completed"
+            and (
+                len(newly_active) != 1
+                or revised.active_subgoal_id != newly_active[0]
+            )
+        ):
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进后必须精确激活一个后续子目标。"
+            )
+        return revised
+
     def _try_advance_visible_presence_subgoal(
         self,
         session: UniversalAgentSessionState,
@@ -2266,7 +2393,7 @@ class UniversalAgentOrchestrator:
         graph: DynamicTaskGraph,
         trusted_observation: Any,
     ) -> DynamicTaskGraph | None:
-        """Use bounded visible evidence to advance one safe presence checkpoint."""
+        """Advance one current-frame presence checkpoint with one authority."""
 
         current = graph.active_subgoal()
         if (
@@ -2275,334 +2402,27 @@ class UniversalAgentOrchestrator:
             or not self._is_presence_only_read_only_subgoal(current)
         ):
             return None
-        scene = getattr(trusted_observation, "scene", None)
-        if scene is None:
-            return None
-        candidates: tuple[Any, ...]
-        presence_text = " ".join(
-            (
-                current.objective,
-                *tuple(current.completion_conditions or ()),
-            )
-        )
-        typed_system_surface_fact = self._typed_idempotent_system_surface_fact(
-            graph,
-            current.subgoal_id,
-            scene,
-        )
-        referenced_app_pages = self._referenced_target_app_pages(
+        visible_evidence = self._visible_presence_evidence(
             graph=graph,
-            presence_text=presence_text,
-            subgoal_id=current.subgoal_id,
+            subgoal=current,
+            trusted_observation=trusted_observation,
         )
-        foreground_matches_referenced_app = bool(
-            referenced_app_pages
-            and self._scene_foreground_matches_target_app_page(
-                scene=scene,
-                target_apps=referenced_app_pages,
-            )
-        )
-        unique_goal_candidate = scene.unique_trusted_goal_element(
-            min_confidence=MIN_TARGET_CONFIDENCE,
-        )
-        if unique_goal_candidate is None:
-            completion_reader = getattr(
-                scene,
-                "trusted_completion_evidence",
-                None,
-            )
-            completion_candidates = (
-                tuple(
-                    completion_reader(
-                        min_confidence=MIN_TARGET_CONFIDENCE,
-                    )
-                )
-                if callable(completion_reader)
-                else ()
-            )
-            if len(completion_candidates) == 1:
-                completion_candidate = completion_candidates[0]
-                competing_goal_evidence = any(
-                    other.element_id != completion_candidate.element_id
-                    and other.states.get("goal_relevant") is True
-                    and float(other.confidence) >= MIN_TARGET_CONFIDENCE
-                    for other in tuple(getattr(scene, "elements", ()) or ())
-                )
-                if not competing_goal_evidence:
-                    # Containers and dialogs may prove one already-visible
-                    # presence checkpoint, but they remain excluded from
-                    # TARGET_LOCAL_ACTION_ROLES and therefore grant no action
-                    # or geometry authority.
-                    unique_goal_candidate = completion_candidate
-        presence_terms = self._presence_binding_terms(presence_text)
-        unique_candidate_terms = (
-            self._presence_binding_terms(
-                unique_goal_candidate.label,
-                unique_goal_candidate.meaning,
-                *unique_goal_candidate.evidence,
-            )
-            if unique_goal_candidate is not None
-            else frozenset()
-        )
-        title_prefixes = self._presence_title_prefixes(
-            current.objective,
-            *tuple(current.completion_conditions or ()),
-        )
-        candidate_label = str(
-            getattr(unique_goal_candidate, "label", "") or ""
-        ).strip().casefold()
-        title_prefix_grounded = bool(
-            unique_goal_candidate is not None
-            and title_prefixes
-            and all(candidate_label.startswith(prefix) for prefix in title_prefixes)
-        )
-        candidate_identity_grounded = bool(
-            unique_goal_candidate is not None
-            and (
-                title_prefix_grounded
-                if title_prefixes
-                else presence_terms.intersection(unique_candidate_terms)
-            )
-        )
-        completion_identity_texts = tuple(
-            str(item or "").strip()
-            for item in tuple(current.completion_conditions or ())
-            if str(item or "").strip()
-        )
-        required_surfaces = self._presence_surface_classes(
-            *completion_identity_texts
-        )
-        destination_surface_claim = bool(
-            current.external_impact == "navigation_only"
-            and required_surfaces
-            and required_surfaces.issubset(
-                {"page", "destination", "foreground_app"}
-            )
-            and required_surfaces.intersection(
-                {"page", "destination", "foreground_app"}
-            )
-        )
-        named_destination_grounded = bool(
-            _named_visual_identity_anchor(completion_identity_texts)
-            and self._scene_named_presence_is_grounded(
-                scene=scene,
-                texts=completion_identity_texts,
-            )
-        )
-        if destination_surface_claim:
-            # A link, button, or list item naming a destination proves that the
-            # destination can be entered; it never proves that the destination
-            # is the current page.  Zero-action idempotence is allowed only
-            # when the completion condition itself is grounded by the current
-            # structured page identity (or by an exact target-App foreground).
-            app_foreground_is_complete_destination = bool(
-                foreground_matches_referenced_app
-                and any(
-                    self._presence_names_only_target_app_surface(
-                        presence_text,
-                        target_app,
-                    )
-                    for target_app in referenced_app_pages
-                )
-            )
-            if not (
-                app_foreground_is_complete_destination
-                or named_destination_grounded
-                or typed_system_surface_fact is not None
-            ):
-                return None
-        elif not (
-            foreground_matches_referenced_app
-            or self._scene_named_presence_is_grounded(
-                scene=scene,
-                texts=(
-                    current.objective,
-                    *tuple(current.completion_conditions or ()),
-                ),
-            )
-            or candidate_identity_grounded
-        ):
+        if not visible_evidence:
             return None
-        if referenced_app_pages and not foreground_matches_referenced_app:
-            return None
-        scene_identity_facts: tuple[str, ...] = ()
-        if destination_surface_claim:
-            # The named App/page container has already been grounded by the
-            # foreground identity or page-title/container-only facts above. A
-            # business control or navigation affordance that repeats the
-            # destination name must neither grant nor veto this page claim.
-            candidates = ()
-            scene_identity_facts = (
-                *self._scene_page_identity_facts(scene),
-                *(
-                    (typed_system_surface_fact,)
-                    if typed_system_surface_fact is not None
-                    else ()
-                ),
-            )
-        elif self._is_explicit_multi_presence_text(presence_text):
-            candidates = self._multi_presence_candidates(
-                subgoal=current,
-                scene=scene,
-                trusted_observation=trusted_observation,
-            ) or ()
-            if not candidates:
-                return None
-        else:
-            completion_terms = self._presence_binding_terms(
-                *tuple(current.completion_conditions or ())
-            )
-            candidate = unique_goal_candidate
-            if candidate is not None:
-                candidate_terms = self._presence_binding_terms(
-                    candidate.label,
-                    candidate.meaning,
-                    *candidate.evidence,
-                )
-                scene_terms = self._presence_binding_terms(
-                    scene.screen_id,
-                    scene.summary,
-                )
-                candidate_surfaces = self._intrinsic_presence_surface_classes(
-                    candidate
-                )
-                scene_container_surfaces = self._presence_surface_classes(
-                    scene.screen_id,
-                    scene.summary,
-                ).intersection({"page"})
-                if referenced_app_pages:
-                    scene_container_surfaces = scene_container_surfaces.union(
-                        required_surfaces.intersection({"foreground_app"})
-                    )
-                required_element_surfaces = required_surfaces.difference(
-                    scene_container_surfaces
-                )
-                # In "a card whose title starts with X", title is a visible
-                # selector carried by the list item's label, not a demand that
-                # the whole card itself have role=text/title.
-                if (
-                    "title" in required_element_surfaces
-                    and title_prefix_grounded
-                ):
-                    required_element_surfaces = required_element_surfaces.difference(
-                        {"title"}
-                    )
-                if (
-                    not completion_terms
-                    or not (
-                        candidate_terms.intersection(completion_terms)
-                        or scene_terms.intersection(completion_terms)
-                    )
-                    or not required_element_surfaces.issubset(candidate_surfaces)
-                    or candidate.states.get("fully_visible") is not True
-                    or self._candidate_has_unresolved_conflict(
-                        trusted_observation,
-                        candidate.element_id,
-                    )
-                ):
-                    return None
-                candidates = (candidate,)
-            elif current.external_impact == "navigation_only":
-                presence_terms = self._presence_binding_terms(presence_text)
-                summary_terms = self._presence_binding_terms(scene.summary)
-                if not presence_terms or not presence_terms.intersection(summary_terms):
-                    return None
-                scene_container_surfaces = self._presence_surface_classes(
-                    scene.screen_id,
-                    scene.summary,
-                ).intersection({"page"})
-                if referenced_app_pages:
-                    scene_container_surfaces = scene_container_surfaces.union(
-                        required_surfaces.intersection({"foreground_app"})
-                    )
-                required_element_surfaces = required_surfaces.difference(
-                    scene_container_surfaces
-                )
-                matched = []
-                for item in scene.elements:
-                    item_terms = self._presence_binding_terms(
-                        item.label,
-                        item.meaning,
-                        *item.evidence,
-                    )
-                    # Container identity (for example, "the current page") is
-                    # a scene-level fact.  The required control type must be
-                    # intrinsic to the candidate itself; a nearby instruction
-                    # merely mentioning an input must not become that input.
-                    intrinsic_item_surfaces = (
-                        self._intrinsic_presence_surface_classes(item)
-                    )
-                    if (
-                        not presence_terms.intersection(item_terms)
-                        or not required_element_surfaces.issubset(
-                            intrinsic_item_surfaces
-                        )
-                    ):
-                        continue
-                    if (
-                        float(item.confidence) < MIN_TARGET_CONFIDENCE
-                        or item.states.get("fully_visible") is not True
-                        or self._candidate_has_unresolved_conflict(
-                            trusted_observation,
-                            item.element_id,
-                        )
-                    ):
-                        return None
-                    left, top, right, bottom = item.bounds
-                    if not (
-                        0.02 <= left < right <= 0.98
-                        and 0.02 <= top < bottom <= 0.98
-                    ):
-                        return None
-                    matched.append(item)
-                if not 1 <= len(matched) <= 4:
-                    return None
-                candidates = tuple(matched)
-            else:
-                return None
-
-        candidate_facts = tuple(
-            "当前可信画面的目标元素："
-            f"element_id={item.element_id}, role={item.role}, "
-            f"label={item.label or '[empty]'}, meaning={item.meaning}, "
-            f"confidence={float(item.confidence):.3f}, "
-            f"fully_visible={item.states.get('fully_visible', 'unknown')}, "
-            "bounds_inside_safe_frame=true。"
-            for item in candidates
-        )
-        focused_input_fact = self._verified_focused_input_fact(
-            trusted_observation
-        )
-        local_state_facts = (
-            (focused_input_fact,) if focused_input_fact is not None else ()
-        )
         observed = self.bridge.observed_state(
             graph=graph,
             trusted_observation=trusted_observation,
             action_outcome="not_applicable",
-            verification={
-                "visible_evidence": [
-                    scene.summary,
-                    *scene_identity_facts,
-                    *candidate_facts,
-                    *local_state_facts,
-                    *(fact for item in candidates for fact in item.evidence),
-                ]
-            },
+            verification={"visible_evidence": list(visible_evidence)},
         )
         revised = self.deepseek_planner.replan(
             graph,
             observed,
             trigger="subgoal_completed",
             reason=(
-                "当前可信画面已经以严格 scene identity 或逐项语义绑定、"
-                f"高置信且无冲突的目标元素证明定位类 {current.external_impact} 子目标；"
-                f"本轮必须先把当前 subgoal_id={current.subgoal_id} 标为 completed，"
-                "其 completion_evidence 必须逐字选择 visible_evidence 中至少一项。"
-                "只有直接依赖连续、且 visible_evidence 已提供对应逐字本地控件状态事实的"
-                "可逆状态节点可以同时完成；最多激活一个直接后继，其他节点不得越级完成。"
-                "不得推断元素值、"
-                "外部状态或执行动作；无法满足这些约束时必须 blocked。"
+                "当前可信画面已逐项证明当前正向可见状态。只完成从当前节点开始、"
+                "依赖连续且 completion_evidence 逐字引用 visible_evidence 的安全前缀；"
+                "不得推断元素值、外部效果、缺失状态或执行动作。"
             ),
         )
         self._validate_graph_identity(
@@ -2614,140 +2434,13 @@ class UniversalAgentOrchestrator:
             verified_app_surface_lineage=session.verified_app_surface_lineage,
             physical_actions=session.physical_actions,
         )
-        if revised.revision != graph.revision + 1:
-            raise UniversalAgentOrchestratorError(
-                "可见状态证据推进必须且只能产生一个新 revision。"
-            )
-        old_ids = tuple(item.subgoal_id for item in graph.subgoals)
-        new_ids = tuple(item.subgoal_id for item in revised.subgoals)
-        if old_ids != new_ids:
-            raise UniversalAgentOrchestratorError(
-                "可见状态证据推进不得增加、删除或重排子目标。"
-            )
-        old_by_id = {item.subgoal_id: item for item in graph.subgoals}
-        new_by_id = {item.subgoal_id: item for item in revised.subgoals}
-        if (
-            revised.goal != graph.goal
-            or revised.constraints != graph.constraints
-            or revised.risk_actions != graph.risk_actions
-        ):
-            raise UniversalAgentOrchestratorError(
-                "可见状态证据推进不得修改目标、约束或效果定义。"
-            )
-        _validate_visible_completion_condition_progress(graph, revised, observed)
-        for subgoal_id in old_ids:
-            old_item = old_by_id[subgoal_id]
-            new_item = new_by_id[subgoal_id]
-            if (
-                new_item.objective != old_item.objective
-                or new_item.depends_on != old_item.depends_on
-                or new_item.constraints != old_item.constraints
-                or new_item.completion_conditions != old_item.completion_conditions
-                or new_item.risk_action_ids != old_item.risk_action_ids
-                or new_item.external_impact != old_item.external_impact
-            ):
-                raise UniversalAgentOrchestratorError(
-                    "可见状态证据推进只能改变子目标状态和完成证据。"
-                )
-        newly_completed = tuple(
-            subgoal_id
-            for subgoal_id in old_ids
-            if old_by_id[subgoal_id].status != "completed"
-            and new_by_id[subgoal_id].status == "completed"
+        self._validate_visible_replan_shape(graph, revised, observed)
+        return self._validated_visible_prefix(
+            previous=graph,
+            revised=revised,
+            current=current,
+            trusted_observation=trusted_observation,
         )
-        completed_current = new_by_id[current.subgoal_id]
-        completed_before = {
-            item.subgoal_id for item in graph.subgoals if item.status == "completed"
-        }
-        accepted_prefix: list[str] = []
-        prefix_valid = bool(
-            newly_completed and newly_completed[0] == current.subgoal_id
-        )
-        unsupported_subgoal_id = ""
-        for subgoal_id in newly_completed:
-            old_item = old_by_id[subgoal_id]
-            new_item = new_by_id[subgoal_id]
-            dependencies_ready = all(
-                dependency in completed_before or dependency in accepted_prefix
-                for dependency in old_item.depends_on
-            )
-            state_fact = self._zero_action_visible_state_fact(
-                old_item,
-                trusted_observation,
-            )
-            presence_eligible = self._is_presence_only_read_only_subgoal(
-                old_item
-            )
-            state_eligible = bool(
-                state_fact
-                and state_fact in new_item.completion_evidence
-            )
-            if (
-                old_item.external_impact not in {"read_only", "navigation_only"}
-                or not (presence_eligible or state_eligible)
-                or not dependencies_ready
-                or not new_item.completion_evidence
-            ):
-                prefix_valid = False
-                unsupported_subgoal_id = subgoal_id
-                break
-            accepted_prefix.append(subgoal_id)
-        if not prefix_valid or not completed_current.completion_evidence:
-            narrowed = self._narrow_unproven_visible_successor(
-                previous=graph,
-                revised=revised,
-                current_subgoal_id=current.subgoal_id,
-                accepted_prefix=tuple(accepted_prefix),
-                unsupported_subgoal_id=unsupported_subgoal_id,
-            )
-            if narrowed is None:
-                raise UniversalAgentOrchestratorError(
-                    "可见状态证据只能完成从当前节点开始、依赖连续满足的安全定位前缀，"
-                    "且每个节点必须记录可见证据："
-                    f"current={current.subgoal_id}, newly_completed={newly_completed}, "
-                    f"current_evidence_count={len(completed_current.completion_evidence)}。"
-                )
-            revised = narrowed
-            new_by_id = {item.subgoal_id: item for item in revised.subgoals}
-            newly_completed = tuple(
-                subgoal_id
-                for subgoal_id in old_ids
-                if old_by_id[subgoal_id].status != "completed"
-                and new_by_id[subgoal_id].status == "completed"
-            )
-            completed_current = new_by_id[current.subgoal_id]
-            prefix_valid = True
-        for subgoal_id in old_ids:
-            old_status = old_by_id[subgoal_id].status
-            new_status = new_by_id[subgoal_id].status
-            if subgoal_id in newly_completed:
-                continue
-            if old_status == "completed" and new_status != "completed":
-                raise UniversalAgentOrchestratorError(
-                    "可见状态证据推进不得回退已完成子目标。"
-                )
-            if old_status == "pending" and new_status not in {"pending", "active"}:
-                raise UniversalAgentOrchestratorError(
-                    "可见状态证据推进不得越过后续子目标。"
-                )
-        newly_active = tuple(
-            subgoal_id
-            for subgoal_id in old_ids
-            if old_by_id[subgoal_id].status == "pending"
-            and new_by_id[subgoal_id].status == "active"
-        )
-        if len(newly_active) > 1:
-            raise UniversalAgentOrchestratorError(
-                "可见状态证据推进最多只能激活一个后续子目标。"
-            )
-        if revised.status != "completed" and (
-            len(newly_active) != 1
-            or revised.active_subgoal_id != newly_active[0]
-        ):
-            raise UniversalAgentOrchestratorError(
-                "可见状态证据推进后必须精确激活一个后续子目标。"
-            )
-        return revised
 
     @staticmethod
     def _narrow_unproven_visible_successor(

@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import re
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 import uuid
 
 from agent.domain.task_graph import (
@@ -956,6 +956,39 @@ class UniversalAgentOrchestrator:
     def _release_if_terminal(self, session: UniversalAgentSessionState) -> None:
         if session.status in self.device_registry.TERMINAL_STATUSES:
             self.device_registry.release(session.device_id, session.session_id)
+
+    @staticmethod
+    def _set_status(session: UniversalAgentSessionState, status: str, reason: str = "") -> None:
+        session.status = status
+        session.failed_reason = reason
+
+    @staticmethod
+    def _clear_action_decision(session: UniversalAgentSessionState, *, effects: bool = False) -> None:
+        session.qwen_decision = None
+        session.controller_decision = None
+        session.confirmation_authority = None
+        if effects:
+            session.effect_confirmation_authority = None
+            session.confirmed_effect_ids = ()
+
+    @classmethod
+    def _require_reobservation(cls, session: UniversalAgentSessionState) -> None:
+        cls._set_status(session, "needs_reobservation")
+        cls._clear_action_decision(session)
+
+    @staticmethod
+    def _blocked_decision(reason: str) -> SimpleNamespace:
+        return SimpleNamespace(proposal=GenericStepProposal(status="blocked", reason=reason))
+
+    @staticmethod
+    def _transition_decision(
+        status: str,
+        reason: str,
+        evidence: tuple[str, ...],
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            proposal=TaskGraphTransitionReport(status=status, reason=reason, completion_evidence=evidence)
+        )
 
     @staticmethod
     def _available_action_kinds(
@@ -2558,6 +2591,34 @@ class UniversalAgentOrchestrator:
             session.evidence_store.write_effect_policy_snapshot(revised),
         )
 
+    def _finish_visible_advancement(
+        self,
+        session: UniversalAgentSessionState,
+        revised: DynamicTaskGraph,
+        *,
+        evidence: str,
+        reason: str,
+        missing_reason: str,
+    ) -> SimpleNamespace:
+        if revised.status == "completed":
+            self._set_status(session, "succeeded")
+        else:
+            current = revised.active_subgoal()
+            if current is None:
+                self._set_status(session, "blocked", missing_reason)
+            elif _requires_effect_confirmation(revised, current):
+                self._set_status(session, "awaiting_effect_confirmation")
+                self._bind_effect_confirmation(session)
+            else:
+                self._require_reobservation(session)
+        self._clear_action_decision(session)
+        self._write_terminal_snapshot(session)
+        return self._transition_decision(
+            "completed" if revised.status == "completed" else "progressed",
+            reason,
+            (evidence,),
+        )
+
     @staticmethod
     def _selection_receipt_payload(
         decision: CanonicalSelectionReceipt,
@@ -3582,7 +3643,181 @@ class UniversalAgentOrchestrator:
         )
 
     @staticmethod
+    def _resolved_input_effect(resolved: Any) -> tuple[str, dict[str, Any] | None]:
+        effect = getattr(resolved, "expected_effect", None)
+        element = effect.get("element_state") if isinstance(effect, Mapping) else None
+        states = element.get("states") if isinstance(element, Mapping) else None
+        meaning = str(element.get("meaning") or "").strip() if isinstance(element, Mapping) else ""
+        return meaning, dict(states) if isinstance(states, Mapping) else None
+
+    @staticmethod
+    def _trusted_scene_element(scene: Any, element_id: str) -> Any | None:
+        try:
+            return scene.get_element(element_id, min_confidence=MIN_TARGET_CONFIDENCE)
+        except UISceneError:
+            return None
+
+    @staticmethod
+    def _matching_input_elements(
+        scene: Any,
+        *,
+        meaning: str,
+        states: Mapping[str, Any],
+        field_id: str = "",
+    ) -> tuple[Any, ...]:
+        return tuple(
+            element
+            for element in scene.elements
+            if element.role == "input"
+            and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+            and element.states.get("visible") is not False
+            and element.meaning == meaning
+            and all(element.states.get(key) == value for key, value in states.items())
+            and (not field_id or str(element.states.get("input_field_id") or "").strip() == field_id)
+        )
+
+    @classmethod
+    def _verified_input_focus_microstep(
+        cls,
+        *,
+        canonical: str,
+        proposal_action: Any,
+        resolved: Any,
+        focus_target: Any,
+        after_scene: Any,
+    ) -> bool:
+        raw_value = focus_target.states.get("value")
+        placeholder = focus_target.states.get("placeholder")
+        prior = (
+            ""
+            if isinstance(raw_value, str)
+            and isinstance(placeholder, str)
+            and raw_value == placeholder
+            and focus_target.states.get("focused") is not True
+            else raw_value
+        )
+        meaning, expected_states = cls._resolved_input_effect(resolved)
+        matches = cls._matching_input_elements(
+            after_scene,
+            meaning=focus_target.meaning,
+            states={"focused": True, "value": prior},
+            field_id=str(focus_target.states.get("input_field_id") or "").strip(),
+        )
+        return bool(
+            str(getattr(proposal_action, "action", "")) == "tap_semantic"
+            and isinstance(prior, str)
+            and canonical.startswith(prior)
+            and prior != canonical
+            and meaning == focus_target.meaning
+            and expected_states == {"focused": True}
+            and len(matches) == 1
+        )
+
+    @classmethod
+    def _verified_direct_input_states(
+        cls,
+        *,
+        step: Any,
+        expected_states: dict[str, Any],
+        expected_meaning: str,
+        after_scene: Any,
+    ) -> tuple[dict[str, Any], bool] | None:
+        exact_states = (
+            {
+                "value": step.current_text,
+                "ime_preedit_text": step.pinyin,
+                "ime_exact_candidate_text": step.segment,
+            }
+            if step.kind == "chinese_pinyin"
+            else {"value": step.expected_value}
+        )
+        if expected_states != exact_states:
+            return None
+        if step.kind != "direct_latin":
+            return exact_states, False
+        inputs = cls._matching_input_elements(
+            after_scene,
+            meaning=expected_meaning,
+            states={
+                "focused": True,
+                "value": step.current_text,
+                "ime_preedit_text": step.segment,
+                "ime_exact_candidate_text": step.segment,
+            },
+        )
+        candidates = tuple(
+            element
+            for element in after_scene.elements
+            if len(inputs) == 1
+            and element.meaning == "ime_exact_candidate"
+            and element.label == step.segment
+            and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+            and element.states.get("goal_relevant") is True
+            and element.states.get("fully_visible") is True
+            and element.states.get("ime_candidate") is True
+            and element.states.get("input_element_id") == inputs[0].element_id
+            and element.states.get("prior_input_value") == step.current_text
+            and element.states.get("expected_input_value") == step.expected_value
+            and element.states.get("pinyin") == step.segment
+        )
+        observed = len(inputs) == len(candidates) == 1
+        return (
+            {
+                "value": step.current_text,
+                "ime_preedit_text": step.segment,
+                "ime_exact_candidate_text": step.segment,
+            }
+            if observed
+            else exact_states,
+            observed,
+        )
+
+    @staticmethod
+    def _verified_auxiliary_input_states(
+        auxiliary: Any,
+        step: Any,
+        prior: str,
+        expected_states: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        meaning, states = auxiliary.meaning, auxiliary.states
+        expected: dict[str, Any] | None = None
+        valid = True
+        if meaning in {"input_exact_literal_key", "input_exact_enter_key"}:
+            valid = (
+                step.kind == "literal_key"
+                and states.get("key_value") == step.segment
+                and states.get("expected_input_value") == step.expected_value
+            )
+            expected = {"value": step.expected_value}
+        elif meaning == "ime_exact_candidate":
+            pinyin = step.pinyin if step.kind == "chinese_pinyin" else step.segment
+            valid = (
+                step.kind in {"chinese_pinyin", "direct_latin"}
+                and auxiliary.label == step.segment
+                and states.get("pinyin") == pinyin
+                and states.get("expected_input_value") == step.expected_value
+            )
+            expected = {"value": step.expected_value}
+        elif meaning == "switch_keyboard_layout":
+            target = states.get("target_layout")
+            valid = keyboard_layout_switch_advances(
+                current_layout=states.get("current_layout"),
+                target_layout=target,
+                desired_layout=preferred_keyboard_layout(step.segment[0]),
+            )
+            expected = {"value": prior, "keyboard_layout": target}
+        elif meaning == "switch_keyboard_case":
+            valid = bool(step.required_case_mode)
+            expected = {"value": prior, "keyboard_case_mode": step.required_case_mode}
+        elif meaning == "switch_keyboard_input_mode":
+            mode = required_keyboard_input_mode_for_step(step)
+            valid = mode is not None and states.get("target_mode") == mode
+            expected = {"value": prior, "keyboard_input_mode": mode}
+        return expected if valid and expected_states == expected else None
+
+    @classmethod
     def _verified_input_transaction_microstep(
+        cls,
         *,
         graph: DynamicTaskGraph,
         previous_decision: Any,
@@ -3591,23 +3826,10 @@ class UniversalAgentOrchestrator:
         new_observation: Any,
         allow_terminal: bool = False,
     ) -> bool:
-        """Recognize one controller-verified step inside canonical text input.
-
-        DeepSeek owns the high-level task graph, but it must not reinterpret an
-        unfinished deterministic text transaction after every locally audited
-        fragment or keyboard-mode switch.  This predicate grants no action
-        authority: it runs only after the one-shot action was consumed and the
-        adapter verified a fresh after-scene.  The next action still requires a
-        new Qwen decision, policy decision and confirmation scope.
-        """
-
         current = graph.active_subgoal()
         canonical = graph.goal.entities.get("input_text")
         if not isinstance(canonical, str) or not canonical:
-            canonical = ObservationBridge._active_input_transaction_text(
-                graph,
-                current,
-            )
+            canonical = ObservationBridge._active_input_transaction_text(graph, current)
         resolved = getattr(result, "resolved_action", None)
         before_scene = getattr(result, "before_scene", None)
         after_scene = getattr(result, "after_scene", None)
@@ -3628,138 +3850,54 @@ class UniversalAgentOrchestrator:
             != str(getattr(after_scene, "fingerprint", ""))
         ):
             return False
-
-        proposal_action = getattr(
-            getattr(previous_decision, "proposal", None),
-            "action",
-            None,
-        )
+        proposal_action = getattr(getattr(previous_decision, "proposal", None), "action", None)
         if proposal_action is None:
             return False
 
-        resolved_kind = str(getattr(resolved, "kind", ""))
-        if resolved_kind == "tap_semantic":
-            target_id = str(
-                getattr(resolved, "target_element_id", "") or ""
-            ).strip()
-            try:
-                focus_target = before_scene.get_element(
-                    target_id,
-                    min_confidence=MIN_TARGET_CONFIDENCE,
-                )
-            except UISceneError:
-                focus_target = None
+        kind = str(getattr(resolved, "kind", ""))
+        if kind == "tap_semantic":
+            target_id = str(getattr(resolved, "target_element_id", "") or "").strip()
+            focus_target = cls._trusted_scene_element(before_scene, target_id)
             if focus_target is not None and focus_target.role == "input":
-                expected_effect = getattr(resolved, "expected_effect", None)
-                expected_element = (
-                    expected_effect.get("element_state")
-                    if isinstance(expected_effect, Mapping)
-                    else None
-                )
-                expected_states = (
-                    expected_element.get("states")
-                    if isinstance(expected_element, Mapping)
-                    else None
-                )
-                raw_value = focus_target.states.get("value")
-                placeholder = focus_target.states.get("placeholder")
-                prior_value = (
-                    ""
-                    if isinstance(raw_value, str)
-                    and isinstance(placeholder, str)
-                    and raw_value == placeholder
-                    and focus_target.states.get("focused") is not True
-                    else raw_value
-                )
-                field_id = str(
-                    focus_target.states.get("input_field_id") or ""
-                ).strip()
-                after_inputs = tuple(
-                    element
-                    for element in after_scene.elements
-                    if element.role == "input"
-                    and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-                    and element.states.get("visible") is not False
-                    and element.states.get("focused") is True
-                    and element.meaning == focus_target.meaning
-                    and element.states.get("value") == prior_value
-                    and (
-                        not field_id
-                        or str(element.states.get("input_field_id") or "").strip()
-                        == field_id
-                    )
-                )
-                return bool(
-                    str(getattr(proposal_action, "action", "")) == "tap_semantic"
-                    and isinstance(prior_value, str)
-                    and canonical.startswith(prior_value)
-                    and prior_value != canonical
-                    and isinstance(expected_element, Mapping)
-                    and str(expected_element.get("meaning") or "").strip()
-                    == focus_target.meaning
-                    and expected_states == {"focused": True}
-                    and len(after_inputs) == 1
+                return cls._verified_input_focus_microstep(
+                    canonical=canonical,
+                    proposal_action=proposal_action,
+                    resolved=resolved,
+                    focus_target=focus_target,
+                    after_scene=after_scene,
                 )
 
-        auxiliary_meanings = {
-            "ime_exact_candidate",
-            "input_exact_literal_key",
-            "input_exact_enter_key",
-            "switch_keyboard_layout",
-            "switch_keyboard_case",
-            "switch_keyboard_input_mode",
-        }
-        before_input_id = ""
         auxiliary = None
-        if resolved_kind == "input_verified_text":
-            before_input_id = str(
-                getattr(resolved, "target_element_id", "") or ""
-            ).strip()
+        if kind == "input_verified_text":
+            before_input_id = str(getattr(resolved, "target_element_id", "") or "").strip()
             if (
-                str(getattr(proposal_action, "action", ""))
-                != "input_verified_text"
+                str(getattr(proposal_action, "action", "")) != kind
                 or str(getattr(resolved, "text", "")) != canonical
             ):
                 return False
-        elif resolved_kind in {"tap_semantic", "press_enter"}:
-            target_id = str(
-                getattr(resolved, "target_element_id", "") or ""
-            ).strip()
-            try:
-                auxiliary = before_scene.get_element(
-                    target_id,
-                    min_confidence=MIN_TARGET_CONFIDENCE,
-                )
-            except UISceneError:
-                return False
+        elif kind in {"tap_semantic", "press_enter"}:
+            target_id = str(getattr(resolved, "target_element_id", "") or "").strip()
+            auxiliary = cls._trusted_scene_element(before_scene, target_id)
             if (
-                str(getattr(proposal_action, "action", "")) != resolved_kind
-                or auxiliary.meaning not in auxiliary_meanings
+                auxiliary is None
+                or str(getattr(proposal_action, "action", "")) != kind
+                or auxiliary.meaning
+                not in {
+                    "ime_exact_candidate",
+                    "input_exact_literal_key",
+                    "input_exact_enter_key",
+                    "switch_keyboard_layout",
+                    "switch_keyboard_case",
+                    "switch_keyboard_input_mode",
+                }
                 or auxiliary.states.get("fully_visible") is not True
             ):
                 return False
-            before_input_id = str(
-                auxiliary.states.get("input_element_id") or ""
-            ).strip()
+            before_input_id = str(auxiliary.states.get("input_element_id") or "").strip()
         else:
             return False
 
-        expected_effect = getattr(resolved, "expected_effect", None)
-        expected_element = (
-            expected_effect.get("element_state")
-            if isinstance(expected_effect, Mapping)
-            else None
-        )
-        expected_states = (
-            expected_element.get("states")
-            if isinstance(expected_element, Mapping)
-            else None
-        )
-        expected_meaning = (
-            str(expected_element.get("meaning") or "").strip()
-            if isinstance(expected_element, Mapping)
-            else ""
-        )
+        expected_meaning, expected_states = cls._resolved_input_effect(resolved)
         if (
             not before_input_id
             or not expected_meaning
@@ -3767,200 +3905,59 @@ class UniversalAgentOrchestrator:
             or not isinstance(expected_states.get("value"), str)
         ):
             return False
-        try:
-            before_input = before_scene.get_element(
-                before_input_id,
-                min_confidence=MIN_TARGET_CONFIDENCE,
-            )
-        except UISceneError:
-            return False
-        prior_value = before_input.states.get("value")
+        before_input = cls._trusted_scene_element(before_scene, before_input_id)
+        prior = before_input.states.get("value") if before_input is not None else None
         if (
-            before_input.role != "input"
+            before_input is None
+            or before_input.role != "input"
             or before_input.states.get("focused") is not True
-            or not isinstance(prior_value, str)
-            or not canonical.startswith(prior_value)
+            or not isinstance(prior, str)
+            or not canonical.startswith(prior)
         ):
             return False
         try:
-            input_step = plan_next_verified_input(canonical, prior_value)
+            step = plan_next_verified_input(canonical, prior)
         except (ValueError, VerifiedTextTransactionError):
             return False
-        if input_step is None:
+        if step is None or not canonical.startswith(expected_states["value"]):
             return False
 
-        expected_value = expected_states["value"]
-        if not canonical.startswith(expected_value):
-            return False
         if auxiliary is None:
             if (
-                getattr(resolved, "prior_input_value", None) != prior_value
-                or getattr(resolved, "input_fragment", None)
-                != input_step.segment
-                or getattr(resolved, "input_method", None) != input_step.kind
-                or getattr(resolved, "expected_input_value", None)
-                != input_step.expected_value
+                getattr(resolved, "prior_input_value", None) != prior
+                or getattr(resolved, "input_fragment", None) != step.segment
+                or getattr(resolved, "input_method", None) != step.kind
+                or getattr(resolved, "expected_input_value", None) != step.expected_value
             ):
                 return False
-            direct_preedit_inputs = tuple(
-                element
-                for element in after_scene.elements
-                if input_step.kind == "direct_latin"
-                and element.role == "input"
-                and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-                and element.states.get("visible") is not False
-                and element.states.get("focused") is True
-                and element.meaning == expected_meaning
-                and element.states.get("value") == input_step.current_text
-                and element.states.get("ime_preedit_text") == input_step.segment
-                and element.states.get("ime_exact_candidate_text")
-                == input_step.segment
+            direct = cls._verified_direct_input_states(
+                step=step,
+                expected_states=expected_states,
+                expected_meaning=expected_meaning,
+                after_scene=after_scene,
             )
-            direct_preedit_candidates = tuple(
-                element
-                for element in after_scene.elements
-                if len(direct_preedit_inputs) == 1
-                and element.meaning == "ime_exact_candidate"
-                and element.label == input_step.segment
-                and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-                and element.states.get("goal_relevant") is True
-                and element.states.get("fully_visible") is True
-                and element.states.get("ime_candidate") is True
-                and element.states.get("input_element_id")
-                == direct_preedit_inputs[0].element_id
-                and element.states.get("prior_input_value")
-                == input_step.current_text
-                and element.states.get("expected_input_value")
-                == input_step.expected_value
-                and element.states.get("pinyin") == input_step.segment
-            )
-            direct_preedit_observed = bool(
-                len(direct_preedit_inputs) == 1
-                and len(direct_preedit_candidates) == 1
-            )
-            exact_expected_states = (
-                {
-                    "value": input_step.current_text,
-                    "ime_preedit_text": input_step.pinyin,
-                    "ime_exact_candidate_text": input_step.segment,
-                }
-                if input_step.kind == "chinese_pinyin"
-                else {"value": input_step.expected_value}
-            )
-            if expected_states != exact_expected_states:
+            if direct is None:
                 return False
-            after_match_states = (
-                {
-                    "value": input_step.current_text,
-                    "ime_preedit_text": input_step.segment,
-                    "ime_exact_candidate_text": input_step.segment,
-                }
-                if direct_preedit_observed
-                else exact_expected_states
-            )
+            after_states, provisional_preedit = direct
         else:
-            direct_preedit_observed = False
-            after_match_states = expected_states
-            states = auxiliary.states
-            if states.get("prior_input_value") != prior_value:
+            after_states = cls._verified_auxiliary_input_states(auxiliary, step, prior, expected_states)
+            provisional_preedit = False
+            if after_states is None:
                 return False
-            if auxiliary.meaning in {
-                "input_exact_literal_key",
-                "input_exact_enter_key",
-            }:
-                if (
-                    input_step.kind != "literal_key"
-                    or states.get("key_value") != input_step.segment
-                    or states.get("expected_input_value")
-                    != input_step.expected_value
-                    or expected_states != {"value": input_step.expected_value}
-                ):
-                    return False
-            elif auxiliary.meaning == "ime_exact_candidate":
-                if (
-                    input_step.kind not in {"chinese_pinyin", "direct_latin"}
-                    or auxiliary.label != input_step.segment
-                    or states.get("pinyin")
-                    != (
-                        input_step.pinyin
-                        if input_step.kind == "chinese_pinyin"
-                        else input_step.segment
-                    )
-                    or states.get("expected_input_value")
-                    != input_step.expected_value
-                    or expected_states != {"value": input_step.expected_value}
-                ):
-                    return False
-            elif auxiliary.meaning == "switch_keyboard_layout":
-                desired_layout = preferred_keyboard_layout(
-                    input_step.segment[0]
-                )
-                current_layout = states.get("current_layout")
-                target_layout = states.get("target_layout")
-                if (
-                    not keyboard_layout_switch_advances(
-                        current_layout=current_layout,
-                        target_layout=target_layout,
-                        desired_layout=desired_layout,
-                    )
-                    or expected_states
-                    != {
-                        "value": prior_value,
-                        "keyboard_layout": target_layout,
-                    }
-                ):
-                    return False
-            elif auxiliary.meaning == "switch_keyboard_case":
-                if (
-                    not input_step.required_case_mode
-                    or expected_states
-                    != {
-                        "value": prior_value,
-                        "keyboard_case_mode": input_step.required_case_mode,
-                    }
-                ):
-                    return False
-            elif auxiliary.meaning == "switch_keyboard_input_mode":
-                required_input_mode = required_keyboard_input_mode_for_step(
-                    input_step
-                )
-                if (
-                    required_input_mode is None
-                    or states.get("target_mode") != required_input_mode
-                    or expected_states
-                    != {
-                        "value": prior_value,
-                        "keyboard_input_mode": required_input_mode,
-                    }
-                ):
-                    return False
 
-        after_inputs = tuple(
-            element
-            for element in after_scene.elements
-            if element.role == "input"
-            and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-            and element.states.get("visible") is not False
-            and element.states.get("focused") is True
-            and element.meaning == expected_meaning
-            and all(
-                element.states.get(key) == value
-                for key, value in after_match_states.items()
-            )
+        after_inputs = cls._matching_input_elements(
+            after_scene,
+            meaning=expected_meaning,
+            states={"focused": True, **after_states},
         )
-        # Only an unfinished verified prefix remains inside the deterministic
-        # input transaction.  Once the fresh after-scene proves the canonical
-        # value itself, this is a terminal input step: return to the normal
-        # typed receipt / DeepSeek completion path instead of asking Qwen to
-        # enumerate the same text again (for example, input value and a stale
-        # IME candidate carrying an identical literal).
         if len(after_inputs) != 1:
             return False
-        if direct_preedit_observed:
+        if provisional_preedit:
             return True
+        expected_value = expected_states["value"]
         if expected_value == canonical:
             return bool(allow_terminal)
-        if UniversalAgentOrchestrator._input_step_reaches_formal_successor(
+        if cls._input_step_reaches_formal_successor(
             graph=graph,
             current_subgoal_id=current.subgoal_id,
             canonical=canonical,
@@ -4390,6 +4387,9 @@ class UniversalAgentOrchestrator:
                         start=1,
                     )
                 )
+        transition_kind = "wait_observation" if wait_transition else "physical_action"
+        receipt_payload = receipt.to_dict() if receipt is not None else None
+        controller_evidence = receipt.controller_transition_evidence if receipt is not None else ()
         verification = {
             "matched": matched,
             "action_outcome": action_outcome,
@@ -4400,15 +4400,9 @@ class UniversalAgentOrchestrator:
             "visible_evidence": [result.after_scene.summary],
             "blocked_reasons": list(verification_errors),
             "after_frame_paths": list(result.after_frame_paths),
-            "controller_transition_evidence": list(
-                receipt.controller_transition_evidence if receipt is not None else ()
-            ),
-            "verified_action_transition": (
-                receipt.to_dict() if receipt is not None else None
-            ),
-            "transition_kind": (
-                "wait_observation" if wait_transition else "physical_action"
-            ),
+            "controller_transition_evidence": list(controller_evidence),
+            "verified_action_transition": receipt_payload,
+            "transition_kind": transition_kind,
         }
         self._remember(
             session,
@@ -4428,10 +4422,8 @@ class UniversalAgentOrchestrator:
         previous_signature = _subgoal_progress_signature(previous_current)
         transition_record = {
             "protocol_version": POST_ACTION_TRANSITION_PROTOCOL_VERSION,
-            "receipt": receipt.to_dict() if receipt is not None else None,
-            "transition_kind": (
-                "wait_observation" if wait_transition else "physical_action"
-            ),
+            "receipt": receipt_payload,
+            "transition_kind": transition_kind,
             "prior_subgoal_signature": previous_signature,
             "prior_action_equivalence_digest": _action_equivalence_digest(
                 previous_decision.proposal.action
@@ -4455,14 +4447,21 @@ class UniversalAgentOrchestrator:
                 ),
             )
 
+        def finish_transition(
+            disposition: str,
+            *,
+            status: str | None = None,
+            reason: str | None = None,
+        ) -> None:
+            transition_record["disposition"] = disposition
+            if status is not None:
+                self._set_status(session, status, reason or "")
+            if reason:
+                transition_record["diagnostic"] = reason
+            persist_transition()
+
         persist_transition()
-        # The consumed decision and every authority derived from the old frame
-        # become unusable before any model replan attempt.
-        session.qwen_decision = None
-        session.controller_decision = None
-        session.confirmation_authority = None
-        session.effect_confirmation_authority = None
-        session.confirmed_effect_ids = ()
+        self._clear_action_decision(session, effects=True)
         try:
             if target_app_home_reset_microstep:
                 revised = previous_graph
@@ -4534,17 +4533,14 @@ class UniversalAgentOrchestrator:
                 )
             session.verified_app_surface_lineage = next_lineage
         except Exception as exc:
-            session.status = "blocked"
-            session.failed_reason = f"DeepSeek 重规划失败：{exc}"
+            reason = f"DeepSeek 重规划失败：{exc}"
             self._record_deepseek_failure(
                 session,
                 exc,
                 stage="post_action_replan",
                 previous_graph=previous_graph,
             )
-            transition_record["disposition"] = "blocked_replan_failure"
-            transition_record["diagnostic"] = session.failed_reason
-            persist_transition()
+            finish_transition("blocked_replan_failure", status="blocked", reason=reason)
             return
 
         session.task_graph = revised
@@ -4569,9 +4565,7 @@ class UniversalAgentOrchestrator:
                 session.evidence_store.write_effect_policy_snapshot(revised),
             )
         if revised.status == "completed":
-            session.status = "succeeded"
-            transition_record["disposition"] = "task_completed"
-            persist_transition()
+            finish_transition("task_completed", status="succeeded")
             return
         if (
             matched
@@ -4587,21 +4581,14 @@ class UniversalAgentOrchestrator:
                     consumed_revision=revised.revision,
                 )
             except Exception as exc:
-                session.status = "blocked"
-                session.failed_reason = f"外部效果只读复核绑定失败：{exc}"
-                transition_record["disposition"] = (
-                    "blocked_effect_verification_binding"
+                finish_transition(
+                    "blocked_effect_verification_binding",
+                    status="blocked",
+                    reason=f"外部效果只读复核绑定失败：{exc}",
                 )
-                transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
                 return
-            session.status = "needs_effect_verification"
-            session.failed_reason = ""
-            session.qwen_decision = None
-            session.controller_decision = None
-            session.confirmation_authority = None
-            session.effect_confirmation_authority = None
-            session.confirmed_effect_ids = ()
+            self._set_status(session, "needs_effect_verification")
+            self._clear_action_decision(session, effects=True)
             transition_record["disposition"] = (
                 "pending_read_only_effect_result_verification"
             )
@@ -4633,9 +4620,10 @@ class UniversalAgentOrchestrator:
                     if verified_current is not None
                     else None
                 )
-            if session.failed_reason:
-                transition_record["diagnostic"] = session.failed_reason
-            persist_transition()
+            finish_transition(
+                str(transition_record["disposition"]),
+                reason=session.failed_reason or None,
+            )
             return
         if controller_refs:
             prior_in_revised = next(
@@ -4647,51 +4635,31 @@ class UniversalAgentOrchestrator:
                 None,
             )
             if prior_in_revised is None or prior_in_revised.status != "completed":
-                session.status = "blocked"
-                session.failed_reason = (
+                reason = (
                     "本地一次性 controller_transition 完成证据已满足，"
                     "但重规划未完成其绑定的 navigation_only 子目标；"
                     "禁止继续产生动作或第二确认。"
                 )
-                transition_record["disposition"] = (
-                    "blocked_unconsumed_controller_completion"
-                )
-                transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
+                finish_transition("blocked_unconsumed_controller_completion", status="blocked", reason=reason)
                 return
         current = revised.active_subgoal()
         impact = current.external_impact if current is not None else "unknown"
         if current is None:
-            session.status = "blocked"
-            session.failed_reason = "重规划后的任务图没有活动子目标。"
-            transition_record["disposition"] = "blocked_missing_active_subgoal"
-            persist_transition()
+            self._set_status(session, "blocked", "重规划后的任务图没有活动子目标。")
+            finish_transition("blocked_missing_active_subgoal")
             return
         current_focus_changed = (
             _subgoal_progress_signature(current) != previous_signature
         )
         if _requires_effect_confirmation(revised, current):
-            session.status = "awaiting_effect_confirmation"
-            session.failed_reason = ""
-            transition_record["disposition"] = "advanced_to_effect_confirmation"
+            self._set_status(session, "awaiting_effect_confirmation")
             self._bind_effect_confirmation(session)
-            persist_transition()
+            finish_transition("advanced_to_effect_confirmation")
             return
         if current_focus_changed:
-            # The post-action pixels remain authoritative for verifying the
-            # action that just ran, but their structured scene was conditioned
-            # on the previous active subgoal.  Every newly activated or
-            # rewritten subgoal starts with its own observation/model step.
-            session.status = "needs_reobservation"
-            session.failed_reason = ""
-            session.qwen_decision = None
-            session.controller_decision = None
-            session.confirmation_authority = None
-            transition_record["disposition"] = (
-                "advanced_to_current_subgoal_reobservation"
-            )
+            self._require_reobservation(session)
             transition_record["reobservation_subgoal_id"] = current.subgoal_id
-            persist_transition()
+            finish_transition("advanced_to_current_subgoal_reobservation")
             return
         if (
             not matched
@@ -4700,20 +4668,9 @@ class UniversalAgentOrchestrator:
                 action_kind=previous_decision.proposal.action.action,
             )
         ):
-            # A navigation mismatch is verified by this action-result scene,
-            # but its corrective candidate must come from one independent
-            # current-subgoal observation.  Do not mint a provisional choice
-            # here only for the autonomous loop to discard it immediately.
-            session.status = "needs_reobservation"
-            session.failed_reason = ""
-            session.qwen_decision = None
-            session.controller_decision = None
-            session.confirmation_authority = None
-            transition_record["disposition"] = (
-                "navigation_mismatch_needs_fresh_observation"
-            )
+            self._require_reobservation(session)
             transition_record["reobservation_subgoal_id"] = current.subgoal_id
-            persist_transition()
+            finish_transition("navigation_mismatch_needs_fresh_observation")
             return
         if impact == "read_only":
             try:
@@ -4745,17 +4702,14 @@ class UniversalAgentOrchestrator:
                     session.evidence_store.write_effect_policy_snapshot(reviewed),
                 )
             except Exception as exc:
-                session.status = "blocked"
-                session.failed_reason = f"只读完成复核失败：{exc}"
-                transition_record["disposition"] = "blocked_read_only_review"
-                transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
+                finish_transition(
+                    "blocked_read_only_review",
+                    status="blocked",
+                    reason=f"只读完成复核失败：{exc}",
+                )
                 return
             if reviewed.status == "completed":
-                session.status = "succeeded"
-                session.failed_reason = ""
-                transition_record["disposition"] = "task_completed_after_read_only_review"
-                persist_transition()
+                finish_transition("task_completed_after_read_only_review", status="succeeded")
                 return
             reviewed_current = reviewed.active_subgoal()
             reviewed_impact = (
@@ -4764,47 +4718,33 @@ class UniversalAgentOrchestrator:
                 else "unknown"
             )
             if reviewed_current is None:
-                session.status = "blocked"
-                session.failed_reason = "只读复核后的任务图没有活动子目标。"
-                transition_record["disposition"] = "blocked_read_only_no_active"
-                transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
+                finish_transition(
+                    "blocked_read_only_no_active",
+                    status="blocked",
+                    reason="只读复核后的任务图没有活动子目标。",
+                )
                 return
             if _requires_effect_confirmation(reviewed, reviewed_current):
-                session.status = "awaiting_effect_confirmation"
-                session.failed_reason = ""
+                self._set_status(session, "awaiting_effect_confirmation")
                 self._bind_effect_confirmation(session)
-                transition_record["disposition"] = (
-                    "advanced_to_effect_confirmation_after_read_only"
-                )
-                persist_transition()
+                finish_transition("advanced_to_effect_confirmation_after_read_only")
                 return
             if (
                 _subgoal_progress_signature(reviewed_current)
                 != _subgoal_progress_signature(current)
             ):
-                session.status = "needs_reobservation"
-                session.failed_reason = ""
-                session.qwen_decision = None
-                session.controller_decision = None
-                session.confirmation_authority = None
-                transition_record["disposition"] = (
-                    "read_only_advanced_to_current_subgoal_reobservation"
-                )
+                self._require_reobservation(session)
                 transition_record["reobservation_subgoal_id"] = (
                     reviewed_current.subgoal_id
                 )
-                persist_transition()
+                finish_transition("read_only_advanced_to_current_subgoal_reobservation")
                 return
             if reviewed_impact == "read_only":
-                session.status = "blocked"
-                session.failed_reason = (
+                reason = (
                     "当前可信画面没有让 DeepSeek 完成 read_only 子目标；"
                     "禁止为只读验证请求物理动作。"
                 )
-                transition_record["disposition"] = "blocked_read_only_incomplete"
-                transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
+                finish_transition("blocked_read_only_incomplete", status="blocked", reason=reason)
                 return
             revised = reviewed
             transition_record["revised_revision"] = revised.revision
@@ -4857,14 +4797,15 @@ class UniversalAgentOrchestrator:
                 transition_record["disposition"] = "blocked_qwen_no_action"
             elif transition_record.get("disposition") != "blocked_equivalent_repeat":
                 transition_record["disposition"] = "blocked_canonical_selection"
-            transition_record["diagnostic"] = session.failed_reason
-            persist_transition()
+            finish_transition(
+                str(transition_record["disposition"]),
+                reason=session.failed_reason,
+            )
             return
-        transition_record["disposition"] = "advanced_to_new_confirmation"
         transition_record["next_confirmation_scope"] = (
             session.confirmation_authority.scope()
         )
-        persist_transition()
+        finish_transition("advanced_to_new_confirmation")
 
     def _complete_pending_effect_verification(
         self,
@@ -5060,7 +5001,7 @@ class UniversalAgentOrchestrator:
         session.confirmation_authority = None
         before_actions = session.physical_actions
         try:
-            session.status = "observing"
+            self._set_status(session, "observing")
             observation_id = f"obs_{uuid.uuid4().hex}"
             scene, frames, frame_paths = session.adapter.capture_scene(
                 goal,
@@ -5081,9 +5022,8 @@ class UniversalAgentOrchestrator:
             except EvidenceStoreError:
                 raise
             except Exception as exc:
-                session.status = "blocked"
-                session.failed_reason = f"重新观察证据不足：{exc}"
-                session.qwen_decision = None
+                self._set_status(session, "blocked", f"重新观察证据不足：{exc}")
+                self._clear_action_decision(session)
                 session.controller_decision = CanonicalSelectionReceipt(
                     allowed=False,
                     reason=session.failed_reason,
@@ -5092,14 +5032,8 @@ class UniversalAgentOrchestrator:
                     raise UniversalAgentOrchestratorError(
                         "重新观察证据失败路径错误地改变了物理动作计数。"
                     )
-                blocked_decision = SimpleNamespace(
-                    proposal=GenericStepProposal(
-                        status="blocked",
-                        reason=session.failed_reason,
-                    )
-                )
                 self._write_terminal_snapshot(session)
-                return blocked_decision
+                return self._blocked_decision(session.failed_reason)
             lineage = session.verified_app_surface_lineage
             if lineage is not None and (
                 lineage.physical_actions != session.physical_actions
@@ -5139,44 +5073,13 @@ class UniversalAgentOrchestrator:
                 )
                 if visible_advances:
                     graph = visible_revised
-                    if visible_revised.status == "completed":
-                        session.status = "succeeded"
-                        session.failed_reason = ""
-                    else:
-                        next_subgoal = visible_revised.active_subgoal()
-                        if next_subgoal is None:
-                            session.status = "blocked"
-                            session.failed_reason = (
-                                "可见状态证据推进后没有活动子目标。"
-                            )
-                        elif _requires_effect_confirmation(
-                            visible_revised,
-                            next_subgoal,
-                        ):
-                            session.status = "awaiting_effect_confirmation"
-                            session.failed_reason = ""
-                            self._bind_effect_confirmation(session)
-                        else:
-                            session.status = "needs_reobservation"
-                            session.failed_reason = ""
-                    decision = SimpleNamespace(
-                        proposal=TaskGraphTransitionReport(
-                            status=(
-                                "completed"
-                                if visible_revised.status == "completed"
-                                else "progressed"
-                            ),
-                            reason=(
-                                "当前可见状态已由 DeepSeek 任务图和本地"
-                                "完成条件共同复核。"
-                            ),
-                            completion_evidence=(scene.summary,),
-                        )
+                    return self._finish_visible_advancement(
+                        session,
+                        visible_revised,
+                        evidence=scene.summary,
+                        reason="当前可见状态已由 DeepSeek 任务图和本地完成条件共同复核。",
+                        missing_reason="可见状态证据推进后没有活动子目标。",
                     )
-                    session.qwen_decision = None
-                    session.controller_decision = None
-                    self._write_terminal_snapshot(session)
-                    return decision
 
             if current is not None and current.external_impact == "read_only":
                 text_revised = self._try_advance_visible_text_read_subgoal(
@@ -5186,35 +5089,13 @@ class UniversalAgentOrchestrator:
                 )
                 if text_revised is not None:
                     self._store_revised_graph(session, text_revised)
-                    if text_revised.status == "completed":
-                        session.status = "succeeded"
-                    else:
-                        next_subgoal = text_revised.active_subgoal()
-                        if next_subgoal is None:
-                            session.status = "blocked"
-                            session.failed_reason = "只读文字结果推进后没有活动子目标。"
-                        elif _requires_effect_confirmation(text_revised, next_subgoal):
-                            session.status = "awaiting_effect_confirmation"
-                            session.failed_reason = ""
-                            self._bind_effect_confirmation(session)
-                        else:
-                            session.status = "needs_reobservation"
-                            session.failed_reason = ""
-                    decision = SimpleNamespace(
-                        proposal=TaskGraphTransitionReport(
-                            status=(
-                                "completed"
-                                if text_revised.status == "completed"
-                                else "progressed"
-                            ),
-                            reason="唯一可信可见文字已由 DeepSeek 复核。",
-                            completion_evidence=(scene.summary,),
-                        )
+                    return self._finish_visible_advancement(
+                        session,
+                        text_revised,
+                        evidence=scene.summary,
+                        reason="唯一可信可见文字已由 DeepSeek 复核。",
+                        missing_reason="只读文字结果推进后没有活动子目标。",
                     )
-                    session.qwen_decision = None
-                    session.controller_decision = None
-                    self._write_terminal_snapshot(session)
-                    return decision
 
             if (
                 prior_observation is not None
@@ -5247,49 +5128,28 @@ class UniversalAgentOrchestrator:
                         trusted_observation=observation,
                     )
                 except Exception as exc:
-                    session.status = "blocked"
-                    session.failed_reason = f"页面变化重规划失败：{exc}"
-                    session.qwen_decision = None
+                    self._set_status(session, "blocked", f"页面变化重规划失败：{exc}")
+                    self._clear_action_decision(session, effects=True)
                     session.controller_decision = CanonicalSelectionReceipt(
                         allowed=False,
                         reason=session.failed_reason,
                     )
-                    session.confirmed_effect_ids = ()
-                    session.effect_confirmation_authority = None
                     if session.physical_actions != before_actions:
                         raise UniversalAgentOrchestratorError(
                             "页面变化重规划失败路径错误地改变了物理动作计数。"
                         )
-                    blocked_decision = SimpleNamespace(
-                        proposal=GenericStepProposal(
-                            status="blocked",
-                            reason=session.failed_reason,
-                        )
-                    )
                     self._write_terminal_snapshot(session)
-                    return blocked_decision
-                session.task_graph = revised
-                session.goal_draft = self.bridge.goal_draft(revised)
-                session.qwen_decision = None
-                session.controller_decision = None
-                session.confirmed_effect_ids = ()
-                session.effect_confirmation_authority = None
+                    return self._blocked_decision(session.failed_reason)
+                self._store_revised_graph(session, revised)
+                self._clear_action_decision(session, effects=True)
                 graph = revised
                 goal = session.goal_draft
-                self._remember(
-                    session,
-                    session.evidence_store.write_task_graph(revised),
-                    session.evidence_store.write_effect_policy_snapshot(revised),
-                )
                 if revised.status == "completed":
-                    session.status = "succeeded"
-                    session.failed_reason = ""
-                    terminal_decision = SimpleNamespace(
-                        proposal=TaskGraphTransitionReport(
-                            status="completed",
-                            reason="DeepSeek 已依据新的可信画面确认任务完成。",
-                            completion_evidence=observed.visible_evidence[:3],
-                        )
+                    self._set_status(session, "succeeded")
+                    terminal_decision = self._transition_decision(
+                        "completed",
+                        "DeepSeek 已依据新的可信画面确认任务完成。",
+                        observed.visible_evidence[:3],
                     )
                     if session.physical_actions != before_actions:
                         raise UniversalAgentOrchestratorError(
@@ -5302,46 +5162,23 @@ class UniversalAgentOrchestrator:
                     current.external_impact if current is not None else "unknown"
                 )
                 if current is None:
-                    session.status = "blocked"
-                    session.failed_reason = "页面变化重规划后没有活动子目标。"
-                    blocked_decision = SimpleNamespace(
-                        proposal=GenericStepProposal(
-                            status="blocked",
-                            reason=session.failed_reason,
-                        )
-                    )
+                    self._set_status(session, "blocked", "页面变化重规划后没有活动子目标。")
                     self._write_terminal_snapshot(session)
-                    return blocked_decision
+                    return self._blocked_decision(session.failed_reason)
                 if _requires_effect_confirmation(graph, current):
-                    session.status = "awaiting_effect_confirmation"
-                    session.failed_reason = ""
+                    self._set_status(session, "awaiting_effect_confirmation")
                     self._bind_effect_confirmation(session)
-                    risk_decision = SimpleNamespace(
-                        proposal=GenericStepProposal(
-                            status="blocked",
-                            reason="页面变化后必须重新确认当前效果作用域。",
-                        )
-                    )
                     self._write_terminal_snapshot(session)
-                    return risk_decision
+                    return self._blocked_decision("页面变化后必须重新确认当前效果作用域。")
                 if (
                     _subgoal_progress_signature(current)
                     != observed_subgoal_signature
                 ):
-                    session.status = "needs_reobservation"
-                    session.failed_reason = ""
-                    session.qwen_decision = None
-                    session.controller_decision = None
-                    session.confirmation_authority = None
-                    progressed_decision = SimpleNamespace(
-                        proposal=TaskGraphTransitionReport(
-                            status="progressed",
-                            reason=(
-                                "页面变化已推进活动子目标；必须按新子目标"
-                                "重新截图后再选择动作。"
-                            ),
-                            completion_evidence=(scene.summary,),
-                        )
+                    self._require_reobservation(session)
+                    progressed_decision = self._transition_decision(
+                        "progressed",
+                        "页面变化已推进活动子目标；必须按新子目标重新截图后再选择动作。",
+                        (scene.summary,),
                     )
                     self._write_terminal_snapshot(session)
                     return progressed_decision
@@ -5373,8 +5210,7 @@ class UniversalAgentOrchestrator:
             self._write_terminal_snapshot(session)
             return decision
         except Exception as exc:
-            session.status = "failed"
-            session.failed_reason = str(exc)
+            self._set_status(session, "failed", str(exc))
             self._record_deepseek_failure(
                 session,
                 exc,
@@ -5579,6 +5415,15 @@ class UniversalAgentOrchestrator:
         decision = session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
 
+        def reject(reason: str, *, snapshot: bool = False) -> NoReturn:
+            self._set_status(session, "failed", reason)
+            if snapshot:
+                try:
+                    self._write_terminal_snapshot(session)
+                except Exception:
+                    pass
+            raise UniversalAgentOrchestratorError(reason)
+
         session.confirm_stage = "scope_consumed"
         selection_receipt = session.controller_decision
         if selection_receipt is None or not selection_receipt.allowed:
@@ -5601,8 +5446,7 @@ class UniversalAgentOrchestrator:
                 ),
             )
         except Exception:
-            session.status = "failed"
-            session.failed_reason = "执行前控制器证据写入失败。"
+            self._set_status(session, "failed", "执行前控制器证据写入失败。")
             raise
 
         session.status = "executing_one_action"
@@ -5630,12 +5474,11 @@ class UniversalAgentOrchestrator:
                 )
             session.physical_actions += failed_physical_actions
             self._remember(session, exc.evidence)
-            session.status = (
-                "needs_reobservation"
-                if failed_physical_actions == 0
-                else "failed"
+            self._set_status(
+                session,
+                "needs_reobservation" if failed_physical_actions == 0 else "failed",
+                str(exc),
             )
-            session.failed_reason = str(exc)
             try:
                 self._write_terminal_snapshot(session)
             except Exception:
@@ -5652,40 +5495,33 @@ class UniversalAgentOrchestrator:
         wait_transition = result.resolved_action.kind == "wait_for_change"
         if physical_actions != 1 and not (wait_transition and physical_actions == 0):
             session.physical_actions += max(0, physical_actions)
-            session.status = "failed"
-            session.failed_reason = (
+            reject(
                 "已确认动作必须产生一次物理动作，或仅 wait_for_change 产生零动作；"
                 f"实际返回：{physical_actions}。"
             )
-            raise UniversalAgentOrchestratorError(session.failed_reason)
         session.physical_actions += physical_actions
 
         requested_action = decision.proposal.action
         rebound_params = dict(getattr(result.rebound_action, "params", {}) or {})
         resolved_kind = str(getattr(result.resolved_action, "kind", ""))
-        resolved_target_binding_ok = True
-        if resolved_kind in {
-            "tap_semantic",
-            "dismiss_overlay",
-            "input_verified_text",
-            "press_enter",
-            "clear_verified_text",
-            "long_press",
-        }:
-            resolved_target_binding_ok = (
-                str(getattr(result.resolved_action, "target_element_id", "") or "")
-                == str(rebound_params.get("element_id") or "")
+        target_fields = (
+            (("target_element_id", "element_id"),)
+            if resolved_kind in {
+                "tap_semantic", "dismiss_overlay", "input_verified_text",
+                "press_enter", "clear_verified_text", "long_press",
+            }
+            else (
+                ("target_element_id", "source_element_id"),
+                ("destination_element_id", "destination_element_id"),
             )
-        elif resolved_kind == "drag":
-            resolved_target_binding_ok = (
-                str(getattr(result.resolved_action, "target_element_id", "") or "")
-                == str(rebound_params.get("source_element_id") or "")
-                and str(
-                    getattr(result.resolved_action, "destination_element_id", "")
-                    or ""
-                )
-                == str(rebound_params.get("destination_element_id") or "")
-            )
+            if resolved_kind == "drag"
+            else ()
+        )
+        resolved_target_binding_ok = all(
+            str(getattr(result.resolved_action, resolved_field, "") or "")
+            == str(rebound_params.get(rebound_field) or "")
+            for resolved_field, rebound_field in target_fields
+        )
         if (
             requested_action is None
             or _action_digest(requested_action) != authority.action_digest
@@ -5707,11 +5543,9 @@ class UniversalAgentOrchestrator:
                 or {}
             )
         ):
-            session.status = "failed"
-            session.failed_reason = (
+            reject(
                 "执行结果没有严格绑定 confirmed/requested/rebound/resolved 动作链。"
             )
-            raise UniversalAgentOrchestratorError(session.failed_reason)
         session.status = "verifying"
         session.confirm_stage = "validating_post_action_evidence"
         action_outcome = str(getattr(result, "action_outcome", ""))
@@ -5721,26 +5555,16 @@ class UniversalAgentOrchestrator:
             if str(item).strip()
         )
         if action_outcome not in POST_ACTION_OUTCOMES:
-            session.status = "failed"
-            session.failed_reason = f"动作结果 outcome 无效：{action_outcome}。"
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject(f"动作结果 outcome 无效：{action_outcome}。")
         if (action_outcome == "matched") == bool(verification_errors):
-            session.status = "failed"
-            session.failed_reason = (
-                "动作结果 outcome 与 verification_errors 不一致。"
-            )
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作结果 outcome 与 verification_errors 不一致。")
         if (
             result.planned_scene_fingerprint != observation.fingerprint
             or result.confirmation_frame_identity_verified is not True
         ):
-            session.status = "failed"
-            session.failed_reason = "动作结果没有绑定确认 scope 的规划画面。"
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作结果没有绑定确认 scope 的规划画面。")
         if result.resolved_action.before_fingerprint != result.before_scene.fingerprint:
-            session.status = "failed"
-            session.failed_reason = "动作结果没有绑定复核后的执行前画面。"
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作结果没有绑定复核后的执行前画面。")
         after_frames = tuple(getattr(result, "after_frames", ()))
         after_paths = tuple(
             str(item).strip() for item in getattr(result, "after_frame_paths", ())
@@ -5751,22 +5575,14 @@ class UniversalAgentOrchestrator:
             or any(not item for item in after_paths)
             or len(set(after_paths)) != len(after_paths)
         ):
-            session.status = "failed"
-            session.failed_reason = "动作后可信观察缺少完整且唯一的原始帧证据。"
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作后可信观察缺少完整且唯一的原始帧证据。")
         if (
             action_outcome == "matched"
             and
             result.resolved_action.kind != "wait_for_change"
             and result.after_scene.fingerprint == observation.fingerprint
         ):
-            session.status = "failed"
-            session.failed_reason = "动作后 fingerprint 没有变化，禁止继续。"
-            try:
-                self._write_terminal_snapshot(session)
-            except Exception:
-                pass
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作后 fingerprint 没有变化，禁止继续。", snapshot=True)
 
         session.confirm_stage = "building_trusted_observation"
         new_observation = self.trusted_observation_factory(
@@ -5782,9 +5598,7 @@ class UniversalAgentOrchestrator:
             or str(getattr(getattr(new_observation, "scene", None), "fingerprint", ""))
             != result.after_scene.fingerprint
         ):
-            session.status = "failed"
-            session.failed_reason = "动作后可信观察未严格绑定 device/after scene fingerprint。"
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作后可信观察未严格绑定 device/after scene fingerprint。")
         if (
             new_observation.observation_id == observation.observation_id
             or (
@@ -5794,9 +5608,7 @@ class UniversalAgentOrchestrator:
                 and new_observation.fingerprint == observation.fingerprint
             )
         ):
-            session.status = "failed"
-            session.failed_reason = "动作后可信观察 observation/fingerprint 未更新。"
-            raise UniversalAgentOrchestratorError(session.failed_reason)
+            reject("动作后可信观察 observation/fingerprint 未更新。")
         session.confirm_stage = "persisting_post_observation"
         session.trusted_observation = new_observation
         session.trusted_frames = after_frames
@@ -5837,12 +5649,10 @@ class UniversalAgentOrchestrator:
             self._write_terminal_snapshot(session)
             return result
         except EvidenceStoreError as exc:
-            session.status = "failed"
-            session.failed_reason = str(exc)
+            self._set_status(session, "failed", str(exc))
             raise
         except Exception as exc:
-            session.status = "failed"
-            session.failed_reason = str(exc)
+            self._set_status(session, "failed", str(exc))
             self._record_deepseek_failure(
                 session,
                 exc,
@@ -5924,37 +5734,50 @@ class UniversalAgentOrchestrator:
         max_physical_actions: int = 12,
         max_iterations: int = 24,
     ) -> dict[str, Any]:
-        """Advance read-only/navigation work with fresh one-shot scopes.
-
-        Every iteration consumes the exact authority already bound to the
-        latest revision/observation/decision, executes at most one physical
-        action, then re-observes and replans through ``_confirm_one_locked``.
-        External/unknown work and exhausted budgets stop the loop.  A semantic
-        mismatch may schedule exactly one corrective physical action, but only
-        after a new observation, new canonical candidate, new geometry and new
-        one-shot scope; the consumed action/coordinate is never replayed.
-        """
-
         if self.device_registry.active_session(session.device_id) != session.session_id:
             raise UniversalAgentOrchestratorError(
                 "当前会话已不再拥有该设备，禁止自动推进。"
             )
-        if (
-            isinstance(max_physical_actions, bool)
-            or not isinstance(max_physical_actions, int)
-            or not 1 <= max_physical_actions <= 20
+        for value, maximum, message in (
+            (max_physical_actions, 20, "安全动作预算必须是1～20。"),
+            (max_iterations, 40, "安全迭代预算必须是1～40。"),
         ):
-            raise UniversalAgentOrchestratorError("安全动作预算必须是1～20。")
-        if (
-            isinstance(max_iterations, bool)
-            or not isinstance(max_iterations, int)
-            or not 1 <= max_iterations <= 40
-        ):
-            raise UniversalAgentOrchestratorError("安全迭代预算必须是1～40。")
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise UniversalAgentOrchestratorError(message)
 
         start_actions = session.physical_actions
         iterations = 0
         pending_corrective_retry: dict[str, Any] | None = None
+
+        def observation_identity() -> tuple[str, str]:
+            observation = session.trusted_observation
+            return (
+                str(getattr(observation, "observation_id", "") or ""),
+                str(getattr(observation, "fingerprint", "") or ""),
+            )
+
+        def action_kind() -> str:
+            proposal = getattr(session.qwen_decision, "proposal", None)
+            action = getattr(proposal, "action", None)
+            return str(getattr(action, "action", "") or "")
+
+        def finish_retry(
+            status: str,
+            reason: str = "",
+            *,
+            fail_session: bool = False,
+            **fields: Any,
+        ) -> None:
+            nonlocal pending_corrective_retry
+            assert pending_corrective_retry is not None
+            pending_corrective_retry.update(status=status, **fields)
+            if reason:
+                pending_corrective_retry["stop_reason"] = reason
+            if fail_session:
+                self._set_status(session, "failed", reason)
+                session.auto_pause_reason = reason
+            pending_corrective_retry = None
+
         session.automatic_loop_enabled = True
         session.auto_pause_reason = ""
         try:
@@ -5975,121 +5798,60 @@ class UniversalAgentOrchestrator:
                     impact = current.external_impact if current is not None else "unknown"
                     if impact not in {"read_only", "navigation_only"}:
                         if pending_corrective_retry is not None:
-                            pending_corrective_retry["status"] = (
-                                "stopped_before_corrective_action"
-                            )
-                            pending_corrective_retry["stop_reason"] = (
+                            finish_retry(
+                                "stopped_before_corrective_action",
                                 "重新规划后的子目标不再属于普通只读或导航动作。"
                             )
-                            pending_corrective_retry = None
                         session.auto_pause_reason = (
                             "下一子目标可能产生外部影响或仍未知，已在物理动作前停止。"
                         )
                         break
                     if session.status == "needs_reobservation":
-                        prior_observation_id = str(
-                            getattr(session.trusted_observation, "observation_id", "")
-                            or ""
-                        )
+                        prior_observation_id, _ = observation_identity()
                         self._refresh_decision_locked(session)
                         iterations += 1
                         if pending_corrective_retry is not None:
-                            refreshed_observation_id = str(
-                                getattr(
-                                    session.trusted_observation,
-                                    "observation_id",
-                                    "",
-                                )
-                                or ""
-                            )
-                            refreshed_fingerprint = str(
-                                getattr(
-                                    session.trusted_observation,
-                                    "fingerprint",
-                                    "",
-                                )
-                                or ""
-                            )
+                            refreshed_observation_id, refreshed_fingerprint = observation_identity()
                             pending_corrective_retry.update(
-                                {
-                                    "refresh_observation_id": (
-                                        refreshed_observation_id
-                                    ),
-                                    "refresh_fingerprint": refreshed_fingerprint,
-                                }
+                                refresh_observation_id=refreshed_observation_id,
+                                refresh_fingerprint=refreshed_fingerprint,
                             )
-                            if (
-                                not refreshed_observation_id
-                                or refreshed_observation_id == prior_observation_id
-                            ):
-                                pending_corrective_retry["status"] = (
-                                    "stopped_before_corrective_action"
+                            if not refreshed_observation_id or refreshed_observation_id == prior_observation_id:
+                                finish_retry(
+                                    "stopped_before_corrective_action",
+                                    "纠正重观察没有形成新的 observation。",
+                                    fail_session=True,
                                 )
-                                pending_corrective_retry["stop_reason"] = (
-                                    "纠正重观察没有形成新的 observation。"
-                                )
-                                session.status = "failed"
-                                session.failed_reason = (
-                                    pending_corrective_retry["stop_reason"]
-                                )
-                                session.auto_pause_reason = session.failed_reason
-                                pending_corrective_retry = None
-                                break
-                            refreshed_graph = session.task_graph
-                            refreshed_current = (
-                                refreshed_graph.active_subgoal()
-                                if refreshed_graph is not None
-                                else None
-                            )
-                            refreshed_subgoal_id = str(
-                                getattr(refreshed_current, "subgoal_id", "") or ""
-                            )
-                            if session.status == "succeeded":
-                                pending_corrective_retry["status"] = (
-                                    "resolved_by_reobservation"
-                                )
-                                pending_corrective_retry = None
-                            elif (
-                                refreshed_subgoal_id
-                                and refreshed_subgoal_id
-                                != pending_corrective_retry.get(
-                                    "source_subgoal_id"
-                                )
-                            ):
-                                pending_corrective_retry["status"] = (
-                                    "resolved_by_replan"
-                                )
-                                pending_corrective_retry[
-                                    "replanned_subgoal_id"
-                                ] = refreshed_subgoal_id
-                                pending_corrective_retry = None
-                            elif session.status == "awaiting_confirmation":
-                                pending_corrective_retry["status"] = (
-                                    "ready_for_corrective_action"
-                                )
-                            elif session.status == "needs_reobservation":
-                                pending_corrective_retry["status"] = (
-                                    "stopped_before_corrective_action"
-                                )
-                                pending_corrective_retry["stop_reason"] = (
-                                    "一次新观察仍未形成唯一可执行动作。"
-                                )
-                                session.status = "failed"
-                                session.failed_reason = (
-                                    pending_corrective_retry["stop_reason"]
-                                )
-                                session.auto_pause_reason = session.failed_reason
-                                pending_corrective_retry = None
-                                break
                             else:
-                                pending_corrective_retry["status"] = (
-                                    "stopped_before_corrective_action"
+                                refreshed_graph = session.task_graph
+                                refreshed_current = (
+                                    refreshed_graph.active_subgoal()
+                                    if refreshed_graph is not None
+                                    else None
                                 )
-                                pending_corrective_retry["stop_reason"] = (
-                                    session.failed_reason
-                                    or f"重新观察后状态为 {session.status}。"
+                                refreshed_subgoal_id = str(
+                                    getattr(refreshed_current, "subgoal_id", "") or ""
                                 )
-                                pending_corrective_retry = None
+                                if session.status == "succeeded":
+                                    finish_retry("resolved_by_reobservation")
+                                elif refreshed_subgoal_id and refreshed_subgoal_id != pending_corrective_retry.get("source_subgoal_id"):
+                                    finish_retry(
+                                        "resolved_by_replan",
+                                        replanned_subgoal_id=refreshed_subgoal_id,
+                                    )
+                                elif session.status == "awaiting_confirmation":
+                                    pending_corrective_retry["status"] = "ready_for_corrective_action"
+                                elif session.status == "needs_reobservation":
+                                    finish_retry(
+                                        "stopped_before_corrective_action",
+                                        "一次新观察仍未形成唯一可执行动作。",
+                                        fail_session=True,
+                                    )
+                                else:
+                                    finish_retry(
+                                        "stopped_before_corrective_action",
+                                        session.failed_reason or f"重新观察后状态为 {session.status}。",
+                                    )
                         continue
                     if session.status != "awaiting_confirmation":
                         session.auto_pause_reason = (
@@ -6102,18 +5864,7 @@ class UniversalAgentOrchestrator:
                             "安全自动推进缺少当前一次性动作作用域。"
                         )
                     before = session.physical_actions
-                    action_kind = str(
-                        getattr(
-                            getattr(
-                                getattr(session.qwen_decision, "proposal", None),
-                                "action",
-                                None,
-                            ),
-                            "action",
-                            "",
-                        )
-                        or ""
-                    )
+                    current_action_kind = action_kind()
                     is_corrective_action = bool(
                         pending_corrective_retry is not None
                         and pending_corrective_retry.get("status")
@@ -6121,42 +5872,22 @@ class UniversalAgentOrchestrator:
                     )
                     if is_corrective_action and not _allows_fresh_observation_corrective_retry(
                         impact=impact,
-                        action_kind=action_kind,
+                        action_kind=current_action_kind,
                     ):
-                        assert pending_corrective_retry is not None
-                        pending_corrective_retry["status"] = (
-                            "stopped_before_corrective_action"
+                        reason = "新计划不再是允许自动纠正的普通导航动作。"
+                        finish_retry(
+                            "stopped_before_corrective_action",
+                            reason,
                         )
-                        pending_corrective_retry["stop_reason"] = (
-                            "新计划不再是允许自动纠正的普通导航动作。"
-                        )
-                        session.auto_pause_reason = pending_corrective_retry[
-                            "stop_reason"
-                        ]
-                        pending_corrective_retry = None
+                        session.auto_pause_reason = reason
                         break
                     if is_corrective_action:
                         assert pending_corrective_retry is not None
+                        corrective_observation_id, corrective_fingerprint = observation_identity()
                         pending_corrective_retry.update(
-                            {
-                                "corrective_action_kind": action_kind,
-                                "corrective_observation_id": str(
-                                    getattr(
-                                        session.trusted_observation,
-                                        "observation_id",
-                                        "",
-                                    )
-                                    or ""
-                                ),
-                                "corrective_fingerprint": str(
-                                    getattr(
-                                        session.trusted_observation,
-                                        "fingerprint",
-                                        "",
-                                    )
-                                    or ""
-                                ),
-                            }
+                            corrective_action_kind=current_action_kind,
+                            corrective_observation_id=corrective_observation_id,
+                            corrective_fingerprint=corrective_fingerprint,
                         )
                     result = self._confirm_one_locked(session, authority.scope())
                     iterations += 1
@@ -6168,75 +5899,51 @@ class UniversalAgentOrchestrator:
                     if getattr(result, "action_outcome", "matched") != "matched":
                         if is_corrective_action:
                             assert pending_corrective_retry is not None
-                            pending_corrective_retry["status"] = "exhausted"
-                            pending_corrective_retry["corrective_outcome"] = (
-                                "mismatched"
-                            )
-                            pending_corrective_retry["stop_reason"] = (
+                            reason = (
                                 "新观察重新规划后的唯一纠正动作仍未产生预期语义变化。"
                             )
-                            session.status = "failed"
-                            session.failed_reason = pending_corrective_retry[
-                                "stop_reason"
-                            ]
-                            session.qwen_decision = None
-                            session.controller_decision = None
-                            session.confirmation_authority = None
-                            session.auto_pause_reason = session.failed_reason
-                            pending_corrective_retry = None
+                            finish_retry(
+                                "exhausted",
+                                reason,
+                                fail_session=True,
+                                corrective_outcome="mismatched",
+                            )
+                            self._clear_action_decision(session)
                             break
                         if not (
                             session.status
                             in {"needs_reobservation", "awaiting_confirmation"}
                             and _allows_fresh_observation_corrective_retry(
                                 impact=impact,
-                                action_kind=action_kind,
+                                action_kind=current_action_kind,
                             )
                         ):
                             session.auto_pause_reason = (
                                 "当前动作不属于一次新观察纠正范围，已按具体结果停止。"
                             )
                             break
-                        if (
-                            session.physical_actions - start_actions
-                            >= max_physical_actions
-                        ):
-                            session.status = "failed"
-                            session.failed_reason = (
+                        if session.physical_actions - start_actions >= max_physical_actions:
+                            reason = (
                                 "动作未产生预期变化，但本次物理动作预算不足以执行一次纠正。"
                             )
-                            session.auto_pause_reason = session.failed_reason
+                            self._set_status(session, "failed", reason)
+                            session.auto_pause_reason = reason
                             break
-                        # A mismatched action may already have produced a
-                        # provisional next decision from the same post-action
-                        # response.  It is not fresh enough to authorize the
-                        # corrective action: invalidate it and force one new
-                        # observation/candidate/scope.
                         session.status = "needs_reobservation"
-                        session.qwen_decision = None
-                        session.controller_decision = None
-                        session.confirmation_authority = None
-                        transition = dict(
-                            session.last_post_action_transition or {}
-                        )
+                        self._clear_action_decision(session)
+                        transition = dict(session.last_post_action_transition or {})
                         receipt = dict(transition.get("receipt") or {})
                         pending_corrective_retry = {
-                            "protocol_version": (
-                                CORRECTIVE_RETRY_PROTOCOL_VERSION
-                            ),
+                            "protocol_version": CORRECTIVE_RETRY_PROTOCOL_VERSION,
                             "correction_id": f"correction_{uuid.uuid4().hex}",
                             "status": "needs_reobservation",
-                            "source_receipt_id": str(
-                                receipt.get("receipt_id") or ""
-                            ),
+                            "source_receipt_id": str(receipt.get("receipt_id") or ""),
                             "source_subgoal_id": str(
                                 receipt.get("subgoal_id")
                                 or getattr(current, "subgoal_id", "")
                                 or ""
                             ),
-                            "source_action_kind": str(
-                                receipt.get("action_kind") or action_kind
-                            ),
+                            "source_action_kind": str(receipt.get("action_kind") or current_action_kind),
                             "source_before_observation_id": str(
                                 receipt.get("before_observation_id") or ""
                             ),
@@ -6246,33 +5953,23 @@ class UniversalAgentOrchestrator:
                             "source_action_digest": str(
                                 receipt.get("action_digest") or ""
                             ),
-                            "scheduled_after_physical_action": (
-                                session.physical_actions
-                            ),
+                            "scheduled_after_physical_action": session.physical_actions,
                         }
-                        session.corrective_retry_history.append(
-                            pending_corrective_retry
-                        )
+                        session.corrective_retry_history.append(pending_corrective_retry)
                         session.auto_pause_reason = ""
                         continue
                     if is_corrective_action:
                         assert pending_corrective_retry is not None
-                        pending_corrective_retry["status"] = "matched"
-                        pending_corrective_retry["corrective_outcome"] = "matched"
-                        pending_corrective_retry = None
+                        finish_retry("matched", corrective_outcome="matched")
                     if session.physical_actions - start_actions >= max_physical_actions:
                         session.auto_pause_reason = "已达到本次安全物理动作预算。"
                         break
                 if pending_corrective_retry is not None:
-                    pending_corrective_retry["status"] = (
-                        "stopped_before_corrective_action"
+                    finish_retry(
+                        "stopped_before_corrective_action",
+                        "自动循环迭代预算耗尽，纠正动作未执行。",
+                        fail_session=True,
                     )
-                    pending_corrective_retry["stop_reason"] = (
-                        "自动循环迭代预算耗尽，纠正动作未执行。"
-                    )
-                    session.status = "failed"
-                    session.failed_reason = pending_corrective_retry["stop_reason"]
-                    session.auto_pause_reason = session.failed_reason
                 if not session.auto_pause_reason:
                     session.auto_pause_reason = {
                         "awaiting_effect_confirmation": "下一子目标需要一次效果确认。",

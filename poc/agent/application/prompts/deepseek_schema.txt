@@ -1,0 +1,38 @@
+JSON 只允许以下结构：
+{
+  "status":"ready|running|completed|blocked",
+  "goal":{
+    "objective":"用户目标，可保留点击、滑动、输入、长按、拖动等自然动作意图，但不得含坐标或系统命令",
+    "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称；设备或当前表面任务可为空数组"}],
+    "entities":{"recipient":"发送文字消息时逐字复制用户指定收件人；否则省略","input_text":"需要输入时逐字复制原文；否则省略","target_ui_label":"具名字面目标；否则省略","target_surface":"仅 device|system|current_surface；App任务省略","spatial_hint":"仅用户明确给出的上中下左右提示；否则省略","其他键":"仅供规划说明，不能扩大执行权限"}
+  },
+  "constraints":["全局约束"],
+  "completion_conditions":[{
+    "condition_id":"小写稳定ID",
+    "description":"最终完成条件",
+    "evidence_required":["需要从画面看到的事实"],
+    "satisfied":false,
+    "evidence":[]
+  }],
+  "effect_intents":[{
+    "effect_id":"小写稳定ID",
+    "kind":"send_message|publish_content|relationship_change|membership_change|data_mutation|authentication|financial_transaction|sensitive_permission_change|irreversible_account_deletion|irreversible_data_deletion",
+    "target_entity_roles":["goal.entities 中作为效果对象的键"],
+    "payload_entity_roles":["goal.entities 中作为效果正文或值的键"],
+    "source_subgoal_ids":["实际产生该效果的子目标ID"],
+    "expected_results":["逐字复制绑定子目标中的正向完成条件；单一效果任务也可复制唯一最终正向完成条件"]
+  }],
+  "subgoals":[{
+    "subgoal_id":"小写稳定ID",
+    "objective":"要执行的自然动作意图及其可验证后置状态",
+    "status":"pending|active|completed|blocked|skipped",
+    "depends_on":["前置子目标ID"],
+    "constraints":["本子目标约束"],
+    "completion_conditions":["本子目标完成条件"],
+    "completion_evidence":[],
+    "effect_ids":["本子目标实际产生的 effect_id；纯观察或导航为空"],
+    "execution_class":"observe|navigate|effect|unknown"
+  }],
+  "active_subgoal_id":"活动子目标ID或null",
+  "clarification_questions":["阻塞时需要用户补充的信息"]
+}

@@ -1,0 +1,39 @@
+
+这是本闭环步骤唯一一次Qwen视觉调用。你必须在同一个JSON响应中完成当前
+画面理解、目标相关事实标记以及必要的输入/IME/键盘结构报告。不得要求第二次
+精查、App身份审计、几何审计、方向审计或动作选择调用；不确定时保留unknown、
+省略候选或降低confidence。你只报告事实，不输出动作、计划或坐标点击建议。
+{{TEMPORAL_RULE}}
+{{POST_ACTION_RULE}}
+
+本轮每张实际发送给你的JPEG均为{{REQUEST_WIDTH}}×{{REQUEST_HEIGHT}}。整份响应的
+scene与input_structure必须共用一个coordinate_space，绝不能各用一把尺子：
+{"kind":"axis_grid","width":1000,"height":{{REQUEST_HEIGHT}}}。
+横坐标使用0..1000，左边缘为0、右边缘为1000；纵坐标使用0..{{REQUEST_HEIGHT}}，
+上边缘为0、下边缘为{{REQUEST_HEIGHT}}。scene和input_structure的每个边界与锚点
+都必须属于这一个声明网格；本地会在解析任何视觉事实前一次性换算为统一的
+0..1000坐标。禁止另行声明normalized_1000或image_grid，禁止猜测手机逻辑像素、
+常见屏幕高度、裁剪坐标，也禁止在两个内层对象之间混用坐标尺度。
+
+下面的SCENE CONTRACT和INPUT CONTRACT沿用既有字段语义。它们各自末尾的
+“只返回/Return exactly”示例仅说明对应内层对象，不是本轮顶层输出格式。
+
+--- SCENE CONTRACT ---
+{{SCENE_CONTRACT}}
+
+--- INPUT CONTRACT ---
+{{INPUT_CONTRACT}}
+
+最终且唯一有效的顶层格式如下，禁止Markdown、重复键和任何额外字段：
+{"protocol_version":"{{OBSERVATION_PROTOCOL}}",
+"coordinate_space":{"kind":"axis_grid","width":1000,"height":{{REQUEST_HEIGHT}}},
+"scene":{"protocol_version":"{{SCENE_PROTOCOL}}",
+"foreground_app_id":"unknown","screen_id":"unknown","summary":"",
+"system_ui":{"immersive_or_fullscreen":"unknown","navigation_bar_visible":"unknown"},
+"camera_alignment":{"camera_layout_orientation":"portrait",
+"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]},
+"elements":[],"overlays":[],"stable":true,"confidence":0.0,"fingerprint":""},
+"input_structure":null}
+{{INPUT_RULE}}
+scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯一标记；本地只会
+从由它和canonical目录共同证明的唯一候选中确定下一动作，绝不再请求Qwen选择。

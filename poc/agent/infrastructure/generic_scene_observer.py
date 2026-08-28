@@ -5,6 +5,8 @@ from __future__ import annotations
 from agent.domain.validation import reject_if
 import hashlib
 import json
+from functools import lru_cache
+from importlib.resources import files
 import math
 import re
 import statistics
@@ -60,6 +62,17 @@ SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-08-25-single-step-qwen-observation-v2"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
+@lru_cache(maxsize=4)
+def _prompt_template(name: str) -> str:
+    with files(__package__).joinpath("prompts", name).open("r", encoding="utf-8") as stream:
+        return stream.read()
+
+
+def _render_prompt(name: str, **values: str) -> str:
+    template = _prompt_template(name)
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
@@ -479,78 +492,32 @@ CAMERA_ALIGNMENT_OBSERVATION_RULE = (
 def _single_step_observation_prompt(context: dict[str, Any], *, include_input_structure: bool,
     current_input_text: str | None, image_count: int, request_image_size: tuple[int, int],
     post_action_context: post_action_contract.PostActionVisualContext | None) -> str:
-    """Build the sole online prompt for one closed-loop observation step."""
-
     request_width, request_height = request_image_size
     scene_contract = _compact_prompt(context, wire_height=request_height,
         input_structure_is_value_authority=include_input_structure)
     if include_input_structure:
         input_contract = _input_structure_audit_prompt(context, current_input_text=current_input_text,
             wire_height=request_height)
-        input_rule = "input_structure必须是完整输入结构对象，使用下面INPUT CONTRACT的" "字段和值规则；不得为null。"
+        input_rule = "input_structure必须是完整输入结构对象，使用下面INPUT CONTRACT的字段和值规则；不得为null。"
     else:
         input_contract = "本轮子目标与文字输入无关。"
         input_rule = "input_structure必须为null，不得额外枚举键盘或输入结构。"
-    temporal_rule = (
-        f"共有{image_count}张同一稳定手机画面的时间对齐帧。只把它们合并为"
-        "一个当前状态；闪烁光标可从任一帧读取，其他瞬态不得合并。"
-        if image_count > 1
-        else "只有一张当前稳定手机画面。"
-    )
+    temporal_rule = (f"共有{image_count}张同一稳定手机画面的时间对齐帧。只把它们合并为一个当前状态；"
+        "闪烁光标可从任一帧读取，其他瞬态不得合并。" if image_count > 1 else "只有一张当前稳定手机画面。")
     if post_action_context is None:
         post_action_rule = "本轮不是本地已签发的动作后观察；不得猜测此前执行过任何动作。"
     else:
-        post_action_payload = json.dumps(post_action_context.to_dict(), ensure_ascii=False, sort_keys=True,
-            separators=(',', ':'))
-        post_action_rule = f"""
-本轮是一个物理动作后的首次观察。本地只读typed摘要如下：
-{post_action_payload}
-它只证明该canonical动作已到达物理执行层，并说明需要核对的typed后置条件；
-outcome=pending_visual_verification，绝不等于matched，也不能迫使你把预期写成事实。
-当前JPEG仍是当前画面的唯一权威：符合时报告可见结果，不符合时如实报告矛盾。
-识别时先判断最外层系统/App表面，再判断其中嵌入的卡片、预览或子内容；嵌入内容
-所属App不能替代承载它的最外层系统表面。该摘要只帮助选择核对重点，不授权动作。
-"""
-    return f"""
-这是本闭环步骤唯一一次Qwen视觉调用。你必须在同一个JSON响应中完成当前
-画面理解、目标相关事实标记以及必要的输入/IME/键盘结构报告。不得要求第二次
-精查、App身份审计、几何审计、方向审计或动作选择调用；不确定时保留unknown、
-省略候选或降低confidence。你只报告事实，不输出动作、计划或坐标点击建议。
-{temporal_rule}
-{post_action_rule}
-
-本轮每张实际发送给你的JPEG均为{request_width}×{request_height}。整份响应的
-scene与input_structure必须共用一个coordinate_space，绝不能各用一把尺子：
-{{"kind":"axis_grid","width":1000,"height":{request_height}}}。
-横坐标使用0..1000，左边缘为0、右边缘为1000；纵坐标使用0..{request_height}，
-上边缘为0、下边缘为{request_height}。scene和input_structure的每个边界与锚点
-都必须属于这一个声明网格；本地会在解析任何视觉事实前一次性换算为统一的
-0..1000坐标。禁止另行声明normalized_1000或image_grid，禁止猜测手机逻辑像素、
-常见屏幕高度、裁剪坐标，也禁止在两个内层对象之间混用坐标尺度。
-
-下面的SCENE CONTRACT和INPUT CONTRACT沿用既有字段语义。它们各自末尾的
-“只返回/Return exactly”示例仅说明对应内层对象，不是本轮顶层输出格式。
-
---- SCENE CONTRACT ---
-{scene_contract}
-
---- INPUT CONTRACT ---
-{input_contract}
-
-最终且唯一有效的顶层格式如下，禁止Markdown、重复键和任何额外字段：
-{{"protocol_version":"{SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION}",
-"coordinate_space":{{"kind":"axis_grid","width":1000,"height":{request_height}}},
-"scene":{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}",
-"foreground_app_id":"unknown","screen_id":"unknown","summary":"",
-"system_ui":{{"immersive_or_fullscreen":"unknown","navigation_bar_visible":"unknown"}},
-"camera_alignment":{{"camera_layout_orientation":"portrait",
-"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]}},
-"elements":[],"overlays":[],"stable":true,"confidence":0.0,"fingerprint":""}},
-"input_structure":null}}
-{input_rule}
-scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯一标记；本地只会
-从由它和canonical目录共同证明的唯一候选中确定下一动作，绝不再请求Qwen选择。
-"""
+        payload = json.dumps(post_action_context.to_dict(), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        post_action_rule = ("本轮是一个物理动作后的首次观察。本地只读typed摘要如下：\n" + payload
+            + "\n它只证明该canonical动作已到达物理执行层，并说明需要核对的typed后置条件；\n"
+            "outcome=pending_visual_verification，绝不等于matched，也不能迫使你把预期写成事实。\n"
+            "当前JPEG仍是当前画面的唯一权威：符合时报告可见结果，不符合时如实报告矛盾。\n"
+            "识别时先判断最外层系统/App表面，再判断其中嵌入的卡片、预览或子内容；嵌入内容\n"
+            "所属App不能替代承载它的最外层系统表面。该摘要只帮助选择核对重点，不授权动作。\n")
+    return _render_prompt("single_step_observation.txt", SCENE_CONTRACT=scene_contract,
+        INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule, POST_ACTION_RULE=post_action_rule,
+        INPUT_RULE=input_rule, REQUEST_WIDTH=str(request_width), REQUEST_HEIGHT=str(request_height),
+        OBSERVATION_PROTOCOL=SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION)
 
 
 def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_image_size: tuple[int,
@@ -631,99 +598,20 @@ def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
     input_structure_is_value_authority: bool=False) -> str:
     context = _goal_view(context).observation_context
     if _goal_view(context).mode_switch_requested:
-        keyboard_switch_rule = (
-            " 当前子目标明确要求切换键盘输入模式；本轮快速观察不得在elements中报告或定位"
+        keyboard_switch_rule = (" 当前子目标明确要求切换键盘输入模式；本轮快速观察不得在elements中报告或定位"
             "任何模式切换键。后续独立全帧输入结构审计是模式、方向和模式键几何的唯一权威。"
-            "普通输入框和键盘可见事实仍可报告，但不得据此建议动作。"
-        )
+            "普通输入框和键盘可见事实仍可报告，但不得据此建议动作。")
     else:
         keyboard_switch_rule = KEYBOARD_MODE_SWITCH_OBSERVATION_RULE
-    if input_structure_is_value_authority:
-        input_observation_rule = (
-            "本轮input_structure.application_inputs.text是应用输入正文空/非空事实的"
-            "唯一视觉权威。scene中的role=input只可报告一个目标相关输入表面的身份、"
-            "可见边界、goal_relevant、fully_visible和外观证据；不得在scene.states.value"
-            "中重复正文，也不得用scene正文否决input_structure。键盘模式、IME和可执行"
-            "输入几何只在同一响应的input_structure中报告。" + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
-        )
-    else:
-        input_observation_rule = (
-            INPUT_VALUE_AND_MODE_OBSERVATION_RULE + keyboard_switch_rule + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
-        )
-    return f"""
-你是通用手机页面观察器，只报告画面事实，不规划也不执行动作。
-用户目标只用于选择需要读清的控件，不能让你幻读：
-{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-
-用最短JSON报告：当前前台App、页面类型、最上层弹层，以及与目标直接相关的可见控件。
-规则：
-1. 桌面写 launcher；系统最近任务页面必须写foreground_app_id=system、
-   screen_id=system_recent_tasks；不确定写 unknown。不得把目标App当成当前App，也不得把
-   current_foreground、current_app、foreground_app、target_app 或 active_app 等引用占位符
-   写成foreground_app_id；该字段只能来自当前画面的视觉身份。
-2. elements最多{MAX_COMPACT_ELEMENTS}个。必须先报告目标相关控件和当前输入框，
-   再报告关闭/返回与必要导航；省略新闻、商品、图片、标签组等无关内容。
-3. bounds使用[left,top,right,bottom]：横轴为0..1000，纵轴为0..{wire_height}。
-   左右边缘分别为x=0和x=1000，上下边缘分别为y=0和y={wire_height}。必须只框真实清晰控件；
-   不得另猜手机屏幕高度或混用其他坐标尺度，任何边界超出对应轴范围就省略该元素。
-4. role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
-   container只表示承载其他内容的分组、布局区或目标区域；四边独立、可单独识别的色块、卡片、图片
-   或控件不得写container，应按可见形态写image/list_item/button。可见文字或外观明确证明的移动源
-   与目标区域必须分别建元素，不能合成一个container。目标相关元素必须在states中逐项报告
-   fully_visible:true/false；只有整个轮廓均在原图内且无遮挡时才可写true。
-5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
-6. 每个element的evidence最多一条不超过40个字的画面短文字或明确外观。
-   summary不超过60个字。看不清就降低confidence或省略元素。
-7. 禁止action、plan、step、tap、swipe、command、coordinates等动作字段。
-   overlays只允许简短字符串名称；任何带边界、角色或ID的可交互候选必须放入elements，
-   不得把对象放入overlays。
-8. 场景confidence只评价当前画面本身是否清楚、稳定、可描述，不评价目标是否已完成或目标控件
-   是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
-   elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
-9. {PREFILLED_INPUT_OBSERVATION_RULE}
-10. {input_observation_rule}
-11. {SYSTEM_UI_OBSERVATION_RULE}
-12. {CAMERA_ALIGNMENT_OBSERVATION_RULE}
-13. 如果目标尚未出现，而当前画面明确是列表或信息流，并且原图边缘能看见只露出一部分的后续
-    列表项/卡片，必须在summary中简短记录“对应边缘存在部分可见的后续内容，列表仍在延伸”。
-    这是只读滚动线索，不得猜测被裁切项就是目标，不得给动作建议；被裁切元素不得标成可操作目标。
-14. 对分步流程、时间线或其他结构化长页面，如果原图中有连续引导轨、连接线或内容轨道明确延伸并
-    接触视口边缘，必须在summary记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”。只有线条
-    确实属于页面内容且连续到边缘时才能报告；装饰线、手机边框和机械臂控制器标线不算。该事实同样
-    只是只读滚动线索，不能猜测边缘之外的目标或给出动作建议。
-15. 如果目标用“从上往下第N项/列表第N项/first、second、Nth item”等序数指定同一列表内的
-    可见条目，必须把目标条目及其之前所有同列、同类、完整可见的兄弟条目分别写入elements，
-    每项逐字抄录label并紧框自身；只有目标条目写goal_relevant:true，前序证明项写false。
-    序数必须按这些条目的垂直中心从上到下比较，不能根据文字含义猜测。若N超过elements上限、
-    任一前序项不可见/被遮挡/无法同列绑定，或不能逐项证明顺序，就不得把任何候选标成目标相关，
-    并在summary说明序数证据不足。
-16. 如果目标要求看清、读取或核对当前/下一页的标题、题头、heading或title，必须优先报告唯一清晰
-    的页面主标题：role=text、meaning=page_title、label逐字抄录、goal_relevant:true，并明确
-    fully_visible。清晰主标题可直接作为screen_id；普通正文、卡片说明、按钮文字和浏览器标题栏
-    不能冒充页面主标题。看不清、存在多个同级主标题或标题不完整时保持screen_id=unknown。
-17. 如果当前目标明确要求滑动/上划/下划/左划/右划，并且原图能明确证明一个可滚动视口，必须把
-    该视口作为一个role=container元素报告。只有以下任一视觉条件成立才算证明：同一视口内至少两个
-    重复同类条目按同一轴排列；或相关边缘存在被裁切的后续内容；或属于页面内容的连续轨道明确接触
-    相关边缘。该container必须紧框完整可见的内容视口，states必须逐项包含
-    goal_relevant:true、fully_visible:true、scrollable:true、scroll_axis:"vertical"或"horizontal"，
-    evidence必须说明实际看见的重复结构或边缘延续。单张卡片、工具栏、页面边框、目标动作文字本身
-    都不能证明scrollable；无法证明时不得输出该状态，也不得猜测。
-18. 当前画面是launcher、目标App图标尚未出现，且画面有两个或更多分页圆点并能明确看出恰好一个
-    当前圆点时，必须把承载桌面图标的完整分页区域额外报告为role=container、
-    meaning=paged_viewport。states必须包含goal_relevant:true、fully_visible:true、scrollable:true、
-    scroll_axis:"horizontal"、从0开始的page_index和page_count；evidence写明实际看见的圆点总数和
-    当前第几页。圆点不清、选中项不唯一或只有一页时不得输出page_index/page_count，也不得猜测。
-
-只返回下列完整JSON，不要Markdown：
-{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"当前画面短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
-"navigation_bar_visible":"unknown"}},"camera_alignment":{{"camera_layout_orientation":"portrait",
-"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]}},"elements":[],"overlays":[],
-"stable":true,"confidence":0.0,"fingerprint":""}}
-每个element只允许：
-{{"element_id":"e1","role":"button","meaning":"open_search","label":"搜索",
-"bounds":[0,0,1000,{wire_height}],"confidence":0.0,"states":{{"goal_relevant":true}},"evidence":[]}}
-"""
+    input_rule = (("本轮input_structure.application_inputs.text是应用输入正文空/非空事实的"
+        "唯一视觉权威。scene中的role=input只可报告一个目标相关输入表面的身份、可见边界、"
+        "goal_relevant、fully_visible和外观证据；不得在scene.states.value中重复正文，也不得用scene正文"
+        "否决input_structure。键盘模式、IME和可执行输入几何只在同一响应的input_structure中报告。"
+        + LOCAL_TEXT_CLEAR_OBSERVATION_RULE) if input_structure_is_value_authority else
+        INPUT_VALUE_AND_MODE_OBSERVATION_RULE + keyboard_switch_rule + LOCAL_TEXT_CLEAR_OBSERVATION_RULE)
+    return _render_prompt("compact_scene.txt", CONTEXT=json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+        INPUT_RULE=input_rule, MAX_ELEMENTS=str(MAX_COMPACT_ELEMENTS), WIRE_HEIGHT=str(wire_height),
+        SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION)
 
 
 def _input_audit_literal_key_targets(context: dict[str, Any], *, current_input_text: str | None=None) -> tuple[str,
@@ -766,88 +654,31 @@ def _input_structure_audit_prompt(context: dict[str, Any], *, current_input_text
     wire_height: int=1000) -> str:
     context = _goal_view(context).observation_context
     goal = _goal_view(context)
-    coordinate_height = wire_height
-    keyboard_min_height = max(1, round(180 * coordinate_height / 1000))
-    literal_key_targets = _input_audit_literal_key_targets(context, current_input_text=current_input_text)
-    literal_keys_example = []
-    if literal_key_targets:
-        example_value = literal_key_targets[0]
-        literal_keys_example = [{'value': example_value, 'label': 'Space' if example_value == ' ' else example_value,
-            'key_kind': 'space' if example_value == ' ' else 'character', 'bounds': [0, 0, 1000, coordinate_height],
+    keyboard_min_height = max(1, round(180 * wire_height / 1000))
+    literal_targets = _input_audit_literal_key_targets(context, current_input_text=current_input_text)
+    literal_example = []
+    if literal_targets:
+        value = literal_targets[0]
+        literal_example = [{'value': value, 'label': 'Space' if value == ' ' else value,
+            'key_kind': 'space' if value == ' ' else 'character', 'bounds': [0, 0, 1000, wire_height],
             'confidence': 0.0, 'fully_visible': True}]
-    literal_keys_example_json = json.dumps(literal_keys_example, ensure_ascii=False, separators=(',', ':'))
-    active_field_id, active_field_label, active_multiline = goal.field
-    target_only_clear = goal.target_only
+    field_id, field_label, multiline = goal.field
     target_text = goal.transaction_text or goal.explicit_text
     enter_required = False
-    if target_text and current_input_text is not None and active_multiline:
+    if target_text and current_input_text is not None and multiline:
         try:
-            next_input_step = plan_next_verified_input(target_text, current_input_text)
+            step = plan_next_verified_input(target_text, current_input_text)
         except (ValueError, VerifiedTextTransactionError):
-            next_input_step = None
-        enter_required = bool(next_input_step is not None and next_input_step.kind == 'literal_key'
-            and (next_input_step.segment == '\n'))
-    image_contract = "Image 1 is the complete phone frame."
-    coordinate_contract = (
-        "All bounds and qwerty anchor points use the one declared full-frame "
-        f"axis grid: X is 0..1000 and Y is 0..{wire_height}. The left/right "
-        "edges are x=0/x=1000; the top/bottom edges are y=0/"
-        f"y={wire_height}. Never guess another resolution or coordinate scale. "
-        "Omit a structure that cannot be bounded in this exact grid."
-    )
-    return f"""
-You are a read-only, app-independent UI structure auditor. The normal scene observer did not establish an input target.
-Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-{image_contract}
-This response is the sole visual source for the typed input-state ledger. A
-compact scene summary or preliminary input transcription is not an input-value
-authority and is not supplied for reconciliation. Report only the structures
-literally visible in these audit images; local code combines them with typed
-action lineage and never asks you to choose between two prior visual answers.
-Distinguish three different visual structures; never merge them:
-1. application_inputs: editable search/address/form fields and message composers in the App content area. Include a visibly empty field when its complete input surface is visible. Literal editable evidence may be its complete border, a distinct fill/perimeter that separates the whole field surface from surrounding App chrome, a placeholder, caret, focus highlight, or one IME preedit visibly rendered inside that complete surface. A complete blank surface does not need placeholder text, a caret, or focus highlight. Never infer a field from the goal, an unexplained gap, or adjacent icons alone. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; target_only_clear={str(target_only_clear).lower()} means the typed graph intentionally supplies no new text payload and asks only to audit the one currently focused field for clearing. It does not relax the visual evidence rules: enumerate that field only when its complete App surface plus focus/preedit evidence are visible, and never invent its bounds from the goal. Use the label only to enumerate visible evidence, never infer it from the goal.
-2. ime_preedit_regions: the input method's composition and its candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete bounds and may be either immediately adjacent to the composition or in one horizontal candidate row at the top of the visible keyboard, above the QWERTY letter rows. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs. The enum name direct_latin describes the keyboard key mode only: it NEVER proves that Latin letters bypass composition or are already committed.
-3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
-4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
-   When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least {keyboard_min_height}, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
-5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
-6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
-7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
-8. keyboard.layout_switches: enumerate every compact visible key with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone. In particular, on QWERTY report both a visible 123 key targeting numeric and a separately visible ！？# / !?# / symbol key targeting symbol. Never substitute 123 for a symbol-layout key.
-7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
-The local controller has one deterministic keyboard routing policy: Latin letters require QWERTY plus direct_latin, followed by an exact candidate click whenever the resulting letters remain in preedit; Chinese requires QWERTY plus chinese_pinyin and then an exact candidate; decimal digits require the visible 123/numeric layout and then the exact digit; every other printable symbol requires direct_latin first and then the separately visible symbol-layout switch such as ！？# before the exact symbol key. This policy does not authorize an action. It tells you which current state and visible controls must be reported completely so local typed code can select exactly one next action after a fresh observation.
-Determine keyboard.input_mode only from the current whole keyboard image, never from the goal, the JSON example, or the mode-switch key label alone. Visible Chinese composition/candidates or pinyin separators prove chinese_pinyin. A plain Latin QWERTY state with no Chinese composition/candidate strip may prove direct_latin only when the whole keyboard provides independent current-mode evidence. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
-When a visible preedit composition itself exactly matches a complete visible candidate, that exact candidate MUST be enumerated with its own bounds. This applies equally to direct_latin and chinese_pinyin. In particular, when the same Latin glyph sequence appears once as underlined composition in the App field and again as a separate non-underlined word in the candidate strip above the QWERTY rows, the second occurrence is the exact candidate and MUST have its own candidate bounds. Omitting that second occurrence while reporting the matching preedit is an incomplete audit; never silently turn useful target text into a clear/delete instruction.
-keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known, and target_mode MUST be the other supported mode. Across real keyboards the visible key label may name either the current mode or the destination mode: for example, 英/EN can be shown while Chinese pinyin is current and pressing it enters direct Latin, or while direct Latin is current and pressing it enters Chinese. Copy the literal label, but never derive current_mode or target_mode from that label. If the direction is not independently clear from the whole keyboard state, set mode_switch to null.
-For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
-keyboard.mode_switch MUST be either null or an object with exactly these five fields: label, bounds, confidence, current_mode, target_mode. Never omit confidence or target_mode. Valid non-null shapes in the two directions are:
-{{"label":"英","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
-{{"label":"英","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_mode":"direct_latin","target_mode":"chinese_pinyin"}}
-These are shape examples only. Copy the literal visible label and measured bounds from Image 1, set confidence from the visible evidence, and choose the direction from the independently proven current keyboard state. Never copy either example merely to satisfy the goal.
-keyboard.case_switch uses the same five field names, but current_mode and target_mode are lower or upper. It is valid only for direct_latin QWERTY and a visible shift/case glyph. Example shape: {{"label":"⇧","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_mode":"lower","target_mode":"upper"}}.
-Do not plan, suggest, authorize, or perform any action.
-{coordinate_contract}
-Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. caret_line_index is the zero-based VISUAL row containing the complete visible insertion caret, or null when the caret row is absent, clipped, or ambiguous. It is a read-only geometry fact and by itself never proves a user-entered newline. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
-An automatic visual line wrap inside a narrow editable field is presentation only: join the continuous visible glyph sequence and do not insert "\\n" into text. Report a newline character only when the image independently proves an actual user-entered line break; if that distinction is not visually provable, do not invent a newline from row layout alone.
-Return exactly this JSON schema and no other fields. Emit one compact minified
-JSON object on a single line, without Markdown or explanatory whitespace:
-{{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
-"application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,{coordinate_height}],
-"fully_visible":true,"text":"","placeholder":"visible placeholder or empty","field_labels":["literal visible field label"],
-"visible_editable_cues":["literal visible cue"],"caret_line_index":null,"confidence":0.0,
-"right_button":null}}],
-"ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,{coordinate_height}],
-"text":"visible composition text or empty","confidence":0.0,
-"candidates":[{{"text":"literal candidate","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"fully_visible":true}}]}}],
-"keyboard":{{"visible":true,"bounds":[0,0,1000,{coordinate_height}],"layout":"qwerty",
-"input_mode":"unknown","case_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null,
-"backspace_key":{{"label":"⌫","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"fully_visible":true}},
-"enter_key":{{"label":"↵","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"fully_visible":true,"key_action":"newline"}},
-"case_switch":null,"literal_keys":{literal_keys_example_json},
-"layout_switches":[{{"label":"123","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}},{{"label":"！？#","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_layout":"qwerty","target_layout":"symbol"}}]}}}}
-When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"enter_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
-Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
-"""
+            step = None
+        enter_required = bool(step is not None and step.kind == 'literal_key' and step.segment == '\n')
+    return _render_prompt("input_structure_audit.txt",
+        CONTEXT=json.dumps(context, ensure_ascii=False, separators=(',', ':')),
+        FIELD_ID=json.dumps(field_id, ensure_ascii=False), FIELD_LABEL=json.dumps(field_label, ensure_ascii=False),
+        TARGET_ONLY_CLEAR=str(goal.target_only).lower(), ENTER_REQUIRED=str(enter_required).lower(),
+        MULTILINE=str(multiline).lower(), LITERAL_TARGETS=json.dumps(literal_targets, ensure_ascii=False,
+        separators=(',', ':')), LITERAL_KEYS_EXAMPLE=json.dumps(literal_example, ensure_ascii=False,
+        separators=(',', ':')), WIRE_HEIGHT=str(wire_height), KEYBOARD_MIN_HEIGHT=str(keyboard_min_height),
+        AUDIT_VERSION=INPUT_STRUCTURE_AUDIT_VERSION)
 
 
 def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None) -> UIScene:

@@ -26,9 +26,7 @@ from agent.domain.task_graph import (
     _normalize_explicit_target_surface,
     _normalize_explicit_ui_label_payload,
     _normalize_initial_premature_completed_status,
-    _normalize_local_input_execution_class,
-    _normalize_local_recent_task_card_dismissal_execution_class,
-    _normalize_local_refresh_execution_class,
+    _normalize_local_navigation_execution_classes,
     _normalize_redundant_prohibited_effect_conditions,
     _normalize_single_effect_result_string,
     _normalize_terminal_single_navigation_payload,
@@ -347,11 +345,7 @@ class DeepSeekTaskGraphPlanner:
         payload = _normalize_single_effect_result_string(payload)
         payload = _normalize_unique_planner_transport_aliases(payload)
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
-        payload = _normalize_local_input_execution_class(payload)
-        payload = _normalize_local_refresh_execution_class(payload)
-        payload = _normalize_local_recent_task_card_dismissal_execution_class(
-            payload
-        )
+        payload = _normalize_local_navigation_execution_classes(payload)
         if payload_normalizer is not None:
             payload = payload_normalizer(payload)
         graph = _graph_from_payload(

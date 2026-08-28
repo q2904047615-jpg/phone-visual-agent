@@ -141,6 +141,24 @@ class _AuditedKeyboard:
     controls_revoked: bool
 
 
+@dataclass(frozen=True)
+class _AuditedInputControls:
+    step: Any = None
+    candidate: dict[str, Any] | None = None
+    preedit: str = ""
+    qwerty: dict[str, Any] | None = None
+    backspace: dict[str, Any] | None = None
+    clearable_preedit: str = ""
+    next_field: dict[str, Any] | None = None
+    required_mode: str | None = None
+    switch_is_goal: bool = False
+    mode: dict[str, Any] | None = None
+    literal: dict[str, Any] | None = None
+    enter: dict[str, Any] | None = None
+    layout: dict[str, Any] | None = None
+    case: dict[str, Any] | None = None
+
+
 def _has_exact_passive_scene_element_fields(value: Any) -> bool:
     return isinstance(value, dict) and frozenset(value) == _PASSIVE_SCENE_ELEMENT_FIELDS
 
@@ -300,6 +318,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             frame = frames[selected_frame_index].convert("RGB")
             fingerprint = local_frame_fingerprint(frame)
             context = generic_goal_domain.safe_goal_context(goal_context or {})
+            goal = _goal_view(context)
             cache_key = _observation_cache_key(
                 device_id=device_id,
                 fingerprint=fingerprint,
@@ -339,8 +358,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     self._set_stage("completed")
                     return cached
 
-            input_structure_required = _goal_requests_input(context)
-            active_field_id = _goal_active_input_field(context)[0]
+            input_structure_required = goal.input_requested
+            active_field_id = goal.field[0]
             verified_lineage: TypedInputLineage | None = None
             if input_lineage_override is not None:
                 verified_lineage = input_lineage_override
@@ -482,7 +501,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     fingerprint=fingerprint,
                 )
                 if (
-                    (_goal_active_input_transaction_text(context) or _goal_has_target_only_active_input_field(context))
+                    (goal.transaction_text or goal.target_only)
                     and not _input_audit_established_local_target(scene)
                     and not _focus_only_input_surface_established(scene)
                 ):
@@ -919,8 +938,8 @@ def _compact_prompt(
     wire_height: int = 1000,
     input_structure_is_value_authority: bool = False,
 ) -> str:
-    context = _observation_goal_context(context)
-    if _goal_requests_keyboard_mode_switch(context):
+    context = _goal_view(context).observation_context
+    if _goal_view(context).mode_switch_requested:
         keyboard_switch_rule = (
             " 当前子目标明确要求切换键盘输入模式；本轮快速观察不得在elements中报告或定位"
             "任何模式切换键。后续独立全帧输入结构审计是模式、方向和模式键几何的唯一权威。"
@@ -1064,7 +1083,8 @@ def _input_structure_audit_prompt(
     current_input_text: str | None = None,
     wire_height: int = 1000,
 ) -> str:
-    context = _observation_goal_context(context)
+    context = _goal_view(context).observation_context
+    goal = _goal_view(context)
     coordinate_height = wire_height
     keyboard_min_height = max(1, round(180 * coordinate_height / 1000))
     literal_key_targets = _input_audit_literal_key_targets(
@@ -1089,9 +1109,9 @@ def _input_structure_audit_prompt(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    active_field_id, active_field_label, active_multiline = _goal_active_input_field(context)
-    target_only_clear = _goal_has_target_only_active_input_field(context)
-    target_text = _goal_active_input_transaction_text(context) or _goal_explicit_input_text(context)
+    active_field_id, active_field_label, active_multiline = goal.field
+    target_only_clear = goal.target_only
+    target_text = goal.transaction_text or goal.explicit_text
     enter_required = False
     if target_text and current_input_text is not None and active_multiline:
         try:
@@ -1244,57 +1264,8 @@ def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
     alignment["evidence"] = []
 
 
-def _active_subgoal_visual_context(context: dict[str, Any]) -> dict[str, Any]:
-    """Return the current graph node's observation focus when it is present."""
-
-    entities = context.get("entities")
-    if not isinstance(entities, dict):
-        return context
-    focus = entities.get("active_subgoal_visual_context")
-    if not isinstance(focus, dict):
-        return context
-    required = {
-        "subgoal_id",
-        "objective",
-        "constraints",
-        "completion_conditions",
-        "execution_class",
-        "goal_entities",
-    }
-    if set(focus) != required:
-        return context
-    if (
-        not str(focus.get("subgoal_id") or "").strip()
-        or not str(focus.get("objective") or "").strip()
-        or not isinstance(focus.get("constraints"), list)
-        or not isinstance(focus.get("completion_conditions"), list)
-        or not isinstance(focus.get("goal_entities"), dict)
-    ):
-        return context
-    return focus
-
-
-def _observation_goal_context(context: dict[str, Any]) -> dict[str, Any]:
-    """Expose only the active graph node to model evidence-selection prompts.
-
-    The root objective can describe several future actions.  Supplying that full
-    workflow while a different node is active makes an observation model select
-    evidence for later steps.  The graph node is therefore the only semantic
-    focus once the orchestrator has supplied its strict visual context.  App and
-    controller authority still come from the local scene and policy layers.
-    """
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        return context
-    return {
-        "subgoal_id": focused["subgoal_id"],
-        "objective": focused["objective"],
-        "constraints": list(focused["constraints"]),
-        "completion_conditions": list(focused["completion_conditions"]),
-        "execution_class": focused["execution_class"],
-        "goal_entities": dict(focused["goal_entities"]),
-    }
+def _goal_view(context: dict[str, Any]) -> generic_goal_domain.ActiveVisualGoal:
+    return generic_goal_domain.ActiveVisualGoal.from_context(context)
 
 
 def _valid_1000_bounds(value: Any) -> bool:
@@ -1310,13 +1281,14 @@ def _strip_preliminary_input_elements(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
 ) -> bool:
-    if not _goal_requests_input(goal_context):
+    goal = _goal_view(goal_context)
+    if not goal.input_requested:
         return False
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return False
-    mode_only = _goal_requests_keyboard_mode_switch(goal_context)
-    text_input = _goal_has_explicit_input_text(goal_context)
+    mode_only = goal.mode_switch_requested
+    text_input = goal.has_explicit_text
     keyboard_meanings = {
         "input_exact_enter_key",
         "input_exact_literal_key",
@@ -1365,9 +1337,8 @@ def _single_step_input_surface_attestation(
     focus-only surface when the audit misses and the keyboard is hidden.
     """
 
-    if not (
-        _goal_active_input_transaction_text(goal_context) or _goal_has_target_only_active_input_field(goal_context)
-    ):
+    goal = _goal_view(goal_context)
+    if not (goal.transaction_text or goal.target_only):
         return None
     elements = payload.get("elements")
     if not isinstance(elements, list):
@@ -1414,151 +1385,6 @@ def _single_step_input_surface_attestation(
             }
         )
     return candidates[0] if len(candidates) == 1 else None
-
-
-def _goal_requests_input(context: dict[str, Any]) -> bool:
-    focused = _active_subgoal_visual_context(context)
-    if _goal_has_target_only_active_input_field(context):
-        # A clear-only graph deliberately carries no desired text.  Its typed
-        # target marker still requires the same one-call application/IME/
-        # keyboard audit as ordinary input so the focused field cannot be
-        # replaced by a bare candidate word or an unbound backspace key.
-        return True
-    if _goal_active_input_transaction_text(context):
-        # A candidate-selection node may correctly describe only the visible
-        # literal (for example, a Chinese IME candidate) without repeating
-        # words such as "input field" or "keyboard".  The bridge mints this
-        # marker only from a typed ``input.value_equals`` desired state. It is
-        # a read-only audit trigger, not action authority: the dedicated input
-        # audit must still prove one application input, the matching preedit
-        # and one complete exact candidate before minting ``ime_exact_candidate``.
-        return True
-    if _goal_requests_keyboard_mode_switch(context):
-        # A standalone deterministic tap on the keyboard mode switch has no
-        # text payload, but it still requires the same independent whole-frame
-        # input audit as an ordinary text transaction.  The mode helper keeps
-        # the root-context exception limited to the exact-action wrapper.
-        return True
-    if focused is context:
-        input_context: dict[str, Any] = context
-    else:
-        # Goal-wide entities remain available to the decision layer, but they
-        # must not activate a future input audit while the current subgoal is
-        # reload/navigation.  The current subgoal's own wording is the audit
-        # trigger; this keeps independent target audits from overwriting one
-        # another across graph nodes.
-        input_context = {
-            "objective": focused.get("objective"),
-            "completion_conditions": focused.get("completion_conditions"),
-        }
-    visible = json.dumps(
-        input_context,
-        ensure_ascii=False,
-    ).casefold()
-    return any(
-        term in visible
-        for term in (
-            "输入框",
-            "文本框",
-            "搜索框",
-            "编辑框",
-            "地址栏",
-            "字段进入编辑",
-            "字段获得焦点",
-            "字段内容",
-            "草稿区域",
-            "草稿字段",
-            "input field",
-            "search box",
-            "text field",
-            "editable field",
-            "draft field",
-            "draft area",
-            "address bar",
-            "textbox",
-            "input_text",
-            "输入模式",
-            "直输模式",
-            "键盘模式",
-            "软键盘",
-            "input mode",
-            "keyboard mode",
-            "soft keyboard",
-            " ime ",
-            "direct_latin",
-            "chinese_pinyin",
-        )
-    )
-
-
-def _goal_requests_keyboard_mode_switch(context: dict[str, Any]) -> bool:
-    focused = _active_subgoal_visual_context(context)
-    selectors: list[Any] = [focused]
-    entities = context.get("entities")
-    focused_entities = focused.get("goal_entities")
-    if (
-        focused is not context
-        and str(focused.get("subgoal_id") or "").strip() == "exact_tap_semantic"
-        and isinstance(focused_entities, dict)
-        and str(focused_entities.get("target_ui_label") or "").strip()
-        and isinstance(entities, dict)
-        and isinstance(entities.get("original_goal_visual_context"), str)
-        and entities["original_goal_visual_context"].strip()
-    ):
-        # The deterministic exact-action bridge deliberately replaces the
-        # active objective with generic tap wording.  Restore only its original
-        # read-only visual intent so a keyboard-mode target can invoke the
-        # dedicated audit.  Normal graph nodes keep the active-subgoal-only
-        # boundary and cannot see future workflow text.
-        selectors.append(entities["original_goal_visual_context"])
-    visible = json.dumps(selectors, ensure_ascii=False).casefold()
-    return any(
-        term in visible
-        for term in (
-            "切换输入模式",
-            "输入模式切换",
-            "切换到英文",
-            "切到英文",
-            "英文直输",
-            "切换到中文",
-            "切到中文",
-            "切换直输模式",
-            "切换为直输模式",
-            "switch input mode",
-            "switch keyboard mode",
-            "direct_latin",
-            "chinese_pinyin",
-        )
-    )
-
-
-def _goal_requests_active_verified_text_clear(context: dict[str, Any]) -> bool:
-    """Return true only when the current graph node is the clear step."""
-
-    if not _goal_requests_input(context):
-        return False
-    focused = _active_subgoal_visual_context(context)
-    visible = str(focused.get("objective") or "").casefold()
-    return any(
-        term in visible
-        for term in (
-            "清空",
-            "清除",
-            "置空",
-            "删除",
-            "文字变为空",
-            "内容变为空",
-            "恢复为空",
-            "恢复为空白",
-            "clear text",
-            "clear the text",
-            "clear draft",
-            "empty the input",
-            "empty the field",
-            "remove the text",
-            "delete",
-        )
-    )
 
 
 def _input_audit_established_local_target(scene: UIScene) -> bool:
@@ -1673,147 +1499,6 @@ def _focus_only_compact_input_surface(
     }
 
 
-def _goal_explicit_input_text(context: dict[str, Any]) -> str:
-    """Return the active graph node's canonical text-entry payload, if any."""
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        entities = context.get("entities")
-    else:
-        entities = focused.get("goal_entities")
-    if not isinstance(entities, dict):
-        return ""
-    value = entities.get("input_text")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _goal_active_input_transaction_text(context: dict[str, Any]) -> str:
-    """Return a bridge-minted typed input desired state for this active node."""
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        return ""
-    entities = focused.get("goal_entities")
-    if not isinstance(entities, dict):
-        return ""
-    marker = entities.get("active_input_transaction_text")
-    return marker if isinstance(marker, str) and marker else ""
-
-
-def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:
-    """Return bridge-minted field identity, visible label and multiline flag."""
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        return ("", "", False)
-    entities = focused.get("goal_entities")
-    if not isinstance(entities, dict):
-        return ("", "", False)
-    field_id = entities.get("active_input_field_id")
-    field_label = entities.get("active_input_field_label", "")
-    multiline = entities.get("active_input_multiline", False)
-    if (
-        not isinstance(field_id, str)
-        or not field_id
-        or not isinstance(field_label, str)
-        or not isinstance(multiline, bool)
-    ):
-        return ("", "", False)
-    return (field_id, field_label, multiline)
-
-
-def _goal_has_target_only_active_input_field(context: dict[str, Any]) -> bool:
-    """Return whether the bridge minted one clear-only typed field target."""
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        return False
-    entities = focused.get("goal_entities")
-    field_id, _field_label, _multiline = _goal_active_input_field(context)
-    return bool(isinstance(entities, dict) and entities.get("active_input_target_only") is True and field_id)
-
-
-def _goal_has_unique_typed_active_input_field(context: dict[str, Any]) -> bool:
-    """Return whether the active input marker exactly names one root typed field."""
-
-    root_entities = context.get("entities")
-    if not isinstance(root_entities, dict):
-        return False
-    fields = root_entities.get("input_fields")
-    if not isinstance(fields, list):
-        return False
-    field_id, field_label, _multiline = _goal_active_input_field(context)
-    text = _goal_active_input_transaction_text(context)
-    if not field_id or not field_label or not text:
-        return False
-    exact_field_matches = sum(
-        isinstance(item, dict)
-        and item.get("field_id") == field_id
-        and item.get("field_label") == field_label
-        and item.get("text") == text
-        for item in fields
-    )
-    exact_label_matches = sum(isinstance(item, dict) and item.get("field_label") == field_label for item in fields)
-    return exact_field_matches == 1 and exact_label_matches == 1
-
-
-def _goal_active_input_predecessor_field(
-    context: dict[str, Any],
-) -> tuple[str, str, str]:
-    """Return one bridge-minted typed predecessor for a field transition."""
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        return ("", "", "")
-    goal_entities = focused.get("goal_entities")
-    root_entities = context.get("entities")
-    if not isinstance(goal_entities, dict) or not isinstance(root_entities, dict):
-        return ("", "", "")
-    field_id = goal_entities.get("active_input_predecessor_field_id")
-    field_label = goal_entities.get("active_input_predecessor_field_label")
-    text = goal_entities.get("active_input_predecessor_text")
-    if not all(isinstance(value, str) and value for value in (field_id, field_label, text)):
-        return ("", "", "")
-    fields = root_entities.get("input_fields")
-    active_field_id, active_field_label, _ = _goal_active_input_field(context)
-    active_text = _goal_active_input_transaction_text(context)
-    active_matches = (
-        [
-            item
-            for item in fields
-            if isinstance(item, dict)
-            and item.get("field_id") == active_field_id
-            and item.get("field_label", "") == active_field_label
-            and item.get("text") == active_text
-        ]
-        if isinstance(fields, list)
-        else []
-    )
-    matches = (
-        [
-            item
-            for item in fields
-            if isinstance(item, dict)
-            and item.get("field_id") == field_id
-            and item.get("field_label") == field_label
-            and item.get("text") == text
-        ]
-        if isinstance(fields, list)
-        else []
-    )
-    return (
-        (field_id, field_label, text)
-        if field_id != active_field_id and len(matches) == 1 and len(active_matches) == 1
-        else ("", "", "")
-    )
-
-
-def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
-    """Return true only when the graph supplied a concrete text-entry entity."""
-
-    return bool(_goal_explicit_input_text(context) or _goal_active_input_transaction_text(context))
-
-
 def _adjacent_exact_preedit_cue(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
@@ -1923,13 +1608,13 @@ def _authorized_exact_committed_prefix_cue(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
     *,
-    goal_context: dict[str, Any],
+    goal: generic_goal_domain.ActiveVisualGoal,
     keyboard_input_mode: str,
 ) -> str:
     """Recover one committed authorized prefix inside the typed field."""
 
-    field_id, _field_label, _multiline = _goal_active_input_field(goal_context)
-    authorized = _goal_active_input_transaction_text(goal_context)
+    field_id, _field_label, _multiline = goal.field
+    authorized = goal.transaction_text
     cues = trusted_input.get("visible_editable_cues")
     if (
         not field_id
@@ -2715,20 +2400,19 @@ def _append_audited_input_element(
     field_label: str,
     multiline: bool,
     active_clear_goal: bool,
-    switch_is_goal: bool,
     keyboard: _AuditedKeyboard,
-    controls: dict[str, Any],
+    controls: _AuditedInputControls,
 ) -> None:
-    step = controls["step"]
-    auxiliary = any(controls.get(key) is not None for key in ("candidate", "literal", "enter", "layout", "case"))
+    step = controls.step
+    auxiliary = any(getattr(controls, key) is not None for key in ("candidate", "literal", "enter", "layout", "case"))
     needs_auxiliary = bool(
         not active_clear_goal
         and step is not None
         and keyboard.visible
         and (
             step.kind == "literal_key"
-            or controls.get("required_mode") is not None
-            and keyboard.input_mode != controls["required_mode"]
+            or controls.required_mode is not None
+            and keyboard.input_mode != controls.required_mode
             or step.kind in {"direct_latin", "chinese_pinyin"}
             and keyboard.layout != "qwerty"
             or bool(step.required_case_mode)
@@ -2737,8 +2421,8 @@ def _append_audited_input_element(
     )
     states: dict[str, Any] = {
         "goal_relevant": bool(
-            not switch_is_goal
-            and controls.get("next_field") is None
+            not controls.switch_is_goal
+            and controls.next_field is None
             and not auxiliary
             and not needs_auxiliary
             and not keyboard.controls_revoked
@@ -2748,7 +2432,7 @@ def _append_audited_input_element(
     }
     if field_id:
         states["input_field_id"] = field_id
-        if controls.get("next_field") is None:
+        if controls.next_field is None:
             states["input_multiline"] = multiline
     if field_label:
         states["input_field_label"] = field_label
@@ -2771,21 +2455,21 @@ def _append_audited_input_element(
             keyboard_input_mode=keyboard.input_mode,
             keyboard_case_mode=keyboard.case_mode,
         )
-    if controls.get("qwerty") is not None:
-        states["keyboard_geometry"] = controls["qwerty"]
-    elif controls.get("backspace") is not None:
+    if controls.qwerty is not None:
+        states["keyboard_geometry"] = controls.qwerty
+    elif controls.backspace is not None:
         states["keyboard_geometry"] = {
             "type": "generic",
-            "anchors": {"backspace": controls["backspace"]["center"]},
+            "anchors": {"backspace": controls.backspace["center"]},
             "source": "input_structure_audit",
         }
-    if controls.get("candidate") is not None and step is not None:
+    if controls.candidate is not None and step is not None:
         states.update(
-            ime_preedit_text=controls["preedit"],
+            ime_preedit_text=controls.preedit,
             ime_exact_candidate_text=step.segment,
         )
-    elif controls.get("clearable_preedit"):
-        states["ime_preedit_text"] = controls["clearable_preedit"]
+    elif controls.clearable_preedit:
+        states["ime_preedit_text"] = controls.clearable_preedit
 
     evidence = list(
         dict.fromkeys(
@@ -2823,8 +2507,8 @@ def _append_audited_input_element(
         evidence.insert(0, f"应用输入框为空，占位提示：{audited_input['placeholder']}")
     elif audited_input.get("same_frame_input_surface_evidence"):
         evidence.insert(0, "输入结构审计确认当前输入框为空；同帧场景只证明唯一可见输入表面与其重合")
-    if controls.get("clearable_preedit"):
-        evidence.append("唯一相邻输入法预编辑串已绑定当前typed输入框，可清理文字：" f"{controls['clearable_preedit']}")
+    if controls.clearable_preedit:
+        evidence.append("唯一相邻输入法预编辑串已绑定当前typed输入框，可清理文字：" f"{controls.clearable_preedit}")
     if not keyboard.visible:
         evidence.append(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE)
     elements.append(
@@ -2854,14 +2538,13 @@ def _append_audited_input_element(
 def _append_audited_input_controls(
     elements: list[dict[str, Any]],
     *,
-    controls: dict[str, Any],
+    controls: _AuditedInputControls,
     active_field_id: str,
     predecessor_field_id: str,
     active_field_label: str,
-    switch_is_goal: bool,
 ) -> None:
-    step = controls["step"]
-    next_field = controls.get("next_field")
+    step = controls.step
+    next_field = controls.next_field
     if next_field is not None:
         elements.append(
             _next_field_key_element(
@@ -2884,7 +2567,7 @@ def _append_audited_input_controls(
                 {
                     "ime_candidate": True,
                     "expected_input_value": step.expected_value,
-                    "pinyin": controls["preedit"],
+                    "pinyin": controls.preedit,
                 },
                 "输入结构审计确认当前输入法组合的唯一逐字候选：" + step.segment,
             ),
@@ -2918,8 +2601,8 @@ def _append_audited_input_controls(
                 "switch_keyboard_layout",
                 {
                     "keyboard_layout_switch": True,
-                    "current_layout": controls["layout"]["current_layout"] if controls.get("layout") else "",
-                    "target_layout": controls["layout"]["target_layout"] if controls.get("layout") else "",
+                    "current_layout": controls.layout["current_layout"] if controls.layout else "",
+                    "target_layout": controls.layout["target_layout"] if controls.layout else "",
                     "next_input_value": step.segment,
                 },
                 "输入结构审计确认方向明确的键盘布局切换键",
@@ -2930,14 +2613,14 @@ def _append_audited_input_controls(
                 "switch_keyboard_case",
                 {
                     "keyboard_case_switch": True,
-                    "current_mode": controls["case"]["current_mode"] if controls.get("case") else "",
-                    "target_mode": controls["case"]["target_mode"] if controls.get("case") else "",
+                    "current_mode": controls.case["current_mode"] if controls.case else "",
+                    "target_mode": controls.case["target_mode"] if controls.case else "",
                 },
                 "输入结构审计确认方向明确的大小写切换键",
             ),
         )
         for key, suffix, meaning, extra_states, evidence in specs:
-            item = controls.get(key)
+            item = getattr(controls, key)
             if item is not None:
                 elements.append(
                     _audited_element(
@@ -2949,7 +2632,7 @@ def _append_audited_input_controls(
                         evidence=evidence,
                     )
                 )
-    mode = controls.get("mode")
+    mode = controls.mode
     if mode is not None:
         elements.append(
             _audited_element(
@@ -2957,7 +2640,7 @@ def _append_audited_input_controls(
                 "switch_keyboard_input_mode",
                 mode,
                 states={
-                    "goal_relevant": switch_is_goal,
+                    "goal_relevant": controls.switch_is_goal,
                     "keyboard_input_mode_switch": True,
                     "current_mode": mode["current_mode"],
                     "target_mode": mode["target_mode"],
@@ -3124,7 +2807,7 @@ def _plan_audited_input_controls(
     trusted_input: dict[str, Any] | None,
     predecessor_input: dict[str, Any] | None,
     trusted_preedits: list[dict[str, Any]],
-    goal_context: dict[str, Any],
+    goal: generic_goal_domain.ActiveVisualGoal,
     active_clear_goal: bool,
     active_field_id: str,
     active_multiline: bool,
@@ -3136,16 +2819,12 @@ def _plan_audited_input_controls(
     keyboard_bounds: tuple[float, float, float, float] | None,
     snapped_anchors: dict[str, list[int]] | None,
     switch_is_goal: bool,
-) -> tuple[Any, ...]:
+) -> _AuditedInputControls:
     """Derive the sole next typed-input control set from audited facts."""
 
     step = None
-    if trusted_input is not None and _goal_has_explicit_input_text(goal_context) and not active_clear_goal:
-        context = _active_subgoal_visual_context(goal_context)
-        entities = context.get("goal_entities") if context is not goal_context else goal_context.get("entities")
-        target = _goal_active_input_transaction_text(goal_context) or (
-            entities.get("input_text") if isinstance(entities, dict) else None
-        )
+    if trusted_input is not None and goal.has_explicit_text and not active_clear_goal:
+        target = goal.transaction_text or goal.explicit_text
         try:
             step = plan_next_verified_input(target, trusted_input["text"])
         except (ValueError, VerifiedTextTransactionError):
@@ -3190,7 +2869,7 @@ def _plan_audited_input_controls(
     if (
         trusted_input is not None
         and active_field_id
-        and (_goal_active_input_transaction_text(goal_context) or active_clear_goal)
+        and (goal.transaction_text or active_clear_goal)
         and keyboard_visible
         and keyboard_bounds is not None
         and (qwerty_geometry is not None or backspace is not None)
@@ -3252,7 +2931,7 @@ def _plan_audited_input_controls(
     )
     targets = set(
         _input_audit_literal_key_targets(
-            _observation_goal_context(goal_context),
+            goal.observation_context,
             current_input_text=trusted_input["text"] if trusted_input is not None else None,
         )
     )
@@ -3319,7 +2998,7 @@ def _plan_audited_input_controls(
         and keyboard_visible
         and keyboard_layout == "qwerty"
         and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
-        and _goal_has_explicit_input_text(goal_context)
+        and goal.has_explicit_text
         and not switch_is_goal
         and step is not None
         and step.kind in {"direct_latin", "chinese_pinyin"}
@@ -3328,22 +3007,21 @@ def _plan_audited_input_controls(
         and not active_clear_goal
     ):
         raise UISceneError("文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。")
-    return (
-        step,
-        exact_ime_candidate,
-        exact_ime_preedit,
-        qwerty_geometry,
-        backspace,
-        clearable_preedit,
-        enter_key,
-        next_field_key,
-        required_mode,
-        switch_is_goal,
-        mode_switch,
-        exact_literal,
-        exact_enter,
-        exact_layout,
-        exact_case,
+    return _AuditedInputControls(
+        step=step,
+        candidate=exact_ime_candidate,
+        preedit=exact_ime_preedit,
+        qwerty=qwerty_geometry,
+        backspace=backspace,
+        clearable_preedit=clearable_preedit,
+        next_field=next_field_key,
+        required_mode=required_mode,
+        switch_is_goal=switch_is_goal,
+        mode=mode_switch,
+        literal=exact_literal,
+        enter=exact_enter,
+        layout=exact_layout,
+        case=exact_case,
     )
 
 
@@ -3367,6 +3045,7 @@ def _apply_input_structure_audit(
     single_step_input_surface: dict[str, Any] | None = None,
 ) -> UIScene:
     try:
+        goal = _goal_view(goal_context)
         payload = _extract_json_object(raw)
         if set(payload) != {
             "protocol_version",
@@ -3409,11 +3088,11 @@ def _apply_input_structure_audit(
             keyboard_bounds=application_keyboard_bounds,
             qwerty_anchors=(locally_snapped_qwerty_anchors or raw_audited_qwerty_anchors),
         )
-        active_field_id, active_field_label, active_multiline = _goal_active_input_field(goal_context)
-        active_transaction_text = _goal_active_input_transaction_text(goal_context)
-        explicit_input_text = _goal_explicit_input_text(goal_context)
+        active_field_id, active_field_label, active_multiline = goal.field
+        active_transaction_text = goal.transaction_text
+        explicit_input_text = goal.explicit_text
         multiline_input_contract = bool(active_multiline or "\n" in explicit_input_text or "\r" in explicit_input_text)
-        unique_typed_active_field = _goal_has_unique_typed_active_input_field(goal_context)
+        unique_typed_active_field = goal.unique_typed_field
         matches = _collect_audited_input_matches(
             application_inputs,
             active_field_id=active_field_id,
@@ -3430,8 +3109,8 @@ def _apply_input_structure_audit(
             single_step_input_surface=single_step_input_surface,
         )
 
-        switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
-        active_clear_goal = _goal_requests_active_verified_text_clear(goal_context)
+        switch_is_goal = goal.mode_switch_requested
+        active_clear_goal = goal.clear_requested
         trusted_input = _unique_audited_input(matches, label=active_field_label)
         if (
             trusted_input is not None
@@ -3444,9 +3123,7 @@ def _apply_input_structure_audit(
             trusted_input["lineage_ime_candidate_committed_value"] = resolved_ime_state["committed_value"]
             trusted_input["text"] = resolved_ime_state["committed_value"]
             trusted_preedits = [item for item in trusted_preedits if item is not committed_preedit]
-        predecessor_field_id, predecessor_field_label, predecessor_text = _goal_active_input_predecessor_field(
-            goal_context
-        )
+        predecessor_field_id, predecessor_field_label, predecessor_text = goal.predecessor
         predecessor_input = (
             _unique_audited_input(matches, label=predecessor_field_label, text=predecessor_text)
             if predecessor_field_id
@@ -3497,7 +3174,7 @@ def _apply_input_structure_audit(
             authorized_prefix_cue = _authorized_exact_committed_prefix_cue(
                 trusted_input,
                 trusted_preedits,
-                goal_context=goal_context,
+                goal=goal,
                 keyboard_input_mode=keyboard_input_mode,
             )
             if authorized_prefix_cue:
@@ -3517,27 +3194,11 @@ def _apply_input_structure_audit(
                 frame=lineage_frame,
                 keyboard_input_mode=keyboard_input_mode,
             )
-        (
-            input_step,
-            exact_ime_candidate,
-            exact_ime_preedit_text,
-            qwerty_geometry,
-            generic_backspace_geometry,
-            clearable_ime_preedit,
-            enter_key,
-            next_field_key,
-            required_input_mode,
-            switch_is_goal,
-            mode_switch,
-            exact_literal_key,
-            exact_enter_key,
-            exact_layout_switch,
-            exact_case_switch,
-        ) = _plan_audited_input_controls(
+        controls = _plan_audited_input_controls(
             trusted_input=trusted_input,
             predecessor_input=predecessor_input,
             trusted_preedits=trusted_preedits,
-            goal_context=goal_context,
+            goal=goal,
             active_clear_goal=active_clear_goal,
             active_field_id=active_field_id,
             active_multiline=active_multiline,
@@ -3550,17 +3211,14 @@ def _apply_input_structure_audit(
             snapped_anchors=locally_snapped_qwerty_anchors,
             switch_is_goal=switch_is_goal,
         )
-        rendered_input = trusted_input or (predecessor_input if next_field_key is not None else None)
+        rendered_input = trusted_input or (predecessor_input if controls.next_field is not None else None)
 
         focus_only_input = None
         if (
             trusted_input is None
-            and next_field_key is None
-            and (mode_switch is None or not switch_is_goal)
-            and (
-                _goal_active_input_transaction_text(goal_context)
-                or _goal_has_target_only_active_input_field(goal_context)
-            )
+            and controls.next_field is None
+            and (controls.mode is None or not controls.switch_is_goal)
+            and (goal.transaction_text or goal.target_only)
         ):
             focus_only_input = _focus_only_compact_input_surface(
                 single_step_input_surface,
@@ -3582,7 +3240,9 @@ def _apply_input_structure_audit(
             if element.get("role") == "input" or element.get("meaning") == "application_text_input":
                 continue
             elements.append(element)
-        if trusted_input is None and next_field_key is None and (mode_switch is None or not switch_is_goal):
+        if trusted_input is None and controls.next_field is None and (
+            controls.mode is None or not controls.switch_is_goal
+        ):
             if focus_only_input is not None:
                 elements.append(focus_only_input)
             value["elements"] = elements
@@ -3597,30 +3257,14 @@ def _apply_input_structure_audit(
                 stable_override=True,
                 fingerprint_override=fingerprint,
             )
-        controls = {
-            "step": input_step,
-            "candidate": exact_ime_candidate,
-            "preedit": exact_ime_preedit_text,
-            "qwerty": qwerty_geometry,
-            "backspace": generic_backspace_geometry,
-            "clearable_preedit": clearable_ime_preedit,
-            "next_field": next_field_key,
-            "required_mode": required_input_mode,
-            "mode": mode_switch,
-            "literal": exact_literal_key,
-            "enter": exact_enter_key,
-            "layout": exact_layout_switch,
-            "case": exact_case_switch,
-        }
         if rendered_input is not None:
             _append_audited_input_element(
                 elements,
                 rendered_input,
-                field_id=(predecessor_field_id if next_field_key is not None else active_field_id),
-                field_label=(predecessor_field_label if next_field_key is not None else active_field_label),
+                field_id=(predecessor_field_id if controls.next_field is not None else active_field_id),
+                field_label=(predecessor_field_label if controls.next_field is not None else active_field_label),
                 multiline=active_multiline,
                 active_clear_goal=active_clear_goal,
-                switch_is_goal=switch_is_goal,
                 keyboard=audited_keyboard,
                 controls=controls,
             )
@@ -3630,7 +3274,6 @@ def _apply_input_structure_audit(
             active_field_id=active_field_id,
             predecessor_field_id=predecessor_field_id,
             active_field_label=active_field_label,
-            switch_is_goal=switch_is_goal,
         )
         value["elements"] = elements
         value["summary"] = "输入状态仅见typed输入账本；compact输入摘要与输入转写不参与判断。"

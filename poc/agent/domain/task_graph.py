@@ -2882,136 +2882,80 @@ def _has_positive_external_effect(text: str) -> bool:
     return False
 
 
-def _rewrite_local_navigation_subgoals(
-    payload: dict[str, Any],
-    predicate: Any,
-    *,
-    removed_effect_ids: set[str] | None = None,
-) -> dict[str, Any]:
-    subgoals = payload.get("subgoals") if isinstance(payload, dict) else None
-    if not isinstance(subgoals, list):
-        return payload
-    changed = False
-    normalized: list[Any] = []
-    for item in subgoals:
-        if isinstance(item, dict) and predicate(item):
-            replacement = {**item, "execution_class": "navigate", "effect_ids": []}
-            normalized.append(replacement)
-            changed = True
-        else:
-            normalized.append(item)
-    if not changed:
-        return payload
-    value = json.loads(json.dumps(payload, ensure_ascii=False))
-    value["subgoals"] = normalized
-    if removed_effect_ids:
-        value["effect_intents"] = [
-            effect for effect in value.get("effect_intents", [])
-            if not isinstance(effect, dict)
-            or str(effect.get("effect_id") or "") not in removed_effect_ids
-        ]
-    return value
+def _normalize_local_navigation_execution_classes(payload: dict[str, Any]) -> dict[str, Any]:
+    """Classify local input, refresh and recent-card work in one payload pass."""
 
-
-def _normalize_local_refresh_execution_class(payload: dict[str, Any]) -> dict[str, Any]:
-    """Classify a reversible current-page refresh as local navigation."""
-
-    effects = payload.get("effect_intents") if isinstance(payload, dict) else None
-    goal = payload.get("goal") if isinstance(payload, dict) else None
-    if not isinstance(effects, list) or not isinstance(goal, dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("subgoals"), list):
         return payload
-    goal_objective = str(goal.get("objective") or "")
+    goal = payload.get("goal")
+    entities = goal.get("entities") if isinstance(goal, dict) else None
+    effects = payload.get("effect_intents")
     effects_by_id = {
         str(effect.get("effect_id") or ""): effect
-        for effect in effects if isinstance(effect, dict)
+        for effect in effects if isinstance(effects, list) and isinstance(effect, dict)
     }
-    removed: set[str] = set()
-
-    def is_refresh(item: dict[str, Any]) -> bool:
-        local = _subgoal_context(item)
-        context = f"{goal_objective} {local}"
-        effect_ids = tuple(
-            str(value) for value in item.get("effect_ids", [])
-            if isinstance(value, str) and value
+    bound = _bound_effect_subgoals(effects)
+    fields = entities.get("input_fields") if isinstance(entities, dict) else None
+    has_input = bool(
+        isinstance(entities, dict)
+        and (
+            isinstance(entities.get("input_text"), str) and entities["input_text"]
+            or isinstance(fields, list)
+            and any(isinstance(field, dict) and isinstance(field.get("text"), str) and field["text"] for field in fields)
         )
+    )
+    target_surface = str(entities.get("target_surface") or "") if isinstance(entities, dict) else ""
+    goal_objective = str(goal.get("objective") or "") if isinstance(goal, dict) else ""
+    removed: set[str] = set()
+    normalized: list[Any] = []
+    changed = False
+    for item in payload["subgoals"]:
+        if not isinstance(item, dict) or item.get("execution_class") not in {"effect", "unknown"}:
+            normalized.append(item)
+            continue
         subgoal_id = str(item.get("subgoal_id") or "")
-        removable = bool(effect_ids) and all(
+        context = _subgoal_context(item)
+        combined = f"{goal_objective} {context}"
+        effect_ids = tuple(value for value in item.get("effect_ids", ()) if isinstance(value, str) and value)
+        removable_refresh_effects = bool(effect_ids) and all(
             isinstance(effects_by_id.get(effect_id), dict)
             and effects_by_id[effect_id].get("kind") == "data_mutation"
             and effects_by_id[effect_id].get("payload_entity_roles") == []
             and effects_by_id[effect_id].get("source_subgoal_ids") == [subgoal_id]
             for effect_id in effect_ids
         )
-        matched = bool(
-            item.get("execution_class") in {"effect", "unknown"}
-            and (item.get("effect_ids") == [] or removable)
-            and (_REFRESH_PATTERN.search(context) or (
-                _CURRENT_SURFACE_PATTERN.search(context) and _REFRESH_CONTROL_PATTERN.search(local)
-            ))
-            and re.search(r"刷新|重新加载|重新载入|\brefresh\b|\breload\b", local, re.IGNORECASE)
-            and not _has_positive_external_effect(context)
+        local_input = bool(
+            has_input and item.get("effect_ids") == [] and subgoal_id not in bound
+            and _LOCAL_INPUT_PATTERN.search(context) and not _has_positive_external_effect(context)
         )
-        if matched:
-            removed.update(effect_ids)
-        return matched
-
-    return _rewrite_local_navigation_subgoals(payload, is_refresh, removed_effect_ids=removed)
-
-
-def _normalize_local_recent_task_card_dismissal_execution_class(
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Classify dismissal of a local recent-task card as navigation."""
-
-    goal = payload.get("goal") if isinstance(payload, dict) else None
-    entities = goal.get("entities") if isinstance(goal, dict) else None
-    effects = payload.get("effect_intents") if isinstance(payload, dict) else None
-    if not isinstance(entities, dict) or not isinstance(effects, list):
-        return payload
-    target_surface = str(entities.get("target_surface") or "")
-    bound = _bound_effect_subgoals(effects)
-
-    def is_recents_dismissal(item: dict[str, Any]) -> bool:
-        context = _subgoal_context(item)
-        return bool(
-            item.get("execution_class") in {"effect", "unknown"}
-            and item.get("effect_ids") == []
-            and str(item.get("subgoal_id") or "") not in bound
+        local_refresh = bool(
+            isinstance(effects, list) and (item.get("effect_ids") == [] or removable_refresh_effects)
+            and (_REFRESH_PATTERN.search(combined) or (
+                _CURRENT_SURFACE_PATTERN.search(combined) and _REFRESH_CONTROL_PATTERN.search(context)
+            ))
+            and re.search(r"刷新|重新加载|重新载入|\brefresh\b|\breload\b", context, re.IGNORECASE)
+            and not _has_positive_external_effect(combined)
+        )
+        recent_dismissal = bool(
+            isinstance(effects, list) and item.get("effect_ids") == [] and subgoal_id not in bound
             and _RECENTS_PATTERNS[0].search(target_surface)
             and all(pattern.search(context) for pattern in _RECENTS_PATTERNS[1:])
         )
-
-    return _rewrite_local_navigation_subgoals(payload, is_recents_dismissal)
-
-
-def _normalize_local_input_execution_class(payload: dict[str, Any]) -> dict[str, Any]:
-    """Classify exact unsubmitted field edits as local navigation."""
-
-    goal = payload.get("goal") if isinstance(payload, dict) else None
-    entities = goal.get("entities") if isinstance(goal, dict) else None
-    if not isinstance(entities, dict):
+        if local_input or local_refresh or recent_dismissal:
+            normalized.append({**item, "execution_class": "navigate", "effect_ids": []})
+            removed.update(effect_ids if local_refresh else ())
+            changed = True
+        else:
+            normalized.append(item)
+    if not changed:
         return payload
-    input_fields = entities.get("input_fields")
-    has_input = bool(isinstance(entities.get("input_text"), str) and entities["input_text"]) or bool(
-        isinstance(input_fields, list)
-        and any(isinstance(field, dict) and isinstance(field.get("text"), str) and field["text"] for field in input_fields)
-    )
-    if not has_input:
-        return payload
-    effects = payload.get("effect_intents")
-    bound = _bound_effect_subgoals(effects)
-
-    def is_local_input(item: dict[str, Any]) -> bool:
-        context = _subgoal_context(item)
-        return bool(
-            item.get("execution_class") in {"effect", "unknown"}
-            and item.get("effect_ids") == []
-            and str(item.get("subgoal_id") or "") not in bound
-            and _LOCAL_INPUT_PATTERN.search(context)
-            and not _has_positive_external_effect(context)
-        )
-
-    return _rewrite_local_navigation_subgoals(payload, is_local_input)
+    result = {**payload, "subgoals": normalized}
+    if removed:
+        result["effect_intents"] = [
+            effect for effect in effects
+            if not isinstance(effect, dict) or str(effect.get("effect_id") or "") not in removed
+        ]
+    return result
 
 
 def _normalize_unique_planner_transport_aliases(

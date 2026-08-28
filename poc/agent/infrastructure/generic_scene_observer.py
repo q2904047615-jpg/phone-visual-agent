@@ -940,228 +940,52 @@ def _normalize_single_step_wire_coordinates(
     *,
     request_image_size: tuple[int, int],
 ) -> dict[str, Any]:
-    """Atomically normalize one declared wire grid into canonical 0..1000.
-
-    The wire grid is syntax only.  It never reaches UIScene, canonical
-    candidates, scope, Controller, or the robot.  The primary contract keeps X
-    in 0..1000 and binds Y to the exact JPEG height sent in this request.  A
-    legacy full-image grid is accepted only when its aspect ratio independently
-    agrees with that JPEG.  No conventional phone resolution is guessed.
-    """
-
+    """Convert the sole request-bound axis grid to canonical 0..1000."""
     coordinate_space = payload.get("coordinate_space")
-    if not isinstance(coordinate_space, dict) or set(coordinate_space) != {
-        "kind",
-        "width",
-        "height",
-    }:
-        raise UISceneError("单步观察必须声明唯一coordinate_space。")
-    kind = coordinate_space.get("kind")
-    width = coordinate_space.get("width")
-    height = coordinate_space.get("height")
-    if (
-        isinstance(width, bool)
-        or isinstance(height, bool)
-        or not isinstance(width, int)
-        or not isinstance(height, int)
-        or not 64 <= width <= 8192
-        or not 64 <= height <= 8192
-    ):
-        raise UISceneError("coordinate_space宽高必须是64..8192整数。")
-    if kind not in {"normalized_1000", "axis_grid", "image_grid"}:
-        raise UISceneError("coordinate_space.kind无效。")
-    if kind == "normalized_1000" and (width, height) != (1000, 1000):
-        raise UISceneError("normalized_1000必须声明1000×1000。")
     request_width, request_height = request_image_size
+    expected = {"kind": "axis_grid", "width": 1000, "height": request_height}
+    if coordinate_space != expected:
+        raise UISceneError("单步观察必须声明唯一coordinate_space。")
     if request_width <= 0 or request_height <= 0:
         raise UISceneError("本轮Qwen请求图片尺寸无效。")
+    def numbers(value: Any, length: int, label: str) -> list[float]:
+        if not isinstance(value, (list, tuple)) or len(value) != length or any(
+            isinstance(part, bool) or not isinstance(part, (int, float))
+            for part in value
+        ):
+            raise UISceneError(f"coordinate_space内存在无效{label}。")
+        return [float(part) for part in value]
 
-    bounds_refs: list[tuple[dict[str, Any], str]] = []
-    point_refs: list[tuple[dict[str, Any], str]] = []
+    def normalize(node: Any, *, anchors: bool = False) -> None:
+        if isinstance(node, list):
+            for item in node:
+                normalize(item, anchors=anchors)
+            return
+        if not isinstance(node, dict):
+            return
+        for key, value in tuple(node.items()):
+            if key == "bounds" and value is not None:
+                left, top, right, bottom = numbers(value, 4, "bounds")
+                if not (0 <= left < right <= 1000 and 0 <= top < bottom <= request_height):
+                    raise UISceneError("bounds超出声明的axis_grid。")
+                node[key] = [
+                    round(left), round(top * 1000 / request_height),
+                    round(right), round(bottom * 1000 / request_height),
+                ]
+                if not _valid_1000_bounds(node[key]):
+                    raise UISceneError("axis_grid换算后bounds退化。")
+            elif anchors and value is not None:
+                x, y = numbers(value, 2, "锚点")
+                if not (0 <= x <= 1000 and 0 <= y <= request_height):
+                    raise UISceneError("锚点超出声明的axis_grid。")
+                node[key] = [round(x), round(y * 1000 / request_height)]
+            else:
+                normalize(value, anchors=(key == "qwerty_anchors"))
 
-    def add_bounds(owner: Any, key: str = "bounds") -> None:
-        if isinstance(owner, dict) and owner.get(key) is not None:
-            bounds_refs.append((owner, key))
-
-    def add_point(owner: Any, key: str) -> None:
-        if isinstance(owner, dict) and owner.get(key) is not None:
-            point_refs.append((owner, key))
-
+    normalize(payload.get("scene"))
+    normalize(payload.get("input_structure"))
     scene = payload.get("scene")
-    if isinstance(scene, dict):
-        for item in scene.get("elements") or []:
-            add_bounds(item)
     input_payload = payload.get("input_structure")
-    if isinstance(input_payload, dict):
-        for item in input_payload.get("application_inputs") or []:
-            add_bounds(item)
-            if isinstance(item, dict):
-                add_bounds(item.get("right_button"))
-        for region in input_payload.get("ime_preedit_regions") or []:
-            add_bounds(region)
-            if isinstance(region, dict):
-                for candidate in region.get("candidates") or []:
-                    add_bounds(candidate)
-        keyboard = input_payload.get("keyboard")
-        if isinstance(keyboard, dict):
-            add_bounds(keyboard)
-            for key in (
-                "mode_switch",
-                "backspace_key",
-                "enter_key",
-                "case_switch",
-            ):
-                add_bounds(keyboard.get(key))
-            for collection_name in ("literal_keys", "layout_switches"):
-                for item in keyboard.get(collection_name) or []:
-                    add_bounds(item)
-            anchors = keyboard.get("qwerty_anchors")
-            if isinstance(anchors, dict):
-                for key in anchors:
-                    add_point(anchors, key)
-
-    parsed_bounds: list[tuple[dict[str, Any], str, tuple[float, float, float, float]]] = []
-    parsed_points: list[tuple[dict[str, Any], str, tuple[float, float]]] = []
-    all_coordinates: list[float] = []
-    x_coordinates: list[float] = []
-    y_coordinates: list[float] = []
-    for owner, key in bounds_refs:
-        value = owner.get(key)
-        if (
-            not isinstance(value, (list, tuple))
-            or len(value) != 4
-            or any(
-                isinstance(part, bool) or not isinstance(part, (int, float))
-                for part in value
-            )
-        ):
-            raise UISceneError("coordinate_space内存在无效bounds。")
-        left, top, right, bottom = (float(part) for part in value)
-        parsed_bounds.append((owner, key, (left, top, right, bottom)))
-        all_coordinates.extend((left, top, right, bottom))
-        x_coordinates.extend((left, right))
-        y_coordinates.extend((top, bottom))
-    for owner, key in point_refs:
-        value = owner.get(key)
-        if (
-            not isinstance(value, (list, tuple))
-            or len(value) != 2
-            or any(
-                isinstance(part, bool) or not isinstance(part, (int, float))
-                for part in value
-            )
-        ):
-            raise UISceneError("coordinate_space内存在无效锚点。")
-        x, y = (float(part) for part in value)
-        parsed_points.append((owner, key, (x, y)))
-        all_coordinates.extend((x, y))
-        x_coordinates.append(x)
-        y_coordinates.append(y)
-
-    declared_kind = kind
-    wire_kind = kind
-    wire_width = width
-    wire_height = height
-    coordinate_error_label = kind
-    if kind == "normalized_1000":
-        # Older responses sometimes preserve the former declaration while
-        # using the exact new Y axis.  Correct that one proven contradiction
-        # locally and atomically; every X and Y value must fit the request-
-        # bound axis, so this never guesses a conventional phone resolution.
-        infer_request_bound_y_axis = (
-            request_height > 1000
-            and any(value > 1000 for value in y_coordinates)
-            and all(0 <= value <= 1000 for value in x_coordinates)
-            and all(0 <= value <= request_height for value in y_coordinates)
-        )
-        if infer_request_bound_y_axis:
-            wire_kind = "axis_grid_inferred_from_normalized_1000"
-            wire_width = 1000
-            wire_height = request_height
-            coordinate_error_label = "axis_grid"
-        else:
-            # Keep the existing downstream distinction: an input target with
-            # invalid canonical geometry fails closed, while a non-input scene
-            # may discard an unusable element batch and retain only the typed
-            # top-level App/screen facts.  This branch changes no coordinates.
-            payload.pop("coordinate_space", None)
-            return {
-                "wire_kind": kind,
-                "wire_extent": [1000, 1000],
-                "canonical_extent": [1000, 1000],
-                "applied": False,
-            }
-    elif kind == "axis_grid":
-        if (width, height) != (1000, request_height):
-            raise UISceneError(
-                "axis_grid必须声明width=1000且height等于本轮Qwen请求图片高度。"
-            )
-        if not all_coordinates:
-            payload.pop("coordinate_space", None)
-            return {
-                "wire_kind": kind,
-                "wire_extent": [width, height],
-                "request_image_size": [request_width, request_height],
-                "canonical_extent": [1000, 1000],
-                "applied": False,
-            }
-    else:
-        if not math.isclose(
-            width / height,
-            request_width / request_height,
-            rel_tol=0.01,
-            abs_tol=0.0,
-        ):
-            raise UISceneError("image_grid宽高比与本轮Qwen请求图片不一致。")
-        if not all_coordinates or not any(
-            value > 1000 for value in all_coordinates
-        ):
-            raise UISceneError("image_grid没有可证明需要归一化的越界坐标。")
-
-    transformed_bounds: list[tuple[dict[str, Any], str, list[int]]] = []
-    transformed_points: list[tuple[dict[str, Any], str, list[int]]] = []
-    for owner, key, (left, top, right, bottom) in parsed_bounds:
-        if not (
-            0 <= left < right <= wire_width
-            and 0 <= top < bottom <= wire_height
-        ):
-            raise UISceneError(
-                f"bounds超出声明的{coordinate_error_label}。"
-            )
-        normalized = [
-            round(left * 1000 / wire_width),
-            round(top * 1000 / wire_height),
-            round(right * 1000 / wire_width),
-            round(bottom * 1000 / wire_height),
-        ]
-        if not (
-            0 <= normalized[0] < normalized[2] <= 1000
-            and 0 <= normalized[1] < normalized[3] <= 1000
-        ):
-            raise UISceneError(
-                f"{coordinate_error_label}换算后bounds退化。"
-            )
-        transformed_bounds.append((owner, key, normalized))
-    for owner, key, (x, y) in parsed_points:
-        if not (0 <= x <= wire_width and 0 <= y <= wire_height):
-            raise UISceneError(
-                f"锚点超出声明的{coordinate_error_label}。"
-            )
-        normalized = [
-            round(x * 1000 / wire_width),
-            round(y * 1000 / wire_height),
-        ]
-        if not (0 <= normalized[0] <= 1000 and 0 <= normalized[1] <= 1000):
-            raise UISceneError(
-                f"{coordinate_error_label}换算后锚点无效。"
-            )
-        transformed_points.append((owner, key, normalized))
-
-    for owner, key, value in transformed_bounds:
-        owner[key] = value
-    for owner, key, value in transformed_points:
-        owner[key] = value
-
     scene_inputs = [
         item
         for item in (scene.get("elements") or [])
@@ -1198,19 +1022,16 @@ def _normalize_single_step_wire_coordinates(
         ):
             raise UISceneError(
                 "scene与input_structure没有使用同一个"
-                f"{coordinate_error_label}坐标空间。"
+                "axis_grid坐标空间。"
             )
     payload.pop("coordinate_space", None)
-    diagnostics = {
-        "wire_kind": wire_kind,
-        "wire_extent": [wire_width, wire_height],
+    return {
+        "wire_kind": "axis_grid",
+        "wire_extent": [1000, request_height],
         "request_image_size": [request_width, request_height],
         "canonical_extent": [1000, 1000],
         "applied": True,
     }
-    if wire_kind != declared_kind:
-        diagnostics["declared_wire_kind"] = declared_kind
-    return diagnostics
 
 
 def _parse_single_step_observation_envelope(
@@ -1223,22 +1044,6 @@ def _parse_single_step_observation_envelope(
 
     try:
         payload = _extract_json_object(raw, reject_duplicate_keys=True)
-        # Flat scene JSON remains a valid one-call response for non-input
-        # observations.  This is a shape normalization only; it never enables
-        # a second request or restores any former audit authority.
-        if payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION:
-            if input_structure_required:
-                raise UISceneError("输入子目标的单次响应缺少input_structure。")
-            return {
-                "scene": payload,
-                "input_structure": None,
-                "coordinate_normalization": {
-                    "wire_kind": "implicit_normalized_1000",
-                    "wire_extent": [1000, 1000],
-                    "canonical_extent": [1000, 1000],
-                    "applied": False,
-                },
-            }
         required = {
             "protocol_version",
             "coordinate_space",
@@ -1265,22 +1070,6 @@ def _parse_single_step_observation_envelope(
         input_payload = payload["input_structure"]
         if input_structure_required and not isinstance(input_payload, dict):
             raise UISceneError("输入子目标必须在同一响应返回input_structure对象。")
-        if (
-            input_structure_required
-            and isinstance(input_payload, dict)
-            and set(input_payload)
-            == {"application_inputs", "ime_preedit_regions", "keyboard"}
-        ):
-            # The outer single-step envelope already fixes the sole valid
-            # nested audit protocol.  Restoring that one omitted constant is a
-            # deterministic shape normalization; no visual fact, geometry or
-            # action meaning is inferred.  Every other missing/extra/wrong
-            # nested field still fails in the strict audit parser below.
-            input_payload = {
-                "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
-                **input_payload,
-            }
-            payload = {**payload, "input_structure": input_payload}
         if not input_structure_required and input_payload is not None:
             raise UISceneError("非输入子目标的input_structure必须为null。")
         return {

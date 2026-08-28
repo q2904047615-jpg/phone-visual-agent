@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -20,6 +21,63 @@ from agent.infrastructure.generic_scene_observer import (
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from agent.infrastructure.dashscope_vision_provider import _image_data_url
 from agent.domain.vision_model import VisionAgentError
+
+
+def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
+    """Translate old normalized fixtures to the sole current wire contract."""
+
+    payload = json.loads(json.dumps(value, ensure_ascii=False))
+    flat_scene = payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
+    if flat_scene:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "axis_grid", "width": 1000, "height": request_height,
+            },
+            "scene": payload,
+            "input_structure": None,
+        }
+    coordinate_space = payload.get("coordinate_space")
+    normalized_fixture = coordinate_space == {
+        "kind": "normalized_1000", "width": 1000, "height": 1000,
+    }
+    if not (flat_scene or normalized_fixture):
+        return payload
+    if normalized_fixture:
+        payload["coordinate_space"] = {
+            "kind": "axis_grid", "width": 1000, "height": request_height,
+        }
+
+    def scale(node, *, anchors: bool = False) -> None:
+        if isinstance(node, list):
+            for item in node:
+                scale(item, anchors=anchors)
+        elif isinstance(node, dict):
+            for key, item in node.items():
+                if key == "bounds" and isinstance(item, list) and len(item) == 4:
+                    item[1] = round(item[1] * request_height / 1000)
+                    item[3] = round(item[3] * request_height / 1000)
+                elif anchors and isinstance(item, list) and len(item) == 2:
+                    item[1] = round(item[1] * request_height / 1000)
+                else:
+                    scale(item, anchors=(key == "qwerty_anchors"))
+
+    scale(payload.get("scene"))
+    scale(payload.get("input_structure"))
+    return payload
+
+
+def request_axis_height(messages: list[dict]) -> int:
+    prompt = json.dumps(messages, ensure_ascii=False)
+    match = re.search(
+        r'coordinate_space.{0,40}?axis_grid.{0,40}?width.{0,15}?1000'
+        r'.{0,40}?height.{0,15}?(\d+)',
+        prompt,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError("single-step prompt omitted the current axis grid")
+    return int(match.group(1))
 
 
 class FakeProvider:
@@ -47,7 +105,10 @@ class FakeProvider:
             "timeout": timeout,
             "max_attempts": max_attempts,
         }
-        payload = self.payload
+        payload = current_axis_grid_payload(
+            self.payload,
+            request_height=request_axis_height(messages),
+        )
         if (
             self.calls == 2
             and payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
@@ -82,6 +143,11 @@ class SequenceProvider(FakeProvider):
         value = self.responses.pop(0)
         if isinstance(value, BaseException):
             raise value
+        if isinstance(value, dict):
+            value = current_axis_grid_payload(
+                value,
+                request_height=request_axis_height(messages),
+            )
         # Existing scene fixtures describe the intended refined facts. Adapt
         # only the second model response to the production targeted-delta wire
         # contract so the large historical suite does not duplicate fixtures.
@@ -1403,7 +1469,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertEqual("aaazjie", candidates[0].label)
                 self.assertEqual((0.08, 0.61, 0.3, 0.645), candidates[0].bounds)
 
-    def test_single_step_observer_atomically_normalizes_declared_image_grid(
+    def test_single_step_observer_rejects_retired_image_grid_contract(
         self,
     ) -> None:
         context = {
@@ -1422,87 +1488,25 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 }
             }
         }
-        cases = (
-            (1080, 1920, [120, 1750, 780, 1830]),
-            (720, 1280, [80, 1167, 520, 1220]),
-        )
-        canonical_bounds = []
-        for width, height, raw_bounds in cases:
-            with self.subTest(image_grid=(width, height)):
-                scene = scene_payload()
-                scene.update(
-                    {
-                        "foreground_app_id": "com.example.messaging",
-                        "screen_id": "named_conversation",
-                        "summary": "指定会话页底部有一个空输入框",
-                        "elements": [
-                            {
-                                "element_id": "e2",
-                                "role": "input",
-                                "meaning": "message_input_field",
-                                "label": "",
-                                "bounds": list(raw_bounds),
-                                "confidence": 1.0,
-                                "states": {
-                                    "goal_relevant": True,
-                                    "fully_visible": True,
-                                    "value": "",
-                                },
-                                "evidence": ["底部唯一完整白色输入区域"],
-                            }
-                        ],
-                    }
-                )
-                audit = input_audit_payload(
-                    application_inputs=[
-                        audited_application_input(
-                            structure_id="message",
-                            bounds=list(raw_bounds),
-                            text="",
-                            placeholder="",
-                            visible_editable_cues=["白色矩形背景"],
-                        )
-                    ]
-                )
-                provider = SequenceProvider(
-                    [
-                        {
-                            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                            "coordinate_space": {
-                                "kind": "image_grid",
-                                "width": width,
-                                "height": height,
-                            },
-                            "scene": scene,
-                            "input_structure": audit,
-                        }
-                    ]
-                )
-                observer = SingleStepGenericSceneObserver(provider)
+        scene, audit = audited_text_input_scene([120, 870, 780, 915])
+        retired = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "image_grid", "width": 540, "height": 960,
+            },
+            "scene": scene,
+            "input_structure": audit,
+        }
+        provider = SequenceProvider([json.dumps(retired, ensure_ascii=False)])
 
-                observed = observer.observe(
-                    frames=stable_frames(),
-                    goal_context=context,
-                    device_id="device-local-01",
-                )
-
-                field = observed.unique_trusted_goal_element()
-                self.assertEqual("local_audited_input_1", field.element_id)
-                self.assertEqual("", field.states["value"])
-                self.assertTrue(
-                    observer.last_diagnostics["coordinate_normalization"]["applied"]
-                )
-                canonical_bounds.append(
-                    tuple(round(value, 3) for value in field.bounds)
-                )
-
-        self.assertTrue(
-            all(
-                abs(first - second) <= 0.002
-                for first, second in zip(canonical_bounds[0], canonical_bounds[1])
+        with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context=context,
+                device_id="device-local-01",
             )
-        )
-        self.assertEqual((0.111, 0.911, 0.722, 0.953), canonical_bounds[0])
+
+        self.assertEqual(1, provider.calls)
 
     def test_single_step_observer_normalizes_request_bound_y_axis_grid(
         self,
@@ -1583,26 +1587,20 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.12, 0.906, 0.78, 0.953), canonical_bounds[0])
         self.assertEqual(canonical_bounds[0], canonical_bounds[1])
 
-    def test_single_step_observer_repairs_bounded_legacy_y_axis_declaration(
+    def test_single_step_observer_rejects_retired_normalized_y_declaration(
         self,
     ) -> None:
-        raw_bounds = [120, 1160, 780, 1220]
+        raw_bounds = [120, 870, 780, 915]
         scene, audit = audited_text_input_scene(raw_bounds)
-        provider = SequenceProvider(
-            [
-                {
-                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    "coordinate_space": {
-                        "kind": "normalized_1000",
-                        "width": 1000,
-                        "height": 1000,
-                    },
-                    "scene": scene,
-                    "input_structure": audit,
-                }
-            ]
-        )
-        observer = SingleStepGenericSceneObserver(provider)
+        retired = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "normalized_1000", "width": 1000, "height": 1000,
+            },
+            "scene": scene,
+            "input_structure": audit,
+        }
+        provider = SequenceProvider([json.dumps(retired, ensure_ascii=False)])
         context = {
             "entities": {
                 "active_subgoal_visual_context": {
@@ -1620,27 +1618,13 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        observed = observer.observe(
-            frames=[
-                Image.new("RGB", (810, 1440), (30, 40, 50))
-                for _ in range(4)
-            ],
-            goal_context=context,
-            device_id="device-local-01",
-        )
+        with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context=context,
+                device_id="device-local-01",
+            )
 
-        field = observed.unique_trusted_goal_element()
-        self.assertEqual(
-            (0.12, 0.906, 0.78, 0.953),
-            tuple(round(value, 3) for value in field.bounds),
-        )
-        normalization = observer.last_diagnostics["coordinate_normalization"]
-        self.assertEqual(
-            "axis_grid_inferred_from_normalized_1000",
-            normalization["wire_kind"],
-        )
-        self.assertEqual("normalized_1000", normalization["declared_wire_kind"])
-        self.assertEqual([1000, 1280], normalization["wire_extent"])
         self.assertEqual(1, provider.calls)
 
     def test_single_step_observer_rejects_unprovable_wire_coordinate_spaces(
@@ -1662,75 +1646,47 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 }
             }
         }
-        base_scene = scene_payload()
-        base_scene["elements"] = [
-            {
-                "element_id": "input",
-                "role": "input",
-                "meaning": "message_input",
-                "label": "",
-                "bounds": [120, 1750, 780, 1830],
-                "confidence": 1.0,
-                "states": {"goal_relevant": True, "fully_visible": True},
-                "evidence": ["完整输入表面"],
-            }
-        ]
-        audit = input_audit_payload(
-            application_inputs=[
-                audited_application_input(
-                    bounds=[120, 1750, 780, 1830], text="", placeholder=""
-                )
-            ]
-        )
+        base_scene, audit = audited_text_input_scene([120, 870, 780, 915])
         cases = (
             (
-                "wrong_aspect",
-                {"kind": "image_grid", "width": 1000, "height": 1920},
-                "宽高比",
+                "retired_image_grid",
+                {"kind": "image_grid", "width": 540, "height": 960},
+                [120, 870, 780, 915],
+                "coordinate_space",
             ),
             (
-                "undeclared_overflow",
+                "retired_normalized_grid",
                 {"kind": "normalized_1000", "width": 1000, "height": 1000},
-                "0..1000",
+                [120, 870, 780, 915],
+                "coordinate_space",
             ),
             (
-                "out_of_declared_grid",
-                {"kind": "image_grid", "width": 1080, "height": 1920},
-                "超出声明的image_grid",
-            ),
-            (
-                "mixed_branches",
-                {"kind": "image_grid", "width": 1080, "height": 1920},
-                "没有使用同一个image_grid",
-            ),
-            (
-                "axis_grid_wrong_height",
+                "wrong_axis_height",
                 {"kind": "axis_grid", "width": 1000, "height": 1280},
-                "height等于本轮Qwen请求图片高度",
+                [120, 870, 780, 915],
+                "coordinate_space",
             ),
             (
                 "axis_grid_out_of_bounds",
                 {"kind": "axis_grid", "width": 1000, "height": 960},
-                "超出声明的axis_grid",
+                [120, 870, 1200, 915],
+                "axis_grid",
             ),
         )
-        for name, coordinate_space, error in cases:
+        for name, coordinate_space, bounds, error in cases:
             with self.subTest(name=name):
                 scene = json.loads(json.dumps(base_scene, ensure_ascii=False))
                 current_audit = json.loads(json.dumps(audit, ensure_ascii=False))
-                if name == "out_of_declared_grid":
-                    scene["elements"][0]["bounds"][2] = 1200
-                elif name == "mixed_branches":
-                    scene["elements"][0]["bounds"] = [120, 910, 780, 960]
+                scene["elements"][0]["bounds"] = list(bounds)
+                current_audit["application_inputs"][0]["bounds"] = list(bounds)
+                raw = {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": coordinate_space,
+                    "scene": scene,
+                    "input_structure": current_audit,
+                }
                 provider = SequenceProvider(
-                    [
-                        {
-                            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                            "coordinate_space": coordinate_space,
-                            "scene": scene,
-                            "input_structure": current_audit,
-                        }
-                    ]
+                    [json.dumps(raw, ensure_ascii=False)]
                 )
                 with self.assertRaisesRegex(VisionAgentError, error):
                     SingleStepGenericSceneObserver(provider).observe(
@@ -1740,15 +1696,11 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     )
                 self.assertEqual(1, provider.calls)
 
-        provider = SequenceProvider(
-            [
-                {
-                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    "scene": base_scene,
-                    "input_structure": audit,
-                }
-            ]
-        )
+        provider = SequenceProvider([json.dumps({
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "scene": base_scene,
+            "input_structure": audit,
+        }, ensure_ascii=False)])
         with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
             SingleStepGenericSceneObserver(provider).observe(
                 frames=stable_frames(),
@@ -1757,7 +1709,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             )
         self.assertEqual(1, provider.calls)
 
-    def test_single_step_observer_restores_only_missing_nested_audit_version(self) -> None:
+    def test_single_step_observer_rejects_missing_nested_audit_version(self) -> None:
         scene = scene_payload()
         scene.update(
             {
@@ -1811,17 +1763,14 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        observed = SingleStepGenericSceneObserver(provider).observe(
-            frames=stable_frames(),
-            goal_context=context,
-            device_id="device-local-01",
-        )
+        with self.assertRaisesRegex(VisionAgentError, "协议外字段"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context=context,
+                device_id="device-local-01",
+            )
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(
-            observed.unique_trusted_goal_element().element_id,
-            "local_audited_input_1",
-        )
 
     def test_single_step_observer_rejects_other_nested_audit_shape_changes(self) -> None:
         scene = scene_payload()
@@ -1878,21 +1827,19 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
         self.assertFalse(observer.last_diagnostics["remote_retry_used"])
 
-    def test_single_step_observer_accepts_flat_non_input_scene_in_one_call(self) -> None:
-        provider = SequenceProvider([scene_payload()])
+    def test_single_step_observer_rejects_retired_flat_scene(self) -> None:
+        provider = SequenceProvider(
+            [json.dumps(scene_payload(), ensure_ascii=False)]
+        )
         observer = SingleStepGenericSceneObserver(provider)
 
-        observed = observer.observe(frames=stable_frames())
+        with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
+            observer.observe(frames=stable_frames())
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(observed.foreground_app_id, "calculator")
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
-        self.assertEqual(
-            observer.last_diagnostics["online_stages"],
-            ["single_step_observation"],
-        )
 
-    def test_single_step_non_input_keeps_scene_but_discards_overflow_batch(self) -> None:
+    def test_single_step_non_input_rejects_overflow_geometry(self) -> None:
         scene = scene_payload()
         scene.update(
             {
@@ -1928,7 +1875,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000", "width": 1000, "height": 1000,
+                        "kind": "axis_grid", "width": 1000, "height": 960,
                     },
                     "scene": scene,
                     "input_structure": None,
@@ -1936,28 +1883,26 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             ]
         )
 
-        observed = SingleStepGenericSceneObserver(provider).observe(
-            frames=stable_frames(),
-            goal_context={
-                "app_id": "sample_app",
-                "app_name": "示例应用",
-                "entities": {
-                    "active_subgoal_visual_context": {
-                        "subgoal_id": "launch_sample_app",
-                        "objective": "打开示例应用",
-                        "constraints": [],
-                        "completion_conditions": ["示例应用已打开"],
-                        "execution_class": "navigate",
-                        "goal_entities": {},
-                    }
+        with self.assertRaisesRegex(VisionAgentError, "axis_grid"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={
+                    "app_id": "sample_app",
+                    "app_name": "示例应用",
+                    "entities": {
+                        "active_subgoal_visual_context": {
+                            "subgoal_id": "launch_sample_app",
+                            "objective": "打开示例应用",
+                            "constraints": [],
+                            "completion_conditions": ["示例应用已打开"],
+                            "execution_class": "navigate",
+                            "goal_entities": {},
+                        }
+                    },
                 },
-            },
-            device_id="device-local-01",
-        )
+                device_id="device-local-01",
+            )
 
-        self.assertEqual("com.vendor.runtime", observed.foreground_app_id)
-        self.assertEqual("sample_app_conversation", observed.screen_id)
-        self.assertEqual((), observed.elements)
         self.assertEqual(1, provider.calls)
 
     def test_single_step_input_keeps_overflow_geometry_fail_closed(self) -> None:
@@ -2031,7 +1976,19 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     separators=(",", ":"),
                 )
 
-        provider = PlainSequenceProvider([scene_payload(), scene_payload()])
+        def current_scene_envelope() -> dict:
+            return {
+                "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                "coordinate_space": {
+                    "kind": "axis_grid", "width": 1000, "height": 960,
+                },
+                "scene": scene_payload(),
+                "input_structure": None,
+            }
+
+        provider = PlainSequenceProvider(
+            [current_scene_envelope(), current_scene_envelope()]
+        )
         observer = SingleStepGenericSceneObserver(provider)
         frames = stable_frames()
         context: dict = {}

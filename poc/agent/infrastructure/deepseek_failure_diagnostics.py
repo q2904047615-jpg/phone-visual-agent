@@ -54,13 +54,13 @@ def _redact_deepseek_failure_response(raw: str) -> str:
 
 def _classify_deepseek_error(error: Exception) -> str:
     message = str(error)
-    if "低层动作表达" in message:
+    if '低层动作表达' in message:
         return "low_level_instruction"
-    if "外部状态变化但未声明" in message:
+    if '外部状态变化但未声明' in message:
         return "execution_class_mismatch"
-    if "active 子目标" in message or "活动子目标" in message:
+    if 'active 子目标' in message or '活动子目标' in message:
         return "active_frontier"
-    if "JSON" in message or "json" in message:
+    if 'JSON' in message or 'json' in message:
         return "invalid_json"
     return "task_graph_validation"
 
@@ -68,7 +68,7 @@ def _classify_deepseek_error(error: Exception) -> str:
 def _structured_candidate_diff(raw: str, previous_graph: Any) -> dict[str, Any] | None:
     """Compare only whitelisted high-level graph fields from valid JSON."""
 
-    if previous_graph is None or not hasattr(previous_graph, "to_dict"):
+    if previous_graph is None or not hasattr(previous_graph, 'to_dict'):
         return None
     try:
         candidate = json.loads(str(raw or "").strip())
@@ -85,74 +85,35 @@ def _structured_candidate_diff(raw: str, previous_graph: Any) -> dict[str, Any] 
         target_apps = goal.get("target_apps")
         safe_apps = None
         if isinstance(target_apps, list):
-            safe_apps = [
-                {
-                    key: item.get(key)
-                    for key in ("app_id", "app_name")
-                    if isinstance(item, dict) and key in item
-                }
-                for item in target_apps
-                if isinstance(item, dict)
-            ]
+            safe_apps = [{key: item.get(key) for key in ('app_id', 'app_name') if isinstance(item,
+                dict) and key in item} for item in target_apps if isinstance(item, dict)]
         entities = goal.get("entities")
         input_fields = entities.get('input_fields') if isinstance(entities, dict) else None
         safe_fields = None
         if isinstance(input_fields, list):
-            safe_fields = [
-                {
-                    key: item.get(key)
-                    for key in ("field_id", "field_label", "text")
-                    if isinstance(item, dict) and key in item
-                }
-                for item in input_fields
-                if isinstance(item, dict)
-            ]
+            safe_fields = [{key: item.get(key) for key in ('field_id', 'field_label', 'text') if isinstance(item,
+                dict) and key in item} for item in input_fields if isinstance(item, dict)]
         safe_subgoals = None
-        if isinstance(payload.get("subgoals"), list):
-            allowed = (
-                "subgoal_id",
-                "objective",
-                "status",
-                "depends_on",
-                "constraints",
-                "completion_conditions",
-                "effect_ids",
-                "execution_class",
-            )
-            safe_subgoals = [
-                {key: item.get(key) for key in allowed if key in item}
-                for item in payload["subgoals"]
-                if isinstance(item, dict)
-            ]
-        return {
-            "goal_objective": goal.get("objective"),
-            "target_apps": safe_apps,
-            "input_fields": safe_fields,
-            "subgoals": safe_subgoals,
-        }
+        if isinstance(payload.get('subgoals'), list):
+            allowed = ('subgoal_id', 'objective', 'status', 'depends_on', 'constraints', 'completion_conditions',
+                'effect_ids', 'execution_class')
+            safe_subgoals = [{key: item.get(key) for key in allowed if key in item} for item
+                in payload['subgoals'] if isinstance(item, dict)]
+        return {'goal_objective': goal.get('objective'), 'target_apps': safe_apps, 'input_fields': safe_fields,
+            'subgoals': safe_subgoals}
 
     before = project(previous)
     after = project(candidate)
     if before is None or after is None:
         return None
-    result = {
-        "changed_fields": [key for key in before if before[key] != after[key]],
-        "previous": before,
-        "candidate": after,
-    }
+    result = {'changed_fields': [key for key in before if before[key] != after[key]], 'previous': before,
+        'candidate': after}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True)
     return json.loads(_redact_deepseek_failure_response(encoded))
 
 
-def persist_deepseek_failure_diagnostic(
-    planner: Any,
-    *,
-    evidence_dir: Path | None,
-    prefix: str,
-    failed_stage: str,
-    error: Exception,
-    previous_graph: Any = None,
-) -> tuple[str, ...]:
+def persist_deepseek_failure_diagnostic(planner: Any, *, evidence_dir: Path | None, prefix: str, failed_stage: str,
+    error: Exception, previous_graph: Any=None) -> tuple[str, ...]:
     """Persist bounded redacted planner output without changing fail-closed policy."""
 
     raw = str(getattr(planner, "last_raw_response", "") or "")
@@ -165,18 +126,11 @@ def persist_deepseek_failure_diagnostic(
     target = output_dir / f"{safe_prefix or 'task_graph'}_deepseek_failure.json"
     redacted = _redact_deepseek_failure_response(raw)
     bounded = redacted[:MAX_REDACTED_DEEPSEEK_RESPONSE_CHARS]
-    payload = {
-        "artifact_version": DEEPSEEK_FAILURE_DIAGNOSTIC_VERSION,
-        "model_role": "high_level_task_planner",
-        "provider": "deepseek",
-        "failed_stage": str(failed_stage or "unknown")[:120],
-        "error_type": _classify_deepseek_error(error),
-        "error_message": _redact_deepseek_failure_response(str(error))[:1000],
-        "raw_response_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
-        "raw_response_length": len(raw),
-        "redacted_response_truncated": len(redacted) > len(bounded),
-        "redacted_raw_response": bounded,
-    }
+    payload = {'artifact_version': DEEPSEEK_FAILURE_DIAGNOSTIC_VERSION, 'model_role': 'high_level_task_planner',
+        'provider': 'deepseek', 'failed_stage': str(failed_stage or 'unknown')[:120],
+        'error_type': _classify_deepseek_error(error), 'error_message': _redact_deepseek_failure_response(str(error))[
+        :1000], 'raw_response_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(), 'raw_response_length': len(raw),
+        'redacted_response_truncated': len(redacted) > len(bounded), 'redacted_raw_response': bounded}
     structured_diff = _structured_candidate_diff(raw, previous_graph)
     if structured_diff is not None:
         payload["structured_candidate_diff"] = structured_diff

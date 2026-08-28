@@ -24,13 +24,8 @@ from agent.domain.input_value_lineage import (
 
 
 class FileSystemTypedInputLineageStore:
-    def __init__(
-        self,
-        directory: Path,
-        *,
-        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
-        clock: Any = time.time,
-    ) -> None:
+    def __init__(self, directory: Path, *, ttl_seconds: float=DEFAULT_LINEAGE_TTL_SECONDS,
+        clock: Any=time.time) -> None:
         self.directory = Path(directory)
         self.ttl_seconds = max(1.0, float(ttl_seconds))
         self.clock = clock
@@ -45,7 +40,7 @@ class FileSystemTypedInputLineageStore:
         destination = self._path(record.device_id)
         descriptor, temporary = tempfile.mkstemp(prefix=f'.{destination.stem}.', suffix='.tmp', dir=str(self.directory))
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            with os.fdopen(descriptor, 'w', encoding='utf-8', newline='\n') as handle:
                 json.dump(record.to_dict(), handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
                 handle.flush()
@@ -83,78 +78,34 @@ class FileSystemTypedInputLineageStore:
         return record
 
     @staticmethod
-    def _descriptor_factory( after_frames: tuple[Image.Image, ...], ) -> Any:
+    def _descriptor_factory(after_frames: tuple[Image.Image, ...]) -> Any:
         return lambda bounds: build_surface_descriptors(after_frames, bounds)
 
-    def record_verified_literal_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        hardware_receipt: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_literal_action",
-    ) -> TypedInputLineage:
-        record = build_verified_literal_lineage(
-            device_id=device_id,
-            resolved=resolved_action,
-            before_scene=before_scene,
-            after_scene=after_scene,
-            hardware_receipt=hardware_receipt,
-            recorded_at_epoch=float(self.clock()),
-            source=source,
-            surface_fallback=self.load(device_id),
-            surface_descriptor_factory=self._descriptor_factory(after_frames),
-        )
+    def record_verified_literal_action(self, *, device_id: str, resolved_action: dict[str, Any], before_scene: dict[str,
+        Any], after_scene: dict[str, Any], hardware_receipt: dict[str, Any], after_frames: tuple[Image.Image, ...],
+        source: str='verified_live_literal_action') -> TypedInputLineage:
+        record = build_verified_literal_lineage(device_id=device_id, resolved=resolved_action,
+            before_scene=before_scene, after_scene=after_scene, hardware_receipt=hardware_receipt,
+            recorded_at_epoch=float(self.clock()), source=source, surface_fallback=self.load(device_id),
+            surface_descriptor_factory=self._descriptor_factory(after_frames))
         self.write(record)
         return record
 
-    def record_verified_text_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_text_action",
-    ) -> TypedInputLineage:
-        record = build_verified_text_lineage(
-            device_id=device_id,
-            resolved=resolved_action,
-            before_scene=before_scene,
-            after_scene=after_scene,
-            recorded_at_epoch=float(self.clock()),
-            source=source,
-            surface_fallback=self.load(device_id),
-            surface_descriptor_factory=self._descriptor_factory(after_frames),
-        )
+    def record_verified_text_action(self, *, device_id: str, resolved_action: dict[str, Any], before_scene: dict[str,
+        Any], after_scene: dict[str, Any], after_frames: tuple[Image.Image, ...],
+        source: str='verified_live_text_action') -> TypedInputLineage:
+        record = build_verified_text_lineage(device_id=device_id, resolved=resolved_action, before_scene=before_scene,
+            after_scene=after_scene, recorded_at_epoch=float(self.clock()), source=source,
+            surface_fallback=self.load(device_id), surface_descriptor_factory=self._descriptor_factory(after_frames))
         self.write(record)
         return record
 
-    def record_verified_newline_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        hardware_receipt: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_newline_action",
-    ) -> TypedInputLineage:
-        record = build_verified_newline_lineage(
-            device_id=device_id,
-            resolved=resolved_action,
-            before_scene=before_scene,
-            after_scene=after_scene,
-            hardware_receipt=hardware_receipt,
-            recorded_at_epoch=float(self.clock()),
-            source=source,
-            surface_fallback=self.load(device_id),
-            surface_descriptor_factory=self._descriptor_factory(after_frames),
-        )
+    def record_verified_newline_action(self, *, device_id: str, resolved_action: dict[str, Any], before_scene: dict[str,
+        Any], after_scene: dict[str, Any], hardware_receipt: dict[str, Any], after_frames: tuple[Image.Image, ...],
+        source: str='verified_live_newline_action') -> TypedInputLineage:
+        record = build_verified_newline_lineage(device_id=device_id, resolved=resolved_action,
+            before_scene=before_scene, after_scene=after_scene, hardware_receipt=hardware_receipt,
+            recorded_at_epoch=float(self.clock()), source=source, surface_fallback=self.load(device_id),
+            surface_descriptor_factory=self._descriptor_factory(after_frames))
         self.write(record)
         return record

@@ -26,16 +26,11 @@ from agent.infrastructure.observation_images import (
 MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 
 
-def build_trusted_observation(
-    *,
-    frames: list[Image.Image],
-    device_id: str,
-    scene: UIScene,
-    observation_id: str | None = None,
-) -> TrustedObservation:
+def build_trusted_observation(*, frames: list[Image.Image], device_id: str, scene: UIScene,
+    observation_id: str | None=None) -> TrustedObservation:
     if len(frames) < 4:
         raise VisionAgentError("可信观察至少需要4帧。")
-    if not DEVICE_ID_PATTERN.fullmatch(str(device_id or "").strip()):
+    if not DEVICE_ID_PATTERN.fullmatch(str(device_id or '').strip()):
         raise VisionAgentError(f"可信观察 device_id 无效：{device_id!r}")
     stability = measure_local_stability(frames, allow_leading_outlier=True)
     if not stability.stable:
@@ -52,38 +47,23 @@ def build_trusted_observation(
     scene.validate()
     canonical_scene, aliases, conflicts = canonicalize_trusted_scene(scene)
     target_local_candidate = trusted_target_local_candidate(canonical_scene, conflicts)
-    if not scene.stable or (
-        float(scene.confidence) < MIN_TARGET_CONFIDENCE
-        and target_local_candidate is None
-        and not canonical_scene.trusted_completion_evidence()
-    ):
+    if (not scene.stable or (float(scene.confidence) < MIN_TARGET_CONFIDENCE and target_local_candidate is None
+        and (not canonical_scene.trusted_completion_evidence()))):
         raise VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。")
     if scene.fingerprint != fingerprint:
         raise VisionAgentError('只读观察 fingerprint 与当前本地帧不一致，拒绝建立可信候选。')
     resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
     if not OBSERVATION_ID_PATTERN.fullmatch(resolved_id):
         raise VisionAgentError(f"observation_id 格式无效：{resolved_id!r}")
-    result = TrustedObservation(
-        observation_id=resolved_id,
-        device_id=str(device_id).strip(),
-        fingerprint=fingerprint,
-        scene=canonical_scene,
-        local_stability=stability,
-        selected_frame_index=selected,
-        frame_sharpness_scores=sharpness,
-        candidate_aliases=aliases,
-        candidate_conflicts=conflicts,
-    )
+    result = TrustedObservation(observation_id=resolved_id, device_id=str(device_id).strip(), fingerprint=fingerprint,
+        scene=canonical_scene, local_stability=stability, selected_frame_index=selected,
+        frame_sharpness_scores=sharpness, candidate_aliases=aliases, candidate_conflicts=conflicts)
     validate_trusted_observation_against_frames(result, frames, allow_leading_outlier=True)
     return result
 
 
-def validate_trusted_observation_against_frames(
-    observation: TrustedObservation,
-    frames: list[Image.Image],
-    *,
-    allow_leading_outlier: bool = False,
-) -> None:
+def validate_trusted_observation_against_frames(observation: TrustedObservation, frames: list[Image.Image], *,
+    allow_leading_outlier: bool=False) -> None:
     if len(frames) < 4:
         raise VisionAgentError("新鲜度校验至少需要4帧。")
     stability = measure_local_stability(frames, allow_leading_outlier=allow_leading_outlier)

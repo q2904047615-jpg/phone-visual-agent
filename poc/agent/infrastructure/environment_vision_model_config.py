@@ -8,13 +8,8 @@ from typing import Mapping
 from agent.domain.vision_model import DEFAULT_VISION_BASE_URL, DEFAULT_VISION_MODEL, VisionModelConfig
 
 
-def load_vision_model_config(
-    *,
-    model: str | None = None,
-    base_url: str | None = None,
-    enable_thinking: bool = False,
-    environ: Mapping[str, str] | None = None,
-) -> VisionModelConfig:
+def load_vision_model_config(*, model: str | None=None, base_url: str | None=None, enable_thinking: bool=False,
+    environ: Mapping[str, str] | None=None) -> VisionModelConfig:
     """Resolve the visual model from the single current configuration surface."""
 
     values = os.environ if environ is None else environ

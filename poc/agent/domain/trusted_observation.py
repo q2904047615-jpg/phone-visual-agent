@@ -12,20 +12,8 @@ from .visual_evidence import LocalFrameStability
 
 
 OBSERVATION_ID_PATTERN = re.compile(r"^obs_[A-Za-z0-9]{16,64}$")
-ROLE_PRIORITY = {
-    "input": 100,
-    "button": 95,
-    "icon": 90,
-    "keyboard_key": 85,
-    "list_item": 80,
-    "tab": 75,
-    "toggle": 75,
-    "dialog": 60,
-    "text": 40,
-    "image": 35,
-    "container": 10,
-    "unknown": 0,
-}
+ROLE_PRIORITY = {'input': 100, 'button': 95, 'icon': 90, 'keyboard_key': 85, 'list_item': 80, 'tab': 75, 'toggle': 75,
+    'dialog': 60, 'text': 40, 'image': 35, 'container': 10, 'unknown': 0}
 
 
 @dataclass(frozen=True)
@@ -53,19 +41,11 @@ class TrustedObservation:
         system_ui = structured_system_ui(self.scene)
         if system_ui is not None:
             scene["system_ui"] = system_ui
-        return {
-            "observation_id": self.observation_id,
-            "device_id": self.device_id,
-            "fingerprint": self.fingerprint,
-            "scene": scene,
-            "local_stability": self.local_stability.to_dict(),
-            "selected_frame_index": self.selected_frame_index,
-            "frame_sharpness_scores": [
-                round(value, 3) for value in self.frame_sharpness_scores
-            ],
-            "candidate_aliases": dict(self.candidate_aliases),
-            "candidate_conflicts": [dict(item) for item in self.candidate_conflicts],
-        }
+        return {'observation_id': self.observation_id, 'device_id': self.device_id, 'fingerprint': self.fingerprint,
+            'scene': scene, 'local_stability': self.local_stability.to_dict(),
+            'selected_frame_index': self.selected_frame_index, 'frame_sharpness_scores': [round(value,
+            3) for value in self.frame_sharpness_scores], 'candidate_aliases': dict(self.candidate_aliases),
+            'candidate_conflicts': [dict(item) for item in self.candidate_conflicts]}
 
 
 def structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
@@ -82,9 +62,8 @@ def structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
     return {'immersive_or_fullscreen': immersive, 'navigation_bar_visible': navigation_visible}
 
 
-def canonicalize_trusted_scene(
-    scene: UIScene,
-) -> tuple[UIScene, tuple[tuple[str, str], ...], tuple[dict[str, Any], ...]]:
+def canonicalize_trusted_scene(scene: UIScene) -> tuple[UIScene, tuple[tuple[str, str], ...], tuple[dict[str, Any],
+    ...]]:
     """Collapse duplicate descriptions while preserving original bounds."""
 
     elements = list(scene.elements)
@@ -109,31 +88,18 @@ def canonicalize_trusted_scene(
         for right in range(left + 1, len(elements)):
             overlap = bounds_overlap(elements[left].bounds, elements[right].bounds)
             compatible = elements_semantically_compatible(elements[left], elements[right])
-            exact_same_role = bool(
-                elements[left].label.strip()
-                and elements[left].label.strip().casefold()
-                == elements[right].label.strip().casefold()
-                and elements[left].role == elements[right].role
-            )
-            if compatible and (
-                overlap["intersection_over_smaller"] >= 0.85
-                or (exact_same_role and overlap["iou"] >= 0.5)
-            ):
+            exact_same_role = bool(elements[left].label.strip()
+                and elements[left].label.strip().casefold() == elements[right].label.strip().casefold()
+                and (elements[left].role == elements[right].role))
+            if (compatible and (overlap['intersection_over_smaller'] >= 0.85 or (exact_same_role
+                and overlap['iou'] >= 0.5))):
                 union(left, right)
-            elif overlap["iou"] >= 0.5:
-                conflicts.append(
-                    {
-                        "kind": "overlapping_semantic_conflict",
-                        "element_ids": [
-                            elements[left].element_id,
-                            elements[right].element_id,
-                        ],
-                        "iou": round(overlap["iou"], 4),
-                    }
-                )
+            elif overlap['iou'] >= 0.5:
+                conflicts.append({'kind': 'overlapping_semantic_conflict', 'element_ids': [elements[left].element_id,
+                    elements[right].element_id], 'iou': round(overlap['iou'], 4)})
 
     groups: dict[int, list[UIElement]] = {}
-    for index, element in enumerate(elements):
+    for (index, element) in enumerate(elements):
         groups.setdefault(find(index), []).append(element)
     canonical: list[UIElement] = []
     aliases: list[tuple[str, str]] = []
@@ -142,38 +108,21 @@ def canonicalize_trusted_scene(
         canonical.append(selected)
         if len(group) > 1:
             duplicate_ids = sorted(item.element_id for item in group)
-            conflicts.append(
-                {
-                    "kind": "duplicate_visual_object_collapsed",
-                    "canonical_element_id": selected.element_id,
-                    "element_ids": duplicate_ids,
-                }
-            )
-            aliases.extend(
-                (item.element_id, selected.element_id)
-                for item in group
-                if item.element_id != selected.element_id
-            )
+            conflicts.append({'kind': 'duplicate_visual_object_collapsed', 'canonical_element_id': selected.element_id,
+                'element_ids': duplicate_ids})
+            aliases.extend(((item.element_id, selected.element_id) for item
+                in group if item.element_id != selected.element_id))
     canonical.sort(key=lambda item: elements.index(item))
     if len(canonical) == len(elements):
         return scene, tuple(sorted(aliases)), tuple(conflicts)
-    canonical_scene = UIScene(
-        app_id=scene.app_id,
-        screen_id=scene.screen_id,
-        summary=scene.summary,
-        elements=tuple(canonical),
-        overlays=scene.overlays,
-        stable=scene.stable,
-        confidence=scene.confidence,
-        fingerprint=scene.fingerprint,
-        protocol_version=scene.protocol_version,
-        system_ui=scene.system_ui,
-        camera_alignment=scene.camera_alignment,
-    )
+    canonical_scene = UIScene(app_id=scene.app_id, screen_id=scene.screen_id, summary=scene.summary,
+        elements=tuple(canonical), overlays=scene.overlays, stable=scene.stable, confidence=scene.confidence,
+        fingerprint=scene.fingerprint, protocol_version=scene.protocol_version, system_ui=scene.system_ui,
+        camera_alignment=scene.camera_alignment)
     return canonical_scene, tuple(sorted(aliases)), tuple(conflicts)
 
 
-def trusted_target_local_candidate( scene: UIScene, conflicts: tuple[dict[str, Any], ...], ) -> UIElement | None:
+def trusted_target_local_candidate(scene: UIScene, conflicts: tuple[dict[str, Any], ...]) -> UIElement | None:
     """Resolve one strong goal element and fail closed on unresolved overlap."""
 
     candidate = scene.unique_trusted_goal_element()
@@ -183,10 +132,8 @@ def trusted_target_local_candidate( scene: UIScene, conflicts: tuple[dict[str, A
         conflict_ids = tuple(str(item) for item in conflict.get("element_ids") or ())
         if candidate.element_id not in conflict_ids:
             continue
-        if (
-            conflict.get("kind") == "duplicate_visual_object_collapsed"
-            and conflict.get("canonical_element_id") == candidate.element_id
-        ):
+        if (conflict.get('kind') == 'duplicate_visual_object_collapsed'
+            and conflict.get('canonical_element_id') == candidate.element_id):
             continue
         return None
     return candidate
@@ -195,22 +142,11 @@ def trusted_target_local_candidate( scene: UIScene, conflicts: tuple[dict[str, A
 def canonical_element_rank(element: UIElement) -> tuple[int, int, float, float]:
     left, top, right, bottom = element.bounds
     area = (right - left) * (bottom - top)
-    locally_audited_input_control = int(
-        element.element_id.startswith("local_audited_")
-        and (
-            (
-                element.meaning == "ime_exact_candidate"
-                and element.states.get("ime_candidate") is True
-            )
-            or (
-                element.meaning == "input_exact_literal_key"
-                and element.states.get("input_literal_key") is True
-            )
-            or element.states.get("keyboard_layout_switch") is True
-            or element.states.get("keyboard_case_switch") is True
-            or element.states.get("keyboard_input_mode_switch") is True
-        )
-    )
+    locally_audited_input_control = int(element.element_id.startswith('local_audited_')
+        and (element.meaning == 'ime_exact_candidate' and element.states.get('ime_candidate') is True
+        or (element.meaning == 'input_exact_literal_key' and element.states.get('input_literal_key') is True)
+        or element.states.get('keyboard_layout_switch') is True or (element.states.get('keyboard_case_switch') is True)
+        or (element.states.get('keyboard_input_mode_switch') is True)))
     return (locally_audited_input_control, ROLE_PRIORITY.get(element.role, 0), float(element.confidence), -area)
 
 
@@ -222,10 +158,8 @@ def elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:
     return left.meaning.strip().casefold() == right.meaning.strip().casefold()
 
 
-def bounds_overlap(
-    left: tuple[float, float, float, float],
-    right: tuple[float, float, float, float],
-) -> dict[str, float]:
+def bounds_overlap(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> dict[str,
+    float]:
     intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
     intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
     intersection = intersection_width * intersection_height
@@ -233,7 +167,5 @@ def bounds_overlap(
     right_area = (right[2] - right[0]) * (right[3] - right[1])
     union = left_area + right_area - intersection
     smaller = min(left_area, right_area)
-    return {
-        "iou": intersection / union if union > 0 else 0.0,
-        "intersection_over_smaller": intersection / smaller if smaller > 0 else 0.0,
-    }
+    return {'iou': intersection / union if union > 0 else 0.0,
+        'intersection_over_smaller': intersection / smaller if smaller > 0 else 0.0}

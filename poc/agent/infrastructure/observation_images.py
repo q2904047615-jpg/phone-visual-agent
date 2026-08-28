@@ -14,21 +14,10 @@ def local_frame_fingerprint(frame: Image.Image) -> str:
     return hashlib.sha256(compact.tobytes()).hexdigest()[:20]
 
 
-def _ratio_bounds(
-    left: int,
-    top: int,
-    right: int,
-    bottom: int,
-    *,
-    width: int,
-    height: int,
-) -> tuple[int, int, int, int]:
-    return (
-        max(0, min(1000, round(left * 1000 / width))),
-        max(0, min(1000, round(top * 1000 / height))),
-        max(0, min(1000, round(right * 1000 / width))),
-        max(0, min(1000, round(bottom * 1000 / height))),
-    )
+def _ratio_bounds(left: int, top: int, right: int, bottom: int, *, width: int, height: int) -> tuple[int, int, int,
+    int]:
+    return (max(0, min(1000, round(left * 1000 / width))), max(0, min(1000, round(top * 1000 / height))), max(0,
+        min(1000, round(right * 1000 / width))), max(0, min(1000, round(bottom * 1000 / height))))
 
 
 def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction, ...]:
@@ -90,9 +79,9 @@ def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction,
             index += 1
             continue
         gap_start = index
-        while index < analysis_width and not active[index]:
+        while index < analysis_width and (not active[index]):
             index += 1
-        if ( gap_start > 0 and index < analysis_width and index - gap_start <= bridge ):
+        if gap_start > 0 and index < analysis_width and (index - gap_start <= bridge):
             for gap_index in range(gap_start, index):
                 active[gap_index] = True
 
@@ -108,43 +97,28 @@ def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction,
         runs.append((run_start, index))
 
     results: list[VisualObstruction] = []
-    for run_start, run_end in runs:
+    for (run_start, run_end) in runs:
         run_width = run_end - run_start
         width_ratio = run_width / analysis_width
-        if not 0.14 <= width_ratio <= 0.90:
+        if not 0.14 <= width_ratio <= 0.9:
             continue
         band_dark = sum(column_dark[run_start:run_end]) / run_width
         below_start = end
         below_end = min(analysis_height, end + max(4, band_height * 2))
         if below_end <= below_start:
             continue
-        below_dark = sum(
-            1
-            for y in range(below_start, below_end)
-            for x in range(run_start, run_end)
-            if pixels[x, y] <= dark_limit
-        ) / (run_width * (below_end - below_start))
+        below_dark = sum((1 for y in range(below_start, below_end) for x in range(run_start, run_end) if pixels[x,
+            y] <= dark_limit)) / (run_width * (below_end - below_start))
         if band_dark < 0.74 or below_dark >= band_dark * 0.55:
             continue
-        bounds = _ratio_bounds(
-            run_start,
-            0,
-            run_end,
-            min(analysis_height, end + max(1, round(band_height * 0.08))),
-            width=analysis_width,
-            height=analysis_height,
-        )
-        results.append(
-            VisualObstruction(
-                kind="top_edge_opaque_band",
-                bounds=bounds,
-                reason="顶部存在浅层、非全宽且与下方画面不连续的不透明暗色区域",
-            )
-        )
+        bounds = _ratio_bounds(run_start, 0, run_end, min(analysis_height, end + max(1, round(band_height * 0.08))),
+            width=analysis_width, height=analysis_height)
+        results.append(VisualObstruction(kind='top_edge_opaque_band', bounds=bounds,
+            reason='顶部存在浅层、非全宽且与下方画面不连续的不透明暗色区域'))
     return tuple(results)
 
 
-def _bounds_iou( first: tuple[int, int, int, int], second: tuple[int, int, int, int], ) -> float:
+def _bounds_iou(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
     left = max(first[0], second[0])
     top = max(first[1], second[1])
     right = min(first[2], second[2])
@@ -157,7 +131,7 @@ def _bounds_iou( first: tuple[int, int, int, int], second: tuple[int, int, int, 
     return intersection / max(1, first_area + second_area - intersection)
 
 
-def consensus_top_edge_obstructions( frames: Iterable[Image.Image], ) -> tuple[VisualObstruction, ...]:
+def consensus_top_edge_obstructions(frames: Iterable[Image.Image]) -> tuple[VisualObstruction, ...]:
     """Return only top-edge obstructions repeated across the stable frame tail."""
 
     frame_list = list(frames)
@@ -167,12 +141,12 @@ def consensus_top_edge_obstructions( frames: Iterable[Image.Image], ) -> tuple[V
     required = max(2, (len(frame_list) + 1) // 2) if len(frame_list) > 1 else 1
     accepted: list[VisualObstruction] = []
     for candidate in (item for frame in detections for item in frame):
-        if any(_bounds_iou(candidate.bounds, item.bounds) >= 0.60 for item in accepted):
+        if any((_bounds_iou(candidate.bounds, item.bounds) >= 0.6 for item in accepted)):
             continue
         matches: list[VisualObstruction] = []
         for frame_detections in detections:
             match = max(frame_detections, key=lambda item: _bounds_iou(candidate.bounds, item.bounds), default=None)
-            if match is not None and _bounds_iou(candidate.bounds, match.bounds) >= 0.60:
+            if match is not None and _bounds_iou(candidate.bounds, match.bounds) >= 0.6:
                 matches.append(match)
         if len(matches) < required:
             continue
@@ -197,30 +171,20 @@ def _static_band_sheet(image: Image.Image) -> Image.Image:
     return sheet
 
 
-def measure_local_stability(
-    frames: list[Image.Image],
-    *,
-    threshold: float | None = None,
-    allow_leading_outlier: bool = False,
-) -> LocalFrameStability:
+def measure_local_stability(frames: list[Image.Image], *, threshold: float | None=None,
+    allow_leading_outlier: bool=False) -> LocalFrameStability:
     """Measure camera/UI stability locally; no frame leaves the machine."""
 
     if len(frames) < 2:
         raise ValueError("本地稳定性判断至少需要2帧。")
     sizes = {frame.size for frame in frames}
     if len(sizes) != 1:
-        return LocalFrameStability(
-            stable=False,
-            mean_delta=float("inf"),
-            max_delta=float("inf"),
-            frame_count=len(frames),
-            threshold=float(threshold or 0.0),
-            reason="连续画面尺寸发生变化",
-        )
+        return LocalFrameStability(stable=False, mean_delta=float('inf'), max_delta=float('inf'),
+            frame_count=len(frames), threshold=float(threshold or 0.0), reason='连续画面尺寸发生变化')
     limit = float(threshold if threshold is not None else os.environ.get('ROBOT_LOCAL_FRAME_DELTA_MAX', '38.0'))
     sheets = [_static_band_sheet(frame) for frame in frames]
     deltas: list[float] = []
-    for first, second in zip(sheets, sheets[1:]):
+    for (first, second) in zip(sheets, sheets[1:]):
         value = ImageStat.Stat(ImageChops.difference(first, second)).mean[0]
         deltas.append(float(value))
 
@@ -233,35 +197,14 @@ def measure_local_stability(
     mean_delta = sum(evaluated_deltas) / len(evaluated_deltas)
     max_delta = max(evaluated_deltas)
     stable = max_delta <= limit
-    return LocalFrameStability(
-        stable=stable,
-        mean_delta=mean_delta,
-        max_delta=max_delta,
-        frame_count=len(frames),
-        threshold=limit,
-        reason=(
-            (
-                f"末尾{required_pairs + 1}帧外圈静态UI一致"
-                if allow_leading_outlier
-                else "完整采样窗口外圈静态UI一致"
-            )
-            if stable
-            else (
-                (
-                    f"末尾{required_pairs + 1}帧外圈静态UI变化"
-                    if allow_leading_outlier
-                    else "完整采样窗口外圈静态UI变化"
-                )
-                + f"{max_delta:.1f}超过阈值{limit:.1f}"
-            )
-        ),
-    )
+    return LocalFrameStability(stable=stable, mean_delta=mean_delta, max_delta=max_delta, frame_count=len(frames),
+        threshold=limit, reason=(f'末尾{required_pairs +
+        1}帧外圈静态UI一致' if allow_leading_outlier else '完整采样窗口外圈静态UI一致') if stable else (f'末尾{required_pairs +
+        1}帧外圈静态UI变化' if allow_leading_outlier else '完整采样窗口外圈静态UI变化') + f'{max_delta:.1f}超过阈值{limit:.1f}')
 
 
-def measure_static_band_identity_delta(
-    reference_frames: list[Image.Image] | tuple[Image.Image, ...],
-    candidate_frames: list[Image.Image] | tuple[Image.Image, ...],
-) -> float:
+def measure_static_band_identity_delta(reference_frames: list[Image.Image] | tuple[Image.Image, ...],
+    candidate_frames: list[Image.Image] | tuple[Image.Image, ...]) -> float:
     """Compare camera framing while tolerating changes in central App content.
 
     The outer-band descriptor deliberately excludes most of the editable or
@@ -279,17 +222,8 @@ def measure_static_band_identity_delta(
         raise ValueError("取景身份比较的动作前后画面尺寸不一致。")
     reference_sheets = tuple(_static_band_sheet(frame) for frame in references)
     candidate_sheets = tuple(_static_band_sheet(frame) for frame in candidates)
-    nearest_deltas = sorted(
-        min(
-            float(
-                ImageStat.Stat(
-                    ImageChops.difference(candidate, reference)
-                ).mean[0]
-            )
-            for reference in reference_sheets
-        )
-        for candidate in candidate_sheets
-    )
+    nearest_deltas = sorted((min((float(ImageStat.Stat(ImageChops.difference(candidate,
+        reference)).mean[0]) for reference in reference_sheets)) for candidate in candidate_sheets))
     middle = len(nearest_deltas) // 2
     if len(nearest_deltas) % 2:
         return nearest_deltas[middle]

@@ -13,7 +13,7 @@ class DeviceRuntimeResourceError(RuntimeError):
 class DeviceRuntimeResourceRegistry:
     """Own stable coordination resources independently for each device."""
 
-    def __init__(self, initial_device_ids: Iterable[str] = ()) -> None:
+    def __init__(self, initial_device_ids: Iterable[str]=()) -> None:
         self._coordination_lock_guard = threading.RLock()
         self._coordination_locks: dict[str, threading.Lock] = {}
         self._camera_coordinator_guard = threading.RLock()

@@ -16,11 +16,8 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
 OCR_SCRIPT = ROOT / "windows_ocr.ps1"
-POWERSHELL = Path(
-    os.environ.get(
-        "SystemRoot", r"C:\Windows"
-    )
-) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+POWERSHELL = Path(os.environ.get('SystemRoot',
+    'C:\\Windows')) / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
 
 
 class OcrUnavailableError(RuntimeError):
@@ -57,13 +54,8 @@ def _match_from_items(text: str, items: list[dict[str, Any]]) -> OcrMatch:
     top = min(float(item.get("top", 0)) for item in items)
     right = max((float(item.get('left', 0)) + float(item.get('width', 1)) for item in items))
     bottom = max((float(item.get('top', 0)) + float(item.get('height', 1)) for item in items))
-    return OcrMatch(
-        text=text,
-        left=int(round(left)),
-        top=int(round(top)),
-        width=max(1, int(round(right - left))),
-        height=max(1, int(round(bottom - top))),
-    )
+    return OcrMatch(text=text, left=int(round(left)), top=int(round(top)), width=max(1, int(round(right - left))),
+        height=max(1, int(round(bottom - top))))
 
 
 def find_text(payload: dict[str, Any], target: str) -> list[OcrMatch]:
@@ -73,7 +65,7 @@ def find_text(payload: dict[str, Any], target: str) -> list[OcrMatch]:
     found: list[OcrMatch] = []
     seen: set[tuple[int, int, int, int]] = set()
 
-    for line in payload.get("lines") or []:
+    for line in payload.get('lines') or []:
         words = list(line.get("words") or [])
         compact_words = [_compact(str(word.get("text", ""))) for word in words]
         combined = "".join(compact_words)
@@ -83,14 +75,14 @@ def find_text(payload: dict[str, Any], target: str) -> list[OcrMatch]:
             stop = start + len(needle)
             cursor = 0
             selected: list[dict[str, Any]] = []
-            for word, word_text in zip(words, compact_words):
+            for (word, word_text) in zip(words, compact_words):
                 word_stop = cursor + len(word_text)
                 if word_stop > start and cursor < stop:
                     selected.append(word)
                 cursor = word_stop
             if selected:
                 match = _match_from_items(target, selected)
-        elif needle in _compact(str(line.get("text", ""))):
+        elif needle in _compact(str(line.get('text', ''))):
             match = _match_from_items(target, [line])
 
         if match is None:
@@ -104,52 +96,30 @@ def find_text(payload: dict[str, Any], target: str) -> list[OcrMatch]:
 
 
 def _rescale_box(item: dict[str, Any], scale: float) -> None:
-    for key in ("left", "top", "width", "height"):
+    for key in ('left', 'top', 'width', 'height'):
         if key in item:
             item[key] = round(float(item[key]) / scale, 2)
-    for word in item.get("words") or []:
+    for word in item.get('words') or []:
         _rescale_box(word, scale)
 
 
-def recognize( image: Image.Image, language: str = "zh-Hans-CN", *, scale: float = 3.0, ) -> dict[str, Any]:
+def recognize(image: Image.Image, language: str='zh-Hans-CN', *, scale: float=3.0) -> dict[str, Any]:
     if not is_available():
         raise OcrUnavailableError("Windows 简体中文 OCR 不可用。")
 
     path: str | None = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as handle:
             path = handle.name
         source = image.convert("RGB")
         actual_scale = max(1.0, float(scale))
         if actual_scale > 1.0:
-            source = source.resize(
-                (
-                    max(1, int(round(source.width * actual_scale))),
-                    max(1, int(round(source.height * actual_scale))),
-                ),
-                Image.Resampling.LANCZOS,
-            )
+            source = source.resize((max(1, int(round(source.width * actual_scale))), max(1,
+                int(round(source.height * actual_scale)))), Image.Resampling.LANCZOS)
         source.save(path, format="PNG")
-        process = subprocess.run(
-            [
-                str(POWERSHELL),
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(OCR_SCRIPT),
-                "-ImagePath",
-                path,
-                "-LanguageTag",
-                language,
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=20,
-            check=False,
-        )
+        process = subprocess.run([str(POWERSHELL), '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+            'Bypass', '-File', str(OCR_SCRIPT), '-ImagePath', path, '-LanguageTag', language], stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=20, check=False)
         stdout = process.stdout.decode("utf-8-sig", errors="replace").strip()
         stderr = process.stderr.decode("utf-8-sig", errors="replace").strip()
         if process.returncode != 0:
@@ -161,7 +131,7 @@ def recognize( image: Image.Image, language: str = "zh-Hans-CN", *, scale: float
         if not isinstance(payload, dict):
             raise OcrRecognitionError("Windows OCR 返回格式错误。")
         if actual_scale > 1.0:
-            for line in payload.get("lines") or []:
+            for line in payload.get('lines') or []:
                 _rescale_box(line, actual_scale)
         return payload
     finally:

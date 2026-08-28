@@ -6,15 +6,8 @@ from typing import Any, Protocol
 
 
 class GenericActionAdapterError(RuntimeError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        physical_actions: int = 0,
-        evidence: tuple[str, ...] = (),
-        observation_errors: tuple[str, ...] = (),
-        verification_errors: tuple[str, ...] = (),
-    ) -> None:
+    def __init__(self, message: str, *, physical_actions: int=0, evidence: tuple[str, ...]=(),
+        observation_errors: tuple[str, ...]=(), verification_errors: tuple[str, ...]=()) -> None:
         super().__init__(message)
         self.physical_actions = int(physical_actions)
         self.evidence = tuple(evidence)

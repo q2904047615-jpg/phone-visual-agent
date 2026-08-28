@@ -20,18 +20,10 @@ class ConfirmationAuthority:
     invalid_reason: str = ""
 
     def scope(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "task_id": self.task_id,
-            "device_id": self.device_id,
-            "revision": self.revision,
-            "subgoal_id": self.subgoal_id,
-            "effect_ids": sorted(self.effect_ids),
-            "observation_id": self.observation_id,
-            "fingerprint": self.fingerprint,
-            "decision_node_id": self.decision_node_id,
-            "action_digest": self.action_digest,
-        }
+        return {'session_id': self.session_id, 'task_id': self.task_id, 'device_id': self.device_id,
+            'revision': self.revision, 'subgoal_id': self.subgoal_id, 'effect_ids': sorted(self.effect_ids),
+            'observation_id': self.observation_id, 'fingerprint': self.fingerprint,
+            'decision_node_id': self.decision_node_id, 'action_digest': self.action_digest}
 
 
 @dataclass
@@ -48,12 +40,6 @@ class EffectConfirmationAuthority:
     invalid_reason: str = ""
 
     def scope(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "task_id": self.task_id,
-            "device_id": self.device_id,
-            "revision": self.revision,
-            "subgoal_id": self.subgoal_id,
-            "effect_ids": sorted(self.effect_ids),
-            "intent_digest": self.intent_digest,
-        }
+        return {'session_id': self.session_id, 'task_id': self.task_id, 'device_id': self.device_id,
+            'revision': self.revision, 'subgoal_id': self.subgoal_id, 'effect_ids': sorted(self.effect_ids),
+            'intent_digest': self.intent_digest}

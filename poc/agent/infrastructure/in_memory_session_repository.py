@@ -42,8 +42,5 @@ class InMemoryAgentSessionRepository:
 
     def active_snapshots(self) -> list[dict[str, object]]:
         with self._lock:
-            return [
-                session.snapshot()
-                for session in self._sessions.values()
-                if session.status in ACTIVE_SESSION_STATUSES
-            ]
+            return [session.snapshot() for session in self._sessions.values() if session.status
+                in ACTIVE_SESSION_STATUSES]

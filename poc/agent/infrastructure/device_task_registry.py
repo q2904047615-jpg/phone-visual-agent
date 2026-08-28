@@ -15,7 +15,7 @@ class DeviceTaskRegistry:
 
     TERMINAL_STATUSES = frozenset({'succeeded', 'blocked', 'failed', 'paused', 'cancelled'})
 
-    def __init__(self, *, lease_directory: Path | None = None) -> None:
+    def __init__(self, *, lease_directory: Path | None=None) -> None:
         self._guard = threading.RLock()
         self._locks: dict[str, threading.RLock] = {}
         self._active: dict[str, str] = {}
@@ -45,11 +45,8 @@ class DeviceTaskRegistry:
                 raise DeviceTaskRegistryError(f'设备 {device} 已有活动任务：{active}。')
             lease_path = self._lease_path(device)
             if lease_path is not None and device not in self._leases:
-                lease = InterProcessLease(
-                    lease_path,
-                    owner_id=session,
-                    metadata={"device_id": device, "session_id": session},
-                )
+                lease = InterProcessLease(lease_path, owner_id=session, metadata={'device_id': device,
+                    'session_id': session})
                 if not lease.acquire():
                     payload = InterProcessLease.active_payload(lease_path) or {}
                     owner = str(payload.get("session_id") or "另一个进程")

@@ -10,28 +10,15 @@ from agent.infrastructure.orientation_safety import OrientationSafetyError
 class RobotDeviceExecutor:
     """The only registry mapping resolved canonical actions to Robot methods."""
 
-    def __init__( self, robot: Any, *, sleep: Callable[[float], None] = time.sleep, ) -> None:
+    def __init__(self, robot: Any, *, sleep: Callable[[float], None]=time.sleep) -> None:
         self.robot = robot
         self.sleep = sleep
-        self._handlers: dict[
-            str,
-            Callable[[DeviceActionRequest], DeviceExecutionResult],
-        ] = {
-            "tap_semantic": self._tap,
-            "press_enter": self._tap,
-            "dismiss_overlay": self._dismiss_overlay,
-            "double_tap": self._double_tap,
-            "reveal_system_navigation": self._reveal_system_navigation,
-            "swipe": self._swipe,
-            "back": self._back,
-            "home": self._home,
-            "open_recent_apps": self._open_recent_apps,
-            "input_verified_text": self._input_text,
-            "clear_verified_text": self._clear_text,
-            "long_press": self._long_press,
-            "drag": self._drag,
-            "wait_for_change": self._wait,
-        }
+        self._handlers: dict[str, Callable[[DeviceActionRequest], DeviceExecutionResult]] = {'tap_semantic': self._tap,
+            'press_enter': self._tap, 'dismiss_overlay': self._dismiss_overlay, 'double_tap': self._double_tap,
+            'reveal_system_navigation': self._reveal_system_navigation, 'swipe': self._swipe, 'back': self._back,
+            'home': self._home, 'open_recent_apps': self._open_recent_apps, 'input_verified_text': self._input_text,
+            'clear_verified_text': self._clear_text, 'long_press': self._long_press, 'drag': self._drag,
+            'wait_for_change': self._wait}
 
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         request.validate()
@@ -60,12 +47,9 @@ class RobotDeviceExecutor:
     def _consume_click_receipt(self, *, expected_count: int) -> dict[str, Any]:
         consumer = self._method("consume_last_click_receipt")
         raw = consumer()
-        if (
-            not isinstance(raw, dict)
-            or raw.get("seller_event_barrier_confirmed") is not True
-            or raw.get("round_trip_position_confirmed") is not True
-            or raw.get("mechanical_contact_ack") is not False
-        ):
+        if (not isinstance(raw, dict) or raw.get('seller_event_barrier_confirmed') is not True
+            or raw.get('round_trip_position_confirmed') is not True or (raw.get('mechanical_contact_ack')
+            is not False)):
             raise DeviceExecutionError('机械控制端没有返回有效的单击事件栅栏凭据。', physical_actions=1)
         click_count = raw.get("click_count", 1)
         if click_count != expected_count:
@@ -79,80 +63,50 @@ class RobotDeviceExecutor:
 
     def _tap(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call("vision_tap_relative", *self._point(request))
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=self._consume_click_receipt(expected_count=1),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=1))
 
     def _dismiss_overlay(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call('vision_dismiss_overlay_relative', *self._point(request))
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=self._consume_click_receipt(expected_count=1),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=1))
 
     def _double_tap(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call('vision_double_tap_relative', *self._point(request))
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=self._consume_click_receipt(expected_count=2),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=2))
 
-    def _reveal_system_navigation( self, _request: DeviceActionRequest ) -> DeviceExecutionResult:
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=self._hardware_call("vision_reveal_system_navigation"),
-        )
+    def _reveal_system_navigation(self, _request: DeviceActionRequest) -> DeviceExecutionResult:
+        return DeviceExecutionResult(physical_actions=1, transport_result=self._hardware_call(
+            'vision_reveal_system_navigation'))
 
     def _swipe(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         assert request.direction is not None
         if request.point is not None and request.end_point is not None:
-            return DeviceExecutionResult(
-                physical_actions=1,
-                transport_result=self._hardware_call(
-                    "vision_swipe_relative",
-                    *request.point,
-                    *request.end_point,
-                    request.direction,
-                ),
-            )
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=self._hardware_call(
-                f"vision_swipe_{request.direction}"
-            ),
-        )
+            return DeviceExecutionResult(physical_actions=1,
+                transport_result=self._hardware_call('vision_swipe_relative', *request.point, *request.end_point,
+                request.direction))
+        return DeviceExecutionResult(physical_actions=1, transport_result=self._hardware_call(f'vision_swipe_{
+            request.direction}'))
 
     def _back(self, _request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call("vision_android_back")
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=self._consume_click_receipt(expected_count=1),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=1))
 
     def _home(self, _request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call("vision_android_home")
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=self._consume_click_receipt(expected_count=1),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=1))
 
-    def _open_recent_apps( self, _request: DeviceActionRequest ) -> DeviceExecutionResult:
+    def _open_recent_apps(self, _request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call("vision_android_recent_apps")
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=self._consume_click_receipt(expected_count=1),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=1))
 
     def _input_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         geometry = dict(request.keyboard_geometry or {})
-        if request.input_method == "chinese_pinyin":
+        if request.input_method == 'chinese_pinyin':
             result = self._hardware_call('vision_type_pinyin', request.input_fragment, request.input_pinyin, geometry)
         else:
             result = self._hardware_call('vision_type_text_with_layout', request.input_fragment, geometry)
@@ -171,14 +125,8 @@ class RobotDeviceExecutor:
 
     def _drag(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         assert request.end_point is not None
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=self._hardware_call(
-                "vision_drag_relative",
-                *self._point(request),
-                *request.end_point,
-            ),
-        )
+        return DeviceExecutionResult(physical_actions=1, transport_result=self._hardware_call('vision_drag_relative',
+            *self._point(request), *request.end_point))
 
     def _wait(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         self.sleep(float(request.wait_seconds or 0.0))
@@ -208,20 +156,13 @@ class ReplayDeviceExecutor:
         expected_request = expected.get("request")
         actual = request.to_dict()
         if isinstance(expected_request, Mapping):
-            for key, value in expected_request.items():
+            for (key, value) in expected_request.items():
                 if actual.get(str(key)) != value:
                     raise DeviceExecutionError(f"离线回放参数不匹配：{key}")
         self._index += 1
         self.requests.append(actual)
-        return DeviceExecutionResult(
-            execution_mode="offline_replay",
-            physical_actions=0,
-            replayed_actions=1 if request.kind != "wait_for_change" else 0,
-            transport_result=expected.get("transport_result"),
-            hardware_receipt=(
-                dict(expected["hardware_receipt"])
-                if isinstance(expected.get("hardware_receipt"), Mapping)
-                else None
-            ),
-            metadata={"script_index": self._index - 1},
-        )
+        return DeviceExecutionResult(execution_mode='offline_replay', physical_actions=0,
+            replayed_actions=1 if request.kind != 'wait_for_change' else 0,
+            transport_result=expected.get('transport_result'),
+            hardware_receipt=dict(expected['hardware_receipt']) if isinstance(expected.get('hardware_receipt'),
+            Mapping) else None, metadata={'script_index': self._index - 1})

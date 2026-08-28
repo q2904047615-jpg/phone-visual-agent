@@ -18,7 +18,7 @@ class DeviceCameraCoordinator:
         self._cached_preview: bytes | None = None
 
     @staticmethod
-    def _jpeg(frame: Any, *, quality: int = 72) -> bytes:
+    def _jpeg(frame: Any, *, quality: int=72) -> bytes:
         buffer = BytesIO()
         frame.convert('RGB').save(buffer, format='JPEG', quality=max(1, min(95, int(quality))), optimize=True)
         return buffer.getvalue()
@@ -34,13 +34,7 @@ class DeviceCameraCoordinator:
             self._cached_preview = self._jpeg(frame)
             return frame
 
-    def capture_preview(
-        self,
-        capture: Callable[..., bytes],
-        *,
-        quality: int,
-        cache_only: bool,
-    ) -> tuple[bytes, bool]:
+    def capture_preview(self, capture: Callable[..., bytes], *, quality: int, cache_only: bool) -> tuple[bytes, bool]:
         if cache_only:
             if self._cached_preview is None:
                 raise CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。')

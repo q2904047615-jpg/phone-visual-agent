@@ -8,16 +8,12 @@ from pathlib import Path
 from typing import Any
 
 
-SHARED_DEVICE_LEASE_DIR = Path(
-    os.environ.get(
-        "PHONE_VISUAL_AGENT_LEASE_DIR",
-        str(Path(tempfile.gettempdir()) / "phone_visual_agent_device_leases"),
-    )
-)
+SHARED_DEVICE_LEASE_DIR = Path(os.environ.get('PHONE_VISUAL_AGENT_LEASE_DIR',
+    str(Path(tempfile.gettempdir()) / 'phone_visual_agent_device_leases')))
 
 
 def _try_lock(descriptor: int) -> bool:
-    if os.name == "nt":
+    if os.name == 'nt':
         import msvcrt
 
         try:
@@ -36,7 +32,7 @@ def _try_lock(descriptor: int) -> bool:
 
 
 def _unlock(descriptor: int) -> None:
-    if os.name == "nt":
+    if os.name == 'nt':
         import msvcrt
 
         os.lseek(descriptor, 0, os.SEEK_SET)
@@ -118,7 +114,7 @@ class InterProcessLease:
             self._descriptor = None
             self.acquired = False
 
-    def __enter__(self) -> "InterProcessLease":
+    def __enter__(self) -> 'InterProcessLease':
         if not self.acquire():
             raise RuntimeError("跨进程设备控制权已被占用。")
         return self

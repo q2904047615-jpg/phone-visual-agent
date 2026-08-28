@@ -16,9 +16,5 @@ class CanonicalSelectionReceipt:
     canonical_class: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "allowed": self.allowed,
-            "reason": self.reason,
-            "canonical_class": self.canonical_class,
-            "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
-        }
+        return {'allowed': self.allowed, 'reason': self.reason, 'canonical_class': self.canonical_class,
+            'policy_version': CANONICAL_SELECTION_RECEIPT_VERSION}

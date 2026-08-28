@@ -68,7 +68,7 @@ class TypedInputLineageStorePort(Protocol):
     ) -> TypedInputLineage: ...
 
 
-def describe_input_surface( frame: Image.Image, bounds: tuple[float, float, float, float], ) -> str:
+def describe_input_surface(frame: Image.Image, bounds: tuple[float, float, float, float]) -> str:
     if not isinstance(frame, Image.Image):
         raise InputValueLineageError("输入表面描述缺少真实图像帧。")
     valid = _valid_bounds(bounds)
@@ -79,23 +79,17 @@ def describe_input_surface( frame: Image.Image, bounds: tuple[float, float, floa
     top = max(0.0, top - 0.035)
     right = min(1.0, right + 0.04)
     bottom = min(1.0, bottom + 0.035)
-    pixel_box = (
-        round(left * frame.width),
-        round(top * frame.height),
-        round(right * frame.width),
-        round(bottom * frame.height),
-    )
+    pixel_box = (round(left * frame.width), round(top * frame.height), round(right * frame.width),
+        round(bottom * frame.height))
     if pixel_box[0] >= pixel_box[2] or pixel_box[1] >= pixel_box[3]:
         raise InputValueLineageError("输入表面描述的局部区域为空。")
     gray = frame.convert("L").crop(pixel_box)
-    normalized = ImageOps.autocontrast(gray, cutoff=1).resize(
-        (SURFACE_DESCRIPTOR_WIDTH, SURFACE_DESCRIPTOR_HEIGHT),
-        Image.Resampling.LANCZOS,
-    )
+    normalized = ImageOps.autocontrast(gray, cutoff=1).resize((SURFACE_DESCRIPTOR_WIDTH, SURFACE_DESCRIPTOR_HEIGHT),
+        Image.Resampling.LANCZOS)
     return normalized.tobytes().hex()
 
 
-def build_surface_descriptors( frames: Any, bounds: tuple[float, float, float, float], ) -> tuple[str, ...]:
+def build_surface_descriptors(frames: Any, bounds: tuple[float, float, float, float]) -> tuple[str, ...]:
     if not isinstance(frames, (list, tuple)) or len(frames) != 4:
         raise InputValueLineageError("输入表面连续性必须绑定动作后四帧。")
     descriptors = tuple(describe_input_surface(frame, bounds) for frame in frames)
@@ -104,12 +98,8 @@ def build_surface_descriptors( frames: Any, bounds: tuple[float, float, float, f
     return descriptors
 
 
-def surface_descriptors_match(
-    descriptors: tuple[str, ...],
-    *,
-    frame: Image.Image | None,
-    bounds: tuple[float, float, float, float],
-) -> bool:
+def surface_descriptors_match(descriptors: tuple[str, ...], *, frame: Image.Image | None, bounds: tuple[float, float,
+    float, float]) -> bool:
     if frame is None or not descriptors:
         return False
     try:
@@ -129,53 +119,21 @@ def surface_descriptors_match(
     return False
 
 
-def lineage_matches_visual(
-    record: TypedInputLineage,
-    *,
-    current_frame: Image.Image | None = None,
-    **context: Any,
-) -> bool:
-    return record.matches_visual(
-        **context,
-        surface_matches=surface_descriptors_match(
-            record.surface_descriptors,
-            frame=current_frame,
-            bounds=record.input_bounds,
-        ),
-    )
+def lineage_matches_visual(record: TypedInputLineage, *, current_frame: Image.Image | None=None,
+    **context: Any) -> bool:
+    return record.matches_visual(**context, surface_matches=surface_descriptors_match(record.surface_descriptors,
+        frame=current_frame, bounds=record.input_bounds))
 
 
-def lineage_matches_persisted_surface_cue(
-    record: TypedInputLineage,
-    *,
-    input_bounds: tuple[float, float, float, float] | None,
-    current_frame: Image.Image | None,
-    **context: Any,
-) -> bool:
-    surface_matches = bool(
-        input_bounds is not None
-        and surface_descriptors_match(
-            record.surface_descriptors,
-            frame=current_frame,
-            bounds=input_bounds,
-        )
-    )
+def lineage_matches_persisted_surface_cue(record: TypedInputLineage, *, input_bounds: tuple[float, float, float,
+    float] | None, current_frame: Image.Image | None, **context: Any) -> bool:
+    surface_matches = bool(input_bounds is not None and surface_descriptors_match(record.surface_descriptors,
+        frame=current_frame, bounds=input_bounds))
     return record.matches_persisted_surface_cue(**context, input_bounds=input_bounds, surface_matches=surface_matches)
 
 
-def lineage_matches_trailing_newline_cue(
-    record: TypedInputLineage,
-    *,
-    input_bounds: tuple[float, float, float, float] | None,
-    current_frame: Image.Image | None = None,
-    **context: Any,
-) -> bool:
-    surface_matches = bool(
-        input_bounds is not None
-        and surface_descriptors_match(
-            record.surface_descriptors,
-            frame=current_frame,
-            bounds=input_bounds,
-        )
-    )
+def lineage_matches_trailing_newline_cue(record: TypedInputLineage, *, input_bounds: tuple[float, float, float,
+    float] | None, current_frame: Image.Image | None=None, **context: Any) -> bool:
+    surface_matches = bool(input_bounds is not None and surface_descriptors_match(record.surface_descriptors,
+        frame=current_frame, bounds=input_bounds))
     return record.matches_trailing_newline_cue(**context, input_bounds=input_bounds, surface_matches=surface_matches)

@@ -19,21 +19,21 @@ class ProvisionalDeviceControllerError(DeviceControllerRegistryError):
 class DeviceControllerRegistry:
     """Resolve one controller and calibration per configured device_id."""
 
-    def __init__( self, path: Path, *, promotable_actions: Collection[str], mock: bool = False, ) -> None:
+    def __init__(self, path: Path, *, promotable_actions: Collection[str], mock: bool=False) -> None:
         self.path = Path(path)
         self._promotable_actions = frozenset((str(action or '').strip() for action in promotable_actions))
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise DeviceControllerRegistryError(f'设备注册表无法读取：{exc}') from exc
-        if payload.get("version") != 1 or not isinstance( payload.get("devices"), list, ):
+        if payload.get('version') != 1 or not isinstance(payload.get('devices'), list):
             raise DeviceControllerRegistryError('设备注册表版本或 devices 格式无效。')
         self.default_device_id = str(payload.get('default_device_id') or '').strip()
         self._controllers: dict[str, RobotController] = {}
         self._descriptors: dict[str, dict[str, Any]] = {}
         enabled_windows: set[str] = set()
-        for raw in payload["devices"]:
-            if not isinstance(raw, dict) or raw.get("enabled") is not True:
+        for raw in payload['devices']:
+            if not isinstance(raw, dict) or raw.get('enabled') is not True:
                 continue
             device_id = str(raw.get("device_id") or "").strip()
             window_title = str(raw.get("window_title") or "").strip()
@@ -41,10 +41,8 @@ class DeviceControllerRegistry:
             raw_verified_actions = raw.get("verified_actions")
             if raw_verified_actions is None:
                 verified_actions = None
-            elif not isinstance(raw_verified_actions, list) or not all(
-                isinstance(item, str) and item.strip()
-                for item in raw_verified_actions
-            ):
+            elif (not isinstance(raw_verified_actions, list) or not all((isinstance(item,
+                str) and item.strip() for item in raw_verified_actions))):
                 raise DeviceControllerRegistryError(f'设备 {device_id or 'missing'} 的 verified_actions 格式无效。')
             else:
                 verified_actions = {str(item).strip() for item in raw_verified_actions}
@@ -61,25 +59,14 @@ class DeviceControllerRegistry:
             if mock:
                 controller = MockRobotController(device_id=device_id)
             elif window_title:
-                controller = RobotController(
-                    window_title,
-                    calibration_path=calibration_path,
-                    verified_actions=verified_actions,
-                    device_id=device_id,
-                )
+                controller = RobotController(window_title, calibration_path=calibration_path,
+                    verified_actions=verified_actions, device_id=device_id)
             else:
-                controller = RobotController(
-                    calibration_path=calibration_path,
-                    verified_actions=verified_actions,
-                    device_id=device_id,
-                )
+                controller = RobotController(calibration_path=calibration_path, verified_actions=verified_actions,
+                    device_id=device_id)
             self._controllers[device_id] = controller
-            self._descriptors[device_id] = {
-                "device_id": device_id,
-                "window_title": window_title,
-                "calibration_path": str(calibration_path),
-                "verified_actions": sorted(controller.verified_actions),
-            }
+            self._descriptors[device_id] = {'device_id': device_id, 'window_title': window_title,
+                'calibration_path': str(calibration_path), 'verified_actions': sorted(controller.verified_actions)}
         if not self._controllers or self.default_device_id not in self._controllers:
             raise DeviceControllerRegistryError('设备注册表必须包含已启用的 default_device_id。')
 
@@ -90,7 +77,7 @@ class DeviceControllerRegistry:
             raise DeviceControllerRegistryError(f'device_id 未登记或未启用：{resolved or 'missing'}。')
         return controller
 
-    def provisional_controller( self, device_id: str, candidate_action: str, ) -> RobotController:
+    def provisional_controller(self, device_id: str, candidate_action: str) -> RobotController:
         """Create an unregistered controller for one evidence-bound trial."""
 
         resolved_device = str(device_id or "").strip()
@@ -107,12 +94,9 @@ class DeviceControllerRegistry:
         verified_actions = set(original.verified_actions) | {action}
         if isinstance(original, MockRobotController):
             return MockRobotController(verified_actions=verified_actions, device_id=resolved_device)
-        return RobotController(
-            descriptor["window_title"] or original.title,
-            calibration_path=Path(descriptor["calibration_path"]),
-            verified_actions=verified_actions,
-            device_id=resolved_device,
-        )
+        return RobotController(descriptor['window_title'] or original.title,
+            calibration_path=Path(descriptor['calibration_path']), verified_actions=verified_actions,
+            device_id=resolved_device)
 
     def descriptors(self) -> list[dict[str, Any]]:
         return [dict(self._descriptors[key]) for key in sorted(self._descriptors)]

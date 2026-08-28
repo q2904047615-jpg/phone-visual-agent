@@ -15,14 +15,8 @@ class LocalFrameStability:
     reason: str
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "stable": self.stable,
-            "mean_delta": round(self.mean_delta, 3),
-            "max_delta": round(self.max_delta, 3),
-            "frame_count": self.frame_count,
-            "threshold": self.threshold,
-            "reason": self.reason,
-        }
+        return {'stable': self.stable, 'mean_delta': round(self.mean_delta, 3), 'max_delta': round(self.max_delta, 3),
+            'frame_count': self.frame_count, 'threshold': self.threshold, 'reason': self.reason}
 
 
 @dataclass(frozen=True)

@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
 
 
-if sys.platform != "win32":
+if sys.platform != 'win32':
     raise SystemExit("这个 PoC 只能在 Windows 上运行。")
 
 
@@ -107,24 +107,13 @@ user32.GetWindow.restype = wintypes.HWND
 
 
 class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD),
-        ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),
-    ]
+    _fields_ = [('wVk', wintypes.WORD), ('wScan', wintypes.WORD), ('dwFlags', wintypes.DWORD), ('time', wintypes.DWORD),
+        ('dwExtraInfo', ctypes.c_size_t)]
 
 
 class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx", wintypes.LONG),
-        ("dy", wintypes.LONG),
-        ("mouseData", wintypes.DWORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_size_t),
-    ]
+    _fields_ = [('dx', wintypes.LONG), ('dy', wintypes.LONG), ('mouseData', wintypes.DWORD), ('dwFlags',
+        wintypes.DWORD), ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_size_t)]
 
 
 class HARDWAREINPUT(ctypes.Structure):
@@ -218,18 +207,11 @@ def ensure_window_fully_visible(hwnd: int) -> None:
 
     target_left = min(max(window_rect.left, info.rcWork.left), info.rcWork.right - outer_width)
     target_top = min(max(window_rect.top, info.rcWork.top), info.rcWork.bottom - desired_outer_height)
-    if ( target_left != window_rect.left or target_top != window_rect.top or desired_outer_height != outer_height ):
+    if target_left != window_rect.left or target_top != window_rect.top or desired_outer_height != outer_height:
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
-        if not user32.SetWindowPos(
-            hwnd,
-            0,
-            target_left,
-            target_top,
-            outer_width,
-            desired_outer_height,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        ):
+        if (not user32.SetWindowPos(hwnd, 0, target_left, target_top, outer_width, desired_outer_height,
+            SWP_NOZORDER | SWP_NOACTIVATE)):
             raise ctypes.WinError()
         time.sleep(0.2)
 
@@ -259,18 +241,15 @@ def seller_layout_scale(client_width: int, client_height: int) -> float:
     return seller_ui_scale(client_width)
 
 
-def scale_seller_vertical_value( value: int | float, client_width: int, client_height: int, ) -> int:
+def scale_seller_vertical_value(value: int | float, client_width: int, client_height: int) -> int:
     if isinstance(value, bool) or float(value) < 0:
         raise ValueError("控制端基准坐标必须是非负数。")
     scaled = float(value) * seller_layout_scale(client_width, client_height)
     return int(math.floor(scaled + 0.5))
 
 
-def seller_required_client_height(
-    client_width: int,
-    client_height: int,
-    baseline_height: int = DEFAULT_CAMERA_HEIGHT,
-) -> int:
+def seller_required_client_height(client_width: int, client_height: int,
+    baseline_height: int=DEFAULT_CAMERA_HEIGHT) -> int:
     """Return the smallest client height containing camera and both tool rows."""
 
     scale = seller_layout_scale(client_width, client_height)
@@ -279,7 +258,7 @@ def seller_required_client_height(
     return int(math.floor(required + 0.5))
 
 
-def seller_camera_height( client_width: int, client_height: int, baseline_height: int = DEFAULT_CAMERA_HEIGHT, ) -> int:
+def seller_camera_height(client_width: int, client_height: int, baseline_height: int=DEFAULT_CAMERA_HEIGHT) -> int:
     """Map the 540x960 camera viewport to the current physical client size."""
 
     if isinstance(client_height, bool) or int(client_height) <= 0:
@@ -291,11 +270,8 @@ def seller_camera_height( client_width: int, client_height: int, baseline_height
     return max(1, scale_seller_vertical_value(BASELINE_CLIENT_WIDTH, client_width, client_height))
 
 
-def seller_layout_has_full_camera(
-    client_width: int,
-    client_height: int,
-    baseline_height: int = DEFAULT_CAMERA_HEIGHT,
-) -> bool:
+def seller_layout_has_full_camera(client_width: int, client_height: int,
+    baseline_height: int=DEFAULT_CAMERA_HEIGHT) -> bool:
     """The real controller must include the full camera plus a bottom toolbar."""
 
     landscape = int(client_width) > int(client_height)
@@ -309,20 +285,12 @@ def seller_layout_has_full_camera(
     scale = seller_layout_scale(client_width, client_height)
     expected_width = baseline_height * scale
     ratio = int(client_width) / int(client_height)
-    return (
-        int(client_width) >= 800
-        and int(client_height) >= BASELINE_CLIENT_WIDTH * scale
-        and int(client_width) >= expected_width * 0.95
-        and 1.55 <= ratio <= 2.0
-    )
+    return int(client_width) >= 800 and int(client_height) >= BASELINE_CLIENT_WIDTH * scale and (int(client_width) >=
+        expected_width * 0.95) and (1.55 <= ratio <= 2.0)
 
 
-def seller_control_point(
-    client_width: int,
-    client_height: int,
-    baseline_x: int | float,
-    baseline_y_from_bottom: int | float = CONTROL_Y_FROM_BOTTOM,
-) -> tuple[int, int]:
+def seller_control_point(client_width: int, client_height: int, baseline_x: int | float,
+    baseline_y_from_bottom: int | float=CONTROL_Y_FROM_BOTTOM) -> tuple[int, int]:
     """Map one documented seller-toolbar point to the actual client pixels."""
 
     x = scale_seller_ui_value(baseline_x, client_width)
@@ -350,7 +318,7 @@ def _window_is_minimized(hwnd: int) -> bool:
         return False
 
 
-def _validate_camera_region_unoccluded( hwnd: int, *, camera_height: int = DEFAULT_CAMERA_HEIGHT, ) -> None:
+def _validate_camera_region_unoccluded(hwnd: int, *, camera_height: int=DEFAULT_CAMERA_HEIGHT) -> None:
     """Prove the current desktop pixels belong to the seller controller."""
 
     left, top, width, height = client_geometry(hwnd)
@@ -363,20 +331,11 @@ def _validate_camera_region_unoccluded( hwnd: int, *, camera_height: int = DEFAU
     # Avoid borders and the seller toolbar.  Every point must belong to the
     # controller (or one of its child windows); one foreign owner means the
     # camera is still covered and the capture is unsafe.
-    samples = (
-        (0.20, 0.15),
-        (0.50, 0.15),
-        (0.80, 0.15),
-        (0.20, 0.50),
-        (0.50, 0.50),
-        (0.80, 0.50),
-        (0.20, 0.82),
-        (0.50, 0.82),
-        (0.80, 0.82),
-    )
+    samples = ((0.2, 0.15), (0.5, 0.15), (0.8, 0.15), (0.2, 0.5), (0.5, 0.5), (0.8, 0.5), (0.2, 0.82), (0.5, 0.82),
+        (0.8, 0.82))
     foreign: list[tuple[int, int, int]] = []
     expected = int(hwnd)
-    for x_ratio, y_ratio in samples:
+    for (x_ratio, y_ratio) in samples:
         screen_x = left + min(width - 1, max(0, int(round((width - 1) * x_ratio))))
         screen_y = top + min(visible_height - 1, max(0, int(round((visible_height - 1) * y_ratio))))
         owner = _root_window_at(screen_x, screen_y)
@@ -386,7 +345,7 @@ def _validate_camera_region_unoccluded( hwnd: int, *, camera_height: int = DEFAU
         raise RuntimeError('控制端相机区域仍被其他窗口遮挡，已拒绝把电脑桌面当成手机画面。')
 
 
-def ensure_camera_region_unoccluded( hwnd: int, *, camera_height: int = DEFAULT_CAMERA_HEIGHT, ) -> None:
+def ensure_camera_region_unoccluded(hwnd: int, *, camera_height: int=DEFAULT_CAMERA_HEIGHT) -> None:
     """Activate the seller controller for one explicitly requested task capture."""
 
     user32.ShowWindow(hwnd, SW_RESTORE)
@@ -422,20 +381,12 @@ def camera_crop(image: Image.Image, camera_height: int) -> Image.Image:
     return image.crop((0, 0, image.width, height))
 
 
-def click_client_point(
-    hwnd: int,
-    x: int,
-    y: int,
-    countdown: int,
-    hold_seconds: float,
-    *,
-    require_event_barrier: bool = False,
-    click_count: int = 1,
-) -> dict[str, object] | None:
+def click_client_point(hwnd: int, x: int, y: int, countdown: int, hold_seconds: float, *,
+    require_event_barrier: bool=False, click_count: int=1) -> dict[str, object] | None:
     _, _, width, height = client_geometry(hwnd)
     if not (0 <= x < width and 0 <= y < height):
         raise ValueError(f"点击位置 ({x}, {y}) 超出窗口客户区 {width}×{height}。")
-    if not (0.1 <= hold_seconds <= 2.0):
+    if not 0.1 <= hold_seconds <= 2.0:
         raise ValueError("按住时间必须在 0.1～2.0 秒之间。")
     if click_count not in {1, 2}:
         raise ValueError("点击次数只允许1或2。")
@@ -455,7 +406,7 @@ def click_client_point(
         time.sleep(0.1)
 
     for remaining in range(countdown, 0, -1):
-        if user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+        if user32.GetAsyncKeyState(VK_ESCAPE) & 32768:
             raise RuntimeError("用户按下 Esc，已取消执行。")
         print(f"{remaining} 秒后执行物理点击；按 Esc 取消……", flush=True)
         time.sleep(1)
@@ -497,19 +448,12 @@ def click_client_point(
 
     if not require_event_barrier:
         return None
-    return {
-        "version": "2026-08-19-seller-gui-click-barrier-v1",
-        "channel": "left_button_atomic_click",
-        "seller_event_barrier_confirmed": True,
-        "round_trip_position_confirmed": True,
-        "requested_mouse_hold_seconds": float(hold_seconds),
-        "click_count": int(click_count),
-        "barrier_offset_pixels": abs(int(offset)),
-        "changed_pixels": int(changed_pixels),
-        "return_changed_pixels": int(return_changed_pixels),
-        "barrier_elapsed_ms": round(barrier_seconds * 1000.0, 3),
-        "mechanical_contact_ack": False,
-    }
+    return {'version': '2026-08-19-seller-gui-click-barrier-v1', 'channel': 'left_button_atomic_click',
+        'seller_event_barrier_confirmed': True, 'round_trip_position_confirmed': True,
+        'requested_mouse_hold_seconds': float(hold_seconds), 'click_count': int(click_count),
+        'barrier_offset_pixels': abs(int(offset)), 'changed_pixels': int(changed_pixels),
+        'return_changed_pixels': int(return_changed_pixels), 'barrier_elapsed_ms': round(barrier_seconds * 1000.0, 3),
+        'mechanical_contact_ack': False}
 
 
 def _capture_seller_position_overlay(hwnd: int) -> np.ndarray:
@@ -527,20 +471,15 @@ def _capture_seller_position_overlay(hwnd: int) -> np.ndarray:
     return np.asarray(image, dtype=np.int16).copy()
 
 
-def _seller_position_changed_pixels( baseline: np.ndarray, current: np.ndarray, ) -> int:
+def _seller_position_changed_pixels(baseline: np.ndarray, current: np.ndarray) -> int:
     if baseline.shape != current.shape or baseline.ndim != 3:
         raise RuntimeError("控制端坐标状态条尺寸在动作期间发生变化。")
     delta = np.abs(current - baseline).max(axis=2)
     return int((delta > SELLER_POSITION_DIFF_CHANNEL_THRESHOLD).sum())
 
 
-def _wait_for_seller_position_state(
-    hwnd: int,
-    baseline: np.ndarray,
-    *,
-    expect_changed: bool,
-    timeout: float = SELLER_POSITION_BARRIER_TIMEOUT,
-) -> tuple[int, float]:
+def _wait_for_seller_position_state(hwnd: int, baseline: np.ndarray, *, expect_changed: bool,
+    timeout: float=SELLER_POSITION_BARRIER_TIMEOUT) -> tuple[int, float]:
     started = time.monotonic()
     deadline = started + max(0.1, float(timeout))
     last_count = 0
@@ -564,13 +503,13 @@ def _stable_seller_position_baseline(hwnd: int) -> np.ndarray:
     while time.monotonic() < deadline:
         time.sleep(0.03)
         current = _capture_seller_position_overlay(hwnd)
-        if ( _seller_position_changed_pixels(previous, current) <= SELLER_POSITION_RETURN_PIXEL_MAX ):
+        if _seller_position_changed_pixels(previous, current) <= SELLER_POSITION_RETURN_PIXEL_MAX:
             return current
         previous = current
     raise RuntimeError("控制端坐标状态条在长按前不稳定。")
 
 
-def long_press_client_point( hwnd: int, x: int, y: int, *, hold_seconds: float, ) -> dict[str, object]:
+def long_press_client_point(hwnd: int, x: int, y: int, *, hold_seconds: float) -> dict[str, object]:
     """Hold contact only after the seller GUI processes a down/move barrier."""
 
     _, _, width, height = client_geometry(hwnd)
@@ -621,34 +560,21 @@ def long_press_client_point( hwnd: int, x: int, y: int, *, hold_seconds: float, 
             user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
             time.sleep(0.12)
         user32.SetCursorPos(old_cursor.x, old_cursor.y)
-    return {
-        "version": "2026-08-16-seller-gui-contact-barrier-v3",
-        "channel": "right_button_stationary_touch",
-        "seller_event_barrier_confirmed": True,
-        "round_trip_position_confirmed": True,
-        "hold_started_after_barrier": True,
-        "requested_hold_seconds": float(hold_seconds),
-        "barrier_offset_pixels": abs(int(offset)),
-        "changed_pixels": int(changed_pixels),
-        "return_changed_pixels": int(return_changed_pixels),
-        "barrier_elapsed_ms": round(barrier_seconds * 1000.0, 3),
-        "post_barrier_settle_seconds": SELLER_TOUCH_DOWN_SETTLE_SECONDS,
-    }
+    return {'version': '2026-08-16-seller-gui-contact-barrier-v3', 'channel': 'right_button_stationary_touch',
+        'seller_event_barrier_confirmed': True, 'round_trip_position_confirmed': True,
+        'hold_started_after_barrier': True, 'requested_hold_seconds': float(hold_seconds),
+        'barrier_offset_pixels': abs(int(offset)), 'changed_pixels': int(changed_pixels),
+        'return_changed_pixels': int(return_changed_pixels), 'barrier_elapsed_ms': round(barrier_seconds * 1000.0, 3),
+        'post_barrier_settle_seconds': SELLER_TOUCH_DOWN_SETTLE_SECONDS}
 
 
-def drag_client_path(
-    hwnd: int,
-    start: tuple[int, int],
-    end: tuple[int, int],
-    *,
-    duration_seconds: float = 0.8,
-    steps: int = 16,
-) -> None:
+def drag_client_path(hwnd: int, start: tuple[int, int], end: tuple[int, int], *, duration_seconds: float=0.8,
+    steps: int=16) -> None:
     """Drive the seller UI's right-button touch-down/move/touch-up path."""
 
     _, _, width, height = client_geometry(hwnd)
     camera_height = seller_camera_height(width, height)
-    for name, (x, y) in (("起点", start), ("终点", end)):
+    for (name, (x, y)) in (('起点', start), ('终点', end)):
         if not (0 <= x < width and 0 <= y < camera_height):
             raise ValueError(f'拖动{name} ({x}, {y}) 超出摄像头客户区 {width}×{camera_height}。')
     if start == end:
@@ -693,12 +619,12 @@ def drag_client_path(
         user32.SetCursorPos(old_cursor.x, old_cursor.y)
 
 
-def _check_escape(message: str = "用户按下 Esc，已停止执行。") -> None:
-    if user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+def _check_escape(message: str='用户按下 Esc，已停止执行。') -> None:
+    if user32.GetAsyncKeyState(VK_ESCAPE) & 32768:
         raise RuntimeError(message)
 
 
-def sleep_interruptible(seconds: float, poll_seconds: float = 0.1) -> None:
+def sleep_interruptible(seconds: float, poll_seconds: float=0.1) -> None:
     """Sleep while keeping Esc responsive."""
     deadline = time.monotonic() + max(0.0, seconds)
     while True:
@@ -709,7 +635,7 @@ def sleep_interruptible(seconds: float, poll_seconds: float = 0.1) -> None:
         time.sleep(min(poll_seconds, remaining))
 
 
-def click_client_control(hwnd: int, x: int, y: int, hold: float = 0.08) -> None:
+def click_client_control(hwnd: int, x: int, y: int, hold: float=0.08) -> None:
     """Click the seller software UI itself, not the camera/phone area."""
     _, _, width, height = client_geometry(hwnd)
     if not (0 <= x < width and 0 <= y < height):
@@ -741,11 +667,8 @@ def press_virtual_key(key_code: int) -> None:
 def type_unicode_text(text: str) -> None:
     """Type bounded BMP text into the focused seller control."""
 
-    if (
-        not isinstance(text, str)
-        or not 1 <= len(text) <= 100
-        or any(char in "\r\n\x00" or ord(char) > 0xFFFF for char in text)
-    ):
+    if (not isinstance(text, str) or not 1 <= len(text) <= 100 or any((char in '\r\n\x00' or ord(char) > 65535 for char
+        in text))):
         raise ValueError("控制端文字必须是1～100个无换行 BMP 字符。")
 
     events = (INPUT * (len(text) * 2))()
@@ -791,31 +714,19 @@ def cursor_parking_client_point(width: int, height: int) -> tuple[int, int]:
     return width // 2, camera_height + (height - camera_height) // 2
 
 
-def cursor_parking_screen_point(
-    window_rect: tuple[int, int, int, int],
-    virtual_screen_rect: tuple[int, int, int, int],
-) -> tuple[int, int] | None:
+def cursor_parking_screen_point(window_rect: tuple[int, int, int, int], virtual_screen_rect: tuple[int, int, int,
+    int]) -> tuple[int, int] | None:
     """Choose a visible desktop corner that is definitely outside the seller window."""
 
     window_left, window_top, window_right, window_bottom = window_rect
     screen_left, screen_top, screen_right, screen_bottom = virtual_screen_rect
     if screen_right <= screen_left or screen_bottom <= screen_top:
         raise ValueError("虚拟桌面范围无效。")
-    candidates = (
-        (screen_left + 2, screen_top + 2),
-        (screen_right - 3, screen_top + 2),
-        (screen_left + 2, screen_bottom - 3),
-        (screen_right - 3, screen_bottom - 3),
-    )
+    candidates = ((screen_left + 2, screen_top + 2), (screen_right - 3, screen_top + 2), (screen_left + 2,
+        screen_bottom - 3), (screen_right - 3, screen_bottom - 3))
     window_center = ((window_left + window_right) / 2, (window_top + window_bottom) / 2)
-    outside = [
-        point
-        for point in candidates
-        if not (
-            window_left <= point[0] < window_right
-            and window_top <= point[1] < window_bottom
-        )
-    ]
+    outside = [point for point in candidates if not (window_left <= point[0] < window_right
+        and window_top <= point[1] < window_bottom)]
     if not outside:
         return None
     return max(outside, key=lambda point: (point[0] - window_center[0]) ** 2 + (point[1] - window_center[1]) ** 2)
@@ -838,7 +749,7 @@ def temporarily_park_cursor_outside_camera(hwnd: int):
         raise ctypes.WinError()
     left, top, width, height = client_geometry(hwnd)
     camera_height = seller_camera_height(width, height, DEFAULT_CAMERA_HEIGHT)
-    if not ( left <= original.x < left + width and top <= original.y < top + camera_height ):
+    if not (left <= original.x < left + width and top <= original.y < top + camera_height):
         yield False
         return
 
@@ -853,15 +764,8 @@ def temporarily_park_cursor_outside_camera(hwnd: int):
     screen_top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
     screen_width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
     screen_height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
-    screen_point = cursor_parking_screen_point(
-        (window.left, window.top, window.right, window.bottom),
-        (
-            screen_left,
-            screen_top,
-            screen_left + screen_width,
-            screen_top + screen_height,
-        ),
-    )
+    screen_point = cursor_parking_screen_point((window.left, window.top, window.right, window.bottom), (screen_left,
+        screen_top, screen_left + screen_width, screen_top + screen_height))
     if screen_point is None:
         client_x, client_y = cursor_parking_client_point(width, height)
         screen_point = (left + client_x, top + client_y)

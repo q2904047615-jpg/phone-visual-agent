@@ -32,20 +32,26 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
         payload = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {
-                "kind": "axis_grid", "width": 1000, "height": request_height,
+                "kind": "axis_grid",
+                "width": 1000,
+                "height": request_height,
             },
             "scene": payload,
             "input_structure": None,
         }
     coordinate_space = payload.get("coordinate_space")
     normalized_fixture = coordinate_space == {
-        "kind": "normalized_1000", "width": 1000, "height": 1000,
+        "kind": "normalized_1000",
+        "width": 1000,
+        "height": 1000,
     }
     if not (flat_scene or normalized_fixture):
         return payload
     if normalized_fixture:
         payload["coordinate_space"] = {
-            "kind": "axis_grid", "width": 1000, "height": request_height,
+            "kind": "axis_grid",
+            "width": 1000,
+            "height": request_height,
         }
 
     def scale(node, *, anchors: bool = False) -> None:
@@ -70,8 +76,7 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
 def request_axis_height(messages: list[dict]) -> int:
     prompt = json.dumps(messages, ensure_ascii=False)
     match = re.search(
-        r'coordinate_space.{0,40}?axis_grid.{0,40}?width.{0,15}?1000'
-        r'.{0,40}?height.{0,15}?(\d+)',
+        r"coordinate_space.{0,40}?axis_grid.{0,40}?width.{0,15}?1000" r".{0,40}?height.{0,15}?(\d+)",
         prompt,
         flags=re.DOTALL,
     )
@@ -97,6 +102,7 @@ class FakeProvider:
         *,
         timeout: float | None = None,
         max_attempts: int | None = None,
+        response_format: dict[str, str] | None = None,
     ) -> str:
         self.calls += 1
         self.messages = messages
@@ -104,15 +110,13 @@ class FakeProvider:
         self.call_options = {
             "timeout": timeout,
             "max_attempts": max_attempts,
+            "response_format": response_format,
         }
         payload = current_axis_grid_payload(
             self.payload,
             request_height=request_axis_height(messages),
         )
-        if (
-            self.calls == 2
-            and payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
-        ):
+        if self.calls == 2 and payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION:
             payload = targeted_delta_payload(
                 elements=payload.get("elements") or [],
                 summary_addendum=str(payload.get("summary") or "")[:120],
@@ -135,11 +139,16 @@ class SequenceProvider(FakeProvider):
         *,
         timeout: float | None = None,
         max_attempts: int | None = None,
+        response_format: dict[str, str] | None = None,
     ) -> str:
         self.calls += 1
         self.messages_seen.append(messages)
         self.max_tokens_seen.append(max_tokens)
-        self.call_options = {"timeout": timeout, "max_attempts": max_attempts}
+        self.call_options = {
+            "timeout": timeout,
+            "max_attempts": max_attempts,
+            "response_format": response_format,
+        }
         value = self.responses.pop(0)
         if isinstance(value, BaseException):
             raise value
@@ -151,11 +160,7 @@ class SequenceProvider(FakeProvider):
         # Existing scene fixtures describe the intended refined facts. Adapt
         # only the second model response to the production targeted-delta wire
         # contract so the large historical suite does not duplicate fixtures.
-        if (
-            self.calls == 2
-            and isinstance(value, dict)
-            and value.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
-        ):
+        if self.calls == 2 and isinstance(value, dict) and value.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION:
             value = targeted_delta_payload(
                 elements=value.get("elements") or [],
                 summary_addendum=str(value.get("summary") or "")[:120],
@@ -320,8 +325,7 @@ def input_audit_payload(
     resolved_keyboard.setdefault("layout_switches", [])
     if (
         resolved_keyboard.get("visible") is True
-        and str(resolved_keyboard.get("layout") or "").strip().casefold()
-        == "qwerty"
+        and str(resolved_keyboard.get("layout") or "").strip().casefold() == "qwerty"
         and resolved_keyboard.get("input_mode") == "direct_latin"
         and "qwerty_anchors" not in resolved_keyboard
     ):
@@ -374,11 +378,7 @@ def icon_cluster_audit_payload(
         "protocol_version": ICON_CLUSTER_AUDIT_VERSION,
         "cluster_complete": cluster_complete,
         "cluster_bounds": (
-            cluster_bounds
-            if cluster_bounds is not None
-            else [700, 0, 920, 100]
-            if resolved_controls
-            else None
+            cluster_bounds if cluster_bounds is not None else [700, 0, 920, 100] if resolved_controls else None
         ),
         "controls": resolved_controls,
     }
@@ -447,11 +447,7 @@ def audited_application_input(
         "fully_visible": fully_visible,
         "text": text,
         "placeholder": placeholder,
-        "visible_editable_cues": list(
-            ["完整横向输入边框"]
-            if visible_editable_cues is None
-            else visible_editable_cues
-        ),
+        "visible_editable_cues": list(["完整横向输入边框"] if visible_editable_cues is None else visible_editable_cues),
         "caret_line_index": caret_line_index,
         "confidence": confidence,
         "right_button": right_button,
@@ -518,27 +514,43 @@ def multifield_next_context(fields: list[dict], *, dependency: bool = True) -> d
         "active_input_multiline": False,
     }
     if dependency:
-        markers.update({
-            "active_input_predecessor_field_id": source["field_id"],
-            "active_input_predecessor_field_label": source["field_label"],
-            "active_input_predecessor_text": source["text"],
-        })
-    return {"entities": {"input_fields": fields, "active_subgoal_visual_context": {
-        "subgoal_id": "input_body", "objective": "输入下一字段",
-        "constraints": [], "completion_conditions": [],
-        "execution_class": "navigate", "goal_entities": markers,
-    }}}
+        markers.update(
+            {
+                "active_input_predecessor_field_id": source["field_id"],
+                "active_input_predecessor_field_label": source["field_label"],
+                "active_input_predecessor_text": source["text"],
+            }
+        )
+    return {
+        "entities": {
+            "input_fields": fields,
+            "active_subgoal_visual_context": {
+                "subgoal_id": "input_body",
+                "objective": "输入下一字段",
+                "constraints": [],
+                "completion_conditions": [],
+                "execution_class": "navigate",
+                "goal_entities": markers,
+            },
+        }
+    }
 
 
 def multifield_next_base(fields: list[dict], *, duplicate: bool = False):
     source = next(item for item in fields if item["field_id"] == "subject_field")
     visible = {
-        "element_id": "source-visible", "role": "input",
-        "meaning": "application_text_input", "label": source["field_label"],
-        "bounds": [120, 430, 880, 590], "confidence": 0.98,
+        "element_id": "source-visible",
+        "role": "input",
+        "meaning": "application_text_input",
+        "label": source["field_label"],
+        "bounds": [120, 430, 880, 590],
+        "confidence": 0.98,
         "states": {
-            "goal_relevant": True, "fully_visible": True, "focused": True,
-            "value": source["text"], "input_field_id": source["field_id"],
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": source["text"],
+            "input_field_id": source["field_id"],
             "input_field_label": source["field_label"],
         },
         "evidence": [source["field_label"], "caret"],
@@ -546,37 +558,56 @@ def multifield_next_base(fields: list[dict], *, duplicate: bool = False):
     payload = scene_payload()
     payload["elements"] = [visible]
     if duplicate:
-        payload["elements"].append({
-            **visible, "element_id": "source-duplicate",
-            "bounds": [120, 250, 880, 400],
-        })
+        payload["elements"].append(
+            {
+                **visible,
+                "element_id": "source-duplicate",
+                "bounds": [120, 250, 880, 400],
+            }
+        )
     return _parse_scene(json.dumps(payload, ensure_ascii=False), fingerprint="f" * 64)
 
 
 def multifield_next_audit(
-    fields: list[dict], *, action: str = "next",
-    fully_visible: bool = True, confidence: float = 0.98,
+    fields: list[dict],
+    *,
+    action: str = "next",
+    fully_visible: bool = True,
+    confidence: float = 0.98,
     duplicate: bool = False,
 ) -> dict:
     source = next(item for item in fields if item["field_id"] == "subject_field")
-    application_inputs = [audited_application_input(
-        structure_id="source", bounds=[120, 430, 880, 590],
-        text=source["text"], field_labels=[source["field_label"]],
-    )]
+    application_inputs = [
+        audited_application_input(
+            structure_id="source",
+            bounds=[120, 430, 880, 590],
+            text=source["text"],
+            field_labels=[source["field_label"]],
+        )
+    ]
     if duplicate:
-        application_inputs.append(audited_application_input(
-            structure_id="source-duplicate", bounds=[120, 250, 880, 400],
-            text=source["text"], field_labels=[source["field_label"]],
-        ))
+        application_inputs.append(
+            audited_application_input(
+                structure_id="source-duplicate",
+                bounds=[120, 250, 880, 400],
+                text=source["text"],
+                field_labels=[source["field_label"]],
+            )
+        )
     return input_audit_payload(
         application_inputs=application_inputs,
         keyboard={
-            "visible": True, "bounds": [0, 600, 1000, 1000],
-            "layout": "qwerty", "input_mode": "direct_latin",
-            "case_mode": "lower", "mode_switch": None,
+            "visible": True,
+            "bounds": [0, 600, 1000, 1000],
+            "layout": "qwerty",
+            "input_mode": "direct_latin",
+            "case_mode": "lower",
+            "mode_switch": None,
             "enter_key": {
-                "label": "下一步", "bounds": [820, 920, 990, 985],
-                "confidence": confidence, "fully_visible": fully_visible,
+                "label": "下一步",
+                "bounds": [820, 920, 990, 985],
+                "confidence": confidence,
+                "fully_visible": fully_visible,
                 "key_action": action,
             },
         },
@@ -609,18 +640,11 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 }
             )
         )
-        self.assertFalse(
-            _has_exact_passive_scene_element_fields(
-                {**element, "unexpected": "field"}
-            )
-        )
+        self.assertFalse(_has_exact_passive_scene_element_fields({**element, "unexpected": "field"}))
 
-        source = (
-            Path(__file__).parent
-            / "agent"
-            / "infrastructure"
-            / "generic_scene_observer.py"
-        ).read_text(encoding="utf-8")
+        source = (Path(__file__).parent / "agent" / "infrastructure" / "generic_scene_observer.py").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn("exact_fields =", source)
         self.assertNotIn("action_like =", source)
         self.assertNotIn("def contains_action_like_key", source)
@@ -670,9 +694,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 )
 
                 image_parts = [
-                    part
-                    for part in provider.messages_seen[0][1]["content"]
-                    if part.get("type") == "image_url"
+                    part for part in provider.messages_seen[0][1]["content"] if part.get("type") == "image_url"
                 ]
                 self.assertEqual(1, len(image_parts))
                 self.assertEqual(
@@ -973,7 +995,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000", "width": 1000, "height": 1000,
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
                     },
                     "scene": scene,
                     "input_structure": audit,
@@ -1062,9 +1086,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
-            SingleStepGenericSceneObserver(
-                SequenceProvider([envelope])
-            ).observe(
+            SingleStepGenericSceneObserver(SequenceProvider([envelope])).observe(
                 frames=stable_frames(),
                 goal_context=context,
                 device_id="device-local-01",
@@ -1129,12 +1151,10 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             with self.subTest(with_spoofed_phase=with_spoofed_phase):
                 current_context = json.loads(json.dumps(context, ensure_ascii=False))
                 if with_spoofed_phase:
-                    current_context["entities"]["active_subgoal_visual_context"][
-                        "goal_entities"
-                    ]["observation_phase"] = "untrusted-successor-preview"
-                observed = SingleStepGenericSceneObserver(
-                    SequenceProvider([envelope])
-                ).observe(
+                    current_context["entities"]["active_subgoal_visual_context"]["goal_entities"][
+                        "observation_phase"
+                    ] = "untrusted-successor-preview"
+                observed = SingleStepGenericSceneObserver(SequenceProvider([envelope])).observe(
                     frames=stable_frames(),
                     goal_context=current_context,
                     device_id="device-local-01",
@@ -1234,9 +1254,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "input_structure": audit,
                 }
                 with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
-                    SingleStepGenericSceneObserver(
-                        SequenceProvider([envelope])
-                    ).observe(
+                    SingleStepGenericSceneObserver(SequenceProvider([envelope])).observe(
                         frames=stable_frames(),
                         goal_context=context,
                         device_id="device-local-01",
@@ -1319,9 +1337,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 provider = SequenceProvider(
                     [
                         {
-                            "protocol_version": (
-                                SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
-                            ),
+                            "protocol_version": (SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION),
                             "coordinate_space": {
                                 "kind": "normalized_1000",
                                 "width": 1000,
@@ -1437,9 +1453,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     SequenceProvider(
                         [
                             {
-                                "protocol_version": (
-                                    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
-                                ),
+                                "protocol_version": (SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION),
                                 "coordinate_space": {
                                     "kind": "normalized_1000",
                                     "width": 1000,
@@ -1457,11 +1471,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 )
 
                 field = observed.get_element("local_audited_input_1")
-                candidates = [
-                    element
-                    for element in observed.elements
-                    if element.meaning == "ime_exact_candidate"
-                ]
+                candidates = [element for element in observed.elements if element.meaning == "ime_exact_candidate"]
                 self.assertIsNotNone(field)
                 self.assertEqual("", field.states["value"])
                 self.assertEqual("aaazjie", field.states["ime_preedit_text"])
@@ -1492,7 +1502,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         retired = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {
-                "kind": "image_grid", "width": 540, "height": 960,
+                "kind": "image_grid",
+                "width": 540,
+                "height": 960,
             },
             "scene": scene,
             "input_structure": audit,
@@ -1552,21 +1564,14 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 observer = SingleStepGenericSceneObserver(provider)
 
                 observed = observer.observe(
-                    frames=[
-                        Image.new("RGB", frame_size, (30, 40, 50))
-                        for _ in range(4)
-                    ],
+                    frames=[Image.new("RGB", frame_size, (30, 40, 50)) for _ in range(4)],
                     goal_context=context,
                     device_id="device-local-01",
                 )
 
                 field = observed.unique_trusted_goal_element()
-                canonical_bounds.append(
-                    tuple(round(value, 3) for value in field.bounds)
-                )
-                normalization = observer.last_diagnostics[
-                    "coordinate_normalization"
-                ]
+                canonical_bounds.append(tuple(round(value, 3) for value in field.bounds))
+                normalization = observer.last_diagnostics["coordinate_normalization"]
                 self.assertEqual("axis_grid", normalization["wire_kind"])
                 self.assertEqual([1000, request_size[1]], normalization["wire_extent"])
                 self.assertEqual(list(request_size), normalization["request_image_size"])
@@ -1574,13 +1579,11 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertEqual(1, provider.calls)
                 prompt = provider.messages_seen[0][1]["content"][0]["text"]
                 self.assertIn(
-                    f'"coordinate_space":{{"kind":"axis_grid","width":1000,'
-                    f'"height":{request_size[1]}}}',
+                    f'"coordinate_space":{{"kind":"axis_grid","width":1000,' f'"height":{request_size[1]}}}',
                     prompt,
                 )
                 self.assertNotIn(
-                    '"coordinate_space":{"kind":"normalized_1000",'
-                    '"width":1000,"height":1000}',
+                    '"coordinate_space":{"kind":"normalized_1000",' '"width":1000,"height":1000}',
                     prompt,
                 )
 
@@ -1595,7 +1598,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         retired = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {
-                "kind": "normalized_1000", "width": 1000, "height": 1000,
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
             },
             "scene": scene,
             "input_structure": audit,
@@ -1685,9 +1690,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "scene": scene,
                     "input_structure": current_audit,
                 }
-                provider = SequenceProvider(
-                    [json.dumps(raw, ensure_ascii=False)]
-                )
+                provider = SequenceProvider([json.dumps(raw, ensure_ascii=False)])
                 with self.assertRaisesRegex(VisionAgentError, error):
                     SingleStepGenericSceneObserver(provider).observe(
                         frames=stable_frames(),
@@ -1696,11 +1699,18 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     )
                 self.assertEqual(1, provider.calls)
 
-        provider = SequenceProvider([json.dumps({
-            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "scene": base_scene,
-            "input_structure": audit,
-        }, ensure_ascii=False)])
+        provider = SequenceProvider(
+            [
+                json.dumps(
+                    {
+                        "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                        "scene": base_scene,
+                        "input_structure": audit,
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
         with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
             SingleStepGenericSceneObserver(provider).observe(
                 frames=stable_frames(),
@@ -1738,7 +1748,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000", "width": 1000, "height": 1000,
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
                     },
                     "scene": scene,
                     "input_structure": audit,
@@ -1782,7 +1794,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000", "width": 1000, "height": 1000,
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
                     },
                     "scene": scene,
                     "input_structure": audit,
@@ -1828,9 +1842,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(observer.last_diagnostics["remote_retry_used"])
 
     def test_single_step_observer_rejects_retired_flat_scene(self) -> None:
-        provider = SequenceProvider(
-            [json.dumps(scene_payload(), ensure_ascii=False)]
-        )
+        provider = SequenceProvider([json.dumps(scene_payload(), ensure_ascii=False)])
         observer = SingleStepGenericSceneObserver(provider)
 
         with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
@@ -1875,7 +1887,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "axis_grid", "width": 1000, "height": 960,
+                        "kind": "axis_grid",
+                        "width": 1000,
+                        "height": 960,
                     },
                     "scene": scene,
                     "input_structure": None,
@@ -1924,7 +1938,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000", "width": 1000, "height": 1000,
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
                     },
                     "scene": scene,
                     "input_structure": input_audit_payload(application_inputs=[]),
@@ -1980,15 +1996,15 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             return {
                 "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                 "coordinate_space": {
-                    "kind": "axis_grid", "width": 1000, "height": 960,
+                    "kind": "axis_grid",
+                    "width": 1000,
+                    "height": 960,
                 },
                 "scene": scene_payload(),
                 "input_structure": None,
             }
 
-        provider = PlainSequenceProvider(
-            [current_scene_envelope(), current_scene_envelope()]
-        )
+        provider = PlainSequenceProvider([current_scene_envelope(), current_scene_envelope()])
         observer = SingleStepGenericSceneObserver(provider)
         frames = stable_frames()
         context: dict = {}

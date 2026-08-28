@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import os
 import time
 from typing import Any
@@ -64,8 +65,7 @@ class DeepSeekIntentProvider:
             'error': None if self.configured else '未配置 DEEPSEEK_API_KEY'}
 
     def chat_json(self, messages: list[dict[str, Any]], max_tokens: int=500) -> str:
-        if not self.configured:
-            raise IntentProviderError('DeepSeek 文本理解尚未配置：请先设置 DEEPSEEK_API_KEY。')
+        reject_if(not self.configured, IntentProviderError('DeepSeek 文本理解尚未配置：请先设置 DEEPSEEK_API_KEY。'))
 
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
@@ -80,8 +80,7 @@ class DeepSeekIntentProvider:
                 self.last_usage = payload.get("usage") or {}
                 self.last_request_id = str(payload.get("id") or "")
                 content = payload["choices"][0]["message"]["content"]
-                if not isinstance(content, str) or not content.strip():
-                    raise IntentProviderError("DeepSeek 文本理解返回了空内容。")
+                reject_if(not isinstance(content, str) or not content.strip(), IntentProviderError("DeepSeek 文本理解返回了空内容。"))
                 return content
             except httpx.HTTPStatusError as exc:
                 last_error = exc

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import json
 import os
 import re
@@ -104,8 +105,7 @@ def _rescale_box(item: dict[str, Any], scale: float) -> None:
 
 
 def recognize(image: Image.Image, language: str='zh-Hans-CN', *, scale: float=3.0) -> dict[str, Any]:
-    if not is_available():
-        raise OcrUnavailableError("Windows 简体中文 OCR 不可用。")
+    reject_if(not is_available(), OcrUnavailableError("Windows 简体中文 OCR 不可用。"))
 
     path: str | None = None
     try:
@@ -122,14 +122,12 @@ def recognize(image: Image.Image, language: str='zh-Hans-CN', *, scale: float=3.
             capture_output=True, timeout=20, check=False)
         stdout = process.stdout.decode("utf-8-sig", errors="replace").strip()
         stderr = process.stderr.decode("utf-8-sig", errors="replace").strip()
-        if process.returncode != 0:
-            raise OcrRecognitionError(f'Windows OCR 执行失败（{process.returncode}）：{stderr or stdout}')
+        reject_if(process.returncode != 0, OcrRecognitionError(f'Windows OCR 执行失败（{process.returncode}）：{stderr or stdout}'))
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise OcrRecognitionError(f'Windows OCR 返回内容无法解析：{stdout[:300]}') from exc
-        if not isinstance(payload, dict):
-            raise OcrRecognitionError("Windows OCR 返回格式错误。")
+        reject_if(not isinstance(payload, dict), OcrRecognitionError("Windows OCR 返回格式错误。"))
         if actual_scale > 1.0:
             for line in payload.get('lines') or []:
                 _rescale_box(line, actual_scale)

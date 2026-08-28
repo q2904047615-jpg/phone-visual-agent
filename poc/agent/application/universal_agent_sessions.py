@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,8 +96,7 @@ class UniversalAgentSessionApplicationService:
     @staticmethod
     def _require_start_available(orchestrator: UniversalAgentOrchestratorPort, device_id: str) -> None:
         active_session_id = orchestrator.device_registry.active_session(device_id)
-        if active_session_id is not None:
-            raise AgentSessionConflictError(f'设备 {device_id} 已有活动任务：{active_session_id}。')
+        reject_if(active_session_id is not None, AgentSessionConflictError(f'设备 {device_id} 已有活动任务：{active_session_id}。'))
 
     def require(self, session_id: str) -> AgentSession:
         return self._sessions.require(session_id)
@@ -128,15 +128,13 @@ class UniversalAgentSessionApplicationService:
         Any] | None) -> AgentSessionOperationResult:
         self._ensure_device_ready(session.device_id)
         before_actions = session.physical_actions
-        if confirmed is not True or confirmation is None:
-            raise AgentSessionCommandError('调用 Qwen 处理受限效果前必须确认完整效果作用域。')
+        reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('调用 Qwen 处理受限效果前必须确认完整效果作用域。'))
         require_session_device(session, str(confirmation.get('device_id') or ''))
         orchestrator = self._orchestrator()
         with self._exclusive_device_session(session.device_id):
             result = orchestrator.approve_effects(session, confirmation)
         physical_actions = session.physical_actions - before_actions
-        if physical_actions not in {0, 1}:
-            raise AgentSessionCommandError("一次效果确认产生了超过一个物理动作。")
+        reject_if(physical_actions not in {0, 1}, AgentSessionCommandError("一次效果确认产生了超过一个物理动作。"))
         return AgentSessionOperationResult(session=session, operation=result, physical_actions=physical_actions)
 
     def confirm(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
@@ -151,8 +149,7 @@ class UniversalAgentSessionApplicationService:
                 pass
             raise
         before_actions = session.physical_actions
-        if confirmed is not True or confirmation is None:
-            raise AgentSessionCommandError('执行一个动作前必须提交完整且明确的确认作用域。')
+        reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('执行一个动作前必须提交完整且明确的确认作用域。'))
         with self._exclusive_device_session(session.device_id):
             result = orchestrator.confirm_one(session, confirmation)
         return AgentSessionOperationResult(session=session, operation=result, physical_actions=max(0,
@@ -181,8 +178,7 @@ class UniversalAgentSessionApplicationService:
                 pass
             raise
         before_actions = session.physical_actions
-        if confirmed is True or confirmation is not None:
-            raise AgentSessionCommandError('安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。')
+        reject_if(confirmed is True or confirmation is not None, AgentSessionCommandError('安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。'))
         with self._exclusive_device_session(session.device_id):
             result = orchestrator.run_autonomous_safe_loop(session, max_physical_actions=max_physical_actions,
                 max_iterations=max_iterations)

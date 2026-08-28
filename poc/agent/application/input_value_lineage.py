@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -69,11 +70,9 @@ class TypedInputLineageStorePort(Protocol):
 
 
 def describe_input_surface(frame: Image.Image, bounds: tuple[float, float, float, float]) -> str:
-    if not isinstance(frame, Image.Image):
-        raise InputValueLineageError("输入表面描述缺少真实图像帧。")
+    reject_if(not isinstance(frame, Image.Image), InputValueLineageError("输入表面描述缺少真实图像帧。"))
     valid = _valid_bounds(bounds)
-    if valid is None or frame.width < 2 or frame.height < 2:
-        raise InputValueLineageError("输入表面描述的图像或 bounds 无效。")
+    reject_if(valid is None or frame.width < 2 or frame.height < 2, InputValueLineageError("输入表面描述的图像或 bounds 无效。"))
     left, top, right, bottom = valid
     left = max(0.0, left - 0.04)
     top = max(0.0, top - 0.035)
@@ -81,8 +80,7 @@ def describe_input_surface(frame: Image.Image, bounds: tuple[float, float, float
     bottom = min(1.0, bottom + 0.035)
     pixel_box = (round(left * frame.width), round(top * frame.height), round(right * frame.width),
         round(bottom * frame.height))
-    if pixel_box[0] >= pixel_box[2] or pixel_box[1] >= pixel_box[3]:
-        raise InputValueLineageError("输入表面描述的局部区域为空。")
+    reject_if(pixel_box[0] >= pixel_box[2] or pixel_box[1] >= pixel_box[3], InputValueLineageError("输入表面描述的局部区域为空。"))
     gray = frame.convert("L").crop(pixel_box)
     normalized = ImageOps.autocontrast(gray, cutoff=1).resize((SURFACE_DESCRIPTOR_WIDTH, SURFACE_DESCRIPTOR_HEIGHT),
         Image.Resampling.LANCZOS)
@@ -90,11 +88,9 @@ def describe_input_surface(frame: Image.Image, bounds: tuple[float, float, float
 
 
 def build_surface_descriptors(frames: Any, bounds: tuple[float, float, float, float]) -> tuple[str, ...]:
-    if not isinstance(frames, (list, tuple)) or len(frames) != 4:
-        raise InputValueLineageError("输入表面连续性必须绑定动作后四帧。")
+    reject_if(not isinstance(frames, (list, tuple)) or len(frames) != 4, InputValueLineageError("输入表面连续性必须绑定动作后四帧。"))
     descriptors = tuple(describe_input_surface(frame, bounds) for frame in frames)
-    if not descriptors:
-        raise InputValueLineageError("输入表面连续性没有可用的局部描述。")
+    reject_if(not descriptors, InputValueLineageError("输入表面连续性没有可用的局部描述。"))
     return descriptors
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 from dataclasses import replace
 from typing import Final
 import uuid
@@ -43,14 +44,12 @@ class CapabilityAcceptanceTaskGraphPlanner:
 
     def __init__(self, candidate_action: str) -> None:
         action = str(candidate_action or "").strip()
-        if action not in PROMOTABLE_ACTIONS or action not in _SEMANTIC_CONTRACTS:
-            raise CapabilityAcceptancePlannerError(f'动作 {action or 'missing'} 没有确定性的能力验收合同。')
+        reject_if(action not in PROMOTABLE_ACTIONS or action not in _SEMANTIC_CONTRACTS, CapabilityAcceptancePlannerError(f'动作 {action or 'missing'} 没有确定性的能力验收合同。'))
         self.candidate_action = action
 
     def plan(self, raw_goal: str, *, device_id: str, task_id: str | None=None) -> DynamicTaskGraph:
         text = " ".join(str(raw_goal or "").split())
-        if not text:
-            raise CapabilityAcceptancePlannerError("能力验收目标不能为空。")
+        reject_if(not text, CapabilityAcceptancePlannerError("能力验收目标不能为空。"))
         objective, completion = _SEMANTIC_CONTRACTS[self.candidate_action]
         graph = DynamicTaskGraph(task_id=str(task_id or uuid.uuid4().hex), device_id=str(device_id or '').strip(),
             revision=1, status='ready', goal=GraphGoal(objective=objective,
@@ -70,8 +69,7 @@ class CapabilityAcceptanceTaskGraphPlanner:
         reason: str) -> DynamicTaskGraph:
         graph.validate()
         observation.validate()
-        if graph.raw_user_goal == '' or graph.active_subgoal_id != 'certify_primitive':
-            raise CapabilityAcceptancePlannerError('能力验收任务图身份或活动节点已变化。')
+        reject_if(graph.raw_user_goal == '' or graph.active_subgoal_id != 'certify_primitive', CapabilityAcceptancePlannerError('能力验收任务图身份或活动节点已变化。'))
         evidence = tuple(dict.fromkeys((observation.summary, *observation.visible_evidence,
             *observation.grounded_visual_facts)))
         record = ReplanRecord(revision=graph.revision + 1, trigger=str(trigger or '').strip(),

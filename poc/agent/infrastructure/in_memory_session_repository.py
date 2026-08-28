@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import threading
 from contextlib import contextmanager
 from typing import Iterator
@@ -24,16 +25,14 @@ class InMemoryAgentSessionRepository:
 
     def require(self, session_id: str) -> AgentSession:
         session = self.get(session_id)
-        if session is None:
-            raise AgentSessionNotFoundError("通用单步会话不存在。")
+        reject_if(session is None, AgentSessionNotFoundError("通用单步会话不存在。"))
         return session
 
     @contextmanager
     def locked(self, session_id: str) -> Iterator[AgentSession]:
         with self._lock:
             session = self._sessions.get(session_id)
-            if session is None:
-                raise AgentSessionNotFoundError("通用单步会话不存在。")
+            reject_if(session is None, AgentSessionNotFoundError("通用单步会话不存在。"))
             yield session
 
     def clear(self) -> None:

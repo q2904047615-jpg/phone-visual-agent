@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import hashlib
 import time
 from datetime import datetime
@@ -68,8 +69,7 @@ def _capture_stable_frames(controller: Any, *, sleep: Callable[[float], None]) -
     try:
         for index in range(DOCTOR_FRAME_COUNT):
             frame = controller.vision_capture()
-            if not isinstance(frame, Image.Image):
-                raise TypeError("vision_capture did not return PIL.Image")
+            reject_if(not isinstance(frame, Image.Image), TypeError("vision_capture did not return PIL.Image"))
             frames.append(frame.convert("RGB"))
             if index + 1 < DOCTOR_FRAME_COUNT:
                 sleep(DOCTOR_FRAME_INTERVAL_SECONDS)
@@ -84,8 +84,7 @@ def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: An
     """Inspect the current formal runtime without requesting a physical action."""
 
     resolved_device = str(device_id or "").strip()
-    if not resolved_device:
-        raise ValueError("device_id 不能为空。")
+    reject_if(not resolved_device, ValueError("device_id 不能为空。"))
 
     blockers: list[str] = []
     controller_status = _public_controller_status(controller)

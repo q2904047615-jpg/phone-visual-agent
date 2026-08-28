@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import hashlib
 import json
 import re
@@ -42,20 +43,13 @@ class CapabilityGap:
     protocol_version: str = CAPABILITY_GAP_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != CAPABILITY_GAP_PROTOCOL:
-            raise ActionCapabilityError("CapabilityGap protocol_version 无效。")
-        if not _ID.fullmatch(self.device_id):
-            raise ActionCapabilityError("CapabilityGap device_id 无效。")
-        if self.requested_action not in KNOWN_ACTION_CAPABILITIES:
-            raise ActionCapabilityError("CapabilityGap requested_action 未知。")
-        if not _ID.fullmatch(self.reason_code):
-            raise ActionCapabilityError("CapabilityGap reason_code 无效。")
-        if len(self.supported_actions) != len(set(self.supported_actions)):
-            raise ActionCapabilityError("CapabilityGap supported_actions 重复。")
-        if set(self.supported_actions) - KNOWN_ACTION_CAPABILITIES:
-            raise ActionCapabilityError("CapabilityGap 含未知 supported action。")
-        if self.profile_digest and (not re.fullmatch('[0-9a-f]{64}', self.profile_digest)):
-            raise ActionCapabilityError("CapabilityGap profile_digest 无效。")
+        reject_if(self.protocol_version != CAPABILITY_GAP_PROTOCOL, ActionCapabilityError("CapabilityGap protocol_version 无效。"))
+        reject_if(not _ID.fullmatch(self.device_id), ActionCapabilityError("CapabilityGap device_id 无效。"))
+        reject_if(self.requested_action not in KNOWN_ACTION_CAPABILITIES, ActionCapabilityError("CapabilityGap requested_action 未知。"))
+        reject_if(not _ID.fullmatch(self.reason_code), ActionCapabilityError("CapabilityGap reason_code 无效。"))
+        reject_if(len(self.supported_actions) != len(set(self.supported_actions)), ActionCapabilityError("CapabilityGap supported_actions 重复。"))
+        reject_if(set(self.supported_actions) - KNOWN_ACTION_CAPABILITIES, ActionCapabilityError("CapabilityGap 含未知 supported action。"))
+        reject_if(self.profile_digest and (not re.fullmatch('[0-9a-f]{64}', self.profile_digest)), ActionCapabilityError("CapabilityGap profile_digest 无效。"))
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -72,15 +66,11 @@ class DeviceCapabilitySnapshot:
     protocol_version: str = CAPABILITY_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != CAPABILITY_PROTOCOL:
-            raise ActionCapabilityError("capability protocol_version 无效。")
-        if not _ID.fullmatch(self.device_id):
-            raise ActionCapabilityError("capability device_id 无效。")
-        if set(self.actions) != KNOWN_ACTION_CAPABILITIES:
-            raise ActionCapabilityError("capability actions 必须完整覆盖已知动作。")
+        reject_if(self.protocol_version != CAPABILITY_PROTOCOL, ActionCapabilityError("capability protocol_version 无效。"))
+        reject_if(not _ID.fullmatch(self.device_id), ActionCapabilityError("capability device_id 无效。"))
+        reject_if(set(self.actions) != KNOWN_ACTION_CAPABILITIES, ActionCapabilityError("capability actions 必须完整覆盖已知动作。"))
         for (action, spec) in self.actions.items():
-            if not isinstance(spec, dict) or not isinstance(spec.get('enabled'), bool):
-                raise ActionCapabilityError(f"capability.{action} 缺少 enabled。")
+            reject_if(not isinstance(spec, dict) or not isinstance(spec.get('enabled'), bool), ActionCapabilityError(f"capability.{action} 缺少 enabled。"))
             json.dumps(spec, ensure_ascii=False, allow_nan=False)
 
     @property
@@ -101,8 +91,7 @@ class DeviceCapabilitySnapshot:
 
     def gap(self, requested_action: str, *, required_parameters: Iterable[str]=()) -> CapabilityGap | None:
         self.validate()
-        if requested_action not in KNOWN_ACTION_CAPABILITIES:
-            raise ActionCapabilityError(f"未知动作能力：{requested_action}")
+        reject_if(requested_action not in KNOWN_ACTION_CAPABILITIES, ActionCapabilityError(f"未知动作能力：{requested_action}"))
         if self.actions[requested_action]['enabled']:
             return None
         return CapabilityGap(device_id=self.device_id, requested_action=requested_action,
@@ -115,8 +104,7 @@ def build_device_capability_snapshot(*, device_id: str, supported_actions: Itera
     Any] | None=None) -> DeviceCapabilitySnapshot:
     supported = frozenset(str(item) for item in supported_actions)
     unknown = supported - KNOWN_ACTION_CAPABILITIES
-    if unknown:
-        raise ActionCapabilityError('设备声明未知动作能力：' + ', '.join(sorted(unknown)))
+    reject_if(unknown, ActionCapabilityError('设备声明未知动作能力：' + ', '.join(sorted(unknown))))
     raw_actions = raw_profile.get('actions', {}) if isinstance(raw_profile, Mapping) else {}
     if not isinstance(raw_actions, Mapping):
         raw_actions = {}

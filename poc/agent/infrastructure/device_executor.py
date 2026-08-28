@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import time
 from typing import Any, Callable, Iterable, Mapping
 
@@ -23,14 +24,12 @@ class RobotDeviceExecutor:
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         request.validate()
         handler = self._handlers.get(request.kind)
-        if handler is None:
-            raise DeviceExecutionError(f"设备执行器没有动作处理器：{request.kind}")
+        reject_if(handler is None, DeviceExecutionError(f"设备执行器没有动作处理器：{request.kind}"))
         return handler(request)
 
     def _method(self, name: str) -> Callable[..., Any]:
         method = getattr(self.robot, name, None)
-        if not callable(method):
-            raise DeviceExecutionError(f"机械控制端缺少 transport：{name}")
+        reject_if(not callable(method), DeviceExecutionError(f"机械控制端缺少 transport：{name}"))
         return method
 
     def _hardware_call(self, method_name: str, *args: Any) -> Any:
@@ -47,13 +46,14 @@ class RobotDeviceExecutor:
     def _consume_click_receipt(self, *, expected_count: int) -> dict[str, Any]:
         consumer = self._method("consume_last_click_receipt")
         raw = consumer()
-        if (not isinstance(raw, dict) or raw.get('seller_event_barrier_confirmed') is not True
+        reject_if(
+            not isinstance(raw, dict) or raw.get('seller_event_barrier_confirmed') is not True
             or raw.get('round_trip_position_confirmed') is not True or (raw.get('mechanical_contact_ack')
-            is not False)):
-            raise DeviceExecutionError('机械控制端没有返回有效的单击事件栅栏凭据。', physical_actions=1)
+            is not False),
+            DeviceExecutionError('机械控制端没有返回有效的单击事件栅栏凭据。', physical_actions=1),
+        )
         click_count = raw.get("click_count", 1)
-        if click_count != expected_count:
-            raise DeviceExecutionError('点击事件栅栏的 click_count 与请求不一致。', physical_actions=1)
+        reject_if(click_count != expected_count, DeviceExecutionError('点击事件栅栏的 click_count 与请求不一致。', physical_actions=1))
         return dict(raw)
 
     @staticmethod
@@ -119,8 +119,7 @@ class RobotDeviceExecutor:
     def _long_press(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call('vision_long_press_relative', *self._point(request), request.hold_seconds)
         raw = self._method("consume_last_long_press_receipt")()
-        if not isinstance(raw, dict):
-            raise DeviceExecutionError('机械控制端没有返回长按事件栅栏凭据。', physical_actions=1)
+        reject_if(not isinstance(raw, dict), DeviceExecutionError('机械控制端没有返回长按事件栅栏凭据。', physical_actions=1))
         return DeviceExecutionResult(physical_actions=1, transport_result=result, hardware_receipt=dict(raw))
 
     def _drag(self, request: DeviceActionRequest) -> DeviceExecutionResult:
@@ -147,18 +146,15 @@ class ReplayDeviceExecutor:
 
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         request.validate()
-        if self._index >= len(self._script):
-            raise DeviceExecutionError("离线回放收到脚本之外的额外动作。")
+        reject_if(self._index >= len(self._script), DeviceExecutionError("离线回放收到脚本之外的额外动作。"))
         expected = self._script[self._index]
         expected_kind = str(expected.get("kind") or "")
-        if expected_kind != request.kind:
-            raise DeviceExecutionError(f'离线回放动作不匹配：{request.kind} != {expected_kind}')
+        reject_if(expected_kind != request.kind, DeviceExecutionError(f'离线回放动作不匹配：{request.kind} != {expected_kind}'))
         expected_request = expected.get("request")
         actual = request.to_dict()
         if isinstance(expected_request, Mapping):
             for (key, value) in expected_request.items():
-                if actual.get(str(key)) != value:
-                    raise DeviceExecutionError(f"离线回放参数不匹配：{key}")
+                reject_if(actual.get(str(key)) != value, DeviceExecutionError(f"离线回放参数不匹配：{key}"))
         self._index += 1
         self.requests.append(actual)
         return DeviceExecutionResult(execution_mode='offline_replay', physical_actions=0,

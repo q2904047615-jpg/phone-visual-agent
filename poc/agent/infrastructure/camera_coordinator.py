@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 from contextlib import contextmanager
 from io import BytesIO
 import threading
@@ -36,14 +37,12 @@ class DeviceCameraCoordinator:
 
     def capture_preview(self, capture: Callable[..., bytes], *, quality: int, cache_only: bool) -> tuple[bytes, bool]:
         if cache_only:
-            if self._cached_preview is None:
-                raise CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。')
+            reject_if(self._cached_preview is None, CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。'))
             return self._cached_preview, True
 
         acquired = self._serial_lock.acquire(blocking=False)
         if not acquired:
-            if self._cached_preview is None:
-                raise CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。')
+            reject_if(self._cached_preview is None, CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。'))
             return self._cached_preview, True
         try:
             content = bytes(capture(quality=quality))

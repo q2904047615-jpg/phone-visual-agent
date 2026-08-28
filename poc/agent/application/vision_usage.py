@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -72,10 +73,8 @@ class VisionSessionUsageLedger:
     def __post_init__(self) -> None:
         self.session_id = str(self.session_id or "").strip()
         self.expected_model = str(self.expected_model or "").strip()
-        if not self.session_id:
-            raise ValueError("Qwen 用量账本必须绑定 session_id。")
-        if self.expected_model != QWEN_PLUS_MODEL:
-            raise ValueError("正式 Qwen 用量账本只允许 qwen3.7-plus。")
+        reject_if(not self.session_id, ValueError("Qwen 用量账本必须绑定 session_id。"))
+        reject_if(self.expected_model != QWEN_PLUS_MODEL, ValueError("正式 Qwen 用量账本只允许 qwen3.7-plus。"))
 
     @staticmethod
     def _timestamp() -> str:
@@ -137,8 +136,7 @@ class VisionSessionUsageLedger:
             float)) and (not isinstance(elapsed_seconds, bool)) else None
         with self._lock:
             event = self._request_event(local_request_id)
-            if event.get('outcome') != 'started':
-                raise VisionUsageError("Qwen 请求用量被重复结算。")
+            reject_if(event.get('outcome') != 'started', VisionUsageError("Qwen 请求用量被重复结算。"))
             event.update({'outcome': 'succeeded', 'completed_at': self._timestamp(),
                 'provider_request_id': str(provider_request_id or '')[:256],
                 'response_model': str(response_model or '')[:128], 'network_attempts': max(1, int(network_attempts)),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
@@ -219,8 +220,7 @@ class CapabilityAcceptanceManager:
 
     @staticmethod
     def _require_live_trial(trial: Any) -> CapabilityTrial:
-        if isinstance(trial, RecoveredCapabilityTrial):
-            raise CapabilityAcceptanceError('该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。')
+        reject_if(isinstance(trial, RecoveredCapabilityTrial), CapabilityAcceptanceError('该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。'))
         return trial
 
     @staticmethod
@@ -228,12 +228,9 @@ class CapabilityAcceptanceManager:
         resolved_device = str(device_id or "").strip()
         candidate = str(action or "").strip()
         goal = " ".join(str(text or "").split())
-        if not resolved_device or len(resolved_device) > 128:
-            raise CapabilityAcceptanceError("验收 device_id 格式无效。")
-        if candidate not in PROMOTABLE_ACTIONS:
-            raise CapabilityAcceptanceError(f'动作 {candidate or 'missing'} 不能进入真机能力验收。')
-        if not goal or len(goal) > 500:
-            raise CapabilityAcceptanceError("验收目标长度必须在 1～500 个字符之间。")
+        reject_if(not resolved_device or len(resolved_device) > 128, CapabilityAcceptanceError("验收 device_id 格式无效。"))
+        reject_if(candidate not in PROMOTABLE_ACTIONS, CapabilityAcceptanceError(f'动作 {candidate or 'missing'} 不能进入真机能力验收。'))
+        reject_if(not goal or len(goal) > 500, CapabilityAcceptanceError("验收目标长度必须在 1～500 个字符之间。"))
         return resolved_device, candidate, goal
 
     @staticmethod
@@ -256,27 +253,21 @@ class CapabilityAcceptanceManager:
         if action not in CALIBRATION_BOUND_ACTIONS:
             return None
         calibration_path = getattr(controller, "calibration_path", None)
-        if calibration_path is None:
-            raise CapabilityAcceptanceError('正式长按/拖动/系统边缘唤栏验收要求设备控制器提供触控标定路径。')
+        reject_if(calibration_path is None, CapabilityAcceptanceError('正式长按/拖动/系统边缘唤栏验收要求设备控制器提供触控标定路径。'))
         return validated_calibration_evidence(Path(calibration_path))
 
     def start(self, *, device_id: str, candidate_action: str, text: str) -> CapabilityTrial:
         resolved_device, action, goal = self._validate_start_values(device_id, candidate_action, text)
         active = self.device_registry.active_session(resolved_device)
-        if active is not None:
-            raise CapabilityAcceptanceError(f'设备 {resolved_device} 已有活动任务：{active}。')
+        reject_if(active is not None, CapabilityAcceptanceError(f'设备 {resolved_device} 已有活动任务：{active}。'))
         trial_id = str(self.id_factory() or "").strip()
-        if not re.fullmatch('[A-Za-z0-9_-]{1,128}', trial_id):
-            raise CapabilityAcceptanceError("验收 trial_id 格式无效。")
+        reject_if(not re.fullmatch('[A-Za-z0-9_-]{1,128}', trial_id), CapabilityAcceptanceError("验收 trial_id 格式无效。"))
         with self._guard:
-            if trial_id in self._trials:
-                raise CapabilityAcceptanceError(f"验收 trial_id 已存在：{trial_id}。")
+            reject_if(trial_id in self._trials, CapabilityAcceptanceError(f"验收 trial_id 已存在：{trial_id}。"))
 
         revision = str(self.code_revision_provider() or "").strip()
-        if not revision or len(revision) > 128:
-            raise CapabilityAcceptanceError("无法记录当前代码提交，验收已取消。")
-        if revision.endswith('+dirty'):
-            raise CapabilityAcceptanceError("当前代码存在未提交修改，不能开始真机验收。")
+        reject_if(not revision or len(revision) > 128, CapabilityAcceptanceError("无法记录当前代码提交，验收已取消。"))
+        reject_if(revision.endswith('+dirty'), CapabilityAcceptanceError("当前代码存在未提交修改，不能开始真机验收。"))
 
         controller = self.provisional_controller_factory(resolved_device, action)
         calibration_evidence = self._controller_calibration_evidence(controller, action)
@@ -302,8 +293,7 @@ class CapabilityAcceptanceManager:
     def get(self, trial_id: str) -> CapabilityTrial:
         with self._guard:
             trial = self._trials.get(str(trial_id or "").strip())
-        if trial is None:
-            raise CapabilityAcceptanceError("真机能力验收会话不存在。")
+        reject_if(trial is None, CapabilityAcceptanceError("真机能力验收会话不存在。"))
         return trial
 
     def snapshots(self) -> list[dict[str, Any]]:
@@ -327,8 +317,7 @@ class CapabilityAcceptanceManager:
     def approve_effects(self, trial_id: str, confirmation: Mapping[str, Any]) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
         result = trial.orchestrator.approve_effects(trial.session, confirmation)
-        if int(getattr(trial.session, 'physical_actions', 0)) != 0:
-            raise CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。")
+        reject_if(int(getattr(trial.session, 'physical_actions', 0)) != 0, CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。"))
         self._ensure_candidate(trial)
         _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
         return result
@@ -440,13 +429,10 @@ class CapabilityAcceptanceManager:
 
     def confirm(self, trial_id: str, confirmation: Mapping[str, Any]) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
-        if not trial.operation_lock.acquire(blocking=False):
-            raise CapabilityAcceptanceError("验收确认或晋级正在处理中。")
+        reject_if(not trial.operation_lock.acquire(blocking=False), CapabilityAcceptanceError("验收确认或晋级正在处理中。"))
         try:
-            if trial.report_path.exists():
-                raise CapabilityAcceptanceError("验收报告已经生成，禁止重复执行或覆盖。")
-            if trial.confirmation_attempted:
-                raise CapabilityAcceptanceError("验收动作确认已经尝试，禁止重复执行。")
+            reject_if(trial.report_path.exists(), CapabilityAcceptanceError("验收报告已经生成，禁止重复执行或覆盖。"))
+            reject_if(trial.confirmation_attempted, CapabilityAcceptanceError("验收动作确认已经尝试，禁止重复执行。"))
             self._ensure_candidate(trial)
             before_snapshot = trial.session.snapshot()
             before_actions = int(getattr(trial.session, "physical_actions", 0))
@@ -454,15 +440,12 @@ class CapabilityAcceptanceManager:
             result = None
             try:
                 current_calibration = self._controller_calibration_evidence(trial.controller, trial.candidate_action)
-                if current_calibration != trial.calibration_evidence:
-                    raise CapabilityAcceptanceError('验收开始后触控标定发生变化；本次会话已失效，必须重新创建。')
+                reject_if(current_calibration != trial.calibration_evidence, CapabilityAcceptanceError('验收开始后触控标定发生变化；本次会话已失效，必须重新创建。'))
                 result = trial.orchestrator.confirm_one(trial.session, confirmation)
                 request_actions = int(getattr(trial.session, 'physical_actions', 0)) - before_actions
-                if request_actions != 1 or int(getattr(result, 'physical_actions', 0)) != 1:
-                    raise CapabilityAcceptanceError(f'验收确认必须恰好产生一个物理动作，实际为 {request_actions}。')
+                reject_if(request_actions != 1 or int(getattr(result, 'physical_actions', 0)) != 1, CapabilityAcceptanceError(f'验收确认必须恰好产生一个物理动作，实际为 {request_actions}。'))
                 report = self._write_pass_or_fail_report(trial, before_snapshot=before_snapshot, result=result)
-                if report['status'] != 'passed':
-                    raise CapabilityAcceptanceError("真机动作未满足验收通过标准。")
+                reject_if(report['status'] != 'passed', CapabilityAcceptanceError("真机动作未满足验收通过标准。"))
             except Exception as exc:
                 if not trial.report_path.exists():
                     self._write_exception_report(trial, before_snapshot=before_snapshot, before_actions=before_actions,
@@ -489,21 +472,17 @@ class CapabilityAcceptanceManager:
     def promotion_scope(self, trial_id: str) -> PromotionScope:
         trial = self._require_live_trial(self.get(trial_id))
         authority = trial.promotion_authority
-        if authority is None or authority.consumed:
-            raise CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。")
+        reject_if(authority is None or authority.consumed, CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。"))
         return authority.scope
 
     def promote(self, trial_id: str, confirmation: Mapping[str, Any]) -> dict[str, Any]:
         trial = self._require_live_trial(self.get(trial_id))
-        if not trial.operation_lock.acquire(blocking=False):
-            raise CapabilityAcceptanceError("验收确认或晋级正在处理中。")
+        reject_if(not trial.operation_lock.acquire(blocking=False), CapabilityAcceptanceError("验收确认或晋级正在处理中。"))
         try:
             authority = trial.promotion_authority
-            if authority is None:
-                raise CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。")
+            reject_if(authority is None, CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。"))
             active_session = self.device_registry.active_session(trial.device_id)
-            if active_session is not None:
-                raise CapabilityAcceptanceError(f'设备 {trial.device_id} 仍有活动任务：{active_session}，不能晋级。')
+            reject_if(active_session is not None, CapabilityAcceptanceError(f'设备 {trial.device_id} 仍有活动任务：{active_session}，不能晋级。'))
             try:
                 current_revision = str(self.code_revision_provider() or "").strip()
             except Exception:

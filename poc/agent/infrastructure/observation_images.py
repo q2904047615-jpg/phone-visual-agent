@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import hashlib
 import os
 from typing import Iterable
@@ -175,8 +176,7 @@ def measure_local_stability(frames: list[Image.Image], *, threshold: float | Non
     allow_leading_outlier: bool=False) -> LocalFrameStability:
     """Measure camera/UI stability locally; no frame leaves the machine."""
 
-    if len(frames) < 2:
-        raise ValueError("本地稳定性判断至少需要2帧。")
+    reject_if(len(frames) < 2, ValueError("本地稳定性判断至少需要2帧。"))
     sizes = {frame.size for frame in frames}
     if len(sizes) != 1:
         return LocalFrameStability(stable=False, mean_delta=float('inf'), max_delta=float('inf'),
@@ -215,11 +215,9 @@ def measure_static_band_identity_delta(reference_frames: list[Image.Image] | tup
 
     references = tuple(reference_frames)
     candidates = tuple(candidate_frames)
-    if not references or not candidates:
-        raise ValueError("取景身份比较需要动作前后真实帧。")
+    reject_if(not references or not candidates, ValueError("取景身份比较需要动作前后真实帧。"))
     sizes = {frame.size for frame in references + candidates}
-    if len(sizes) != 1:
-        raise ValueError("取景身份比较的动作前后画面尺寸不一致。")
+    reject_if(len(sizes) != 1, ValueError("取景身份比较的动作前后画面尺寸不一致。"))
     reference_sheets = tuple(_static_band_sheet(frame) for frame in references)
     candidate_sheets = tuple(_static_band_sheet(frame) for frame in candidates)
     nearest_deltas = sorted((min((float(ImageStat.Stat(ImageChops.difference(candidate,

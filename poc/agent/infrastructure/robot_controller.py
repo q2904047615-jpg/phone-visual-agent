@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import json
 import re
 import threading
@@ -85,17 +86,14 @@ def load_controller_config() -> dict[str, Any]:
         raw = json.loads(CONTROL_CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise WorkflowNotReady(f"控制器配置损坏：{exc}") from exc
-    if not isinstance(raw, dict):
-        raise WorkflowNotReady("控制器配置必须是 JSON 对象。")
+    reject_if(not isinstance(raw, dict), WorkflowNotReady("控制器配置必须是 JSON 对象。"))
     return _deep_merge(DEFAULT_CONTROLLER_CONFIG, raw)
 
 
 def qwerty_key_point(width: int, height: int, key: str, keyboard_config: dict[str, Any]) -> tuple[int, int]:
-    if len(key) != 1 or key not in 'abcdefghijklmnopqrstuvwxyz':
-        raise ValueError(f"不支持的拼音键：{key!r}")
+    reject_if(len(key) != 1 or key not in 'abcdefghijklmnopqrstuvwxyz', ValueError(f"不支持的拼音键：{key!r}"))
     rows = keyboard_config.get("rows")
-    if not isinstance(rows, list):
-        raise WorkflowNotReady("拼音键盘配置缺少 rows。")
+    reject_if(not isinstance(rows, list), WorkflowNotReady("拼音键盘配置缺少 rows。"))
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -105,8 +103,7 @@ def qwerty_key_point(width: int, height: int, key: str, keyboard_config: dict[st
         index = keys.index(key)
         x_ratio = float(row["x_start"]) + index * float(row["x_step"])
         y_ratio = float(row["y"])
-        if not (0.0 <= x_ratio <= 1.0 and 0.0 <= y_ratio <= 1.0):
-            raise WorkflowNotReady("拼音键盘坐标超出画面范围。")
+        reject_if(not (0.0 <= x_ratio <= 1.0 and 0.0 <= y_ratio <= 1.0), WorkflowNotReady("拼音键盘坐标超出画面范围。"))
         return (min(width - 1, max(0, int(round(width * x_ratio)))), min(height - 1, max(0,
             int(round(height * y_ratio)))))
     raise WorkflowNotReady(f"拼音键盘配置中没有按键 {key!r}。")
@@ -124,30 +121,27 @@ def qwerty_keyboard_config_from_anchors(anchors: dict[str, Any], *, key_hold: fl
     centers are then calculated locally and deterministically.
     """
 
-    if not isinstance(anchors, dict):
-        raise WorkflowNotReady("动态拼音键盘缺少 anchors。")
+    reject_if(not isinstance(anchors, dict), WorkflowNotReady("动态拼音键盘缺少 anchors。"))
 
     points: dict[str, tuple[float, float]] = {}
     for key in QWERTY_ANCHOR_KEYS:
         value = anchors.get(key)
-        if (not isinstance(value, (list, tuple)) or len(value) != 2 or any((isinstance(item,
-            bool) or not isinstance(item, (int, float)) for item in value))):
-            raise WorkflowNotReady(f"动态拼音键盘锚点 {key!r} 无效。")
+        reject_if(
+            not isinstance(value, (list, tuple)) or len(value) != 2 or any((isinstance(item,
+            bool) or not isinstance(item, (int, float)) for item in value)),
+            WorkflowNotReady(f"动态拼音键盘锚点 {key!r} 无效。"),
+        )
         x, y = float(value[0]), float(value[1])
-        if not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0):
-            raise WorkflowNotReady(f"动态拼音键盘锚点 {key!r} 超出安全范围。")
+        reject_if(not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0), WorkflowNotReady(f"动态拼音键盘锚点 {key!r} 超出安全范围。"))
         points[key] = (x, y)
 
     def row(first: str, last: str, key_count: int) -> tuple[float, float, float]:
         first_x, first_y = points[first]
         last_x, last_y = points[last]
-        if last_x <= first_x:
-            raise WorkflowNotReady("动态拼音键盘行锚点左右顺序错误。")
-        if abs(first_y - last_y) > 45.0:
-            raise WorkflowNotReady("动态拼音键盘同一行不够水平，拒绝执行。")
+        reject_if(last_x <= first_x, WorkflowNotReady("动态拼音键盘行锚点左右顺序错误。"))
+        reject_if(abs(first_y - last_y) > 45.0, WorkflowNotReady("动态拼音键盘同一行不够水平，拒绝执行。"))
         step = (last_x - first_x) / (key_count - 1)
-        if not 45.0 <= step <= 130.0:
-            raise WorkflowNotReady("动态拼音键盘键距异常，拒绝执行。")
+        reject_if(not 45.0 <= step <= 130.0, WorkflowNotReady("动态拼音键盘键距异常，拒绝执行。"))
         return first_x, step, (first_y + last_y) / 2.0
 
     q_x, top_step, top_y = row("q", "p", 10)
@@ -156,26 +150,19 @@ def qwerty_keyboard_config_from_anchors(anchors: dict[str, Any], *, key_hold: fl
     # A complete audited keyboard can legitimately place its bottom row close
     # to the lower edge of the normalized frame.  Keep a small center margin,
     # while leaving row order and spacing as the authoritative geometry checks.
-    if not 450.0 <= top_y < middle_y < bottom_y <= 980.0:
-        raise WorkflowNotReady("动态拼音键盘行位置或上下顺序异常，拒绝执行。")
-    if not 35.0 <= middle_y - top_y <= 140.0:
-        raise WorkflowNotReady("动态拼音键盘第一、二行间距异常。")
-    if not 35.0 <= bottom_y - middle_y <= 140.0:
-        raise WorkflowNotReady("动态拼音键盘第二、三行间距异常。")
+    reject_if(not 450.0 <= top_y < middle_y < bottom_y <= 980.0, WorkflowNotReady("动态拼音键盘行位置或上下顺序异常，拒绝执行。"))
+    reject_if(not 35.0 <= middle_y - top_y <= 140.0, WorkflowNotReady("动态拼音键盘第一、二行间距异常。"))
+    reject_if(not 35.0 <= bottom_y - middle_y <= 140.0, WorkflowNotReady("动态拼音键盘第二、三行间距异常。"))
     # Vision models reliably locate the keyboard rows and the Q/P endpoints,
     # but may report A/L and Z/M as the visible row bounds instead of the
     # literal key centers.  Use those four anchors as coarse QWERTY evidence,
     # then normalize the two indented rows from the measured Q..P key pitch.
     # This keeps letter clicks deterministic without trusting imprecise
     # per-letter visual coordinates.
-    if not q_x - top_step * 0.5 <= observed_a_x <= q_x + top_step * 2.0:
-        raise WorkflowNotReady("动态拼音键盘第二行缩进异常。")
-    if not points['p'][0] - top_step * 2.0 <= points['l'][0] <= points['p'][0] + top_step * 0.5:
-        raise WorkflowNotReady("动态拼音键盘第二行右端位置异常。")
-    if not q_x - top_step * 0.5 <= observed_z_x <= q_x + top_step * 3.0:
-        raise WorkflowNotReady("动态拼音键盘第三行缩进异常。")
-    if not points['p'][0] - top_step * 3.0 <= points['m'][0] <= points['p'][0] + top_step * 0.5:
-        raise WorkflowNotReady("动态拼音键盘第三行右端位置异常。")
+    reject_if(not q_x - top_step * 0.5 <= observed_a_x <= q_x + top_step * 2.0, WorkflowNotReady("动态拼音键盘第二行缩进异常。"))
+    reject_if(not points['p'][0] - top_step * 2.0 <= points['l'][0] <= points['p'][0] + top_step * 0.5, WorkflowNotReady("动态拼音键盘第二行右端位置异常。"))
+    reject_if(not q_x - top_step * 0.5 <= observed_z_x <= q_x + top_step * 3.0, WorkflowNotReady("动态拼音键盘第三行缩进异常。"))
+    reject_if(not points['p'][0] - top_step * 3.0 <= points['m'][0] <= points['p'][0] + top_step * 0.5, WorkflowNotReady("动态拼音键盘第三行右端位置异常。"))
 
     a_x = q_x + top_step * 0.5
     middle_step = top_step
@@ -183,8 +170,7 @@ def qwerty_keyboard_config_from_anchors(anchors: dict[str, Any], *, key_hold: fl
     bottom_step = top_step
 
     backspace_x, backspace_y = points["backspace"]
-    if backspace_x <= z_x + bottom_step * 5.5 or abs(backspace_y - bottom_y) > 90.0:
-        raise WorkflowNotReady("动态拼音键盘退格键位置异常。")
+    reject_if(backspace_x <= z_x + bottom_step * 5.5 or abs(backspace_y - bottom_y) > 90.0, WorkflowNotReady("动态拼音键盘退格键位置异常。"))
 
     return {'source': 'vision_anchors_normalized', 'rows': [{'keys': 'qwertyuiop', 'x_start': q_x / 1000.0,
         'x_step': top_step / 1000.0, 'y': top_y / 1000.0}, {'keys': 'asdfghjkl', 'x_start': a_x / 1000.0,
@@ -219,8 +205,7 @@ class RobotController:
         allowed_actions = default_actions | {'input_verified_text', 'double_tap', 'long_press', 'drag',
             'reveal_system_navigation'}
         unexpected = self.verified_actions - allowed_actions
-        if unexpected:
-            raise ValueError('设备已验证动作包含未知值：' + ', '.join(sorted(unexpected)))
+        reject_if(unexpected, ValueError('设备已验证动作包含未知值：' + ', '.join(sorted(unexpected))))
 
     def hardware_capabilities(self) -> dict[str, bool]:
         return {action: action in self.verified_actions for action in ('tap_semantic', 'dismiss_overlay', 'swipe',
@@ -272,8 +257,7 @@ class RobotController:
         return dict(receipt) if receipt is not None else None
 
     def _require_verified_action(self, action: str, label: str) -> None:
-        if action not in self.verified_actions:
-            raise WorkflowNotReady(f'当前设备尚未完成{label}真机验收，拒绝执行。')
+        reject_if(action not in self.verified_actions, WorkflowNotReady(f'当前设备尚未完成{label}真机验收，拒绝执行。'))
 
     def arm_physical_execution(self, credential: OrientationCredential, *, action: str, scene_fingerprint: str) -> None:
         self._physical_execution_gate.arm(credential, action=action, scene_fingerprint=scene_fingerprint)
@@ -295,8 +279,7 @@ class RobotController:
             self.stop_event.clear()
 
     def _checkpoint(self) -> None:
-        if self.stop_event.is_set():
-            raise RobotWorkflowError("用户已请求停止任务。")
+        reject_if(self.stop_event.is_set(), RobotWorkflowError("用户已请求停止任务。"))
         seller_gui._check_escape()
 
     def _sleep(self, seconds: float) -> None:
@@ -375,10 +358,8 @@ class RobotController:
 
         self._require_verified_action("long_press", "长按")
         self._last_long_press_receipt = None
-        if not 0.5 <= float(hold_seconds) <= 2.0:
-            raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
-        if not (0 <= x <= 1000 and 0 <= y <= 1000):
-            raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
+        reject_if(not 0.5 <= float(hold_seconds) <= 2.0, ValueError("通用长按时间必须在0.5～2.0秒之间。"))
+        reject_if(not (0 <= x <= 1000 and 0 <= y <= 1000), ValueError("视觉 Agent 坐标必须在0～1000之间。"))
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("long_press", frame)
@@ -389,8 +370,7 @@ class RobotController:
             max(0, int(round(corrected_y * (frame.height - 1) / 1000)))))
         self._checkpoint()
         receipt = seller_gui.long_press_client_point(hwnd, point[0], point[1], hold_seconds=float(hold_seconds))
-        if not isinstance(receipt, dict):
-            raise RuntimeError("控制端没有返回长按事件栅栏凭据。")
+        reject_if(not isinstance(receipt, dict), RuntimeError("控制端没有返回长按事件栅栏凭据。"))
         self._last_long_press_receipt = dict(receipt)
         seller_gui.clear_seller_camera_overlay(hwnd)
         return point
@@ -410,8 +390,7 @@ class RobotController:
         direction_matches = {'up': delta_y < 0 and abs(delta_y) > abs(delta_x),
             'down': delta_y > 0 and abs(delta_y) > abs(delta_x), 'left': delta_x < 0 and abs(delta_x) > abs(delta_y),
             'right': delta_x > 0 and abs(delta_x) > abs(delta_y)}.get(str(direction or '').strip().lower())
-        if direction_matches is not True:
-            raise ValueError("元素滑动轨迹与请求方向不一致。")
+        reject_if(direction_matches is not True, ValueError("元素滑动轨迹与请求方向不一致。"))
         return self._vision_path_relative(start_x, start_y, end_x, end_y, action='swipe', label='元素绑定滑动')
 
     def _vision_path_relative(self, start_x: int, start_y: int, end_x: int, end_y: int, *, action: str,
@@ -420,10 +399,8 @@ class RobotController:
 
         self._require_verified_action(action, label)
         values = (start_x, start_y, end_x, end_y)
-        if any((not 0 <= value <= 1000 for value in values)):
-            raise ValueError(f"{label}视觉坐标必须全部在0～1000之间。")
-        if (start_x, start_y) == (end_x, end_y):
-            raise ValueError(f"{label}起点和终点不能相同。")
+        reject_if(any((not 0 <= value <= 1000 for value in values)), ValueError(f"{label}视觉坐标必须全部在0～1000之间。"))
+        reject_if((start_x, start_y) == (end_x, end_y), ValueError(f"{label}起点和终点不能相同。"))
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
@@ -438,8 +415,7 @@ class RobotController:
 
         start = to_pixel(corrected_start)
         end = to_pixel(corrected_end)
-        if start == end:
-            raise ValueError(f"标定后的{label}起点和终点重合。")
+        reject_if(start == end, ValueError(f"标定后的{label}起点和终点重合。"))
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
         seller_gui.clear_seller_camera_overlay(hwnd)
@@ -461,8 +437,7 @@ class RobotController:
             return (int(round(point[0] * (frame.width - 1) / 1000)), int(round(point[1] * (frame.height - 1) / 1000)))
 
         start, end = (to_pixel(point) for point in corrected)
-        if start == end:
-            raise ValueError("系统边缘轨迹纠偏后起终点重合。")
+        reject_if(start == end, ValueError("系统边缘轨迹纠偏后起终点重合。"))
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
         seller_gui.clear_seller_camera_overlay(hwnd)
@@ -470,8 +445,7 @@ class RobotController:
 
     def _vision_press_relative(self, x: int, y: int, *, action: str, hold_seconds: float,
         click_count: int=1) -> tuple[int, int]:
-        if not (0 <= x <= 1000 and 0 <= y <= 1000):
-            raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
+        reject_if(not (0 <= x <= 1000 and 0 <= y <= 1000), ValueError("视觉 Agent 坐标必须在0～1000之间。"))
         self._last_click_receipt = None
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
@@ -497,8 +471,7 @@ class RobotController:
             if click_count != 1:
                 seller_gui.configure_single_click_count(hwnd)
             seller_gui.clear_seller_camera_overlay(hwnd)
-        if not isinstance(receipt, dict):
-            raise RuntimeError("控制端没有返回点击事件栅栏凭据。")
+        reject_if(not isinstance(receipt, dict), RuntimeError("控制端没有返回点击事件栅栏凭据。"))
         if click_count != 1:
             receipt["click_count_restored_to"] = 1
         self._last_click_receipt = dict(receipt)
@@ -520,8 +493,7 @@ class RobotController:
         seller_gui.configure_single_click_count(hwnd)
         receipt = seller_gui.click_client_point(hwnd, point[0], point[1], countdown=0,
             hold_seconds=float(load_controller_config()['tap_hold']), require_event_barrier=True)
-        if not isinstance(receipt, dict):
-            raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
+        reject_if(not isinstance(receipt, dict), RuntimeError("控制端没有返回单击事件栅栏凭据。"))
         self._last_click_receipt = dict(receipt)
         seller_gui.clear_seller_camera_overlay(hwnd)
         return point
@@ -573,10 +545,8 @@ class RobotController:
         """Universal-agent input path; never falls back to static geometry."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        if not isinstance(keyboard_layout, dict):
-            raise WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。")
-        if not isinstance(text, str) or not re.fullmatch('[A-Za-z]{1,30}', text):
-            raise WorkflowNotReady("通用英文分段必须是1～30个同一可见大小写状态的字母。")
+        reject_if(not isinstance(keyboard_layout, dict), WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。"))
+        reject_if(not isinstance(text, str) or not re.fullmatch('[A-Za-z]{1,30}', text), WorkflowNotReady("通用英文分段必须是1～30个同一可见大小写状态的字母。"))
         self.vision_type_pinyin(text, text.casefold(), keyboard_layout)
 
     def validate_verified_text(self, text: str, input_states: dict[str, Any], *, target_text: str | None=None,
@@ -584,53 +554,41 @@ class RobotController:
         """Fail before hardware unless the current visual keyboard profile is exact."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        if target_text is None:
-            raise WorkflowNotReady("文字输入缺少 canonical 目标全文。")
+        reject_if(target_text is None, WorkflowNotReady("文字输入缺少 canonical 目标全文。"))
         try:
             step = plan_next_verified_input(target_text, input_states.get("value"))
         except (ValueError, VerifiedTextTransactionError) as exc:
             raise WorkflowNotReady(f"无法建立精确文字输入事务：{exc}") from exc
-        if input_method is None:
-            raise WorkflowNotReady("文字输入缺少 canonical 输入方式。")
-        if step is None or text != step.segment or input_method != step.kind:
-            raise WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。")
+        reject_if(input_method is None, WorkflowNotReady("文字输入缺少 canonical 输入方式。"))
+        reject_if(step is None or text != step.segment or input_method != step.kind, WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。"))
         if step.kind == 'direct_latin':
-            if step.required_case_mode and input_states.get('keyboard_case_mode') != step.required_case_mode:
-                raise WorkflowNotReady("当前键盘大小写状态与英文分段不一致。")
+            reject_if(step.required_case_mode and input_states.get('keyboard_case_mode') != step.required_case_mode, WorkflowNotReady("当前键盘大小写状态与英文分段不一致。"))
         elif step.kind == 'chinese_pinyin':
-            if pinyin != step.pinyin:
-                raise WorkflowNotReady("设备收到的拼音与本地确定性结果不一致。")
+            reject_if(pinyin != step.pinyin, WorkflowNotReady("设备收到的拼音与本地确定性结果不一致。"))
         else:
             raise WorkflowNotReady("数字或符号仍要求独立可见键位审计。")
-        if input_states.get('focused') is not True:
-            raise WorkflowNotReady("当前输入框没有可信聚焦证据。")
-        if input_states.get('keyboard_layout') != 'qwerty':
-            raise WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。")
-        if input_states.get('keyboard_input_mode') != step.required_mode:
-            raise WorkflowNotReady("当前键盘模式与下一确定性文字分段不一致。")
-        if input_states.get('ime_preedit_text'):
-            raise WorkflowNotReady("当前仍有未完成的输入法组合。")
+        reject_if(input_states.get('focused') is not True, WorkflowNotReady("当前输入框没有可信聚焦证据。"))
+        reject_if(input_states.get('keyboard_layout') != 'qwerty', WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。"))
+        reject_if(input_states.get('keyboard_input_mode') != step.required_mode, WorkflowNotReady("当前键盘模式与下一确定性文字分段不一致。"))
+        reject_if(input_states.get('ime_preedit_text'), WorkflowNotReady("当前仍有未完成的输入法组合。"))
 
     def vision_type_pinyin(self, text: str, pinyin: str, keyboard_layout: dict[str, Any] | None=None) -> None:
         self._require_verified_action("input_verified_text", "输入文字")
         del text
-        if not re.fullmatch('[a-z]{1,30}', pinyin):
-            raise ValueError("拼音必须是1～30个小写英文字母。")
+        reject_if(not re.fullmatch('[a-z]{1,30}', pinyin), ValueError("拼音必须是1～30个小写英文字母。"))
         cfg = load_controller_config()
         configured_keyboard = cfg["pinyin_keyboard"]
         if keyboard_layout is None:
             keyboard_cfg = configured_keyboard
         else:
-            if keyboard_layout.get('type') != 'qwerty':
-                raise WorkflowNotReady("当前键盘不是受支持的标准 QWERTY 布局。")
+            reject_if(keyboard_layout.get('type') != 'qwerty', WorkflowNotReady("当前键盘不是受支持的标准 QWERTY 布局。"))
             keyboard_cfg = qwerty_keyboard_config_from_anchors(keyboard_layout.get('anchors'),
                 key_hold=float(configured_keyboard['key_hold']),
                 inter_key_wait=float(configured_keyboard['inter_key_wait']))
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("input_verified_text", frame)
-        if frame.width < 400 or frame.height < 700:
-            raise RobotWorkflowError("键盘画面尺寸异常，拒绝执行拼音点击。")
+        reject_if(frame.width < 400 or frame.height < 700, RobotWorkflowError("键盘画面尺寸异常，拒绝执行拼音点击。"))
         seller_gui.configure_single_click_count(hwnd)
         # Editing the seller control's click-count field changes focus and can
         # leave the physical actuator settling.  Starting the first phone tap
@@ -658,8 +616,7 @@ class RobotController:
         determines the exact number of physical backspace taps.
         """
         self._require_verified_action("input_verified_text", "输入文字")
-        if isinstance(delete_count, bool) or not isinstance(delete_count, int) or (not 1 <= delete_count <= 100):
-            raise WorkflowNotReady('退格次数必须是视觉确认后的1～100之间整数，拒绝固定次数清空。')
+        reject_if(isinstance(delete_count, bool) or not isinstance(delete_count, int) or (not 1 <= delete_count <= 100), WorkflowNotReady('退格次数必须是视觉确认后的1～100之间整数，拒绝固定次数清空。'))
         cfg = load_controller_config()
         backspace_x_ratio = float(cfg["keyboard_backspace_x_ratio"])
         backspace_y_ratio = float(cfg["keyboard_backspace_y_ratio"])
@@ -672,10 +629,12 @@ class RobotController:
                 backspace_y_ratio = float(dynamic_cfg["backspace_y_ratio"])
             elif layout_type == 'generic':
                 backspace = anchors.get("backspace")
-                if (not isinstance(backspace, list) or len(backspace) != 2 or any((isinstance(value,
+                reject_if(
+                    not isinstance(backspace, list) or len(backspace) != 2 or any((isinstance(value,
                     bool) or not isinstance(value, (int, float)) for value in backspace))
-                    or (not all((0 <= float(value) <= 1000 for value in backspace)))):
-                    raise WorkflowNotReady('非QWERTY键盘必须提供画面中真实可见的退格键中心。')
+                    or (not all((0 <= float(value) <= 1000 for value in backspace))),
+                    WorkflowNotReady('非QWERTY键盘必须提供画面中真实可见的退格键中心。'),
+                )
                 backspace_x_ratio = float(backspace[0]) / 1000.0
                 backspace_y_ratio = float(backspace[1]) / 1000.0
             else:

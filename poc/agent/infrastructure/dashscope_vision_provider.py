@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import base64
 import binascii
 import contextvars
@@ -29,8 +30,7 @@ class _DuplicateJSONKeyError(ValueError):
 def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for (key, item) in pairs:
-        if key in value:
-            raise _DuplicateJSONKeyError(key)
+        reject_if(key in value, _DuplicateJSONKeyError(key))
         value[key] = item
     return value
 
@@ -48,16 +48,14 @@ def _extract_json_object(raw: str, *, reject_duplicate_keys: bool=False) -> dict
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
-        if start < 0 or end <= start:
-            raise VisionAgentError("模型没有返回 JSON 对象。")
+        reject_if(start < 0 or end <= start, VisionAgentError("模型没有返回 JSON 对象。"))
         try:
             value = json.loads(text[start : end + 1], **load_options)
         except _DuplicateJSONKeyError as exc:
             raise VisionAgentError(f'模型返回的 JSON 包含重复字段：{exc}') from exc
         except json.JSONDecodeError as exc:
             raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
-    if not isinstance(value, dict):
-        raise VisionAgentError("模型返回值必须是 JSON 对象。")
+    reject_if(not isinstance(value, dict), VisionAgentError("模型返回值必须是 JSON 对象。"))
     return value
 
 
@@ -125,8 +123,7 @@ class DashScopeVisionProvider:
     def __init__(self, *, api_key: str | None=None, model: str | None=None, base_url: str | None=None,
         model_config: VisionModelConfig | None=None, enable_thinking: bool=False, timeout: float=45.0,
         max_attempts: int=3, retry_base_delay: float=0.8) -> None:
-        if model_config is not None and (model is not None or base_url is not None):
-            raise ValueError("model_config 不能与 model/base_url 同时传入。")
+        reject_if(model_config is not None and (model is not None or base_url is not None), ValueError("model_config 不能与 model/base_url 同时传入。"))
         self.api_key = api_key if api_key is not None else os.getenv("DASHSCOPE_API_KEY", "")
         self.model_config = model_config or load_vision_model_config(model=model, base_url=base_url,
             enable_thinking=enable_thinking)
@@ -201,8 +198,7 @@ class DashScopeVisionProvider:
 
     def _chat_locked(self, messages: list[dict[str, Any]], max_tokens: int, *, timeout: float | None=None,
         max_attempts: int | None=None, response_format: dict[str, str] | None=None) -> str:
-        if not self.configured:
-            raise VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。")
+        reject_if(not self.configured, VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"))
         ledger = self._active_usage_ledger.get()
         stage, fingerprint = self._active_call_metadata.get()
         local_request_id = ""
@@ -233,8 +229,7 @@ class DashScopeVisionProvider:
 
     def _chat_untracked(self, messages: list[dict[str, Any]], max_tokens: int, *, timeout: float | None=None,
         max_attempts: int | None=None, response_format: dict[str, str] | None=None) -> str:
-        if not self.configured:
-            raise VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。")
+        reject_if(not self.configured, VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"))
         self.last_usage = {}
         self.last_request_id = ""
         self.last_network_attempts = 0
@@ -242,8 +237,7 @@ class DashScopeVisionProvider:
         self.last_response_model = ""
         effective_timeout = self.timeout if timeout is None else max(1.0, float(timeout))
         effective_attempts = self.max_attempts if max_attempts is None else max(1, int(max_attempts))
-        if response_format not in (None, {'type': 'json_object'}):
-            raise VisionAgentError("千问视觉 response_format 只允许 json_object。")
+        reject_if(response_format not in (None, {'type': 'json_object'}), VisionAgentError("千问视觉 response_format 只允许 json_object。"))
         last_error: Exception | None = None
         for attempt in range(1, effective_attempts + 1):
             self.last_network_attempts = attempt
@@ -305,6 +299,5 @@ class DashScopeVisionProvider:
             content = choice["message"]["content"]
         except (AttributeError, KeyError, IndexError, TypeError) as exc:
             raise VisionAgentError("千问视觉响应缺少 message.content。") from exc
-        if not isinstance(content, str) or not content.strip():
-            raise VisionAgentError("千问视觉返回了空内容。")
+        reject_if(not isinstance(content, str) or not content.strip(), VisionAgentError("千问视觉返回了空内容。"))
         return content

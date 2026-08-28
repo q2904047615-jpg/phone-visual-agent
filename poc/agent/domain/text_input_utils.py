@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import re
 import unicodedata
 from typing import Any
@@ -14,17 +15,12 @@ _SUPPORTED_TEXT_RE = re.compile(
 
 
 def normalize_user_text(value: Any, *, field_name: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{field_name}必须是文字。")
+    reject_if(not isinstance(value, str), ValueError(f"{field_name}必须是文字。"))
     text = unicodedata.normalize("NFC", value)
-    if not text:
-        raise ValueError(f"{field_name}不能为空。")
-    if len(text) > MAX_TEXT_LENGTH:
-        raise ValueError(f"{field_name}不能超过{MAX_TEXT_LENGTH}个字符。")
-    if '\r' in text:
-        raise ValueError("输入文字不允许回车控制符；请使用换行字符。")
-    if not _SUPPORTED_TEXT_RE.fullmatch(text):
-        raise ValueError(f"{field_name}含暂不支持的表情、生僻符号或控制字符。")
+    reject_if(not text, ValueError(f"{field_name}不能为空。"))
+    reject_if(len(text) > MAX_TEXT_LENGTH, ValueError(f"{field_name}不能超过{MAX_TEXT_LENGTH}个字符。"))
+    reject_if('\r' in text, ValueError("输入文字不允许回车控制符；请使用换行字符。"))
+    reject_if(not _SUPPORTED_TEXT_RE.fullmatch(text), ValueError(f"{field_name}含暂不支持的表情、生僻符号或控制字符。"))
     return text
 
 

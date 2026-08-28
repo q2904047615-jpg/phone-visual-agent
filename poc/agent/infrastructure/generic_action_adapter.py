@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import hashlib
 import json
 import math
@@ -190,8 +191,7 @@ def _post_action_visual_context(resolved: ResolvedSemanticAction) -> PostActionV
     raw_expectations = resolved.formal_transition.get("expectations")
     if not isinstance(raw_expectations, list) or not raw_expectations:
         return None
-    if not all((isinstance(item, dict) for item in raw_expectations)):
-        raise GenericActionAdapterError("canonical动作的typed后置条件结构无效。")
+    reject_if(not all((isinstance(item, dict) for item in raw_expectations)), GenericActionAdapterError("canonical动作的typed后置条件结构无效。"))
     payload = {'protocol_version': POST_ACTION_VISUAL_CONTEXT_VERSION, 'execution_state': 'physical_action_executed',
         'outcome': 'pending_visual_verification', 'canonical_action_kind': resolved.kind,
         'expected_postconditions': [dict(item) for item in raw_expectations]}
@@ -640,8 +640,7 @@ class GenericSingleActionAdapter:
         frames: list[Image.Image]) -> OrientationCredential:
         """Mint locally from the direction facts in the sole step response."""
 
-        if not frames:
-            raise OrientationSafetyError("单步方向绑定缺少当前稳定帧。")
+        reject_if(not frames, OrientationSafetyError("单步方向绑定缺少当前稳定帧。"))
         alignment = scene.camera_alignment
         return _mint_single_step_scene_credential(device_id=self.device_id, scene_fingerprint=scene.fingerprint,
             frame=frames[-1].convert('RGB'), camera_layout_orientation_value=alignment.camera_layout_orientation,
@@ -737,12 +736,10 @@ class GenericSingleActionAdapter:
     @staticmethod
     def _confirmation_frame_delta(planned_frames: tuple[Image.Image, ...] | list[Image.Image],
         fresh_frames: list[Image.Image]) -> float:
-        if not planned_frames or not fresh_frames:
-            raise GenericActionAdapterError("确认前缺少本地真实帧，不能验证画面身份。")
+        reject_if(not planned_frames or not fresh_frames, GenericActionAdapterError("确认前缺少本地真实帧，不能验证画面身份。"))
         planned_sizes = {frame.size for frame in planned_frames}
         fresh_sizes = {frame.size for frame in fresh_frames}
-        if len(planned_sizes) != 1 or len(fresh_sizes) != 1 or planned_sizes != fresh_sizes:
-            raise GenericActionAdapterError("确认前真实画面尺寸发生变化。")
+        reject_if(len(planned_sizes) != 1 or len(fresh_sizes) != 1 or planned_sizes != fresh_sizes, GenericActionAdapterError("确认前真实画面尺寸发生变化。"))
 
         def compact(frame: Image.Image) -> Image.Image:
             return frame.convert("L").resize((96, 160), Image.Resampling.BILINEAR)
@@ -754,8 +751,7 @@ class GenericSingleActionAdapter:
 
     def _capture_frame(self) -> Image.Image:
         frame = self.capture().convert("RGB")
-        if frame.width < 400 or frame.height < 700:
-            raise GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。")
+        reject_if(frame.width < 400 or frame.height < 700, GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。"))
         return frame
 
     def _capture_confirmation_frames(self, *, evidence_dir: Path | None, prefix: str) -> tuple[list[Image.Image],
@@ -769,8 +765,7 @@ class GenericSingleActionAdapter:
                 time.sleep(self.frame_interval)
         stability = measure_local_stability(frames)
         paths = self._save_frames(frames, evidence_dir, prefix)
-        if not stability.stable:
-            raise GenericActionAdapterError(f'确认前本地多帧稳定性检查未通过：{stability.reason}', evidence=paths)
+        reject_if(not stability.stable, GenericActionAdapterError(f'确认前本地多帧稳定性检查未通过：{stability.reason}', evidence=paths))
         return frames, paths
 
     def _capture_scene_once(self, goal: GenericIntentDraft, *, evidence_dir: Path | None=None,
@@ -1043,8 +1038,7 @@ class GenericSingleActionAdapter:
         ...] | list[Image.Image]) -> dict[str, Any] | None:
         if resolved.kind not in {'input_verified_text', 'clear_verified_text'}:
             return None
-        if resolved.kind == 'input_verified_text' and (not resolved.text):
-            raise GenericActionAdapterError("输入动作缺少已校验文字。")
+        reject_if(resolved.kind == 'input_verified_text' and (not resolved.text), GenericActionAdapterError("输入动作缺少已校验文字。"))
         try:
             input_element = scene.get_element(str(resolved.target_element_id or ''),
                 min_confidence=self.controller.min_confidence)
@@ -1052,16 +1046,16 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f"当前文字输入缺少可信输入框：{exc}") from exc
         geometry = input_element.states.get("keyboard_geometry")
         allowed_types = {"input_verified_text": {"qwerty"}, "clear_verified_text": {"qwerty", "generic"}}
-        if (not isinstance(geometry, dict) or geometry.get('source') != 'input_structure_audit'
-            or geometry.get('type') not in allowed_types[resolved.kind]):
-            raise GenericActionAdapterError("当前文字动作缺少本轮输入结构审计签发的键盘几何；拒绝使用静态配置。")
+        reject_if(
+            not isinstance(geometry, dict) or geometry.get('source') != 'input_structure_audit'
+            or geometry.get('type') not in allowed_types[resolved.kind],
+            GenericActionAdapterError("当前文字动作缺少本轮输入结构审计签发的键盘几何；拒绝使用静态配置。"),
+        )
         prepared = dict(geometry)
         if geometry.get('type') == 'qwerty' and self.require_local_qwerty_row_snap:
-            if not callable(self.qwerty_row_snapper):
-                raise GenericActionAdapterError("真机文字输入缺少本地 QWERTY 行中心复核器。")
+            reject_if(not callable(self.qwerty_row_snapper), GenericActionAdapterError("真机文字输入缺少本地 QWERTY 行中心复核器。"))
             snapped = self.qwerty_row_snapper(frames, geometry.get("anchors"))
-            if not isinstance(snapped, dict):
-                raise GenericActionAdapterError("本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。")
+            reject_if(not isinstance(snapped, dict), GenericActionAdapterError("本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。"))
             prepared.update(anchors=snapped, row_snap_source="stable_local_ocr")
         if prepared.get('type') == 'qwerty':
             try:
@@ -1070,9 +1064,11 @@ class GenericSingleActionAdapter:
                 raise GenericActionAdapterError(f"当前 QWERTY 几何未通过动作前本地复核：{exc}") from exc
         else:
             backspace = (prepared.get("anchors") or {}).get("backspace")
-            if (not isinstance(backspace, list) or len(backspace) != 2 or any((isinstance(part,
-                bool) or not isinstance(part, (int, float)) or (not 0 <= float(part) <= 1000) for part in backspace))):
-                raise GenericActionAdapterError("非 QWERTY 清空缺少本轮完整可见退格键中心。")
+            reject_if(
+                not isinstance(backspace, list) or len(backspace) != 2 or any((isinstance(part,
+                bool) or not isinstance(part, (int, float)) or (not 0 <= float(part) <= 1000) for part in backspace)),
+                GenericActionAdapterError("非 QWERTY 清空缺少本轮完整可见退格键中心。"),
+            )
         validator = getattr(self.robot, "validate_verified_text", None)
         if resolved.kind == 'input_verified_text' and callable(validator):
             try:
@@ -1080,8 +1076,7 @@ class GenericSingleActionAdapter:
                     input_method=resolved.input_method, pinyin=resolved.input_pinyin)
             except (UISceneError, ValueError, RuntimeError) as exc:
                 raise GenericActionAdapterError(f"当前文字输入不满足设备已验证配置：{exc}") from exc
-        if resolved.kind == 'clear_verified_text' and resolved.delete_count is None:
-            raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
+        reject_if(resolved.kind == 'clear_verified_text' and resolved.delete_count is None, GenericActionAdapterError("清空动作缺少已验证退格次数。"))
         return prepared
 
     def _arm_physical_execution(self, requested: SemanticAction, resolved: ResolvedSemanticAction, scene: UIScene,
@@ -1091,8 +1086,7 @@ class GenericSingleActionAdapter:
         if resolved.kind not in self.PHYSICAL_KINDS:
             return None, clear if callable(clear) else None
         arm = getattr(self.robot, "arm_physical_execution", None)
-        if not callable(arm) or not callable(clear):
-            raise GenericActionAdapterError("机械臂控制器未提供共享物理执行门禁，拒绝动作。", evidence=paths)
+        reject_if(not callable(arm) or not callable(clear), GenericActionAdapterError("机械臂控制器未提供共享物理执行门禁，拒绝动作。", evidence=paths))
         clear()
         try:
             credential = self._local_qwerty_orientation_credential(requested=requested, scene=scene, frames=frames)
@@ -1154,8 +1148,7 @@ class GenericSingleActionAdapter:
     def execute(self, *, requested_action: SemanticAction, planned_scene: UIScene, goal: GenericIntentDraft,
         confirmed: bool, evidence_dir: Path | None=None, planned_frames: tuple[Image.Image,
         ...] | list[Image.Image]=()) -> GenericActionExecutionResult:
-        if confirmed is not True:
-            raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
+        reject_if(confirmed is not True, GenericActionAdapterError("必须明确确认当前这一个语义动作。"))
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
@@ -1224,8 +1217,10 @@ class GenericSingleActionAdapter:
         except UniversalActionError as exc:
             raise GenericActionAdapterError(f'确认前控制器拒绝动作：{exc}', evidence=before_paths) from exc
 
-        if resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != 'wait_for_change':
-            raise GenericActionAdapterError(f'当前通用硬件适配器尚未开放：{resolved.kind}', evidence=before_paths)
+        reject_if(
+            resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != 'wait_for_change',
+            GenericActionAdapterError(f'当前通用硬件适配器尚未开放：{resolved.kind}', evidence=before_paths),
+        )
 
         prepared_keyboard_geometry = self._prepare_keyboard_geometry(resolved, before, before_frames)
         orientation_credential, clear_authorization = self._arm_physical_execution(requested_action, resolved, before,
@@ -1320,12 +1315,16 @@ class GenericSingleActionAdapter:
         local_frame_identity_verified: bool=False, require_geometry_overlap: bool=True) -> SemanticAction:
         planned_app = planned_scene.foreground_app_id
         fresh_app = fresh_scene.foreground_app_id
-        if (not local_frame_identity_verified and planned_app != 'unknown' and (fresh_app != 'unknown')
-            and (planned_app != fresh_app)):
-            raise GenericActionAdapterError(f"确认时前台 App 已变化：{planned_app} -> {fresh_app}")
-        if (not local_frame_identity_verified and planned_scene.screen_id != 'unknown'
-            and (planned_scene.screen_id != fresh_scene.screen_id)):
-            raise GenericActionAdapterError(f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}")
+        reject_if(
+            not local_frame_identity_verified and planned_app != 'unknown' and (fresh_app != 'unknown')
+            and (planned_app != fresh_app),
+            GenericActionAdapterError(f"确认时前台 App 已变化：{planned_app} -> {fresh_app}"),
+        )
+        reject_if(
+            not local_frame_identity_verified and planned_scene.screen_id != 'unknown'
+            and (planned_scene.screen_id != fresh_scene.screen_id),
+            GenericActionAdapterError(f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}"),
+        )
         single_element_actions = {'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
             'clear_verified_text', 'double_tap', 'long_press'}
         if requested.action not in single_element_actions | {'drag'}:
@@ -1357,8 +1356,7 @@ class GenericSingleActionAdapter:
                     aliases = ()
                 if len(aliases) == 1:
                     matches = aliases
-            if len(matches) != 1:
-                raise GenericActionAdapterError(f'确认时目标语义不再严格唯一：{original.meaning}，匹配{len(matches)}个')
+            reject_if(len(matches) != 1, GenericActionAdapterError(f'确认时目标语义不再严格唯一：{original.meaning}，匹配{len(matches)}个'))
             current = matches[0]
             original_stable_states = stable_rebind_states(dict(original.states))
             current_stable_states = stable_rebind_states(dict(current.states))
@@ -1369,8 +1367,7 @@ class GenericSingleActionAdapter:
                 and (current_stable_states.get('fully_visible') is True)):
                 states_match = {key: value for key, value in current_stable_states.items() if key !=
                     'fully_visible'} == original_stable_states
-            if current.label != original.label or not states_match:
-                raise GenericActionAdapterError('确认时目标标签或状态已经变化，旧确认失效。')
+            reject_if(current.label != original.label or not states_match, GenericActionAdapterError('确认时目标标签或状态已经变化，旧确认失效。'))
             overlap = bounds_overlap(original.bounds, current.bounds)
             widths = (original.bounds[2] - original.bounds[0], current.bounds[2] - current.bounds[0])
             heights = (original.bounds[3] - original.bounds[1], current.bounds[3] - current.bounds[1])

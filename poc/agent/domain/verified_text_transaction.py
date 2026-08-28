@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -30,8 +31,7 @@ def is_direct_latin_segment(value: Any) -> bool:
 def preferred_keyboard_layout(character: Any) -> str:
     """Return the canonical visible-key layout for one next character."""
 
-    if not isinstance(character, str) or len(character) != 1:
-        raise VerifiedTextTransactionError("下一逐键字符必须恰好一个字符。")
+    reject_if(not isinstance(character, str) or len(character) != 1, VerifiedTextTransactionError("下一逐键字符必须恰好一个字符。"))
     if character.isdecimal():
         return "numeric"
     if character == ' ' or character.isalpha():
@@ -61,16 +61,14 @@ def keyboard_layout_switch_advances(*, current_layout: Any, target_layout: Any, 
 
 
 def local_pinyin(text: str) -> str:
-    if not _CHINESE_RE.fullmatch(text):
-        raise VerifiedTextTransactionError("拼音分段必须全部为中文。")
+    reject_if(not _CHINESE_RE.fullmatch(text), VerifiedTextTransactionError("拼音分段必须全部为中文。"))
     try:
         from pypinyin import Style, lazy_pinyin
     except ImportError as exc:
         raise VerifiedTextTransactionError("缺少本地拼音组件 pypinyin。") from exc
     value = "".join(lazy_pinyin(text, style=Style.NORMAL, errors="strict"))
     value = re.sub(r"[^a-z]", "", value.casefold())
-    if not value or len(value) > 30:
-        raise VerifiedTextTransactionError("本地拼音不是1到30个小写字母。")
+    reject_if(not value or len(value) > 30, VerifiedTextTransactionError("本地拼音不是1到30个小写字母。"))
     return value
 
 
@@ -87,23 +85,23 @@ class VerifiedInputStep:
     physical_keys: str = ""
 
     def validate(self) -> None:
-        if self.kind not in {'direct_latin', 'chinese_pinyin', 'literal_key'}:
-            raise VerifiedTextTransactionError("输入分段类型无效。")
-        if not self.target_text.startswith(self.current_text):
-            raise VerifiedTextTransactionError("当前输入值不是目标文字的精确前缀。")
-        if self.expected_value != self.current_text + self.segment:
-            raise VerifiedTextTransactionError("输入分段后置值没有精确拼接当前前缀。")
-        if not self.segment:
-            raise VerifiedTextTransactionError("输入分段不能为空。")
+        reject_if(self.kind not in {'direct_latin', 'chinese_pinyin', 'literal_key'}, VerifiedTextTransactionError("输入分段类型无效。"))
+        reject_if(not self.target_text.startswith(self.current_text), VerifiedTextTransactionError("当前输入值不是目标文字的精确前缀。"))
+        reject_if(self.expected_value != self.current_text + self.segment, VerifiedTextTransactionError("输入分段后置值没有精确拼接当前前缀。"))
+        reject_if(not self.segment, VerifiedTextTransactionError("输入分段不能为空。"))
         if self.kind == 'chinese_pinyin':
-            if (self.required_mode != 'chinese_pinyin' or self.pinyin != local_pinyin(self.segment)
-                or self.required_case_mode or (self.physical_keys != self.pinyin)):
-                raise VerifiedTextTransactionError("中文分段缺少确定性拼音。")
+            reject_if(
+                self.required_mode != 'chinese_pinyin' or self.pinyin != local_pinyin(self.segment)
+                or self.required_case_mode or (self.physical_keys != self.pinyin),
+                VerifiedTextTransactionError("中文分段缺少确定性拼音。"),
+            )
         elif self.kind == 'direct_latin':
-            if (self.required_mode != 'direct_latin' or self.pinyin or self.required_case_mode not in {'',
+            reject_if(
+                self.required_mode != 'direct_latin' or self.pinyin or self.required_case_mode not in {'',
                 'upper'} or (self.physical_keys != self.segment.casefold()) or (not all((char
-                in DIRECT_LATIN_CHARACTERS for char in self.physical_keys)))):
-                raise VerifiedTextTransactionError("英文分段缺少确定性键序列。")
+                in DIRECT_LATIN_CHARACTERS for char in self.physical_keys))),
+                VerifiedTextTransactionError("英文分段缺少确定性键序列。"),
+            )
         elif (self.required_mode != 'visible_key' or self.pinyin or self.required_case_mode or self.physical_keys
             or (len(self.segment) != 1)):
             raise VerifiedTextTransactionError("逐键分段合同无效。")
@@ -127,10 +125,8 @@ def required_keyboard_input_mode_for_step(step: VerifiedInputStep) -> str | None
 
 def plan_next_verified_input(target_text: Any, current_text: Any) -> VerifiedInputStep | None:
     target = normalize_user_text(target_text, field_name="输入文字")
-    if not isinstance(current_text, str):
-        raise VerifiedTextTransactionError("当前输入框缺少精确文字值。")
-    if not target.startswith(current_text):
-        raise VerifiedTextTransactionError("当前输入值不是目标文字的精确前缀。")
+    reject_if(not isinstance(current_text, str), VerifiedTextTransactionError("当前输入框缺少精确文字值。"))
+    reject_if(not target.startswith(current_text), VerifiedTextTransactionError("当前输入值不是目标文字的精确前缀。"))
     if current_text == target:
         return None
 
@@ -171,6 +167,5 @@ def plan_next_verified_input(target_text: Any, current_text: Any) -> VerifiedInp
 
 
 def plan_from_input_states(target_text: Any, states: Mapping[str, Any]) -> VerifiedInputStep | None:
-    if not isinstance(states, Mapping):
-        raise VerifiedTextTransactionError("输入框 states 格式无效。")
+    reject_if(not isinstance(states, Mapping), VerifiedTextTransactionError("输入框 states 格式无效。"))
     return plan_next_verified_input(target_text, states.get("value"))

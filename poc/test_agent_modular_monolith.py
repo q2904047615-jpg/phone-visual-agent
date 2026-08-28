@@ -1095,7 +1095,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             )
         self.assertEqual([], legacy_imports)
 
-        allowed = {"__future__", "dataclasses", "re", "typing"}
+        allowed = {"__future__", "dataclasses", "re", "typing", "validation"}
         unexpected: list[str] = []
         for path in (
             root / "agent" / "domain" / "semantic_action.py",
@@ -1399,6 +1399,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "json",
             "re",
             "typing",
+            "validation",
         }
         unexpected: list[str] = []
         tree = ast.parse(domain_path.read_text(encoding="utf-8"))

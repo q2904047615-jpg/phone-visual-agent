@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .validation import reject_if
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import hashlib
@@ -22,8 +23,7 @@ class AppSurfaceLineageError(RuntimeError):
 
 
 def _action_digest(action: Any) -> str:
-    if action is None:
-        raise AppSurfaceLineageError("动作摘要缺少语义动作。")
+    reject_if(action is None, AppSurfaceLineageError("动作摘要缺少语义动作。"))
     payload = action.to_dict() if callable(getattr(action, "to_dict", None)) else action
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -193,22 +193,11 @@ class AppSurfaceLineageAuthority:
         before_observation: Any | None=None, previous_decision: Any | None=None, execution_result: Any | None=None,
         verified_app_surface_lineage: VerifiedAppSurfaceLineage | None=None, physical_actions: int=0) -> None:
         scene = getattr(trusted_observation, "scene", None)
-        if scene is None:
-            raise AppSurfaceLineageError("DeepSeek revision 缺少可复核的可信场景。")
+        reject_if(scene is None, AppSurfaceLineageError("DeepSeek revision 缺少可复核的可信场景。"))
         for item in _newly_completed(previous, revised):
             text = " ".join((item.objective, *tuple(item.completion_conditions or ())))
             target_apps = VisibleGoalEvidence.referenced_target_apps(previous, text, item.subgoal_id)
-            if (target_apps and (not VisibleGoalEvidence.foreground_matches(scene,
-                target_apps)) and (not cls.transition_proves(previous=previous, completed_subgoal=item,
-                target_apps=target_apps, trusted_observation=trusted_observation, session_id=session_id,
-                verified_transition=verified_transition,
-                controller_transition_evidence_refs=controller_transition_evidence_refs,
-                before_observation=before_observation, previous_decision=previous_decision,
-                execution_result=execution_result)) and (not cls.lineage_proves(previous=previous,
-                completed_subgoal=item, target_apps=target_apps, trusted_observation=trusted_observation,
-                session_id=session_id, verified_app_surface_lineage=verified_app_surface_lineage,
-                physical_actions=physical_actions))):
-                raise AppSurfaceLineageError(f'Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台：subgoal_id={item.subgoal_id}。')
+            reject_if(target_apps and (not VisibleGoalEvidence.foreground_matches(scene, target_apps)) and (not cls.transition_proves(previous=previous, completed_subgoal=item, target_apps=target_apps, trusted_observation=trusted_observation, session_id=session_id, verified_transition=verified_transition, controller_transition_evidence_refs=controller_transition_evidence_refs, before_observation=before_observation, previous_decision=previous_decision, execution_result=execution_result)) and (not cls.lineage_proves(previous=previous, completed_subgoal=item, target_apps=target_apps, trusted_observation=trusted_observation, session_id=session_id, verified_app_surface_lineage=verified_app_surface_lineage, physical_actions=physical_actions)), AppSurfaceLineageError(f'Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台：subgoal_id={item.subgoal_id}。'))
 
     @classmethod
     def build(cls, *, session: Any, previous: DynamicTaskGraph, revised: DynamicTaskGraph, trusted_observation: Any,

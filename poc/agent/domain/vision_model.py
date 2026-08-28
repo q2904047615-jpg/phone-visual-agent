@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import re
 from dataclasses import dataclass
 from typing import Mapping
@@ -32,12 +33,9 @@ class VisionModelConfig:
     def __post_init__(self) -> None:
         model = self.model.strip()
         base_url = self.base_url.strip().rstrip("/")
-        if not _MODEL_ID_RE.fullmatch(model):
-            raise ValueError("视觉模型 ID 格式无效。")
-        if not base_url.startswith(('https://', 'http://127.0.0.1', 'http://localhost')):
-            raise ValueError("视觉模型地址必须使用 HTTPS 或本机回环地址。")
-        if self.coordinate_scale != VISION_COORDINATE_SCALE:
-            raise ValueError("视觉模型坐标必须使用项目统一的 0..1000 归一化尺度。")
+        reject_if(not _MODEL_ID_RE.fullmatch(model), ValueError("视觉模型 ID 格式无效。"))
+        reject_if(not base_url.startswith(('https://', 'http://127.0.0.1', 'http://localhost')), ValueError("视觉模型地址必须使用 HTTPS 或本机回环地址。"))
+        reject_if(self.coordinate_scale != VISION_COORDINATE_SCALE, ValueError("视觉模型坐标必须使用项目统一的 0..1000 归一化尺度。"))
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "base_url", base_url)
 

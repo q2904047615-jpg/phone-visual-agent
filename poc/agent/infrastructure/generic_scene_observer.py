@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import hashlib
 import json
 import math
@@ -203,11 +204,9 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         stable_tail_start = 0
         input_structure_required = False
         try:
-            if len(frames) < 4:
-                raise VisionAgentError("通用页面观察至少需要4帧。")
+            reject_if(len(frames) < 4, VisionAgentError("通用页面观察至少需要4帧。"))
             stability = measure_local_stability(frames, allow_leading_outlier=True)
-            if not stability.stable:
-                raise VisionAgentError(f"本地多帧稳定性检查未通过：{stability.reason}；不调用模型。")
+            reject_if(not stability.stable, VisionAgentError(f"本地多帧稳定性检查未通过：{stability.reason}；不调用模型。"))
 
             sharpness_scores = [measure_frame_sharpness(item) for item in frames]
             stable_tail_start = max(0, len(frames) - min(3, len(frames)))
@@ -245,8 +244,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             model_frames = tuple(frames[stable_tail_start:]) if input_structure_required else (frame,)
 
             request_image_sizes = {_image_request_size(item) for item in model_frames}
-            if len(request_image_sizes) != 1:
-                raise VisionAgentError("同一步发送给Qwen的稳定帧尺寸不一致，不能建立唯一坐标空间。")
+            reject_if(len(request_image_sizes) != 1, VisionAgentError("同一步发送给Qwen的稳定帧尺寸不一致，不能建立唯一坐标空间。"))
             request_image_size = next(iter(request_image_sizes))
 
             prompt = _single_step_observation_prompt(context, include_input_structure=input_structure_required,
@@ -303,19 +301,22 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     verified_input_lineage=verified_lineage, device_id=device_id, lineage_frame=frame,
                     qwerty_row_snapper=self.qwerty_row_snapper, qwerty_row_frames=frames[stable_tail_start:],
                     single_step_input_surface=single_step_input_surface), obstructions, fingerprint=fingerprint)
-                if ((goal.transaction_text or goal.target_only) and (not _input_audit_established_local_target(scene))
-                    and (not _focus_only_input_surface_established(scene))):
-                    raise VisionAgentError("单步完整观察没有建立当前输入事务的唯一本地目标。")
+                reject_if(
+                    (goal.transaction_text or goal.target_only) and (not _input_audit_established_local_target(scene))
+                    and (not _focus_only_input_surface_established(scene)),
+                    VisionAgentError("单步完整观察没有建立当前输入事务的唯一本地目标。"),
+                )
 
             missing_evidence = [item.element_id for item in scene.elements if item.states.get('goal_relevant') is True
                 and (not any((value.strip() for value in item.evidence)))]
-            if missing_evidence:
-                raise VisionAgentError("目标相关元素缺少原始可见证据，不能建立可信候选：" + ",".join(missing_evidence))
+            reject_if(missing_evidence, VisionAgentError("目标相关元素缺少原始可见证据，不能建立可信候选：" + ",".join(missing_evidence)))
             target = scene.unique_trusted_goal_element()
             completion = scene.trusted_completion_evidence()
-            if (not scene.stable or (float(scene.confidence) < MIN_TARGET_CONFIDENCE and target is None
-                and (not completion))):
-                raise VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。")
+            reject_if(
+                not scene.stable or (float(scene.confidence) < MIN_TARGET_CONFIDENCE and target is None
+                and (not completion)),
+                VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。"),
+            )
 
             self.last_diagnostics = {'observer_version': SINGLE_STEP_SCENE_OBSERVER_VERSION,
                 'vision_model': public_model_identity(self.provider.status()),
@@ -558,15 +559,15 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
     coordinate_space = payload.get("coordinate_space")
     request_width, request_height = request_image_size
     expected = {"kind": "axis_grid", "width": 1000, "height": request_height}
-    if coordinate_space != expected:
-        raise UISceneError("单步观察必须声明唯一coordinate_space。")
-    if request_width <= 0 or request_height <= 0:
-        raise UISceneError("本轮Qwen请求图片尺寸无效。")
+    reject_if(coordinate_space != expected, UISceneError("单步观察必须声明唯一coordinate_space。"))
+    reject_if(request_width <= 0 or request_height <= 0, UISceneError("本轮Qwen请求图片尺寸无效。"))
 
     def numbers(value: Any, length: int, label: str) -> list[float]:
-        if (not isinstance(value, (list, tuple)) or len(value) != length or any((isinstance(part,
-            bool) or not isinstance(part, (int, float)) for part in value))):
-            raise UISceneError(f"coordinate_space内存在无效{label}。")
+        reject_if(
+            not isinstance(value, (list, tuple)) or len(value) != length or any((isinstance(part,
+            bool) or not isinstance(part, (int, float)) for part in value)),
+            UISceneError(f"coordinate_space内存在无效{label}。"),
+        )
         return [float(part) for part in value]
 
     def normalize(node: Any, *, anchors: bool=False) -> None:
@@ -579,16 +580,13 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
         for (key, value) in tuple(node.items()):
             if key == 'bounds' and value is not None:
                 left, top, right, bottom = numbers(value, 4, "bounds")
-                if not (0 <= left < right <= 1000 and 0 <= top < bottom <= request_height):
-                    raise UISceneError("bounds超出声明的axis_grid。")
+                reject_if(not (0 <= left < right <= 1000 and 0 <= top < bottom <= request_height), UISceneError("bounds超出声明的axis_grid。"))
                 node[key] = [round(left), round(top * 1000 / request_height), round(right),
                     round(bottom * 1000 / request_height)]
-                if not _valid_1000_bounds(node[key]):
-                    raise UISceneError("axis_grid换算后bounds退化。")
+                reject_if(not _valid_1000_bounds(node[key]), UISceneError("axis_grid换算后bounds退化。"))
             elif anchors and value is not None:
                 x, y = numbers(value, 2, "锚点")
-                if not (0 <= x <= 1000 and 0 <= y <= request_height):
-                    raise UISceneError("锚点超出声明的axis_grid。")
+                reject_if(not (0 <= x <= 1000 and 0 <= y <= request_height), UISceneError("锚点超出声明的axis_grid。"))
                 node[key] = [round(x), round(y * 1000 / request_height)]
             else:
                 normalize(value, anchors=(key == "qwerty_anchors"))
@@ -616,17 +614,13 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
             if extra:
                 details.append("包含协议外字段：" + ", ".join(extra))
             raise UISceneError("单步观察封装结构无效；" + "；".join(details))
-        if payload['protocol_version'] != SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION:
-            raise UISceneError("单步观察协议版本不匹配。")
-        if not isinstance(payload['scene'], dict):
-            raise UISceneError("单步观察scene必须是对象。")
+        reject_if(payload['protocol_version'] != SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, UISceneError("单步观察协议版本不匹配。"))
+        reject_if(not isinstance(payload['scene'], dict), UISceneError("单步观察scene必须是对象。"))
         coordinate_normalization = _normalize_single_step_wire_coordinates(payload,
             request_image_size=request_image_size)
         input_payload = payload["input_structure"]
-        if input_structure_required and (not isinstance(input_payload, dict)):
-            raise UISceneError("输入子目标必须在同一响应返回input_structure对象。")
-        if not input_structure_required and input_payload is not None:
-            raise UISceneError("非输入子目标的input_structure必须为null。")
+        reject_if(input_structure_required and (not isinstance(input_payload, dict)), UISceneError("输入子目标必须在同一响应返回input_structure对象。"))
+        reject_if(not input_structure_required and input_payload is not None, UISceneError("非输入子目标的input_structure必须为null。"))
         return {'scene': payload['scene'], 'input_structure': payload['input_structure'],
             'coordinate_normalization': coordinate_normalization}
     except (UISceneError, ValueError, TypeError) as exc:
@@ -859,14 +853,11 @@ Return empty arrays when their geometry is not visible. Never merge a clipped st
 def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None) -> UIScene:
     try:
         payload = _extract_json_object(raw)
-        if 'system_ui' not in payload:
-            raise UISceneError("新观察必须显式返回 scene.system_ui；无法判断时两项都写 unknown。")
+        reject_if('system_ui' not in payload, UISceneError("新观察必须显式返回 scene.system_ui；无法判断时两项都写 unknown。"))
         _drop_forbidden_camera_alignment_evidence(payload)
-        if 'camera_alignment' not in payload:
-            raise UISceneError("新观察必须显式返回 scene.camera_alignment。")
+        reject_if('camera_alignment' not in payload, UISceneError("新观察必须显式返回 scene.camera_alignment。"))
         alignment = CameraAlignmentFacts.from_dict(payload["camera_alignment"])
-        if camera_layout_orientation is not None and alignment.camera_layout_orientation != camera_layout_orientation:
-            raise UISceneError("模型报告的相机画布方向与本地稳定帧尺寸不一致。")
+        reject_if(camera_layout_orientation is not None and alignment.camera_layout_orientation != camera_layout_orientation, UISceneError("模型报告的相机画布方向与本地稳定帧尺寸不一致。"))
         _strip_model_authored_local_attestations(payload)
         return UIScene.from_dict(payload, coordinate_scale=1000.0, stable_override=True,
             fingerprint_override=fingerprint)
@@ -1438,32 +1429,32 @@ def _ime_candidate_is_near_preedit(candidate: tuple[float, float, float, float],
 
 
 def _audit_strings(value: Any, *, name: str, limit: int, allow_empty: bool) -> tuple[str, ...]:
-    if (not isinstance(value, list) or len(value) > limit or any((not isinstance(item,
+    reject_if(
+        not isinstance(value, list) or len(value) > limit or any((not isinstance(item,
         str) or (not allow_empty and (not item.strip() or len(item.strip()) > 120 or '\n' in item or ('\r'
-        in item))) for item in value))):
-        raise UISceneError(f"{name} 不符合输入结构协议。")
+        in item))) for item in value)),
+        UISceneError(f"{name} 不符合输入结构协议。"),
+    )
     return tuple(dict.fromkeys(item.strip()[:120] for item in value if item.strip()))
 
 
 def _parse_audited_keyboard(value: Any, *, qwerty_row_snapper: Callable[[list[Image.Image] | tuple[Image.Image, ...],
     dict[str, Any]], dict[str, list[int]] | None] | None, qwerty_row_frames: list[Image.Image] | tuple[Image.Image,
     ...] | None) -> _AuditedKeyboard:
-    if (not isinstance(value, dict) or not _KEYBOARD_REQUIRED_FIELDS.issubset(value)
-        or set(value) - _KEYBOARD_REQUIRED_FIELDS - _KEYBOARD_OPTIONAL_FIELDS):
-        raise UISceneError("输入结构审计 keyboard 字段不符合协议。")
+    reject_if(
+        not isinstance(value, dict) or not _KEYBOARD_REQUIRED_FIELDS.issubset(value)
+        or set(value) - _KEYBOARD_REQUIRED_FIELDS - _KEYBOARD_OPTIONAL_FIELDS,
+        UISceneError("输入结构审计 keyboard 字段不符合协议。"),
+    )
     keyboard = dict(value)
     visible = keyboard["visible"]
     layout = keyboard["layout"]
     input_mode = keyboard["input_mode"]
     case_mode = keyboard.get("case_mode", "unknown")
-    if not isinstance(visible, bool):
-        raise UISceneError("输入结构审计 keyboard.visible 必须是布尔值。")
-    if layout not in {'qwerty', 'numeric', 'symbol', 'unknown'}:
-        raise UISceneError("输入结构审计 keyboard.layout 无效。")
-    if input_mode not in {'direct_latin', 'chinese_pinyin', 'unknown'}:
-        raise UISceneError("输入结构审计 keyboard.input_mode 无效。")
-    if case_mode not in {'lower', 'upper', 'unknown'}:
-        raise UISceneError("输入结构审计 keyboard.case_mode 无效。")
+    reject_if(not isinstance(visible, bool), UISceneError("输入结构审计 keyboard.visible 必须是布尔值。"))
+    reject_if(layout not in {'qwerty', 'numeric', 'symbol', 'unknown'}, UISceneError("输入结构审计 keyboard.layout 无效。"))
+    reject_if(input_mode not in {'direct_latin', 'chinese_pinyin', 'unknown'}, UISceneError("输入结构审计 keyboard.input_mode 无效。"))
+    reject_if(case_mode not in {'lower', 'upper', 'unknown'}, UISceneError("输入结构审计 keyboard.case_mode 无效。"))
 
     raw_anchors = keyboard.get("qwerty_anchors") if isinstance(keyboard.get("qwerty_anchors"), dict) else None
     snapped_anchors = None
@@ -1518,17 +1509,18 @@ def _collect_audited_input_matches(application_inputs: list[Any], *, active_fiel
     tall_labeled_field = unique_typed_active_field and label_occurrences == 1
     matches: list[dict[str, Any]] = []
     for item in application_inputs:
-        if (not isinstance(item, dict) or not _INPUT_AUDIT_FIELDS.issubset(item)
+        reject_if(
+            not isinstance(item, dict) or not _INPUT_AUDIT_FIELDS.issubset(item)
             or set(item) - _INPUT_AUDIT_FIELDS - {'field_labels'} or (not isinstance(item.get('fully_visible'),
-            bool)) or (not _valid_1000_bounds(item.get('bounds'))) or (not isinstance(item.get('text'), str))):
-            raise UISceneError("应用输入结构字段不符合协议。")
+            bool)) or (not _valid_1000_bounds(item.get('bounds'))) or (not isinstance(item.get('text'), str)),
+            UISceneError("应用输入结构字段不符合协议。"),
+        )
         confidence = _audit_confidence(item["confidence"], "应用输入结构")
         cues = list(_audit_strings(item['visible_editable_cues'], name='visible_editable_cues', limit=4,
             allow_empty=True))
         labels = _audit_strings(item.get('field_labels', []), name='field_labels', limit=6, allow_empty=False)
         caret = item["caret_line_index"]
-        if caret is not None and (isinstance(caret, bool) or not isinstance(caret, int) or (not 0 <= caret <= 30)):
-            raise UISceneError("caret_line_index 必须是0..30整数或 null。")
+        reject_if(caret is not None and (isinstance(caret, bool) or not isinstance(caret, int) or (not 0 <= caret <= 30)), UISceneError("caret_line_index 必须是0..30整数或 null。"))
         if not item['fully_visible'] or confidence < 0.9:
             continue
         text = item["text"]
@@ -1789,8 +1781,7 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
     qwerty_geometry = None
     raw_anchors = keyboard.get("qwerty_anchors")
     if raw_anchors is not None:
-        if not keyboard_visible or keyboard_layout != 'qwerty' or keyboard_bounds is None:
-            raise UISceneError("QWERTY anchors 必须绑定完整可见的 QWERTY 键盘。")
+        reject_if(not keyboard_visible or keyboard_layout != 'qwerty' or keyboard_bounds is None, UISceneError("QWERTY anchors 必须绑定完整可见的 QWERTY 键盘。"))
         qwerty_geometry = _validated_qwerty_keyboard_geometry(snapped_anchors or raw_anchors,
             keyboard_bounds=keyboard_bounds, locally_snapped=snapped_anchors is not None)
     backspace = _validated_keyboard_backspace_key(keyboard.get('backspace_key'), keyboard_bounds=keyboard_bounds)
@@ -1816,8 +1807,7 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
     if (mode_switch is not None and keyboard_input_mode != 'unknown'
         and (mode_switch['current_mode'] != keyboard_input_mode)):
         mode_switch = None
-    if needs_mode_switch and (mode_switch is None or mode_switch['target_mode'] != required_mode):
-        raise UISceneError("模式切换键未绑定下一确定性文字分段所需方向。")
+    reject_if(needs_mode_switch and (mode_switch is None or mode_switch['target_mode'] != required_mode), UISceneError("模式切换键未绑定下一确定性文字分段所需方向。"))
 
     literal_keys = _validated_keyboard_literal_keys(keyboard.get('literal_keys', []), keyboard_bounds=keyboard_bounds)
     targets = set(_input_audit_literal_key_targets(goal.observation_context,
@@ -1856,11 +1846,13 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
             and (keyboard_case_mode != step.required_case_mode) and (case_switch is not None)
             and (case_switch['target_mode'] == step.required_case_mode)):
             exact_case = case_switch
-    if (trusted_input is not None and keyboard_visible and (keyboard_layout == 'qwerty') and (keyboard_input_mode
+    reject_if(
+        trusted_input is not None and keyboard_visible and (keyboard_layout == 'qwerty') and (keyboard_input_mode
         in {'direct_latin', 'chinese_pinyin'}) and goal.has_explicit_text and (not switch_is_goal) and (step
         is not None) and (step.kind in {'direct_latin', 'chinese_pinyin'}) and (exact_case is None)
-        and (qwerty_geometry is None) and (not active_clear_goal)):
-        raise UISceneError("文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。")
+        and (qwerty_geometry is None) and (not active_clear_goal),
+        UISceneError("文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"),
+    )
     return _AuditedInputControls(step=step, candidate=exact_ime_candidate, preedit=exact_ime_preedit,
         qwerty=qwerty_geometry, backspace=backspace, clearable_preedit=clearable_preedit, next_field=next_field_key,
         required_mode=required_mode, switch_is_goal=switch_is_goal, mode=mode_switch, literal=exact_literal,
@@ -1875,17 +1867,13 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
     try:
         goal = _goal_view(goal_context)
         payload = _extract_json_object(raw)
-        if set(payload) != {'protocol_version', 'application_inputs', 'ime_preedit_regions', 'keyboard'}:
-            raise UISceneError("输入结构审计包含协议外字段。")
-        if payload.get('protocol_version') != INPUT_STRUCTURE_AUDIT_VERSION:
-            raise UISceneError("输入结构审计协议版本不匹配。")
+        reject_if(set(payload) != {'protocol_version', 'application_inputs', 'ime_preedit_regions', 'keyboard'}, UISceneError("输入结构审计包含协议外字段。"))
+        reject_if(payload.get('protocol_version') != INPUT_STRUCTURE_AUDIT_VERSION, UISceneError("输入结构审计协议版本不匹配。"))
         application_inputs = payload.get("application_inputs")
         ime_preedit_regions = payload.get("ime_preedit_regions")
         keyboard = payload.get("keyboard")
-        if not isinstance(application_inputs, list) or len(application_inputs) > 4:
-            raise UISceneError("输入结构审计 application_inputs 必须是最多4项的数组。")
-        if not isinstance(ime_preedit_regions, list) or len(ime_preedit_regions) > 4:
-            raise UISceneError("输入结构审计 ime_preedit_regions 必须是最多4项的数组。")
+        reject_if(not isinstance(application_inputs, list) or len(application_inputs) > 4, UISceneError("输入结构审计 application_inputs 必须是最多4项的数组。"))
+        reject_if(not isinstance(ime_preedit_regions, list) or len(ime_preedit_regions) > 4, UISceneError("输入结构审计 ime_preedit_regions 必须是最多4项的数组。"))
         audited_keyboard = _parse_audited_keyboard(keyboard, qwerty_row_snapper=qwerty_row_snapper,
             qwerty_row_frames=qwerty_row_frames)
         keyboard = audited_keyboard.payload
@@ -2029,11 +2017,9 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
 
 
 def _audit_confidence(value: Any, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise UISceneError(f"{field_name} confidence 格式无效。")
+    reject_if(isinstance(value, bool) or not isinstance(value, (int, float)), UISceneError(f"{field_name} confidence 格式无效。"))
     confidence = float(value)
-    if not 0.0 <= confidence <= 1.0:
-        raise UISceneError(f"{field_name} confidence 超出0..1。")
+    reject_if(not 0.0 <= confidence <= 1.0, UISceneError(f"{field_name} confidence 超出0..1。"))
     return confidence
 
 
@@ -2097,22 +2083,21 @@ def _validated_qwerty_keyboard_geometry(value: Any, *, keyboard_bounds: tuple[fl
     locally_snapped: bool=False) -> dict[str, Any]:
     """Mint a locally checked execution profile from current-frame facts."""
 
-    if not isinstance(value, dict):
-        raise UISceneError("QWERTY anchors 必须是对象。")
+    reject_if(not isinstance(value, dict), UISceneError("QWERTY anchors 必须是对象。"))
     expected = {"q", "p", "a", "l", "z", "m", "backspace"}
-    if set(value) != expected:
-        raise UISceneError("QWERTY anchors 必须精确包含 q/p/a/l/z/m/backspace。")
+    reject_if(set(value) != expected, UISceneError("QWERTY anchors 必须精确包含 q/p/a/l/z/m/backspace。"))
     normalized: dict[str, list[int]] = {}
     for key in sorted(expected):
         point = value.get(key)
-        if (not isinstance(point, (list, tuple)) or len(point) != 2 or any((isinstance(part,
-            bool) or not isinstance(part, (int, float)) for part in point))):
-            raise UISceneError(f"QWERTY anchor {key} 格式无效。")
+        reject_if(
+            not isinstance(point, (list, tuple)) or len(point) != 2 or any((isinstance(part,
+            bool) or not isinstance(part, (int, float)) for part in point)),
+            UISceneError(f"QWERTY anchor {key} 格式无效。"),
+        )
         x, y = float(point[0]), float(point[1])
         within_horizontal_bounds = keyboard_bounds[0] - 20 <= x <= keyboard_bounds[2] + 20
         within_vertical_bounds = keyboard_bounds[1] - 20 <= y <= keyboard_bounds[3] + 20
-        if not within_horizontal_bounds or (not locally_snapped and (not within_vertical_bounds)):
-            raise UISceneError(f"QWERTY anchor {key} 不在已审计键盘区域内。")
+        reject_if(not within_horizontal_bounds or (not locally_snapped and (not within_vertical_bounds)), UISceneError(f"QWERTY anchor {key} 不在已审计键盘区域内。"))
         normalized[key] = [round(x), round(y)]
     try:
         qwerty_keyboard_config_from_anchors(normalized)
@@ -2244,22 +2229,24 @@ def _select_keyboard_layout_switch_for_target(layout_switches: list[dict[str, An
 
 def _validated_keyboard_literal_keys(value: Any, *, keyboard_bounds: tuple[float, float, float,
     float] | None) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or len(value) > 8:
-        raise UISceneError("literal_keys 必须是最多8项的数组。")
-    if value and keyboard_bounds is None:
-        raise UISceneError("literal_keys 必须绑定完整可见键盘。")
+    reject_if(not isinstance(value, list) or len(value) > 8, UISceneError("literal_keys 必须是最多8项的数组。"))
+    reject_if(value and keyboard_bounds is None, UISceneError("literal_keys 必须绑定完整可见键盘。"))
     result: list[dict[str, Any]] = []
     for item in value:
-        if (not isinstance(item, dict) or set(item) != {'value', 'label', 'key_kind', 'bounds', 'confidence',
-            'fully_visible'}):
-            raise UISceneError("literal_key 字段不符合协议。")
+        reject_if(
+            not isinstance(item, dict) or set(item) != {'value', 'label', 'key_kind', 'bounds', 'confidence',
+            'fully_visible'},
+            UISceneError("literal_key 字段不符合协议。"),
+        )
         key_value = item.get("value")
         label = item.get("label")
         key_kind = item.get("key_kind")
-        if (not isinstance(key_value, str) or len(key_value) != 1 or (not isinstance(label,
+        reject_if(
+            not isinstance(key_value, str) or len(key_value) != 1 or (not isinstance(label,
             str)) or (key_kind not in {'character', 'space'}) or (not _valid_1000_bounds(item.get('bounds')))
-            or (not isinstance(item.get('fully_visible'), bool))):
-            raise UISceneError("literal_key 内容无效。")
+            or (not isinstance(item.get('fully_visible'), bool)),
+            UISceneError("literal_key 内容无效。"),
+        )
         if key_kind == "character" and (key_value == " " or label != key_value):
             # A schema-valid optional key with a mismatched visible glyph is
             # not executable (for example ASCII "?" claimed as full-width
@@ -2360,16 +2347,16 @@ def _layout_switch_label_matches(label: str, target_layout: str) -> bool:
 
 def _validated_keyboard_layout_switches(value: Any, *, keyboard_bounds: tuple[float, float, float, float] | None,
     current_layout: str) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or len(value) > 4:
-        raise UISceneError("layout_switches 必须是最多4项的数组。")
-    if value and keyboard_bounds is None:
-        raise UISceneError("layout_switches 必须绑定完整可见键盘。")
+    reject_if(not isinstance(value, list) or len(value) > 4, UISceneError("layout_switches 必须是最多4项的数组。"))
+    reject_if(value and keyboard_bounds is None, UISceneError("layout_switches 必须绑定完整可见键盘。"))
     result: list[dict[str, Any]] = []
     layouts = {"qwerty", "numeric", "symbol"}
     for item in value:
-        if (not isinstance(item, dict) or set(item) != {'label', 'bounds', 'confidence', 'current_layout',
-            'target_layout'}):
-            raise UISceneError("layout_switch 字段不符合协议。")
+        reject_if(
+            not isinstance(item, dict) or set(item) != {'label', 'bounds', 'confidence', 'current_layout',
+            'target_layout'},
+            UISceneError("layout_switch 字段不符合协议。"),
+        )
         label = str(item.get("label") or "").strip()
         source = item.get("current_layout")
         target = item.get("target_layout")

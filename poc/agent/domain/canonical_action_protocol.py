@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import hashlib
 import json
 import re
@@ -75,66 +76,49 @@ class GenericStepProposal:
 
     def validate(self, scene: UIScene) -> None:
         scene.validate()
-        if self.status not in {'action', 'blocked'}:
-            raise CanonicalActionProtocolError(f"不支持的单步状态：{self.status}")
+        reject_if(self.status not in {'action', 'blocked'}, CanonicalActionProtocolError(f"不支持的单步状态：{self.status}"))
         if self.status == 'blocked':
-            if self.action is not None:
-                raise CanonicalActionProtocolError("blocked 状态不能携带动作。")
-            if not self.reason.strip():
-                raise CanonicalActionProtocolError("阻塞报告必须说明原因。")
+            reject_if(self.action is not None, CanonicalActionProtocolError("blocked 状态不能携带动作。"))
+            reject_if(not self.reason.strip(), CanonicalActionProtocolError("阻塞报告必须说明原因。"))
             return
-        if self.action is None:
-            raise CanonicalActionProtocolError("action 状态缺少唯一动作。")
+        reject_if(self.action is None, CanonicalActionProtocolError("action 状态缺少唯一动作。"))
 
         kind, params = self.action.action, self.action.params
-        if kind not in CANONICAL_ACTION_KINDS:
-            raise CanonicalActionProtocolError(f"单步动作不在 canonical 动作集合：{kind}")
+        reject_if(kind not in CANONICAL_ACTION_KINDS, CanonicalActionProtocolError(f"单步动作不在 canonical 动作集合：{kind}"))
         element_actions = {'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
             'clear_verified_text', 'double_tap', 'long_press'}
         element = None
         if kind in element_actions:
             element_id = str(params.get("element_id") or "").strip()
-            if not element_id:
-                raise CanonicalActionProtocolError("元素动作必须引用当前场景 element_id。")
+            reject_if(not element_id, CanonicalActionProtocolError("元素动作必须引用当前场景 element_id。"))
             element = scene.get_element(element_id)
 
         if kind == 'input_verified_text':
             text = params.get("text")
-            if not isinstance(text, str) or not text or len(text) > 4000 or ('\r' in text):
-                raise CanonicalActionProtocolError("输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。")
-            if element.role != 'input':
-                raise CanonicalActionProtocolError("输入动作必须绑定 input 元素。")
+            reject_if(not isinstance(text, str) or not text or len(text) > 4000 or ('\r' in text), CanonicalActionProtocolError("输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。"))
+            reject_if(element.role != 'input', CanonicalActionProtocolError("输入动作必须绑定 input 元素。"))
         elif kind == 'clear_verified_text':
             allowed = {'element_id', 'target', 'role', 'label', 'states', 'expected_effect', *_FORMAL_AUTHORITY_PARAMS}
             unexpected = set(params) - allowed
-            if unexpected:
-                raise CanonicalActionProtocolError("清空动作包含协议外参数：" + ", ".join(sorted(unexpected)))
-            if element.role != 'input':
-                raise CanonicalActionProtocolError("清空动作必须绑定 input 元素。")
+            reject_if(unexpected, CanonicalActionProtocolError("清空动作包含协议外参数：" + ", ".join(sorted(unexpected))))
+            reject_if(element.role != 'input', CanonicalActionProtocolError("清空动作必须绑定 input 元素。"))
         elif kind == 'long_press':
             duration_ms = params.get("duration_ms", 800)
-            if (isinstance(duration_ms, bool) or not isinstance(duration_ms, (int,
-                float)) or (not 500 <= float(duration_ms) <= 2000)):
-                raise CanonicalActionProtocolError("长按 duration_ms 必须在500～2000之间。")
+            reject_if(isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)) or (not 500 <= float(duration_ms) <= 2000), CanonicalActionProtocolError("长按 duration_ms 必须在500～2000之间。"))
         elif kind == 'drag':
             source_id = str(params.get("source_element_id") or "").strip()
             destination_id = str(params.get("destination_element_id") or "").strip()
-            if not source_id or not destination_id or source_id == destination_id:
-                raise CanonicalActionProtocolError("拖动必须绑定两个不同的可信元素。")
+            reject_if(not source_id or not destination_id or source_id == destination_id, CanonicalActionProtocolError("拖动必须绑定两个不同的可信元素。"))
             scene.get_element(source_id)
             scene.get_element(destination_id)
         elif kind == 'swipe':
-            if str(params.get('direction') or '').strip() not in {'up', 'down', 'left', 'right'}:
-                raise CanonicalActionProtocolError("滑动动作方向无效。")
+            reject_if(str(params.get('direction') or '').strip() not in {'up', 'down', 'left', 'right'}, CanonicalActionProtocolError("滑动动作方向无效。"))
         elif kind == 'reveal_system_navigation':
             unexpected = set(params) - {"expected_effect"} - _FORMAL_AUTHORITY_PARAMS
-            if unexpected:
-                raise CanonicalActionProtocolError("系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。")
+            reject_if(unexpected, CanonicalActionProtocolError("系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"))
             system_ui = scene.system_ui
-            if system_ui.immersive_or_fullscreen is not True or system_ui.navigation_bar_visible is not False:
-                raise CanonicalActionProtocolError("系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。")
-            if params.get('expected_effect') != {'system_ui': {'navigation_bar_visible': True}}:
-                raise CanonicalActionProtocolError("系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。")
+            reject_if(system_ui.immersive_or_fullscreen is not True or system_ui.navigation_bar_visible is not False, CanonicalActionProtocolError("系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"))
+            reject_if(params.get('expected_effect') != {'system_ui': {'navigation_bar_visible': True}}, CanonicalActionProtocolError("系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。"))
 
     def to_dict(self) -> dict[str, Any]:
         return _record_wire(self, "proposal")
@@ -146,8 +130,7 @@ def reject_raw_control_data(value: Any) -> None:
     forbidden = {'actions', 'steps', 'plan', 'coordinate', 'coordinates', 'tap_point', 'x', 'y', 'shell', 'command'}
     if isinstance(value, dict):
         for (key, item) in value.items():
-            if str(key).strip().lower() in forbidden:
-                raise CanonicalActionProtocolError(f'单步动作包含禁止字段：{key}')
+            reject_if(str(key).strip().lower() in forbidden, CanonicalActionProtocolError(f'单步动作包含禁止字段：{key}'))
             reject_raw_control_data(item)
     elif isinstance(value, (list, tuple)):
         for item in value:
@@ -185,16 +168,13 @@ def _element_ref(element_id: str) -> str:
 
 
 def _validate_id(value: str, field_name: str) -> None:
-    if not isinstance(value, str) or not _ID_PATTERN.fullmatch(value):
-        raise CanonicalActionProtocolError(f"{field_name} 无效：{value!r}")
+    reject_if(not isinstance(value, str) or not _ID_PATTERN.fullmatch(value), CanonicalActionProtocolError(f"{field_name} 无效：{value!r}"))
 
 
 def _required_text(value: Any, field_name: str, *, max_length: int=300) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise CanonicalActionProtocolError(f"{field_name} 必须是非空字符串。")
+    reject_if(not isinstance(value, str) or not value.strip(), CanonicalActionProtocolError(f"{field_name} 必须是非空字符串。"))
     text = value.strip()
-    if len(text) > max_length:
-        raise CanonicalActionProtocolError(f"{field_name} 超过长度限制。")
+    reject_if(len(text) > max_length, CanonicalActionProtocolError(f"{field_name} 超过长度限制。"))
     return text
 
 
@@ -228,16 +208,11 @@ class VisualClaim:
         _validate_id(self.claim_id, "claim.claim_id")
         _validate_id(self.subject_ref, "claim.subject_ref")
         _required_text(self.predicate, "claim.predicate", max_length=100)
-        if (self.predicate not in CLAIM_PREDICATES and (not (self.predicate.startswith('element.state.')
-            and self.predicate.removeprefix('element.state.') in _SAFE_STATE_KEYS))):
-            raise CanonicalActionProtocolError(f'claim.predicate 无效：{self.predicate}')
+        reject_if(self.predicate not in CLAIM_PREDICATES and (not (self.predicate.startswith('element.state.') and self.predicate.removeprefix('element.state.') in _SAFE_STATE_KEYS)), CanonicalActionProtocolError(f'claim.predicate 无效：{self.predicate}'))
         _json_value(self.value, "claim.value")
-        if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
-            raise CanonicalActionProtocolError("claim.confidence 格式无效。")
-        if not 0.0 <= float(self.confidence) <= 1.0:
-            raise CanonicalActionProtocolError("claim.confidence 超出范围。")
-        if not re.fullmatch('[0-9a-f]{64}', self.source_digest):
-            raise CanonicalActionProtocolError("claim.source_digest 必须是 SHA-256。")
+        reject_if(isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)), CanonicalActionProtocolError("claim.confidence 格式无效。"))
+        reject_if(not 0.0 <= float(self.confidence) <= 1.0, CanonicalActionProtocolError("claim.confidence 超出范围。"))
+        reject_if(not re.fullmatch('[0-9a-f]{64}', self.source_digest), CanonicalActionProtocolError("claim.source_digest 必须是 SHA-256。"))
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -258,12 +233,9 @@ class VisualRelation:
         _validate_id(self.relation_id, "relation.relation_id")
         _validate_id(self.subject_ref, "relation.subject_ref")
         _validate_id(self.object_ref, "relation.object_ref")
-        if self.relation not in RELATION_KINDS:
-            raise CanonicalActionProtocolError(f"relation.relation 无效：{self.relation}")
-        if not self.support_claim_ids:
-            raise CanonicalActionProtocolError("relation.support_claim_ids 不能为空。")
-        if len(set(self.support_claim_ids)) != len(self.support_claim_ids):
-            raise CanonicalActionProtocolError("relation.support_claim_ids 重复。")
+        reject_if(self.relation not in RELATION_KINDS, CanonicalActionProtocolError(f"relation.relation 无效：{self.relation}"))
+        reject_if(not self.support_claim_ids, CanonicalActionProtocolError("relation.support_claim_ids 不能为空。"))
+        reject_if(len(set(self.support_claim_ids)) != len(self.support_claim_ids), CanonicalActionProtocolError("relation.support_claim_ids 重复。"))
         for value in self.support_claim_ids:
             _validate_id(value, "relation.support_claim_ids")
 
@@ -282,10 +254,8 @@ class Affordance:
     def validate(self) -> None:
         _validate_id(self.affordance_id, "affordance.affordance_id")
         _validate_id(self.subject_ref, "affordance.subject_ref")
-        if self.action_kind not in CANONICAL_ACTION_KINDS:
-            raise CanonicalActionProtocolError(f'affordance.action_kind 无效：{self.action_kind}')
-        if not self.support_claim_ids:
-            raise CanonicalActionProtocolError("affordance.support_claim_ids 不能为空。")
+        reject_if(self.action_kind not in CANONICAL_ACTION_KINDS, CanonicalActionProtocolError(f'affordance.action_kind 无效：{self.action_kind}'))
+        reject_if(not self.support_claim_ids, CanonicalActionProtocolError("affordance.support_claim_ids 不能为空。"))
         for value in self.support_claim_ids:
             _validate_id(value, "affordance.support_claim_ids")
 
@@ -304,10 +274,8 @@ class StateExpectation:
     def validate(self) -> None:
         _validate_id(self.subject_ref, "expectation.subject_ref")
         _required_text(self.predicate, "expectation.predicate", max_length=100)
-        if self.predicate not in EXPECTATION_PREDICATES:
-            raise CanonicalActionProtocolError(f'expectation.predicate 无效：{self.predicate}')
-        if self.operator not in EXPECTATION_OPERATORS:
-            raise CanonicalActionProtocolError(f'expectation.operator 无效：{self.operator}')
+        reject_if(self.predicate not in EXPECTATION_PREDICATES, CanonicalActionProtocolError(f'expectation.predicate 无效：{self.predicate}'))
+        reject_if(self.operator not in EXPECTATION_OPERATORS, CanonicalActionProtocolError(f'expectation.operator 无效：{self.operator}'))
         if self.operator in {'equals', 'not_equals'}:
             _json_value(self.value, "expectation.value")
         elif self.value is not None:
@@ -328,18 +296,14 @@ class TypedStateTransition:
 
     def validate(self) -> None:
         _validate_id(self.transition_id, "transition.transition_id")
-        if not self.precondition_claim_ids:
-            raise CanonicalActionProtocolError("transition.precondition_claim_ids 不能为空。")
+        reject_if(not self.precondition_claim_ids, CanonicalActionProtocolError("transition.precondition_claim_ids 不能为空。"))
         for value in self.precondition_claim_ids:
             _validate_id(value, "transition.precondition_claim_ids")
-        if not self.expectations:
-            raise CanonicalActionProtocolError("transition.expectations 不能为空。")
+        reject_if(not self.expectations, CanonicalActionProtocolError("transition.expectations 不能为空。"))
         for expectation in self.expectations:
             expectation.validate()
-            if expectation.predicate in {'scene.changed', 'observation.changed'} and (not self.exploratory):
-                raise CanonicalActionProtocolError('scene/observation changed 只能用于 exploratory transition。')
-        if not isinstance(self.exploratory, bool):
-            raise CanonicalActionProtocolError("transition.exploratory 必须是布尔值。")
+            reject_if(expectation.predicate in {'scene.changed', 'observation.changed'} and (not self.exploratory), CanonicalActionProtocolError('scene/observation changed 只能用于 exploratory transition。'))
+        reject_if(not isinstance(self.exploratory, bool), CanonicalActionProtocolError("transition.exploratory 必须是布尔值。"))
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -359,19 +323,15 @@ class CanonicalActionCandidate:
 
     def validate(self) -> None:
         _validate_id(self.candidate_id, "candidate.candidate_id")
-        if self.action_kind not in CANONICAL_ACTION_KINDS:
-            raise CanonicalActionProtocolError(f"candidate.action_kind 无效：{self.action_kind}")
-        if not self.subject_refs or not self.affordance_ids:
-            raise CanonicalActionProtocolError("candidate 缺少 subject/affordance 绑定。")
+        reject_if(self.action_kind not in CANONICAL_ACTION_KINDS, CanonicalActionProtocolError(f"candidate.action_kind 无效：{self.action_kind}"))
+        reject_if(not self.subject_refs or not self.affordance_ids, CanonicalActionProtocolError("candidate 缺少 subject/affordance 绑定。"))
         for (field_name, values) in (('subject_refs', self.subject_refs), ('affordance_ids', self.affordance_ids),
             ('relation_ids', self.relation_ids)):
-            if len(set(values)) != len(values):
-                raise CanonicalActionProtocolError(f"candidate.{field_name} 重复。")
+            reject_if(len(set(values)) != len(values), CanonicalActionProtocolError(f"candidate.{field_name} 重复。"))
             for value in values:
                 _validate_id(value, f"candidate.{field_name}")
         _json_value(self.parameters, "candidate.parameters")
-        if any((key in self.parameters for key in {'bounds', 'point', 'x', 'y'})):
-            raise CanonicalActionProtocolError("canonical candidate 不得携带坐标。")
+        reject_if(any((key in self.parameters for key in {'bounds', 'point', 'x', 'y'})), CanonicalActionProtocolError("canonical candidate 不得携带坐标。"))
         if self.effect_ref:
             _validate_id(self.effect_ref, "candidate.effect_ref")
         self.transition.validate()
@@ -397,21 +357,15 @@ class CanonicalActionCatalog:
     protocol_version: str = CANONICAL_ACTION_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != CANONICAL_ACTION_PROTOCOL:
-            raise CanonicalActionProtocolError("canonical action protocol_version 无效。")
+        reject_if(self.protocol_version != CANONICAL_ACTION_PROTOCOL, CanonicalActionProtocolError("canonical action protocol_version 无效。"))
         _required_text(self.task_id, "report.task_id", max_length=128)
         _required_text(self.device_id, "report.device_id", max_length=128)
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
-            raise CanonicalActionProtocolError("report.revision 必须是正整数。")
+        reject_if(isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1, CanonicalActionProtocolError("report.revision 必须是正整数。"))
         for (field_name, value) in (('scene_digest', self.scene_digest), ('semantic_digest', self.semantic_digest)):
-            if not re.fullmatch('[0-9a-f]{64}', value):
-                raise CanonicalActionProtocolError(f"report.{field_name} 必须是 SHA-256。")
-        if self.status not in {'ready', 'blocked'}:
-            raise CanonicalActionProtocolError("report.status 无效。")
-        if self.status == 'ready' and (not MIN_READY_CANDIDATES <= len(self.candidates) <= MAX_READY_CANDIDATES):
-            raise CanonicalActionProtocolError(f'ready report 必须包含{MIN_READY_CANDIDATES}至{MAX_READY_CANDIDATES}个候选。')
-        if self.status == 'blocked' and len(self.candidates) >= MIN_READY_CANDIDATES:
-            raise CanonicalActionProtocolError("候选已足够时不得标记 blocked。")
+            reject_if(not re.fullmatch('[0-9a-f]{64}', value), CanonicalActionProtocolError(f"report.{field_name} 必须是 SHA-256。"))
+        reject_if(self.status not in {'ready', 'blocked'}, CanonicalActionProtocolError("report.status 无效。"))
+        reject_if(self.status == 'ready' and (not MIN_READY_CANDIDATES <= len(self.candidates) <= MAX_READY_CANDIDATES), CanonicalActionProtocolError(f'ready report 必须包含{MIN_READY_CANDIDATES}至{MAX_READY_CANDIDATES}个候选。'))
+        reject_if(self.status == 'blocked' and len(self.candidates) >= MIN_READY_CANDIDATES, CanonicalActionProtocolError("候选已足够时不得标记 blocked。"))
 
         collections = (('claim', self.claims), ('relation', self.relations), ('affordance', self.affordances),
             ('candidate', self.candidates))
@@ -421,8 +375,7 @@ class CanonicalActionCatalog:
             for item in items:
                 item.validate()
                 item_id = str(getattr(item, key))
-                if item_id in seen:
-                    raise CanonicalActionProtocolError(f"report.{field_name} ID 重复。")
+                reject_if(item_id in seen, CanonicalActionProtocolError(f"report.{field_name} ID 重复。"))
                 seen.add(item_id)
 
         claim_ids = {item.claim_id for item in self.claims}
@@ -432,34 +385,21 @@ class CanonicalActionCatalog:
         affordance_ids = {item.affordance_id for item in self.affordances}
         affordance_by_id = {item.affordance_id: item for item in self.affordances}
         for relation in self.relations:
-            if relation.subject_ref not in claimed_subjects:
-                raise CanonicalActionProtocolError("relation.subject_ref 没有事实主体。")
-            if not set(relation.support_claim_ids).issubset(claim_ids):
-                raise CanonicalActionProtocolError("relation 引用未知 claim。")
+            reject_if(relation.subject_ref not in claimed_subjects, CanonicalActionProtocolError("relation.subject_ref 没有事实主体。"))
+            reject_if(not set(relation.support_claim_ids).issubset(claim_ids), CanonicalActionProtocolError("relation 引用未知 claim。"))
         for affordance in self.affordances:
-            if affordance.subject_ref not in claimed_subjects:
-                raise CanonicalActionProtocolError("affordance.subject_ref 没有事实主体。")
-            if not set(affordance.support_claim_ids).issubset(claim_ids):
-                raise CanonicalActionProtocolError("affordance 引用未知 claim。")
+            reject_if(affordance.subject_ref not in claimed_subjects, CanonicalActionProtocolError("affordance.subject_ref 没有事实主体。"))
+            reject_if(not set(affordance.support_claim_ids).issubset(claim_ids), CanonicalActionProtocolError("affordance 引用未知 claim。"))
         for candidate in self.candidates:
-            if not set(candidate.subject_refs).issubset(claimed_subjects):
-                raise CanonicalActionProtocolError("candidate.subject_refs 没有事实主体。")
-            if not set(candidate.relation_ids).issubset(relation_ids):
-                raise CanonicalActionProtocolError("candidate 引用未知 relation。")
-            if not set(candidate.affordance_ids).issubset(affordance_ids):
-                raise CanonicalActionProtocolError("candidate 引用未知 affordance。")
+            reject_if(not set(candidate.subject_refs).issubset(claimed_subjects), CanonicalActionProtocolError("candidate.subject_refs 没有事实主体。"))
+            reject_if(not set(candidate.relation_ids).issubset(relation_ids), CanonicalActionProtocolError("candidate 引用未知 relation。"))
+            reject_if(not set(candidate.affordance_ids).issubset(affordance_ids), CanonicalActionProtocolError("candidate 引用未知 affordance。"))
             bound_affordances = [affordance_by_id[value] for value in candidate.affordance_ids]
-            if (any((item.action_kind != candidate.action_kind or item.subject_ref not
-                in candidate.subject_refs for item in bound_affordances))):
-                raise CanonicalActionProtocolError("candidate 与 affordance 绑定不一致。")
-            if not set(candidate.transition.precondition_claim_ids).issubset(claim_ids):
-                raise CanonicalActionProtocolError("transition 引用未知 claim。")
+            reject_if(any((item.action_kind != candidate.action_kind or item.subject_ref not in candidate.subject_refs for item in bound_affordances)), CanonicalActionProtocolError("candidate 与 affordance 绑定不一致。"))
+            reject_if(not set(candidate.transition.precondition_claim_ids).issubset(claim_ids), CanonicalActionProtocolError("transition 引用未知 claim。"))
             candidate_next_field_subjects = {relation_by_id[value].object_ref for value
                 in candidate.relation_ids if relation_by_id[value].relation == 'binds_next_input_field'}
-            if (any((item.subject_ref not in claimed_subjects and item.subject_ref != candidate.effect_ref
-                and (item.subject_ref not in candidate_next_field_subjects) for item
-                in candidate.transition.expectations))):
-                raise CanonicalActionProtocolError("transition expectation 没有事实主体。")
+            reject_if(any((item.subject_ref not in claimed_subjects and item.subject_ref != candidate.effect_ref and (item.subject_ref not in candidate_next_field_subjects) for item in candidate.transition.expectations)), CanonicalActionProtocolError("transition expectation 没有事实主体。"))
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -658,8 +598,7 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
     scene.validate()
     semantic_ir.validate()
     active_subgoals = tuple((item for item in semantic_ir.subgoals if item.status == 'active'))
-    if len(active_subgoals) != 1:
-        raise CanonicalActionProtocolError('canonical action catalog 要求且只允许一个 active subgoal。')
+    reject_if(len(active_subgoals) != 1, CanonicalActionProtocolError('canonical action catalog 要求且只允许一个 active subgoal。'))
     active_subgoal = active_subgoals[0]
     constraints_by_id = {item.constraint_id: item for item in semantic_ir.constraints}
     active_required_action_constraints = tuple((constraints_by_id[ref] for ref in active_subgoal.constraint_refs if ref
@@ -698,8 +637,7 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
         in active_text for token in ('input', 'text field', '输入框', '文本框', '编辑框'))))
     available = frozenset(str(value) for value in available_action_kinds)
     unknown = available - CANONICAL_ACTION_KINDS
-    if unknown:
-        raise CanonicalActionProtocolError('available_action_kinds 含未知动作：' + ', '.join(sorted(unknown)))
+    reject_if(unknown, CanonicalActionProtocolError('available_action_kinds 含未知动作：' + ', '.join(sorted(unknown))))
 
     surface_ref = "surface_current"
     source = _scene_source(scene)
@@ -1255,8 +1193,7 @@ def canonical_candidate_expected_result(candidate: CanonicalActionCandidate, sce
         element_id = str(candidate.parameters.get("element_id") or "").strip()
         if element_id:
             matches = tuple((element for element in scene.elements if element.element_id == element_id))
-            if len(matches) != 1:
-                raise CanonicalActionProtocolError('元素绑定 swipe 引用了不存在或不唯一的当前元素。')
+            reject_if(len(matches) != 1, CanonicalActionProtocolError('元素绑定 swipe 引用了不存在或不唯一的当前元素。'))
             element = matches[0]
             return {'content_changed': True, 'element_absent': {'element_id': element.element_id,
                 'meaning': element.meaning, 'role': element.role, 'label': element.label}}
@@ -1267,8 +1204,7 @@ def canonical_candidate_expected_result(candidate: CanonicalActionCandidate, sce
         'element.state.') and item.operator == 'equals' and (item.subject_ref in element_by_ref)]
     if state_expectations:
         subjects = {item.subject_ref for item in state_expectations}
-        if len(subjects) != 1:
-            raise CanonicalActionProtocolError('canonical candidate 包含多个元素的状态结果，无法形成唯一验证目标。')
+        reject_if(len(subjects) != 1, CanonicalActionProtocolError('canonical candidate 包含多个元素的状态结果，无法形成唯一验证目标。'))
         subject_ref = next(iter(subjects))
         element = element_by_ref[subject_ref]
         states = {item.predicate.removeprefix('element.state.'): item.value for item in state_expectations}

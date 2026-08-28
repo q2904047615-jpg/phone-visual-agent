@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import json
 import time
 from collections.abc import Mapping
@@ -61,8 +62,7 @@ class VisualTargetRegion:
 
     def validate(self, observation: trusted_observation_domain.TrustedObservation, action: SemanticAction) -> None:
         expected = _canonical_target_region(action, observation)
-        if self != expected:
-            raise GenericStepPlanningError("目标区域没有逐项复用 canonical 候选。")
+        reject_if(self != expected, GenericStepPlanningError("目标区域没有逐项复用 canonical 候选。"))
 
     def to_dict(self) -> dict[str, Any]:
         return {'kind': self.kind, 'element_id': self.element_id or None, 'bounds': list(self.bounds),
@@ -88,31 +88,20 @@ class QwenVisualDecision:
     protocol_version: str = QWEN_VISUAL_DECISION_PROTOCOL_VERSION
 
     def validate(self, context: qwen_task_context_domain.QwenTaskContext) -> None:
-        if ((self.task_id, self.device_id, self.revision, self.observation_id, self.fingerprint) != (context.task_id,
-            context.device_id, context.revision, self.trusted_observation.observation_id,
-            self.trusted_observation.fingerprint)):
-            raise GenericStepPlanningError('task/device/revision/observation/fingerprint 已过期或不匹配。')
+        reject_if((self.task_id, self.device_id, self.revision, self.observation_id, self.fingerprint) != (context.task_id, context.device_id, context.revision, self.trusted_observation.observation_id, self.trusted_observation.fingerprint), GenericStepPlanningError('task/device/revision/observation/fingerprint 已过期或不匹配。'))
         self.proposal.validate(self.trusted_observation.scene)
-        if self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION:
-            raise GenericStepPlanningError("Qwen视觉决策协议版本无效。")
-        if not 0.0 <= float(self.confidence) <= 1.0:
-            raise GenericStepPlanningError("Qwen视觉决策置信度必须在0到1之间。")
-        if not isinstance(self.expected_result, dict):
-            raise GenericStepPlanningError("expected_result 必须是JSON对象。")
+        reject_if(self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION, GenericStepPlanningError("Qwen视觉决策协议版本无效。"))
+        reject_if(not 0.0 <= float(self.confidence) <= 1.0, GenericStepPlanningError("Qwen视觉决策置信度必须在0到1之间。"))
+        reject_if(not isinstance(self.expected_result, dict), GenericStepPlanningError("expected_result 必须是JSON对象。"))
 
         action = self.proposal.action
         if self.proposal.status == 'action':
-            if action is None or self.target_region is None:
-                raise GenericStepPlanningError("唯一下一动作缺少可信目标区域。")
-            if not self.expected_result:
-                raise GenericStepPlanningError("唯一下一动作缺少可验证预期结果。")
-            if not context.effect_action_allowed and context.current_execution_class == 'effect':
-                raise GenericStepPlanningError("风险确认门未满足，禁止产生外部状态动作。")
+            reject_if(action is None or self.target_region is None, GenericStepPlanningError("唯一下一动作缺少可信目标区域。"))
+            reject_if(not self.expected_result, GenericStepPlanningError("唯一下一动作缺少可验证预期结果。"))
+            reject_if(not context.effect_action_allowed and context.current_execution_class == 'effect', GenericStepPlanningError("风险确认门未满足，禁止产生外部状态动作。"))
             self.target_region.validate(self.trusted_observation, action)
-            if dict(action.params.get('expected_effect') or {}) != self.expected_result:
-                raise GenericStepPlanningError("动作 expected_effect 与顶层预期不一致。")
-            if float(self.confidence) < MIN_DECISION_CONFIDENCE:
-                raise GenericStepPlanningError("动作置信度不足，必须 blocked。")
+            reject_if(dict(action.params.get('expected_effect') or {}) != self.expected_result, GenericStepPlanningError("动作 expected_effect 与顶层预期不一致。"))
+            reject_if(float(self.confidence) < MIN_DECISION_CONFIDENCE, GenericStepPlanningError("动作置信度不足，必须 blocked。"))
         elif self.target_region is not None or self.expected_result:
             raise GenericStepPlanningError("blocked 不能携带动作目标区域。")
 
@@ -163,8 +152,7 @@ class QwenVisualDecisionObserver:
         # Confirmation-time recapture and post-action verification use their
         # own stricter full-window stability checks.
         self.trusted_observation_frame_validator(trusted_observation, frames, allow_leading_outlier=True)
-        if context.device_id != trusted_observation.device_id:
-            raise VisionAgentError("任务 device_id 与可信观察不一致。")
+        reject_if(context.device_id != trusted_observation.device_id, VisionAgentError("任务 device_id 与可信观察不一致。"))
         self._metrics["decision_count"] += 1
         canonical_choices = _selection_choices(context, trusted_observation, available_actions)
         canonical_action_kinds = sorted({str(item['action']) for item in canonical_choices})
@@ -225,8 +213,7 @@ def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
     """Build generic action choices from the trusted scene, never app steps."""
 
     choices: list[dict[str, Any]] = []
-    if context.semantic_ir is None:
-        raise VisionAgentError("typed v4 视觉选择缺少 canonical TaskSemanticIR。")
+    reject_if(context.semantic_ir is None, VisionAgentError("typed v4 视觉选择缺少 canonical TaskSemanticIR。"))
     try:
         from agent.domain.canonical_action_protocol import (
             canonical_candidate_expected_result,
@@ -316,19 +303,14 @@ def _hydrate_canonical_selection(payload: Mapping[str, Any], *, context: qwen_ta
     ...]) -> QwenVisualDecision:
     """Hydrate the already-selected immutable canonical candidate."""
 
-    if set(payload) != {'status', 'choice_id', 'confidence', 'reason'}:
-        raise VisionAgentError("本地 canonical 选择结构字段无效。")
-    if payload.get('status') != 'action':
-        raise VisionAgentError("本地 canonical 选择结果必须是 action。")
+    reject_if(set(payload) != {'status', 'choice_id', 'confidence', 'reason'}, VisionAgentError("本地 canonical 选择结构字段无效。"))
+    reject_if(payload.get('status') != 'action', VisionAgentError("本地 canonical 选择结果必须是 action。"))
     matches = [item for item in choices if item.get('choice_id') == payload.get('choice_id')]
-    if len(matches) != 1:
-        raise VisionAgentError("本地选择引用了不存在或不唯一的 choice_id。")
+    reject_if(len(matches) != 1, VisionAgentError("本地选择引用了不存在或不唯一的 choice_id。"))
     choice = matches[0]
     kind = str(choice.get("action") or "").strip()
-    if kind not in CANONICAL_ACTION_KINDS:
-        raise VisionAgentError("canonical candidate 包含未知动作。")
-    if not isinstance(choice.get('expected_result'), Mapping) or not choice['expected_result']:
-        raise VisionAgentError("canonical candidate 缺少可验证 expected_result。")
+    reject_if(kind not in CANONICAL_ACTION_KINDS, VisionAgentError("canonical candidate 包含未知动作。"))
+    reject_if(not isinstance(choice.get('expected_result'), Mapping) or not choice['expected_result'], VisionAgentError("canonical candidate 缺少可验证 expected_result。"))
     expected_result = dict(choice["expected_result"])
     params = {key: value for key, value in choice.items() if key not in {'choice_id', 'action', 'expected_result',
         'selection_context'}}
@@ -349,8 +331,7 @@ def _hydrate_canonical_selection(payload: Mapping[str, Any], *, context: qwen_ta
     params["expected_effect"] = expected_result
     action = SemanticAction(node_id=f'qwen_visual_revision_{context.revision}', action=kind, params=params)
     raw_confidence = payload.get("confidence")
-    if isinstance(raw_confidence, bool) or not isinstance(raw_confidence, (int, float)):
-        raise VisionAgentError("本地 canonical 选择 confidence 无效。")
+    reject_if(isinstance(raw_confidence, bool) or not isinstance(raw_confidence, (int, float)), VisionAgentError("本地 canonical 选择 confidence 无效。"))
     confidence = min(float(raw_confidence), float(observation.scene.confidence),
         *(float(observation.get_candidate(item).confidence) for item in bound_ids))
     reason = str(payload.get("reason") or "").strip()[:500]
@@ -397,13 +378,10 @@ def _normalize_available_action_kinds(value: Iterable[str] | None) -> frozenset[
         normalized = frozenset(str(item or "").strip() for item in value)
     except TypeError as exc:
         raise VisionAgentError("设备动作能力必须是可迭代字符串集合。") from exc
-    if '' in normalized:
-        raise VisionAgentError("设备动作能力不能包含空值。")
+    reject_if('' in normalized, VisionAgentError("设备动作能力不能包含空值。"))
     unexpected = normalized - QWEN_PROTOCOL_ACTIONS
-    if unexpected:
-        raise VisionAgentError('设备动作能力包含协议外动作：' + ', '.join(sorted(unexpected)))
-    if not normalized:
-        raise VisionAgentError("设备没有任何可供本地选择的 canonical 动作。")
+    reject_if(unexpected, VisionAgentError('设备动作能力包含协议外动作：' + ', '.join(sorted(unexpected))))
+    reject_if(not normalized, VisionAgentError("设备没有任何可供本地选择的 canonical 动作。"))
     return normalized
 
 

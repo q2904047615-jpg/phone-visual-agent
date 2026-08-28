@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 from contextlib import contextmanager
 import hashlib
 from pathlib import Path
@@ -32,8 +33,7 @@ class DeviceTaskRegistry:
     @staticmethod
     def _id(value: str, field_name: str) -> str:
         result = str(value or "").strip()
-        if not result:
-            raise DeviceTaskRegistryError(f"{field_name} 不能为空。")
+        reject_if(not result, DeviceTaskRegistryError(f"{field_name} 不能为空。"))
         return result
 
     def reserve(self, device_id: str, session_id: str) -> None:
@@ -41,8 +41,7 @@ class DeviceTaskRegistry:
         session = self._id(session_id, "session_id")
         with self._guard:
             active = self._active.get(device)
-            if active is not None and active != session:
-                raise DeviceTaskRegistryError(f'设备 {device} 已有活动任务：{active}。')
+            reject_if(active is not None and active != session, DeviceTaskRegistryError(f'设备 {device} 已有活动任务：{active}。'))
             lease_path = self._lease_path(device)
             if lease_path is not None and device not in self._leases:
                 lease = InterProcessLease(lease_path, owner_id=session, metadata={'device_id': device,

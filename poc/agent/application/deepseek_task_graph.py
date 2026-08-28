@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.domain.validation import reject_if
 import json
 import uuid
 from dataclasses import replace
@@ -71,8 +72,7 @@ class DeepSeekTaskGraphPlanner:
         # line feed is an authorized input character that must survive into
         # the typed graph and semantic source spans unchanged.
         text = str(raw_goal or "").strip()
-        if not text:
-            raise TaskGraphError("用户目标不能为空。")
+        reject_if(not text, TaskGraphError("用户目标不能为空。"))
         _validate_device_id(device_id)
         resolved_task_id = task_id or uuid.uuid4().hex
         _validate_task_id(resolved_task_id)
@@ -94,17 +94,14 @@ class DeepSeekTaskGraphPlanner:
         graph.validate()
         graph = self._apply_formal_semantic_authority(graph)
         graph.validate()
-        if (graph.status == 'completed' or any((item.status == 'completed' for item in graph.subgoals))
-            or any((item.satisfied for item in graph.completion_conditions))):
-            raise TaskGraphError("初始规划没有观察证据，不能宣称目标或子目标已完成。")
+        reject_if(graph.status == 'completed' or any((item.status == 'completed' for item in graph.subgoals)) or any((item.satisfied for item in graph.completion_conditions)), TaskGraphError("初始规划没有观察证据，不能宣称目标或子目标已完成。"))
         return graph
 
     def replan(self, graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str,
         reason: str) -> DynamicTaskGraph:
         graph.validate()
         observation.validate()
-        if trigger not in REPLAN_TRIGGERS:
-            raise TaskGraphError(f"不支持的重规划触发原因：{trigger}")
+        reject_if(trigger not in REPLAN_TRIGGERS, TaskGraphError(f"不支持的重规划触发原因：{trigger}"))
         _require_text(reason, "replan.reason")
         self._reset_semantic_authority()
         self._require_provider()
@@ -176,24 +173,17 @@ class DeepSeekTaskGraphPlanner:
         observation: ObservedState, *, trigger: str) -> None:
         """Apply every safety and evidence check to one replan candidate."""
 
-        if candidate.revision != graph.revision + 1:
-            raise TaskGraphError('重规划 revision 必须严格等于上一 revision + 1。')
+        reject_if(candidate.revision != graph.revision + 1, TaskGraphError('重规划 revision 必须严格等于上一 revision + 1。'))
         transition = observation.verified_action_transition
         if trigger in {'action_result_matched', 'action_result_mismatch'}:
-            if transition is None:
-                raise TaskGraphError("动作结果重规划缺少本地 verified action transition。")
+            reject_if(transition is None, TaskGraphError("动作结果重规划缺少本地 verified action transition。"))
             expected_outcome = 'matched' if trigger == 'action_result_matched' else 'mismatched'
-            if transition.outcome != expected_outcome:
-                raise TaskGraphError("重规划触发与本地动作转换回执 outcome 不一致。")
+            reject_if(transition.outcome != expected_outcome, TaskGraphError("重规划触发与本地动作转换回执 outcome 不一致。"))
             previous_current = graph.active_subgoal()
-            if (transition.task_id != graph.task_id or transition.device_id != graph.device_id
-                or transition.prior_revision != graph.revision or (transition.subgoal_id != graph.active_subgoal_id)
-                or (transition.after_observation_id != observation.scene_id) or (previous_current is None)):
-                raise TaskGraphError("动作转换回执未严格绑定上一任务图及当前观察。")
+            reject_if(transition.task_id != graph.task_id or transition.device_id != graph.device_id or transition.prior_revision != graph.revision or (transition.subgoal_id != graph.active_subgoal_id) or (transition.after_observation_id != observation.scene_id) or (previous_current is None), TaskGraphError("动作转换回执未严格绑定上一任务图及当前观察。"))
             consumed_receipts = {item.consumed_action_transition_receipt_id for item
                 in graph.replan_history if item.consumed_action_transition_receipt_id}
-            if transition.receipt_id in consumed_receipts:
-                raise TaskGraphError("动作转换回执已经消费，禁止跨 revision 重放。")
+            reject_if(transition.receipt_id in consumed_receipts, TaskGraphError("动作转换回执已经消费，禁止跨 revision 重放。"))
         elif trigger == 'observation_changed' and transition is not None:
             raise TaskGraphError("纯观察变化不得携带动作执行回执。")
 
@@ -202,13 +192,8 @@ class DeepSeekTaskGraphPlanner:
         candidate.validate()
         previous_current = graph.active_subgoal()
         candidate_current = candidate.active_subgoal()
-        if (trigger == 'action_result_mismatch' and previous_current is not None and (next((item.status for item
-            in candidate.subgoals if item.subgoal_id == previous_current.subgoal_id), None) == 'completed')):
-            raise TaskGraphError('动作结果不匹配时不能完成回执绑定的上一活动子目标。')
-        if (trigger == 'subgoal_completed' and previous_current is not None
-            and (previous_current.external_impact == 'read_only') and (candidate_current is not None)
-            and (candidate_current.external_impact == 'read_only')):
-            raise TaskGraphError('read_only 完成复核不能继续保留 read_only 活动子目标；当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。')
+        reject_if(trigger == 'action_result_mismatch' and previous_current is not None and (next((item.status for item in candidate.subgoals if item.subgoal_id == previous_current.subgoal_id), None) == 'completed'), TaskGraphError('动作结果不匹配时不能完成回执绑定的上一活动子目标。'))
+        reject_if(trigger == 'subgoal_completed' and previous_current is not None and (previous_current.external_impact == 'read_only') and (candidate_current is not None) and (candidate_current.external_impact == 'read_only'), TaskGraphError('read_only 完成复核不能继续保留 read_only 活动子目标；当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。'))
         task_graph_domain._validate_revision(graph, candidate, observation)
 
     def _request_graph(self, prompt: str, *, task_id: str, device_id: str, revision: int, raw_user_goal: str,
@@ -233,8 +218,7 @@ class DeepSeekTaskGraphPlanner:
         return graph
 
     def _require_provider(self) -> None:
-        if not self.provider.configured:
-            raise TaskGraphError("DeepSeek 动态任务图尚未配置。")
+        reject_if(not self.provider.configured, TaskGraphError("DeepSeek 动态任务图尚未配置。"))
 
 def _initial_prompt(raw_goal: str) -> str:
     return f"""

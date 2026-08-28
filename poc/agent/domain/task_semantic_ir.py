@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import hashlib
 import json
 import re
@@ -80,14 +81,12 @@ class TaskSemanticIRError(ValueError):
 
 
 def _required_text(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise TaskSemanticIRError(f"{name} 必须是非空字符串。")
+    reject_if(not isinstance(value, str) or not value.strip(), TaskSemanticIRError(f"{name} 必须是非空字符串。"))
     return value.strip()
 
 
 def _valid_id(value: str, name: str, *, external: bool=False) -> None:
-    if not (_EXTERNAL_ID if external else _ID).fullmatch(value):
-        raise TaskSemanticIRError(f"{name} 无效：{value!r}")
+    reject_if(not (_EXTERNAL_ID if external else _ID).fullmatch(value), TaskSemanticIRError(f"{name} 无效：{value!r}"))
 
 
 def _slug(value: Any, fallback: str) -> str:
@@ -125,8 +124,7 @@ def _digest(value: Any) -> str:
 
 def _unique(items: tuple[Any, ...], attr: str, name: str) -> dict[str, Any]:
     values = {getattr(item, attr): item for item in items}
-    if len(values) != len(items):
-        raise TaskSemanticIRError(f"{name} ID 重复。")
+    reject_if(len(values) != len(items), TaskSemanticIRError(f"{name} ID 重复。"))
     return values
 
 
@@ -142,9 +140,11 @@ class SourceSpan(_Record):
     end: int
 
     def validate(self) -> None:
-        if (isinstance(self.start, bool) or not isinstance(self.start, int) or (not isinstance(self.end,
-            int)) or (self.start < 0) or (self.end <= self.start)):
-            raise TaskSemanticIRError("source_span 必须是非空正向区间。")
+        reject_if(
+            isinstance(self.start, bool) or not isinstance(self.start, int) or (not isinstance(self.end,
+            int)) or (self.start < 0) or (self.end <= self.start),
+            TaskSemanticIRError("source_span 必须是非空正向区间。"),
+        )
 
 
 @dataclass(frozen=True)
@@ -161,12 +161,10 @@ class SemanticEntity(_Record):
         _required_text(self.entity_type, "entity_type")
         _valid_id(self.role, "entity role")
         _json_value(self.value, f"entity {self.entity_id}.value")
-        if self.authority not in ENTITY_AUTHORITIES:
-            raise TaskSemanticIRError(f"实体 authority 无效：{self.authority}")
+        reject_if(self.authority not in ENTITY_AUTHORITIES, TaskSemanticIRError(f"实体 authority 无效：{self.authority}"))
         if self.source_span is not None:
             self.source_span.validate()
-            if raw_goal is not None and raw_goal[self.source_span.start:self.source_span.end] != self.value:
-                raise TaskSemanticIRError("user_literal source_span 未逐字绑定实体值。")
+            reject_if(raw_goal is not None and raw_goal[self.source_span.start:self.source_span.end] != self.value, TaskSemanticIRError("user_literal source_span 未逐字绑定实体值。"))
 
 
 @dataclass(frozen=True)
@@ -178,8 +176,7 @@ class SurfaceRef(_Record):
 
     def validate(self) -> None:
         _valid_id(self.surface_id, "surface_id")
-        if self.kind not in SURFACE_KINDS:
-            raise TaskSemanticIRError(f"surface kind 无效：{self.kind}")
+        reject_if(self.kind not in SURFACE_KINDS, TaskSemanticIRError(f"surface kind 无效：{self.kind}"))
         if self.kind == 'app':
             _valid_id(self.app_id, "surface.app_id")
             _required_text(self.app_name, "surface.app_name")
@@ -200,8 +197,7 @@ class EffectIntent(_Record):
         _valid_id(self.kind, "effect kind")
         for value in (*self.target_refs, *self.payload_refs, *self.source_subgoal_ids):
             _valid_id(value, "effect reference")
-        if len(set(self.target_refs)) != len(self.target_refs) or len(set(self.payload_refs)) != len(self.payload_refs):
-            raise TaskSemanticIRError("effect entity reference 重复。")
+        reject_if(len(set(self.target_refs)) != len(self.target_refs) or len(set(self.payload_refs)) != len(self.payload_refs), TaskSemanticIRError("effect entity reference 重复。"))
         for text in self.expected_result_texts:
             _required_text(text, "expected_result_texts")
         _json_value(self.attributes, "effect.attributes")
@@ -218,8 +214,7 @@ class CriticalBinding(_Record):
         for (value, name) in ((self.binding_id, 'binding_id'), (self.effect_id, 'effect_id'), (self.entity_ref,
             'entity_ref')):
             _valid_id(value, name)
-        if self.binding_kind not in {'effect_target_equals', 'effect_payload_equals'}:
-            raise TaskSemanticIRError(f"binding_kind 无效：{self.binding_kind}")
+        reject_if(self.binding_kind not in {'effect_target_equals', 'effect_payload_equals'}, TaskSemanticIRError(f"binding_kind 无效：{self.binding_kind}"))
 
 
 @dataclass(frozen=True)
@@ -234,13 +229,11 @@ class ConstraintIntent(_Record):
 
     def validate(self) -> None:
         _valid_id(self.constraint_id, "constraint_id")
-        if self.kind not in CONSTRAINT_KINDS:
-            raise TaskSemanticIRError(f"constraint kind 无效：{self.kind}")
+        reject_if(self.kind not in CONSTRAINT_KINDS, TaskSemanticIRError(f"constraint kind 无效：{self.kind}"))
         for value in (*self.subject_refs, *self.object_refs):
             _valid_id(value, "constraint reference")
         _json_value(self.value, "constraint.value")
-        if self.kind == 'required_action' and self.value not in REQUIRED_ACTION_KINDS:
-            raise TaskSemanticIRError(f"required_action 无效：{self.value}")
+        reject_if(self.kind == 'required_action' and self.value not in REQUIRED_ACTION_KINDS, TaskSemanticIRError(f"required_action 无效：{self.value}"))
 
 
 @dataclass(frozen=True)
@@ -254,8 +247,7 @@ class DesiredState(_Record):
     def validate(self) -> None:
         _valid_id(self.state_id, "state_id")
         _valid_id(self.subject_ref, "state.subject_ref")
-        if self.predicate not in STATE_PREDICATES:
-            raise TaskSemanticIRError(f"state predicate 无效：{self.predicate}")
+        reject_if(self.predicate not in STATE_PREDICATES, TaskSemanticIRError(f"state predicate 无效：{self.predicate}"))
         if self.source_subgoal_id:
             _valid_id(self.source_subgoal_id, "state.source_subgoal_id")
         _json_value(self.value, "state.value")
@@ -270,8 +262,7 @@ class EvidenceRequirement(_Record):
     def validate(self) -> None:
         _valid_id(self.requirement_id, "requirement_id")
         _valid_id(self.desired_state_ref, "desired_state_ref")
-        if not self.allowed_sources or any((item not in EVIDENCE_SOURCE_KINDS for item in self.allowed_sources)):
-            raise TaskSemanticIRError("evidence allowed_sources 无效。")
+        reject_if(not self.allowed_sources or any((item not in EVIDENCE_SOURCE_KINDS for item in self.allowed_sources)), TaskSemanticIRError("evidence allowed_sources 无效。"))
 
 
 @dataclass(frozen=True)
@@ -290,10 +281,8 @@ class SemanticSubgoal(_Record):
         for value in (self.subgoal_id, self.surface_ref, *self.depends_on, *self.constraint_refs, *self.entity_refs,
             *self.desired_state_refs, *self.effect_refs):
             _valid_id(value, "subgoal reference")
-        if self.external_impact not in SUBGOAL_IMPACTS:
-            raise TaskSemanticIRError(f"subgoal impact 无效：{self.external_impact}")
-        if self.status not in {'pending', 'active', 'completed', 'blocked', 'skipped'}:
-            raise TaskSemanticIRError(f"subgoal status 无效：{self.status}")
+        reject_if(self.external_impact not in SUBGOAL_IMPACTS, TaskSemanticIRError(f"subgoal impact 无效：{self.external_impact}"))
+        reject_if(self.status not in {'pending', 'active', 'completed', 'blocked', 'skipped'}, TaskSemanticIRError(f"subgoal status 无效：{self.status}"))
 
 
 @dataclass(frozen=True)
@@ -309,8 +298,7 @@ class InputFieldIntent(_Record):
         _valid_id(self.field_id, "field_id")
         for value in (self.payload_ref, *self.recipient_refs, *self.source_subgoal_ids):
             _valid_id(value, "input field reference")
-        if not isinstance(self.field_label, str) or not isinstance(self.multiline, bool):
-            raise TaskSemanticIRError("input field metadata 无效。")
+        reject_if(not isinstance(self.field_label, str) or not isinstance(self.multiline, bool), TaskSemanticIRError("input field metadata 无效。"))
 
 
 @dataclass(frozen=True)
@@ -331,12 +319,10 @@ class TaskSemanticIR(_Record):
     protocol_version: str = TASK_SEMANTIC_IR_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != TASK_SEMANTIC_IR_PROTOCOL:
-            raise TaskSemanticIRError(f"TaskSemanticIR 协议无效：{self.protocol_version}")
+        reject_if(self.protocol_version != TASK_SEMANTIC_IR_PROTOCOL, TaskSemanticIRError(f"TaskSemanticIR 协议无效：{self.protocol_version}"))
         _valid_id(self.task_id, "task_id", external=True)
         _valid_id(self.device_id, "device_id", external=True)
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
-            raise TaskSemanticIRError("revision 必须是正整数。")
+        reject_if(isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1, TaskSemanticIRError("revision 必须是正整数。"))
         _required_text(self.raw_goal, "raw_goal")
         groups = ((self.surfaces, 'surface_id', 'surface'), (self.entities, 'entity_id', 'entity'), (self.effects,
             'effect_id', 'effect'), (self.critical_bindings, 'binding_id', 'binding'), (self.constraints,
@@ -356,29 +342,28 @@ class TaskSemanticIR(_Record):
         constraint_ids = set(maps["constraint"])
         state_ids = set(maps["state"])
         for effect in self.effects:
-            if set((*effect.target_refs, *effect.payload_refs)) - entity_ids:
-                raise TaskSemanticIRError(f"EffectIntent 引用未知实体：{effect.effect_id}")
-            if set(effect.source_subgoal_ids) - subgoal_ids:
-                raise TaskSemanticIRError(f"EffectIntent 引用未知子目标：{effect.effect_id}")
+            reject_if(set((*effect.target_refs, *effect.payload_refs)) - entity_ids, TaskSemanticIRError(f"EffectIntent 引用未知实体：{effect.effect_id}"))
+            reject_if(set(effect.source_subgoal_ids) - subgoal_ids, TaskSemanticIRError(f"EffectIntent 引用未知子目标：{effect.effect_id}"))
         for binding in self.critical_bindings:
-            if binding.effect_id not in effect_ids or binding.entity_ref not in entity_ids:
-                raise TaskSemanticIRError(f"CriticalBinding 引用不存在：{binding.binding_id}")
+            reject_if(binding.effect_id not in effect_ids or binding.entity_ref not in entity_ids, TaskSemanticIRError(f"CriticalBinding 引用不存在：{binding.binding_id}"))
             effect = maps["effect"][binding.effect_id]
             expected = effect.target_refs if binding.binding_kind == "effect_target_equals" else effect.payload_refs
-            if binding.entity_ref not in expected:
-                raise TaskSemanticIRError(f"CriticalBinding 未绑定 effect 对应角色：{binding.binding_id}")
+            reject_if(binding.entity_ref not in expected, TaskSemanticIRError(f"CriticalBinding 未绑定 effect 对应角色：{binding.binding_id}"))
         for subgoal in self.subgoals:
-            if (subgoal.surface_ref not in surface_ids or set(subgoal.constraint_refs) - constraint_ids
+            reject_if(
+                subgoal.surface_ref not in surface_ids or set(subgoal.constraint_refs) - constraint_ids
                 or set(subgoal.entity_refs) - entity_ids or set(subgoal.desired_state_refs) - state_ids
-                or set(subgoal.effect_refs) - effect_ids):
-                raise TaskSemanticIRError(f"SemanticSubgoal 引用不存在：{subgoal.subgoal_id}")
+                or set(subgoal.effect_refs) - effect_ids,
+                TaskSemanticIRError(f"SemanticSubgoal 引用不存在：{subgoal.subgoal_id}"),
+            )
         for state in self.desired_states:
-            if state.subject_ref not in entity_ids | effect_ids | surface_ids:
-                raise TaskSemanticIRError(f"DesiredState subject_ref 不存在：{state.subject_ref}")
+            reject_if(state.subject_ref not in entity_ids | effect_ids | surface_ids, TaskSemanticIRError(f"DesiredState subject_ref 不存在：{state.subject_ref}"))
         for item in self.input_fields:
-            if (item.payload_ref not in entity_ids or set(item.recipient_refs) - entity_ids
-                or set(item.source_subgoal_ids) - subgoal_ids):
-                raise TaskSemanticIRError(f"InputFieldIntent 引用不存在：{item.field_id}")
+            reject_if(
+                item.payload_ref not in entity_ids or set(item.recipient_refs) - entity_ids
+                or set(item.source_subgoal_ids) - subgoal_ids,
+                TaskSemanticIRError(f"InputFieldIntent 引用不存在：{item.field_id}"),
+            )
 
     @property
     def semantic_digest(self) -> str:
@@ -401,8 +386,7 @@ class RiskDecision(_Record):
 
     def validate(self) -> None:
         _valid_id(self.effect_id, "risk.effect_id")
-        if self.policy not in RISK_POLICIES or self.policy_version < 1:
-            raise TaskSemanticIRError("risk decision 无效。")
+        reject_if(self.policy not in RISK_POLICIES or self.policy_version < 1, TaskSemanticIRError("risk decision 无效。"))
         _required_text(self.matched_rule, "matched_rule")
         _valid_id(self.policy_id, "policy_id")
 
@@ -416,17 +400,16 @@ class LocalRiskPolicyConfig(_Record):
     protocol_version: str = RISK_POLICY_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != RISK_POLICY_PROTOCOL or self.version < 1:
-            raise TaskSemanticIRError("风险策略版本无效。")
+        reject_if(self.protocol_version != RISK_POLICY_PROTOCOL or self.version < 1, TaskSemanticIRError("风险策略版本无效。"))
         _valid_id(self.policy_id, "policy_id")
-        if any((not _ID.fullmatch(kind) for kind in self.confirmation_effect_kinds)):
-            raise TaskSemanticIRError("confirmation_effect_kinds 无效。")
+        reject_if(any((not _ID.fullmatch(kind) for kind in self.confirmation_effect_kinds)), TaskSemanticIRError("confirmation_effect_kinds 无效。"))
         ids = [effect_kind for effect_kind, policy in self.overrides]
-        if len(ids) != len(set(ids)):
-            raise TaskSemanticIRError("风险策略 override 重复。")
-        if (any((not _ID.fullmatch(effect_kind) or policy not in RISK_POLICIES for effect_kind,
-            policy in self.overrides))):
-            raise TaskSemanticIRError("风险策略 override 无效。")
+        reject_if(len(ids) != len(set(ids)), TaskSemanticIRError("风险策略 override 重复。"))
+        reject_if(
+            any((not _ID.fullmatch(effect_kind) or policy not in RISK_POLICIES for effect_kind,
+            policy in self.overrides)),
+            TaskSemanticIRError("风险策略 override 无效。"),
+        )
 
     def decide(self, effect: EffectIntent) -> RiskDecision:
         self.validate()
@@ -473,9 +456,11 @@ class EffectPreview(_Record):
     protocol_version: str = EFFECT_PREVIEW_PROTOCOL
 
     def validate(self) -> None:
-        if (self.protocol_version != EFFECT_PREVIEW_PROTOCOL or self.policy not in RISK_POLICIES or self.revision < 1
-            or (self.policy_version < 1)):
-            raise TaskSemanticIRError("effect preview 元数据无效。")
+        reject_if(
+            self.protocol_version != EFFECT_PREVIEW_PROTOCOL or self.policy not in RISK_POLICIES or self.revision < 1
+            or (self.policy_version < 1),
+            TaskSemanticIRError("effect preview 元数据无效。"),
+        )
         for (value, name) in ((self.task_id, 'task_id'), (self.device_id, 'device_id')):
             _valid_id(value, name, external=True)
         for value in (self.effect_id, self.effect_kind, self.policy_id):
@@ -499,12 +484,10 @@ class SemanticCompilationReport(_Record):
     protocol_version: str = COMPILATION_REPORT_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != COMPILATION_REPORT_PROTOCOL or self.authoritative or self.execution_allowed:
-            raise TaskSemanticIRError("semantic compilation 不得携带执行权限。")
+        reject_if(self.protocol_version != COMPILATION_REPORT_PROTOCOL or self.authoritative or self.execution_allowed, TaskSemanticIRError("semantic compilation 不得携带执行权限。"))
         self.semantic_ir.validate()
         self.risk_policy.validate()
-        if {item.effect_id for item in self.risk_decisions} != {item.effect_id for item in self.semantic_ir.effects}:
-            raise TaskSemanticIRError("risk decisions 未覆盖全部 effect。")
+        reject_if({item.effect_id for item in self.risk_decisions} != {item.effect_id for item in self.semantic_ir.effects}, TaskSemanticIRError("risk decisions 未覆盖全部 effect。"))
         for item in self.risk_decisions:
             item.validate()
 
@@ -520,8 +503,7 @@ class RiskPolicyTrace(_Record):
     def validate(self) -> None:
         for value in (self.effect_id, self.effect_kind):
             _valid_id(value, "policy trace id")
-        if self.formal_policy not in RISK_POLICIES or not isinstance(self.allowed, bool):
-            raise TaskSemanticIRError("policy trace 无效。")
+        reject_if(self.formal_policy not in RISK_POLICIES or not isinstance(self.allowed, bool), TaskSemanticIRError("policy trace 无效。"))
         _required_text(self.reason, "policy trace reason")
 
 
@@ -538,33 +520,36 @@ class SemanticRiskAuthorityReport(_Record):
     protocol_version: str = AUTHORITY_REPORT_PROTOCOL
 
     def validate(self) -> None:
-        if (self.protocol_version != AUTHORITY_REPORT_PROTOCOL or self.authoritative_scope != 'semantic_task_and_risk'
-            or self.physical_execution_allowed):
-            raise TaskSemanticIRError("semantic authority 元数据无效。")
-        if not re.fullmatch('[0-9a-f]{64}', self.source_graph_digest):
-            raise TaskSemanticIRError("source_graph_digest 无效。")
+        reject_if(
+            self.protocol_version != AUTHORITY_REPORT_PROTOCOL or self.authoritative_scope != 'semantic_task_and_risk'
+            or self.physical_execution_allowed,
+            TaskSemanticIRError("semantic authority 元数据无效。"),
+        )
+        reject_if(not re.fullmatch('[0-9a-f]{64}', self.source_graph_digest), TaskSemanticIRError("source_graph_digest 无效。"))
         self.semantic_ir.validate()
         self.risk_policy.validate()
         effect_ids = {item.effect_id for item in self.semantic_ir.effects}
-        if ({item.effect_id for item in self.risk_decisions} != effect_ids or {item.effect_id for item
-            in self.policy_traces} != effect_ids or {item.effect_id for item in self.effect_previews} != effect_ids):
-            raise TaskSemanticIRError("semantic authority 未逐 effect 覆盖。")
+        reject_if(
+            {item.effect_id for item in self.risk_decisions} != effect_ids or {item.effect_id for item
+            in self.policy_traces} != effect_ids or {item.effect_id for item in self.effect_previews} != effect_ids,
+            TaskSemanticIRError("semantic authority 未逐 effect 覆盖。"),
+        )
         for item in (*self.risk_decisions, *self.policy_traces, *self.effect_previews):
             item.validate()
 
 
 def local_risk_policy_from_dict(payload: Mapping[str, Any]) -> LocalRiskPolicyConfig:
-    if (not isinstance(payload, Mapping) or set(payload) != {'protocol_version', 'policy_id', 'version',
-        'confirmation_effect_kinds', 'overrides'}):
-        raise TaskSemanticIRError("风险策略字段不匹配。")
+    reject_if(
+        not isinstance(payload, Mapping) or set(payload) != {'protocol_version', 'policy_id', 'version',
+        'confirmation_effect_kinds', 'overrides'},
+        TaskSemanticIRError("风险策略字段不匹配。"),
+    )
     kinds = payload.get("confirmation_effect_kinds")
     overrides = payload.get("overrides")
-    if not isinstance(kinds, list) or not isinstance(overrides, list):
-        raise TaskSemanticIRError("风险策略集合必须是数组。")
+    reject_if(not isinstance(kinds, list) or not isinstance(overrides, list), TaskSemanticIRError("风险策略集合必须是数组。"))
     parsed: list[tuple[str, str]] = []
     for item in overrides:
-        if not isinstance(item, Mapping) or set(item) != {'effect_id', 'policy'}:
-            raise TaskSemanticIRError("风险策略 override 字段无效。")
+        reject_if(not isinstance(item, Mapping) or set(item) != {'effect_id', 'policy'}, TaskSemanticIRError("风险策略 override 字段无效。"))
         parsed.append((str(item["effect_id"]), str(item["policy"])))
     config = LocalRiskPolicyConfig(protocol_version=str(payload['protocol_version']),
         policy_id=str(payload['policy_id']), version=payload['version'],
@@ -635,8 +620,7 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
     goal = getattr(graph, "goal", None)
     raw_goal = str(getattr(graph, "raw_user_goal", "") or getattr(goal, "objective", "") or "").strip()
     raw_entities = getattr(goal, "entities", {}) or {}
-    if not isinstance(raw_entities, Mapping):
-        raise TaskSemanticIRError("goal.entities 必须是映射。")
+    reject_if(not isinstance(raw_entities, Mapping), TaskSemanticIRError("goal.entities 必须是映射。"))
     target_apps = tuple(getattr(goal, "target_apps", ()) or ())
     subgoals = tuple(getattr(graph, "subgoals", ()) or ())
     structured = " ".join(str(getattr(item, "objective", "")) for item in subgoals)
@@ -842,8 +826,7 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
         if 'input_verified_text' not in actions:
             continue
         owners = [item for item in typed_fields if semantic.subgoal_id in item.source_subgoal_ids]
-        if len(owners) != 1:
-            raise TaskSemanticIRError("input_verified_text 子目标必须且只能绑定一个 InputFieldIntent。")
+        reject_if(len(owners) != 1, TaskSemanticIRError("input_verified_text 子目标必须且只能绑定一个 InputFieldIntent。"))
     for typed in typed_fields:
         if not typed.multiline or len(typed.source_subgoal_ids) != 1:
             continue
@@ -873,8 +856,10 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
 
 def compile_formal_semantic_authority(graph: Any, *, risk_policy: LocalRiskPolicyConfig |
     None=None) -> SemanticRiskAuthorityReport:
-    if any((not str(getattr(item, 'effect_kind', '') or '') for item in getattr(graph, 'risk_actions', ()) or ())):
-        raise TaskSemanticIRError("正式语义权威只接受由 typed effect_intents 创建的风险条目。")
+    reject_if(
+        any((not str(getattr(item, 'effect_kind', '') or '') for item in getattr(graph, 'risk_actions', ()) or ())),
+        TaskSemanticIRError("正式语义权威只接受由 typed effect_intents 创建的风险条目。"),
+    )
     compilation = compile_runtime_graph_semantics(graph, risk_policy=risk_policy)
     decisions = {item.effect_id: item for item in compilation.risk_decisions}
     entities = {item.entity_id: item for item in compilation.semantic_ir.entities}
@@ -898,16 +883,14 @@ def compile_formal_semantic_authority(graph: Any, *, risk_policy: LocalRiskPolic
 
 def apply_formal_semantic_risk_policy(graph: Any, authority: SemanticRiskAuthorityReport) -> Any:
     authority.validate()
-    if authority.source_graph_digest != _runtime_graph_digest(graph):
-        raise TaskSemanticIRError("正式语义风险权威未绑定当前任务图。")
+    reject_if(authority.source_graph_digest != _runtime_graph_digest(graph), TaskSemanticIRError("正式语义风险权威未绑定当前任务图。"))
     decisions = {effect.attributes.get('runtime_effect_id'): decision for effect,
         decision in zip(authority.semantic_ir.effects, authority.risk_decisions)}
     projected = []
     for risk in getattr(graph, 'risk_actions', ()) or ():
         risk_id = str(getattr(risk, "risk_id", ""))
         decision = decisions.get(risk_id)
-        if decision is None:
-            raise TaskSemanticIRError(f"正式风险权威遗漏 runtime effect：{risk_id}")
+        reject_if(decision is None, TaskSemanticIRError(f"正式风险权威遗漏 runtime effect：{risk_id}"))
         projected.append(replace(risk, confirmation_required=decision.policy == CONFIRMATION_REQUIRED,
             risk_level='high' if decision.policy == CONFIRMATION_REQUIRED else 'low'))
     active_id = str(getattr(graph, "active_subgoal_id", "") or "")

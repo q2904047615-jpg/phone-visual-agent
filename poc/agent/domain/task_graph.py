@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import json
 import re
 import uuid
@@ -157,8 +158,7 @@ class TargetApp:
     app_name: str
 
     def validate(self) -> None:
-        if not ID_PATTERN.fullmatch(self.app_id):
-            raise TaskGraphError(f"目标 App ID 无效：{self.app_id!r}")
+        reject_if(not ID_PATTERN.fullmatch(self.app_id), TaskGraphError(f"目标 App ID 无效：{self.app_id!r}"))
         _require_text(self.app_name, "target_apps.app_name")
 
 
@@ -176,24 +176,21 @@ class GraphGoal:
             app.validate()
         _reject_control_fields(self.entities, "goal.entities")
         target_surface = self.entities.get("target_surface")
-        if target_surface is not None and target_surface not in TARGET_SURFACES:
-            raise TaskGraphError("goal.entities.target_surface 必须是 device、system 或 current_surface。")
+        reject_if(target_surface is not None and target_surface not in TARGET_SURFACES, TaskGraphError("goal.entities.target_surface 必须是 device、system 或 current_surface。"))
         input_text = self.entities.get("input_text")
-        if input_text is not None and (not _is_exact_input_text(input_text)):
-            raise TaskGraphError('goal.entities.input_text 必须为1～4000个逐字输入字符；允许换行但不允许回车控制符。')
+        reject_if(input_text is not None and (not _is_exact_input_text(input_text)), TaskGraphError('goal.entities.input_text 必须为1～4000个逐字输入字符；允许换行但不允许回车控制符。'))
         recipient = self.entities.get("recipient")
-        if recipient is not None and (not _is_single_line_literal(recipient, 100)):
-            raise TaskGraphError("goal.entities.recipient 必须为1～100个首尾无空白的逐字收件人字符。")
+        reject_if(recipient is not None and (not _is_single_line_literal(recipient, 100)), TaskGraphError("goal.entities.recipient 必须为1～100个首尾无空白的逐字收件人字符。"))
         recipients = self.entities.get("recipients")
-        if recipient is not None and recipients is not None:
-            raise TaskGraphError("recipient 与 recipients 只能使用一种表达。")
-        if (recipients is not None and (not isinstance(recipients,
+        reject_if(recipient is not None and recipients is not None, TaskGraphError("recipient 与 recipients 只能使用一种表达。"))
+        reject_if(
+            recipients is not None and (not isinstance(recipients,
             list) or not 1 <= len(recipients) <= MAX_RECIPIENTS or any((not _is_single_line_literal(item,
-            100) for item in recipients)) or (len(recipients) != len(set(recipients))))):
-            raise TaskGraphError("goal.entities.recipients 必须为1～32个互不重复的逐字收件人。")
+            100) for item in recipients)) or (len(recipients) != len(set(recipients)))),
+            TaskGraphError("goal.entities.recipients 必须为1～32个互不重复的逐字收件人。"),
+        )
         input_fields = self.entities.get("input_fields")
-        if input_text is not None and input_fields is not None:
-            raise TaskGraphError("input_text 与 input_fields 只能使用一种表达。")
+        reject_if(input_text is not None and input_fields is not None, TaskGraphError("input_text 与 input_fields 只能使用一种表达。"))
         if input_fields is not None:
             _validate_input_fields(input_fields)
 
@@ -214,10 +211,8 @@ class CompletionCondition:
         for item in self.evidence_required:
             _reject_low_level_completion_evidence(item, 'completion_conditions.evidence_required')
         _validate_text_list(self.evidence, "evidence", required=False)
-        if self.satisfied and (not self.evidence):
-            raise TaskGraphError(f"已满足的完成条件缺少可见证据：{self.condition_id}")
-        if not self.satisfied and self.evidence:
-            raise TaskGraphError(f"未满足的完成条件不能携带完成证据：{self.condition_id}")
+        reject_if(self.satisfied and (not self.evidence), TaskGraphError(f"已满足的完成条件缺少可见证据：{self.condition_id}"))
+        reject_if(not self.satisfied and self.evidence, TaskGraphError(f"未满足的完成条件不能携带完成证据：{self.condition_id}"))
 
 
 @dataclass(frozen=True)
@@ -240,16 +235,12 @@ class RiskAction:
         _require_text(self.external_effect, "effect_intents.expected_results")
         _reject_low_level_instruction(self.description, "effect_intents.description")
         _reject_low_level_instruction(self.external_effect, 'effect_intents.expected_results')
-        if self.risk_type not in RISK_TYPES:
-            raise TaskGraphError(f"通用风险类型无效：{self.risk_type}")
-        if self.risk_level not in RISK_LEVELS:
-            raise TaskGraphError(f"风险等级无效：{self.risk_level}")
-        if not isinstance(self.confirmation_required, bool):
-            raise TaskGraphError(f'effect_intents.local_policy.confirmation_required 必须是布尔值：{self.risk_id}')
+        reject_if(self.risk_type not in RISK_TYPES, TaskGraphError(f"通用风险类型无效：{self.risk_type}"))
+        reject_if(self.risk_level not in RISK_LEVELS, TaskGraphError(f"风险等级无效：{self.risk_level}"))
+        reject_if(not isinstance(self.confirmation_required, bool), TaskGraphError(f'effect_intents.local_policy.confirmation_required 必须是布尔值：{self.risk_id}'))
         _validate_id_list(self.subgoal_ids, "effect_intents.source_subgoal_ids", required=True)
         if self.effect_kind:
-            if self.effect_kind not in PLANNER_EFFECT_KINDS:
-                raise TaskGraphError(f'正式效果类型无效：{self.effect_kind}')
+            reject_if(self.effect_kind not in PLANNER_EFFECT_KINDS, TaskGraphError(f'正式效果类型无效：{self.effect_kind}'))
             _validate_id_list(self.target_roles, 'effect_intents.target_entity_roles', required=False)
             _validate_id_list(self.payload_roles, 'effect_intents.payload_entity_roles', required=False)
             _validate_text_list(self.expected_result_texts, 'effect_intents.expected_results', required=True)
@@ -270,8 +261,7 @@ class Subgoal:
     def validate(self) -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
         _require_text(self.objective, "subgoals.objective")
-        if self.status not in SUBGOAL_STATUSES:
-            raise TaskGraphError(f"子目标状态无效：{self.status}")
+        reject_if(self.status not in SUBGOAL_STATUSES, TaskGraphError(f"子目标状态无效：{self.status}"))
         _validate_id_list(self.depends_on, "subgoals.depends_on", required=False)
         _validate_text_list(self.constraints, "subgoals.constraints", required=False)
         for item in self.constraints:
@@ -282,17 +272,14 @@ class Subgoal:
             _reject_low_level_completion_evidence(item, 'subgoals.completion_conditions')
         _validate_text_list(self.completion_evidence, 'subgoals.completion_evidence', required=False)
         _validate_id_list(self.risk_action_ids, 'subgoals.effect_ids', required=False)
-        if self.external_impact not in SUBGOAL_EXTERNAL_IMPACTS:
-            raise TaskGraphError(f'子目标执行类别无效：{self.external_impact}')
+        reject_if(self.external_impact not in SUBGOAL_EXTERNAL_IMPACTS, TaskGraphError(f'子目标执行类别无效：{self.external_impact}'))
         # Free-form prose is not an input-value authority. Canonical
         # payload ownership is validated later by TaskSemanticIR's typed
         # InputFieldIntent + required_action binding.  In particular, visible,
         # focused, editable and empty preparation states must never be forced to
         # repeat the future input payload merely because they mention a field.
-        if self.status == 'completed' and (not self.completion_evidence):
-            raise TaskGraphError(f"已完成子目标缺少完成证据：{self.subgoal_id}")
-        if self.status != 'completed' and self.completion_evidence:
-            raise TaskGraphError(f"未完成子目标不能携带完成证据：{self.subgoal_id}")
+        reject_if(self.status == 'completed' and (not self.completion_evidence), TaskGraphError(f"已完成子目标缺少完成证据：{self.subgoal_id}"))
+        reject_if(self.status != 'completed' and self.completion_evidence, TaskGraphError(f"未完成子目标不能携带完成证据：{self.subgoal_id}"))
 
 
 @dataclass(frozen=True)
@@ -341,41 +328,32 @@ class VerifiedActionTransition:
     protocol_version: str = VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION
 
     def validate(self) -> None:
-        if self.protocol_version != VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION:
-            raise TaskGraphError(f'动作转换回执协议版本无效：{self.protocol_version}')
+        reject_if(self.protocol_version != VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION, TaskGraphError(f'动作转换回执协议版本无效：{self.protocol_version}'))
         _require_text(self.receipt_id, "action_transition.receipt_id")
         _require_text(self.session_id, "action_transition.session_id")
-        if not ID_PATTERN.fullmatch(self.receipt_id):
-            raise TaskGraphError(f'动作转换回执 receipt_id 无效：{self.receipt_id!r}')
-        if not TASK_ID_PATTERN.fullmatch(self.task_id):
-            raise TaskGraphError(f"动作转换回执 task_id 无效：{self.task_id!r}")
-        if not DEVICE_ID_PATTERN.fullmatch(self.device_id):
-            raise TaskGraphError(f"动作转换回执 device_id 无效：{self.device_id!r}")
-        if isinstance(self.prior_revision, bool) or not isinstance(self.prior_revision, int) or self.prior_revision < 1:
-            raise TaskGraphError("动作转换回执 prior_revision 必须是正整数。")
+        reject_if(not ID_PATTERN.fullmatch(self.receipt_id), TaskGraphError(f'动作转换回执 receipt_id 无效：{self.receipt_id!r}'))
+        reject_if(not TASK_ID_PATTERN.fullmatch(self.task_id), TaskGraphError(f"动作转换回执 task_id 无效：{self.task_id!r}"))
+        reject_if(not DEVICE_ID_PATTERN.fullmatch(self.device_id), TaskGraphError(f"动作转换回执 device_id 无效：{self.device_id!r}"))
+        reject_if(isinstance(self.prior_revision, bool) or not isinstance(self.prior_revision, int) or self.prior_revision < 1, TaskGraphError("动作转换回执 prior_revision 必须是正整数。"))
         for field_name in ('subgoal_id', 'decision_node_id', 'action_digest', 'rebound_action_digest',
             'resolved_action_digest', 'action_kind', 'before_observation_id', 'before_fingerprint',
             'after_observation_id', 'after_fingerprint'):
             _require_text(getattr(self, field_name), f"action_transition.{field_name}")
         for field_name in ('action_digest', 'rebound_action_digest', 'resolved_action_digest'):
-            if not re.fullmatch('[0-9a-f]{64}', getattr(self, field_name)):
-                raise TaskGraphError(f'动作转换回执 {field_name} 必须是 64 位小写 SHA-256。')
-        if self.before_observation_id == self.after_observation_id:
-            raise TaskGraphError("动作转换回执必须绑定新的动作后 observation_id。")
-        if (isinstance(self.physical_actions, bool) or not isinstance(self.physical_actions,
-            int) or self.physical_actions != 1):
-            raise TaskGraphError("动作转换回执必须且只能证明 1 次物理动作。")
-        if self.outcome not in {'matched', 'mismatched'}:
-            raise TaskGraphError(f"动作转换回执 outcome 无效：{self.outcome}")
+            reject_if(not re.fullmatch('[0-9a-f]{64}', getattr(self, field_name)), TaskGraphError(f'动作转换回执 {field_name} 必须是 64 位小写 SHA-256。'))
+        reject_if(self.before_observation_id == self.after_observation_id, TaskGraphError("动作转换回执必须绑定新的动作后 observation_id。"))
+        reject_if(
+            isinstance(self.physical_actions, bool) or not isinstance(self.physical_actions,
+            int) or self.physical_actions != 1,
+            TaskGraphError("动作转换回执必须且只能证明 1 次物理动作。"),
+        )
+        reject_if(self.outcome not in {'matched', 'mismatched'}, TaskGraphError(f"动作转换回执 outcome 无效：{self.outcome}"))
         _validate_text_list(self.errors, "action_transition.errors", required=False)
         _validate_text_list(self.controller_transition_evidence, 'action_transition.controller_transition_evidence',
             required=False)
-        if self.outcome == 'matched' and self.errors:
-            raise TaskGraphError("matched 动作转换回执不能同时包含验证错误。")
-        if self.outcome == 'mismatched' and (not self.errors):
-            raise TaskGraphError("mismatched 动作转换回执必须包含验证错误。")
-        if self.outcome == 'matched' and self.before_fingerprint == self.after_fingerprint:
-            raise TaskGraphError("matched 动作转换回执必须绑定变化后的 fingerprint。")
+        reject_if(self.outcome == 'matched' and self.errors, TaskGraphError("matched 动作转换回执不能同时包含验证错误。"))
+        reject_if(self.outcome == 'mismatched' and (not self.errors), TaskGraphError("mismatched 动作转换回执必须包含验证错误。"))
+        reject_if(self.outcome == 'matched' and self.before_fingerprint == self.after_fingerprint, TaskGraphError("matched 动作转换回执必须绑定变化后的 fingerprint。"))
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -391,12 +369,10 @@ class ControllerTransitionEvidenceRef:
     source: str = "controller_transition"
 
     def validate(self) -> None:
-        if self.source != 'controller_transition':
-            raise TaskGraphError("控制器转换证据来源无效。")
+        reject_if(self.source != 'controller_transition', TaskGraphError("控制器转换证据来源无效。"))
         for field_name in ('ref_id', 'receipt_id', 'subgoal_id', 'text'):
             _require_text(getattr(self, field_name), f'controller_transition_evidence.{field_name}')
-        if not self.ref_id.startswith(f'controller_transition:{self.receipt_id}:'):
-            raise TaskGraphError("控制器转换证据 ref_id 未绑定 receipt_id。")
+        reject_if(not self.ref_id.startswith(f'controller_transition:{self.receipt_id}:'), TaskGraphError("控制器转换证据 ref_id 未绑定 receipt_id。"))
 
     def to_dict(self) -> dict[str, str]:
         self.validate()
@@ -414,14 +390,11 @@ class VisualClaimEvidenceRef:
     source: str = "visual_claim"
 
     def validate(self) -> None:
-        if self.source != 'visual_claim':
-            raise TaskGraphError("视觉 claim 证据来源无效。")
+        reject_if(self.source != 'visual_claim', TaskGraphError("视觉 claim 证据来源无效。"))
         for field_name in ('ref_id', 'claim_id', 'scene_id', 'subject_ref', 'predicate', 'fact'):
             _require_text(getattr(self, field_name), f'visual_claim_evidence.{field_name}')
-        if not re.fullmatch('[0-9a-f]{64}', self.claim_id):
-            raise TaskGraphError("视觉 claim_id 必须是 SHA-256。")
-        if self.ref_id != f'visual_claim:{self.scene_id}:{self.claim_id}':
-            raise TaskGraphError("视觉 claim ref_id 未绑定 scene_id/claim_id。")
+        reject_if(not re.fullmatch('[0-9a-f]{64}', self.claim_id), TaskGraphError("视觉 claim_id 必须是 SHA-256。"))
+        reject_if(self.ref_id != f'visual_claim:{self.scene_id}:{self.claim_id}', TaskGraphError("视觉 claim ref_id 未绑定 scene_id/claim_id。"))
 
     def to_dict(self) -> dict[str, str]:
         self.validate()
@@ -445,29 +418,26 @@ class ObservedState:
         _require_text(self.summary, "observation.summary")
         _validate_text_list(self.visible_evidence, 'observation.visible_evidence', required=True)
         _validate_text_list(self.grounded_visual_facts, 'observation.grounded_visual_facts', required=False)
-        if self.last_action_outcome not in {'not_applicable', 'matched', 'mismatched', 'uncertain'}:
-            raise TaskGraphError(f'观察中的动作结果无效：{self.last_action_outcome}')
+        reject_if(self.last_action_outcome not in {'not_applicable', 'matched', 'mismatched', 'uncertain'}, TaskGraphError(f'观察中的动作结果无效：{self.last_action_outcome}'))
         _validate_text_list(self.blocked_reasons, 'observation.blocked_reasons', required=False)
         if self.verified_action_transition is not None:
             self.verified_action_transition.validate()
-            if self.last_action_outcome != self.verified_action_transition.outcome:
-                raise TaskGraphError('观察动作结果与 verified_action_transition outcome 不一致。')
+            reject_if(self.last_action_outcome != self.verified_action_transition.outcome, TaskGraphError('观察动作结果与 verified_action_transition outcome 不一致。'))
         for item in self.controller_transition_evidence_refs:
             item.validate()
-            if (self.verified_action_transition is None or item.receipt_id !=
+            reject_if(
+                self.verified_action_transition is None or item.receipt_id !=
                 self.verified_action_transition.receipt_id or item.subgoal_id !=
                 self.verified_action_transition.subgoal_id or (item.text not
-                in self.verified_action_transition.controller_transition_evidence)):
-                raise TaskGraphError('控制器转换证据未绑定当前 verified action transition。')
-        if self.verified_action_transition is None and self.controller_transition_evidence_refs:
-            raise TaskGraphError("无动作回执时不得携带控制器转换证据。")
+                in self.verified_action_transition.controller_transition_evidence),
+                TaskGraphError('控制器转换证据未绑定当前 verified action transition。'),
+            )
+        reject_if(self.verified_action_transition is None and self.controller_transition_evidence_refs, TaskGraphError("无动作回执时不得携带控制器转换证据。"))
         visual_ref_ids: set[str] = set()
         for item in self.visual_claim_evidence_refs:
             item.validate()
-            if item.scene_id != self.scene_id:
-                raise TaskGraphError("视觉 claim 未绑定当前 scene_id。")
-            if item.ref_id in visual_ref_ids:
-                raise TaskGraphError("视觉 claim ref_id 重复。")
+            reject_if(item.scene_id != self.scene_id, TaskGraphError("视觉 claim 未绑定当前 scene_id。"))
+            reject_if(item.ref_id in visual_ref_ids, TaskGraphError("视觉 claim ref_id 重复。"))
             visual_ref_ids.add(item.ref_id)
 
     def to_dict(self) -> dict[str, Any]:
@@ -527,18 +497,17 @@ class DynamicTaskGraph:
     raw_user_goal: str = field(default="", repr=False, compare=False)
 
     def validate(self) -> None:
-        if self.protocol_version != DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION:
-            raise TaskGraphError(f"任务图协议版本无效：{self.protocol_version}")
+        reject_if(self.protocol_version != DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION, TaskGraphError(f"任务图协议版本无效：{self.protocol_version}"))
         _validate_task_id(self.task_id)
         _validate_device_id(self.device_id)
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
-            raise TaskGraphError("任务图 revision 必须是正整数。")
-        if self.status not in GRAPH_STATUSES:
-            raise TaskGraphError(f"任务图状态无效：{self.status}")
+        reject_if(isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1, TaskGraphError("任务图 revision 必须是正整数。"))
+        reject_if(self.status not in GRAPH_STATUSES, TaskGraphError(f"任务图状态无效：{self.status}"))
         self.goal.validate()
-        if (self.status != 'blocked' and (not self.goal.target_apps) and (self.goal.entities.get('target_surface') not
-            in TARGET_SURFACES)):
-            raise TaskGraphError("可推进任务图必须声明目标 App，或声明 device/system/current_surface 目标表面。")
+        reject_if(
+            self.status != 'blocked' and (not self.goal.target_apps) and (self.goal.entities.get('target_surface') not
+            in TARGET_SURFACES),
+            TaskGraphError("可推进任务图必须声明目标 App，或声明 device/system/current_surface 目标表面。"),
+        )
         _validate_text_list(self.constraints, "constraints", required=False)
         for item in self.constraints:
             _reject_low_level_instruction(item, "constraints", allow_negated=True)
@@ -547,54 +516,49 @@ class DynamicTaskGraph:
             _reject_low_level_instruction(item, "clarification_questions")
 
         conditions = _unique_by_id(self.completion_conditions, lambda item: item.condition_id, "完成条件")
-        if not conditions:
-            raise TaskGraphError("任务图至少需要一个全局完成条件。")
+        reject_if(not conditions, TaskGraphError("任务图至少需要一个全局完成条件。"))
         risks = _unique_by_id(self.risk_actions, lambda item: item.risk_id, "风险")
         subgoals = _unique_by_id(self.subgoals, lambda item: item.subgoal_id, "子目标")
         for item in (*conditions.values(), *risks.values()):
             item.validate()
         for subgoal in subgoals.values():
             subgoal.validate()
-            if subgoal.subgoal_id in subgoal.depends_on:
-                raise TaskGraphError(f"子目标不能依赖自身：{subgoal.subgoal_id}")
+            reject_if(subgoal.subgoal_id in subgoal.depends_on, TaskGraphError(f"子目标不能依赖自身：{subgoal.subgoal_id}"))
             _reject_missing_refs(subgoal.depends_on, subgoals, f'子目标 {subgoal.subgoal_id} 依赖不存在节点：')
             _reject_missing_refs(subgoal.risk_action_ids, risks, f'子目标 {subgoal.subgoal_id} 引用不存在风险：')
         for risk in risks.values():
             _reject_missing_refs(risk.subgoal_ids, subgoals, f'风险 {risk.risk_id} 引用不存在子目标：')
             for subgoal_id in risk.subgoal_ids:
-                if risk.risk_id not in subgoals[subgoal_id].risk_action_ids:
-                    raise TaskGraphError(f"风险与子目标引用不对称：{risk.risk_id} / {subgoal_id}")
+                reject_if(risk.risk_id not in subgoals[subgoal_id].risk_action_ids, TaskGraphError(f"风险与子目标引用不对称：{risk.risk_id} / {subgoal_id}"))
         _reject_dependency_cycles(subgoals)
 
         active = [item.subgoal_id for item in self.subgoals if item.status == "active"]
         if self.status in {'ready', 'running', 'awaiting_confirmation'}:
-            if len(active) != 1 or self.active_subgoal_id != active[0]:
-                raise TaskGraphError("可推进任务图必须且只能有一个活动子目标。")
+            reject_if(len(active) != 1 or self.active_subgoal_id != active[0], TaskGraphError("可推进任务图必须且只能有一个活动子目标。"))
             active_node = subgoals[active[0]]
             unfinished_dependencies = [dependency for dependency
                 in active_node.depends_on if subgoals[dependency].status != 'completed']
-            if unfinished_dependencies:
-                raise TaskGraphError("活动子目标存在未完成依赖：" + ", ".join(unfinished_dependencies))
+            reject_if(unfinished_dependencies, TaskGraphError("活动子目标存在未完成依赖：" + ", ".join(unfinished_dependencies)))
             confirmation_risk_ids = {risk_id for risk_id in active_node.risk_action_ids if risks[
                 risk_id].confirmation_required}
-            if self.status == 'awaiting_confirmation' and (not confirmation_risk_ids):
-                raise TaskGraphError("等待确认状态必须关联当前子目标的效果意图。")
-            if confirmation_risk_ids and self.status != 'awaiting_confirmation':
-                raise TaskGraphError("本地风险策略要求确认的子目标必须等待用户确认。")
-            if (self.status == 'awaiting_confirmation' and active_node.external_impact not in {'external_state',
-                'unknown'}):
-                raise TaskGraphError("等待确认状态只能用于外部状态或未知影响子目标。")
+            reject_if(self.status == 'awaiting_confirmation' and (not confirmation_risk_ids), TaskGraphError("等待确认状态必须关联当前子目标的效果意图。"))
+            reject_if(confirmation_risk_ids and self.status != 'awaiting_confirmation', TaskGraphError("本地风险策略要求确认的子目标必须等待用户确认。"))
+            reject_if(
+                self.status == 'awaiting_confirmation' and active_node.external_impact not in {'external_state',
+                'unknown'},
+                TaskGraphError("等待确认状态只能用于外部状态或未知影响子目标。"),
+            )
         elif active or self.active_subgoal_id is not None:
             raise TaskGraphError("完成或阻塞任务图不能保留活动子目标。")
 
         if self.status == 'completed':
-            if not all((item.satisfied for item in self.completion_conditions)):
-                raise TaskGraphError("任务完成必须满足全部全局完成条件。")
-            if any((item.status in {'pending', 'active', 'blocked'} for item in self.subgoals)):
-                raise TaskGraphError("任务完成时不能保留未决子目标。")
-        if (self.status == 'blocked' and (not self.clarification_questions)
-            and (not any((item.status == 'blocked' for item in self.subgoals)))):
-            raise TaskGraphError("阻塞任务图必须说明澄清问题或阻塞子目标。")
+            reject_if(not all((item.satisfied for item in self.completion_conditions)), TaskGraphError("任务完成必须满足全部全局完成条件。"))
+            reject_if(any((item.status in {'pending', 'active', 'blocked'} for item in self.subgoals)), TaskGraphError("任务完成时不能保留未决子目标。"))
+        reject_if(
+            self.status == 'blocked' and (not self.clarification_questions)
+            and (not any((item.status == 'blocked' for item in self.subgoals))),
+            TaskGraphError("阻塞任务图必须说明澄清问题或阻塞子目标。"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -635,11 +599,9 @@ class DynamicTaskGraph:
             mismatch = next((label for label, actual, expected in zip(labels, scope,
                 expected_scope) if actual != expected))
             raise TaskGraphError(f"确认记录 {mismatch} 不匹配，禁止跨作用域复用。")
-        if not confirmed and any((item is not None for item in scope)):
-            raise TaskGraphError("确认作用域不能脱离 confirmed_effect_ids 单独提供。")
+        reject_if(not confirmed and any((item is not None for item in scope)), TaskGraphError("确认作用域不能脱离 confirmed_effect_ids 单独提供。"))
         unknown_confirmations = confirmed - confirmation_effect_ids
-        if unknown_confirmations:
-            raise TaskGraphError("确认记录不属于 current_subgoal：" + ", ".join(sorted(unknown_confirmations)))
+        reject_if(unknown_confirmations, TaskGraphError("确认记录不属于 current_subgoal：" + ", ".join(sorted(unknown_confirmations))))
         confirmation_required = bool(confirmation_effect_ids)
         confirmation_granted = confirmation_required and confirmation_effect_ids.issubset(confirmed)
         automatic_external_allowed = bool(current and current['execution_class'] == 'effect'
@@ -743,10 +705,8 @@ def build_exact_input_task_graph(raw_goal: str, *, exact_input_text: str, device
     """Build a typed graph for one explicitly authorized input value."""
     goal_text = str(raw_goal or "").strip()
     canonical = str(exact_input_text or "")
-    if not goal_text:
-        raise TaskGraphError("用户目标不能为空。")
-    if not _is_exact_input_text(canonical):
-        raise TaskGraphError('exact_input_text 必须为1～4000个逐字输入字符；允许换行但不允许回车控制符。')
+    reject_if(not goal_text, TaskGraphError("用户目标不能为空。"))
+    reject_if(not _is_exact_input_text(canonical), TaskGraphError('exact_input_text 必须为1～4000个逐字输入字符；允许换行但不允许回车控制符。'))
     return _build_exact_graph(goal_text=goal_text, device_id=device_id, task_id=task_id, objective='使当前唯一输入框内容精确等于授权文字',
         entities={'target_surface': 'current_surface', 'target_ui_label': '当前唯一输入框', 'input_text': canonical},
         constraints=('不要发送或提交',), condition_id='exact_input_value', completion='当前唯一输入框内容与授权文字逐字一致',
@@ -760,16 +720,11 @@ def build_exact_action_task_graph(raw_goal: str, *, action_kind: str, target_lab
     goal_text = str(raw_goal or "").strip()
     resolved_action = str(action_kind or "").strip()
     label = str(target_label or "").strip()
-    if not goal_text:
-        raise TaskGraphError("用户目标不能为空。")
-    if resolved_action not in {'back', 'home', 'open_recent_apps', 'tap_semantic'}:
-        raise TaskGraphError('exact_action_kind 只允许 back、home、open_recent_apps 或 tap_semantic。')
-    if resolved_action == 'tap_semantic' and (not label):
-        raise TaskGraphError("tap_semantic 直推必须提供 exact_target_label。")
-    if resolved_action != 'tap_semantic' and label:
-        raise TaskGraphError('back/home/open_recent_apps 直推不得携带 exact_target_label。')
-    if len(label) > 120 or '\n' in label or '\r' in label:
-        raise TaskGraphError("exact_target_label 必须为不超过120字符的单行文字。")
+    reject_if(not goal_text, TaskGraphError("用户目标不能为空。"))
+    reject_if(resolved_action not in {'back', 'home', 'open_recent_apps', 'tap_semantic'}, TaskGraphError('exact_action_kind 只允许 back、home、open_recent_apps 或 tap_semantic。'))
+    reject_if(resolved_action == 'tap_semantic' and (not label), TaskGraphError("tap_semantic 直推必须提供 exact_target_label。"))
+    reject_if(resolved_action != 'tap_semantic' and label, TaskGraphError('back/home/open_recent_apps 直推不得携带 exact_target_label。'))
+    reject_if(len(label) > 120 or '\n' in label or '\r' in label, TaskGraphError("exact_target_label 必须为不超过120字符的单行文字。"))
     objective_by_action = {'back': '按一次返回键', 'home': '回到系统主屏幕', 'open_recent_apps': '打开系统最近任务页面',
         'tap_semantic': '点击当前画面中的目标控件'}
     entities: dict[str, Any] = {"target_surface": "current_surface"}
@@ -783,8 +738,7 @@ def build_exact_action_task_graph(raw_goal: str, *, action_kind: str, target_lab
     semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
     required_actions = {str(constraint.value) for constraint
         in semantic_ir.constraints if constraint.kind == 'required_action'}
-    if resolved_action not in required_actions:
-        raise TaskGraphError("本地直推动作没有编译为请求的 canonical action。")
+    reject_if(resolved_action not in required_actions, TaskGraphError("本地直推动作没有编译为请求的 canonical action。"))
     return graph
 
 
@@ -928,8 +882,7 @@ def _planner_transport_snapshot(graph: DynamicTaskGraph) -> dict[str, Any]:
     """Serialize only the current typed planner transport."""
 
     graph.validate()
-    if any((not effect.effect_kind for effect in graph.risk_actions)):
-        raise TaskGraphError("风险条目缺少 typed effect_kind，不能进入正式重规划。")
+    reject_if(any((not effect.effect_kind for effect in graph.risk_actions)), TaskGraphError("风险条目缺少 typed effect_kind，不能进入正式重规划。"))
     return {'status': 'running' if graph.status == 'awaiting_confirmation' else graph.status,
         'goal': _goal_wire(graph.goal), 'constraints': list(graph.constraints),
         'completion_conditions': [_condition_wire(item) for item in graph.completion_conditions],
@@ -967,8 +920,7 @@ def _graph_from_payload(payload: dict[str, Any], *, task_id: str, device_id: str
     active_subgoal_id = None if active_value is None else str(active_value).strip()
     raw_subgoals = tuple((_subgoal_from_payload(item) for item in _expect_list(payload.get('subgoals'), 'subgoals')))
     subgoals_by_id = {item.subgoal_id: item for item in raw_subgoals}
-    if len(subgoals_by_id) != len(raw_subgoals):
-        raise TaskGraphError("子目标 ID 重复。")
+    reject_if(len(subgoals_by_id) != len(raw_subgoals), TaskGraphError("子目标 ID 重复。"))
     for subgoal in raw_subgoals:
         subgoal.validate()
     completion_conditions = tuple((_condition_from_payload(item) for item
@@ -978,18 +930,13 @@ def _graph_from_payload(payload: dict[str, Any], *, task_id: str, device_id: str
         goal_completion_results=tuple((condition.description for condition in completion_conditions)),
         effect_count=len(raw_effects)) for item in raw_effects))
     effects_by_id = {item.risk_id: item for item in effects}
-    if len(effects_by_id) != len(effects):
-        raise TaskGraphError("effect_intents.effect_id 重复。")
+    reject_if(len(effects_by_id) != len(effects), TaskGraphError("effect_intents.effect_id 重复。"))
     for subgoal in raw_subgoals:
         missing = set(subgoal.risk_action_ids) - set(effects_by_id)
-        if missing:
-            raise TaskGraphError(f'子目标 {subgoal.subgoal_id} 引用不存在 effect：' + ', '.join(sorted(missing)))
-        if subgoal.external_impact == 'external_state' and (not subgoal.risk_action_ids):
-            raise TaskGraphError(f'effect 子目标必须引用至少一个 effect_intent：{subgoal.subgoal_id}')
-        if subgoal.external_impact != 'external_state' and subgoal.risk_action_ids:
-            raise TaskGraphError(f'非 effect 子目标不能引用 effect_intent：{subgoal.subgoal_id}')
-    if str(payload.get('status') or '').strip().lower() == 'awaiting_confirmation':
-        raise TaskGraphError("模型不得决定 awaiting_confirmation；确认状态只由本地策略生成。")
+        reject_if(missing, TaskGraphError(f'子目标 {subgoal.subgoal_id} 引用不存在 effect：' + ', '.join(sorted(missing))))
+        reject_if(subgoal.external_impact == 'external_state' and (not subgoal.risk_action_ids), TaskGraphError(f'effect 子目标必须引用至少一个 effect_intent：{subgoal.subgoal_id}'))
+        reject_if(subgoal.external_impact != 'external_state' and subgoal.risk_action_ids, TaskGraphError(f'非 effect 子目标不能引用 effect_intent：{subgoal.subgoal_id}'))
+    reject_if(str(payload.get('status') or '').strip().lower() == 'awaiting_confirmation', TaskGraphError("模型不得决定 awaiting_confirmation；确认状态只由本地策略生成。"))
     return DynamicTaskGraph(task_id=task_id, device_id=device_id, revision=revision,
         status=str(payload.get('status') or '').strip().lower(), goal=goal,
         constraints=_text_tuple(payload.get('constraints'), 'constraints'), completion_conditions=completion_conditions,
@@ -1040,8 +987,7 @@ def _condition_from_payload(value: Any) -> CompletionCondition:
     item = _expect_dict(value, "completion_conditions[]")
     _expect_keys(item, {'condition_id', 'description', 'evidence_required', 'satisfied', 'evidence'},
         'completion_conditions[]')
-    if not isinstance(item.get('satisfied'), bool):
-        raise TaskGraphError("completion_conditions.satisfied 必须是布尔值。")
+    reject_if(not isinstance(item.get('satisfied'), bool), TaskGraphError("completion_conditions.satisfied 必须是布尔值。"))
     return CompletionCondition(condition_id=str(item.get('condition_id') or '').strip().lower(),
         description=_require_text(item.get('description'), 'completion_conditions.description'),
         evidence_required=_text_tuple(item.get('evidence_required'), 'evidence_required'), satisfied=item['satisfied'],
@@ -1056,12 +1002,10 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
     effect_id = str(item.get("effect_id") or "").strip().lower()
     _validate_id(effect_id, "effect_intents.effect_id")
     kind = str(item.get("kind") or "").strip().lower()
-    if kind not in PLANNER_EFFECT_KINDS:
-        raise TaskGraphError(f"正式效果类型无效：{kind}")
+    reject_if(kind not in PLANNER_EFFECT_KINDS, TaskGraphError(f"正式效果类型无效：{kind}"))
     source_subgoal_ids = _id_tuple(item.get('source_subgoal_ids'), 'effect_intents.source_subgoal_ids')
     missing_subgoals = set(source_subgoal_ids) - set(subgoals)
-    if missing_subgoals:
-        raise TaskGraphError('effect_intents 引用不存在子目标：' + ', '.join(sorted(missing_subgoals)))
+    reject_if(missing_subgoals, TaskGraphError('effect_intents 引用不存在子目标：' + ', '.join(sorted(missing_subgoals))))
     target_roles = _id_tuple(item.get('target_entity_roles'), 'effect_intents.target_entity_roles')
     payload_roles = _id_tuple(item.get('payload_entity_roles'), 'effect_intents.payload_entity_roles')
     available_roles = set(entities)
@@ -1070,17 +1014,17 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
     if isinstance(entities.get('input_fields'), list):
         available_roles.add("input_text")
     missing_roles = (set(target_roles) | set(payload_roles)) - available_roles
-    if missing_roles:
-        raise TaskGraphError('effect_intents 引用不存在的 goal.entities 角色：' + ', '.join(sorted(missing_roles)))
+    reject_if(missing_roles, TaskGraphError('effect_intents 引用不存在的 goal.entities 角色：' + ', '.join(sorted(missing_roles))))
     expected_results = _text_tuple(item.get('expected_results'), 'effect_intents.expected_results')
     source_results = tuple((condition for subgoal_id in source_subgoal_ids for condition
         in subgoals[subgoal_id].completion_conditions))
     allowed_results = set(source_results)
-    if not expected_results:
-        raise TaskGraphError('effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。')
-    if (any((DIRECT_PROHIBITION_CLAUSE_PATTERN.search(result) or NON_EFFECT_RESULT_PATTERN.search(result) for result
-        in expected_results))):
-        raise TaskGraphError("禁止或未发生状态不能声明为 effect_intent。")
+    reject_if(not expected_results, TaskGraphError('effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。'))
+    reject_if(
+        any((DIRECT_PROHIBITION_CLAUSE_PATTERN.search(result) or NON_EFFECT_RESULT_PATTERN.search(result) for result
+        in expected_results)),
+        TaskGraphError("禁止或未发生状态不能声明为 effect_intent。"),
+    )
     if any(result not in allowed_results for result in expected_results):
         # expected_results is a redundant textual reference to the bound
         # result.  A single-effect graph has only one possible effect owner, so
@@ -1111,8 +1055,7 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
     _expect_keys(item, {'subgoal_id', 'objective', 'status', 'depends_on', 'constraints', 'completion_conditions',
         'completion_evidence', 'effect_ids', 'execution_class'}, 'subgoals[]')
     execution_class = str(item.get("execution_class") or "").strip().lower()
-    if execution_class not in PLANNER_EXECUTION_CLASSES:
-        raise TaskGraphError(f'subgoals.execution_class 无效：{execution_class}')
+    reject_if(execution_class not in PLANNER_EXECUTION_CLASSES, TaskGraphError(f'subgoals.execution_class 无效：{execution_class}'))
     return Subgoal(subgoal_id=str(item.get('subgoal_id') or '').strip().lower(),
         objective=_require_text(item.get('objective'), 'subgoals.objective'),
         status=str(item.get('status') or '').strip().lower(), depends_on=_id_tuple(item.get('depends_on'),
@@ -1307,10 +1250,8 @@ def _apply_verified_navigation_completion(previous: DynamicTaskGraph, candidate:
     if not ref_ids:
         return candidate
     candidate_current = _by_attr(candidate.subgoals, "subgoal_id").get(current.subgoal_id)
-    if candidate_current is None:
-        raise TaskGraphError("matched controller_transition 的候选图删除了其绑定子目标。")
-    if not _same_subgoal_semantics(current, candidate_current):
-        raise TaskGraphError("matched controller_transition 的候选图改写了其绑定子目标语义。")
+    reject_if(candidate_current is None, TaskGraphError("matched controller_transition 的候选图删除了其绑定子目标。"))
+    reject_if(not _same_subgoal_semantics(current, candidate_current), TaskGraphError("matched controller_transition 的候选图改写了其绑定子目标语义。"))
     subgoals = tuple((replace(item, status='completed', completion_evidence=ref_ids) if item.subgoal_id ==
         current.subgoal_id else item for item in candidate.subgoals))
     active_ids = tuple(item.subgoal_id for item in subgoals if item.status == "active")
@@ -1526,10 +1467,8 @@ def _canonicalize_literal_visible_evidence_clauses(previous: DynamicTaskGraph, c
 
 
 def _validate_revision(previous: DynamicTaskGraph, candidate: DynamicTaskGraph, observation: ObservedState) -> None:
-    if candidate.goal != previous.goal:
-        raise TaskGraphError("重规划不能改写用户目标、目标 App 或目标实体。")
-    if not set(previous.constraints).issubset(candidate.constraints):
-        raise TaskGraphError("重规划不能删除已有全局约束。")
+    reject_if(candidate.goal != previous.goal, TaskGraphError("重规划不能改写用户目标、目标 App 或目标实体。"))
+    reject_if(not set(previous.constraints).issubset(candidate.constraints), TaskGraphError("重规划不能删除已有全局约束。"))
     old_conditions = _by_attr(previous.completion_conditions, "condition_id")
     new_conditions = _by_attr(candidate.completion_conditions, "condition_id")
     _reject_missing_refs(tuple(old_conditions), new_conditions, "重规划不能删除全局完成条件：")
@@ -1555,16 +1494,12 @@ def _validate_revision(previous: DynamicTaskGraph, candidate: DynamicTaskGraph, 
             and ref.subgoal_id == previous_current.subgoal_id and (ref_id in candidate_current.completion_evidence)})
     for (condition_id, old) in old_conditions.items():
         new = new_conditions[condition_id]
-        if not _same_fields(old, new, ('description', 'evidence_required')):
-            raise TaskGraphError(f"重规划不能改写全局完成条件：{condition_id}")
-        if old.satisfied and (not new.satisfied or not set(old.evidence).issubset(new.evidence)):
-            raise TaskGraphError(f"重规划不能撤销已满足完成条件：{condition_id}")
-        if not old.satisfied and new.satisfied and (not set(new.evidence).issubset(evidence)):
-            raise TaskGraphError(f"完成条件使用了当前观察之外的证据：{condition_id}")
+        reject_if(not _same_fields(old, new, ('description', 'evidence_required')), TaskGraphError(f"重规划不能改写全局完成条件：{condition_id}"))
+        reject_if(old.satisfied and (not new.satisfied or not set(old.evidence).issubset(new.evidence)), TaskGraphError(f"重规划不能撤销已满足完成条件：{condition_id}"))
+        reject_if(not old.satisfied and new.satisfied and (not set(new.evidence).issubset(evidence)), TaskGraphError(f"完成条件使用了当前观察之外的证据：{condition_id}"))
     for condition_id in set(new_conditions) - set(old_conditions):
         condition = new_conditions[condition_id]
-        if condition.satisfied and (not set(condition.evidence).issubset(evidence)):
-            raise TaskGraphError(f"新增完成条件使用了当前观察之外的证据：{condition_id}")
+        reject_if(condition.satisfied and (not set(condition.evidence).issubset(evidence)), TaskGraphError(f"新增完成条件使用了当前观察之外的证据：{condition_id}"))
 
     old_risks = _by_attr(previous.risk_actions, "risk_id")
     new_risks = _by_attr(candidate.risk_actions, "risk_id")
@@ -1572,40 +1507,46 @@ def _validate_revision(previous: DynamicTaskGraph, candidate: DynamicTaskGraph, 
     risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     for (risk_id, old) in old_risks.items():
         new = new_risks[risk_id]
-        if (not _same_fields(old, new, ('description', 'external_effect', 'risk_type',
+        reject_if(
+            not _same_fields(old, new, ('description', 'external_effect', 'risk_type',
             'confirmation_required')) or risk_order[new.risk_level] < risk_order[old.risk_level]
-            or (not set(old.subgoal_ids).issubset(new.subgoal_ids))):
-            raise TaskGraphError(f"重规划不能改写或降低既有风险：{risk_id}")
+            or (not set(old.subgoal_ids).issubset(new.subgoal_ids)),
+            TaskGraphError(f"重规划不能改写或降低既有风险：{risk_id}"),
+        )
 
     completed = {key: item for key, item in old_subgoals.items() if item.status == "completed"}
     _reject_missing_refs(tuple(completed), new_subgoals, "重规划不能删除已完成子目标：")
     for (subgoal_id, old) in completed.items():
         new = new_subgoals[subgoal_id]
-        if (new.status != 'completed' or not _same_subgoal_semantics(old,
-            new) or (not set(old.completion_evidence).issubset(new.completion_evidence))):
-            raise TaskGraphError(f"重规划不能复活或改写已完成子目标：{subgoal_id}")
+        reject_if(
+            new.status != 'completed' or not _same_subgoal_semantics(old,
+            new) or (not set(old.completion_evidence).issubset(new.completion_evidence)),
+            TaskGraphError(f"重规划不能复活或改写已完成子目标：{subgoal_id}"),
+        )
     for (subgoal_id, new) in new_subgoals.items():
         old = old_subgoals.get(subgoal_id)
         if new.status != 'completed' or (old is not None and old.status == 'completed'):
             continue
         claimed = set(new.completion_evidence)
         controller_claims = claimed.intersection(controller_refs)
-        if claimed - evidence - set(controller_refs):
-            raise TaskGraphError(f"子目标使用了当前观察之外的完成证据：{subgoal_id}")
-        if (controller_claims and (old is None or old.external_impact != 'navigation_only'
-            or previous.active_subgoal_id != subgoal_id or (transition is None) or (transition.outcome != 'matched'))):
-            raise TaskGraphError("controller_transition 证据只能完成其严格绑定的上一 navigation_only 活动子目标。")
-        if any((controller_refs[ref_id].subgoal_id != subgoal_id for ref_id in controller_claims)):
-            raise TaskGraphError("controller_transition 证据跨子目标使用。")
+        reject_if(claimed - evidence - set(controller_refs), TaskGraphError(f"子目标使用了当前观察之外的完成证据：{subgoal_id}"))
+        reject_if(
+            controller_claims and (old is None or old.external_impact != 'navigation_only'
+            or previous.active_subgoal_id != subgoal_id or (transition is None) or (transition.outcome != 'matched')),
+            TaskGraphError("controller_transition 证据只能完成其严格绑定的上一 navigation_only 活动子目标。"),
+        )
+        reject_if(any((controller_refs[ref_id].subgoal_id != subgoal_id for ref_id in controller_claims)), TaskGraphError("controller_transition 证据跨子目标使用。"))
     if (transition is not None and transition.outcome == 'matched' and controller_refs and (previous.active_subgoal_id
         is not None)):
         old_active = old_subgoals.get(previous.active_subgoal_id)
         revised_old_active = new_subgoals.get(previous.active_subgoal_id)
-        if (old_active is not None and old_active.external_impact == 'navigation_only'
+        reject_if(
+            old_active is not None and old_active.external_impact == 'navigation_only'
             and (transition.subgoal_id == old_active.subgoal_id)
             and any((ref.subgoal_id == old_active.subgoal_id for ref in controller_refs.values()))
-            and (revised_old_active is None or revised_old_active.status != 'completed')):
-            raise TaskGraphError(f'matched controller_transition 未完成其绑定的 navigation_only 子目标：{old_active.subgoal_id}')
+            and (revised_old_active is None or revised_old_active.status != 'completed'),
+            TaskGraphError(f'matched controller_transition 未完成其绑定的 navigation_only 子目标：{old_active.subgoal_id}'),
+        )
 
 
 def _validate_execution_class_revision(previous: DynamicTaskGraph, candidate: DynamicTaskGraph) -> None:
@@ -1615,26 +1556,25 @@ def _validate_execution_class_revision(previous: DynamicTaskGraph, candidate: Dy
         new = new_subgoals.get(subgoal_id)
         if new is None:
             continue
-        if old.external_impact == 'external_state' and new.external_impact != 'external_state':
-            raise TaskGraphError(f'重规划不能把既有 effect 子目标降级：{subgoal_id}')
-        if old.external_impact == 'unknown' and new.external_impact in {'read_only', 'navigation_only'}:
-            raise TaskGraphError(f'重规划不能未经证据把 unknown 降级为安全分类：{subgoal_id}')
+        reject_if(old.external_impact == 'external_state' and new.external_impact != 'external_state', TaskGraphError(f'重规划不能把既有 effect 子目标降级：{subgoal_id}'))
+        reject_if(old.external_impact == 'unknown' and new.external_impact in {'read_only', 'navigation_only'}, TaskGraphError(f'重规划不能未经证据把 unknown 降级为安全分类：{subgoal_id}'))
 
 
 def _validate_preserved_effect_intents(previous: DynamicTaskGraph, candidate: DynamicTaskGraph) -> None:
     previous_effects = {item.risk_id: item for item in previous.risk_actions}
     candidate_effects = {item.risk_id: item for item in candidate.risk_actions}
     missing = set(previous_effects) - set(candidate_effects)
-    if missing:
-        raise TaskGraphError('重规划不能删除既有 EffectIntent：' + ', '.join(sorted(missing)))
+    reject_if(missing, TaskGraphError('重规划不能删除既有 EffectIntent：' + ', '.join(sorted(missing))))
     for (effect_id, previous_effect) in previous_effects.items():
         candidate_effect = candidate_effects[effect_id]
-        if (candidate_effect.effect_kind != previous_effect.effect_kind
+        reject_if(
+            candidate_effect.effect_kind != previous_effect.effect_kind
             or candidate_effect.target_roles != previous_effect.target_roles
             or candidate_effect.payload_roles != previous_effect.payload_roles
             or (candidate_effect.subgoal_ids != previous_effect.subgoal_ids)
-            or (candidate_effect.expected_result_texts != previous_effect.expected_result_texts)):
-            raise TaskGraphError(f'重规划不能改写既有 EffectIntent：{effect_id}')
+            or (candidate_effect.expected_result_texts != previous_effect.expected_result_texts),
+            TaskGraphError(f'重规划不能改写既有 EffectIntent：{effect_id}'),
+        )
 
 
 def _reject_dependency_cycles(subgoals: dict[str, Subgoal]) -> None:
@@ -1642,8 +1582,7 @@ def _reject_dependency_cycles(subgoals: dict[str, Subgoal]) -> None:
     visited: set[str] = set()
 
     def visit(subgoal_id: str) -> None:
-        if subgoal_id in visiting:
-            raise TaskGraphError(f"子目标依赖形成环：{subgoal_id}")
+        reject_if(subgoal_id in visiting, TaskGraphError(f"子目标依赖形成环：{subgoal_id}"))
         if subgoal_id in visited:
             return
         visiting.add(subgoal_id)
@@ -1660,36 +1599,30 @@ def _unique_by_id(values: tuple[Any, ...], key: Any, label: str) -> dict[str, An
     result: dict[str, Any] = {}
     for value in values:
         item_id = key(value)
-        if item_id in result:
-            raise TaskGraphError(f"{label} ID 重复：{item_id}")
+        reject_if(item_id in result, TaskGraphError(f"{label} ID 重复：{item_id}"))
         result[item_id] = value
     return result
 
 
 def _reject_missing_refs(values: tuple[str, ...], available: dict[str, Any], message: str) -> None:
     missing = set(values) - set(available)
-    if missing:
-        raise TaskGraphError(message + ", ".join(sorted(missing)))
+    reject_if(missing, TaskGraphError(message + ", ".join(sorted(missing))))
 
 
 def _expect_keys(value: dict[str, Any], allowed: set[str], path: str) -> None:
     unexpected = set(value) - allowed
-    if unexpected:
-        raise TaskGraphError(f'{path} 包含协议外字段：' + ', '.join(sorted((str(item) for item in unexpected))))
+    reject_if(unexpected, TaskGraphError(f'{path} 包含协议外字段：' + ', '.join(sorted((str(item) for item in unexpected)))))
     missing = allowed - set(value)
-    if missing:
-        raise TaskGraphError(f'{path} 缺少字段：' + ', '.join(sorted(missing)))
+    reject_if(missing, TaskGraphError(f'{path} 缺少字段：' + ', '.join(sorted(missing))))
 
 
 def _expect_dict(value: Any, path: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise TaskGraphError(f"{path} 必须是对象。")
+    reject_if(not isinstance(value, dict), TaskGraphError(f"{path} 必须是对象。"))
     return value
 
 
 def _expect_list(value: Any, path: str) -> list[Any]:
-    if not isinstance(value, list):
-        raise TaskGraphError(f"{path} 必须是数组。")
+    reject_if(not isinstance(value, list), TaskGraphError(f"{path} 必须是数组。"))
     return value
 
 
@@ -1703,37 +1636,28 @@ def _is_exact_input_text(value: Any) -> bool:
 
 
 def _validate_input_fields(value: Any) -> None:
-    if not isinstance(value, list) or not 1 <= len(value) <= MAX_INPUT_FIELDS:
-        raise TaskGraphError("goal.entities.input_fields 必须为1～32个输入字段。")
+    reject_if(not isinstance(value, list) or not 1 <= len(value) <= MAX_INPUT_FIELDS, TaskGraphError("goal.entities.input_fields 必须为1～32个输入字段。"))
     field_ids: set[str] = set()
     labels: set[str] = set()
     for (index, item) in enumerate(value):
         allowed_shapes = ({"field_id", "text"}, {"field_id", "field_label", "text"})
-        if not isinstance(item, dict) or set(item) not in allowed_shapes:
-            raise TaskGraphError(f'goal.entities.input_fields[{index}] 只允许 field_id/可选field_label/text。')
+        reject_if(not isinstance(item, dict) or set(item) not in allowed_shapes, TaskGraphError(f'goal.entities.input_fields[{index}] 只允许 field_id/可选field_label/text。'))
         field_id = item.get("field_id")
         label = item.get("field_label", "")
-        if not isinstance(field_id, str) or not ID_PATTERN.fullmatch(field_id):
-            raise TaskGraphError(f"goal.entities.input_fields[{index}].field_id 无效。")
-        if field_id in field_ids:
-            raise TaskGraphError("goal.entities.input_fields.field_id 重复。")
+        reject_if(not isinstance(field_id, str) or not ID_PATTERN.fullmatch(field_id), TaskGraphError(f"goal.entities.input_fields[{index}].field_id 无效。"))
+        reject_if(field_id in field_ids, TaskGraphError("goal.entities.input_fields.field_id 重复。"))
         field_ids.add(field_id)
-        if not _is_single_line_literal(label, 120, allow_empty=True):
-            raise TaskGraphError(f"goal.entities.input_fields[{index}].field_label 无效。")
+        reject_if(not _is_single_line_literal(label, 120, allow_empty=True), TaskGraphError(f"goal.entities.input_fields[{index}].field_label 无效。"))
         folded = label.casefold()
-        if label and folded in labels:
-            raise TaskGraphError("goal.entities.input_fields.field_label 重复。")
+        reject_if(label and folded in labels, TaskGraphError("goal.entities.input_fields.field_label 重复。"))
         labels.add(folded)
-        if not _is_exact_input_text(item.get('text')):
-            raise TaskGraphError(f"goal.entities.input_fields[{index}].text 必须为1～4000字符。")
+        reject_if(not _is_exact_input_text(item.get('text')), TaskGraphError(f"goal.entities.input_fields[{index}].text 必须为1～4000字符。"))
 
 
 def _require_text(value: Any, path: str, *, max_length: int=1000) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise TaskGraphError(f"{path} 必须是非空字符串。")
+    reject_if(not isinstance(value, str) or not value.strip(), TaskGraphError(f"{path} 必须是非空字符串。"))
     text = value.strip()
-    if len(text) > max_length:
-        raise TaskGraphError(f"{path} 超过最大长度 {max_length}。")
+    reject_if(len(text) > max_length, TaskGraphError(f"{path} 超过最大长度 {max_length}。"))
     return text
 
 
@@ -1748,36 +1672,29 @@ def _id_tuple(value: Any, path: str) -> tuple[str, ...]:
 
 
 def _validate_text_list(values: tuple[str, ...], path: str, *, required: bool) -> None:
-    if required and (not values):
-        raise TaskGraphError(f"{path} 不能为空。")
-    if len(values) != len(set(values)):
-        raise TaskGraphError(f"{path} 不能包含重复项。")
+    reject_if(required and (not values), TaskGraphError(f"{path} 不能为空。"))
+    reject_if(len(values) != len(set(values)), TaskGraphError(f"{path} 不能包含重复项。"))
     for value in values:
         _require_text(value, path)
 
 
 def _validate_id_list(values: tuple[str, ...], path: str, *, required: bool) -> None:
-    if required and (not values):
-        raise TaskGraphError(f"{path} 不能为空。")
-    if len(values) != len(set(values)):
-        raise TaskGraphError(f"{path} 不能包含重复 ID。")
+    reject_if(required and (not values), TaskGraphError(f"{path} 不能为空。"))
+    reject_if(len(values) != len(set(values)), TaskGraphError(f"{path} 不能包含重复 ID。"))
     for value in values:
         _validate_id(value, path)
 
 
 def _validate_id(value: str, label: str) -> None:
-    if not ID_PATTERN.fullmatch(value):
-        raise TaskGraphError(f"{label} 无效：{value!r}")
+    reject_if(not ID_PATTERN.fullmatch(value), TaskGraphError(f"{label} 无效：{value!r}"))
 
 
 def _validate_device_id(device_id: str) -> None:
-    if not DEVICE_ID_PATTERN.fullmatch(str(device_id or '')):
-        raise TaskGraphError(f"device_id 无效：{device_id!r}")
+    reject_if(not DEVICE_ID_PATTERN.fullmatch(str(device_id or '')), TaskGraphError(f"device_id 无效：{device_id!r}"))
 
 
 def _validate_task_id(task_id: str) -> None:
-    if not TASK_ID_PATTERN.fullmatch(str(task_id or '')):
-        raise TaskGraphError(f"task_id 无效：{task_id!r}")
+    reject_if(not TASK_ID_PATTERN.fullmatch(str(task_id or '')), TaskGraphError(f"task_id 无效：{task_id!r}"))
 
 
 def _reject_low_level_instruction(value: str, path: str, *, allow_negated: bool=False) -> None:
@@ -1825,8 +1742,7 @@ def _normalize_explicit_ui_label_payload(payload: dict[str, Any], raw_user_goal:
         in pattern.finditer(source) if NATURAL_ACTION_INTENT_PATTERN.search(match.group(1).strip()))))
     if not action_like_labels:
         return payload
-    if len(action_like_labels) != 1:
-        raise TaskGraphError("用户目标包含多个动作词字面 UI 标签，无法唯一绑定。")
+    reject_if(len(action_like_labels) != 1, TaskGraphError("用户目标包含多个动作词字面 UI 标签，无法唯一绑定。"))
     label = action_like_labels[0]
 
     value = json.loads(json.dumps(payload, ensure_ascii=False))
@@ -1837,8 +1753,7 @@ def _normalize_explicit_ui_label_payload(payload: dict[str, Any], raw_user_goal:
     if not isinstance(entities, dict):
         return value
     existing = entities.get("target_ui_label")
-    if existing not in (None, '', label):
-        raise TaskGraphError("DeepSeek 返回的 target_ui_label 与用户字面标签冲突。")
+    reject_if(existing not in (None, '', label), TaskGraphError("DeepSeek 返回的 target_ui_label 与用户字面标签冲突。"))
     entities["target_ui_label"] = label
 
     def replace_label(item: Any) -> Any:
@@ -2061,8 +1976,7 @@ def _reject_control_fields(value: Any, path: str) -> None:
         'shell', 'command', 'powershell', 'python', 'main_exe', 'execution_plan'}
     if isinstance(value, dict):
         for (key, item) in value.items():
-            if str(key).strip().lower() in forbidden:
-                raise TaskGraphError(f"任务图包含低层控制字段：{path}.{key}")
+            reject_if(str(key).strip().lower() in forbidden, TaskGraphError(f"任务图包含低层控制字段：{path}.{key}"))
             _reject_control_fields(item, f"{path}.{key}")
     elif isinstance(value, (list, tuple)):
         for (index, item) in enumerate(value):

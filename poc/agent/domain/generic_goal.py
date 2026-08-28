@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .validation import reject_if
 import json
 import re
 from collections.abc import Mapping
@@ -42,23 +43,17 @@ class GenericIntentDraft:
     protocol_version: str = GOAL_PROJECTION_PROTOCOL
 
     def validate(self) -> None:
-        if not isinstance(self.understood, bool):
-            raise GenericIntentError("understood 格式无效。")
+        reject_if(not isinstance(self.understood, bool), GenericIntentError("understood 格式无效。"))
         if not self.understood:
-            if not self.message.strip():
-                raise GenericIntentError("未理解任务时必须说明缺少的信息。")
+            reject_if(not self.message.strip(), GenericIntentError("未理解任务时必须说明缺少的信息。"))
             return
-        if not APP_ID_PATTERN.fullmatch(self.app_id):
-            raise GenericIntentError(f"App ID 无效：{self.app_id!r}")
-        if not self.app_name.strip() or not self.objective.strip():
-            raise GenericIntentError("通用任务缺少 App 名称或目标。")
-        if not isinstance(self.needs_confirmation, bool):
-            raise GenericIntentError("needs_confirmation 格式无效。")
+        reject_if(not APP_ID_PATTERN.fullmatch(self.app_id), GenericIntentError(f"App ID 无效：{self.app_id!r}"))
+        reject_if(not self.app_name.strip() or not self.objective.strip(), GenericIntentError("通用任务缺少 App 名称或目标。"))
+        reject_if(not isinstance(self.needs_confirmation, bool), GenericIntentError("needs_confirmation 格式无效。"))
         _validate_json_value(self.entities, "entities")
         _validate_json_value(self.success_criteria, "success_criteria")
         for value in (*self.constraints, *self.account_effects):
-            if not isinstance(value, str) or not value.strip():
-                raise GenericIntentError("约束和账号影响必须是非空字符串。")
+            reject_if(not isinstance(value, str) or not value.strip(), GenericIntentError("约束和账号影响必须是非空字符串。"))
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -573,16 +568,14 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
         raise GenericIntentError(f"文本模型没有返回有效 JSON：{exc}") from exc
-    if not isinstance(value, dict):
-        raise GenericIntentError("文本模型返回内容不是 JSON 对象。")
+    reject_if(not isinstance(value, dict), GenericIntentError("文本模型返回内容不是 JSON 对象。"))
     return value
 
 
 def _validate_json_value(value: Any, path: str) -> None:
     if isinstance(value, dict):
         for (key, item) in value.items():
-            if not isinstance(key, str) or not key.strip():
-                raise GenericIntentError(f"目标参数字段无效：{path}")
+            reject_if(not isinstance(key, str) or not key.strip(), GenericIntentError(f"目标参数字段无效：{path}"))
             _validate_json_value(item, f"{path}.{key}")
     elif isinstance(value, (list, tuple)):
         for (index, item) in enumerate(value):
@@ -598,14 +591,12 @@ def safe_goal_context(value: dict[str, Any]) -> dict[str, Any]:
         'shell', 'execution_plan'}
 
     def clean(item: Any, depth: int=0) -> Any:
-        if depth > 5:
-            raise VisionAgentError("目标上下文嵌套过深。")
+        reject_if(depth > 5, VisionAgentError("目标上下文嵌套过深。"))
         if isinstance(item, dict):
             result: dict[str, Any] = {}
             for (raw_key, raw_value) in item.items():
                 key = str(raw_key).strip()
-                if key.lower() in forbidden:
-                    raise VisionAgentError(f"目标上下文包含控制字段：{key}")
+                reject_if(key.lower() in forbidden, VisionAgentError(f"目标上下文包含控制字段：{key}"))
                 result[key[:80]] = clean(raw_value, depth + 1)
             return result
         if isinstance(item, (list, tuple)):
@@ -617,6 +608,5 @@ def safe_goal_context(value: dict[str, Any]) -> dict[str, Any]:
         raise VisionAgentError("目标上下文包含不支持的数据类型。")
 
     cleaned = clean(value)
-    if not isinstance(cleaned, dict):
-        raise VisionAgentError("目标上下文必须是对象。")
+    reject_if(not isinstance(cleaned, dict), VisionAgentError("目标上下文必须是对象。"))
     return cleaned

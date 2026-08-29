@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from .ui_scene import UIElement, UIScene
+from .validation import NormalizedBounds, dataclass_wire
 from .visual_evidence import LocalFrameStability
 
 
@@ -37,29 +37,19 @@ class TrustedObservation:
         return trusted_target_local_candidate(self.scene, self.candidate_conflicts)
 
     def to_dict(self) -> dict[str, Any]:
-        scene = self.scene.to_dict()
+        value = dataclass_wire(self)
+        scene = value['scene']
         system_ui = structured_system_ui(self.scene)
         if system_ui is not None:
             scene["system_ui"] = system_ui
-        return {'observation_id': self.observation_id, 'device_id': self.device_id, 'fingerprint': self.fingerprint,
-            'scene': scene, 'local_stability': self.local_stability.to_dict(),
-            'selected_frame_index': self.selected_frame_index, 'frame_sharpness_scores': [round(value,
-            3) for value in self.frame_sharpness_scores], 'candidate_aliases': dict(self.candidate_aliases),
-            'candidate_conflicts': [dict(item) for item in self.candidate_conflicts]}
+        value.update(frame_sharpness_scores=[round(score, 3) for score in self.frame_sharpness_scores],
+            candidate_aliases=dict(self.candidate_aliases))
+        return value
 
 
 def structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
     facts = getattr(scene, "system_ui", None)
-    if facts is None:
-        return None
-    immersive = getattr(facts, "immersive_or_fullscreen", None)
-    navigation_visible = getattr(facts, "navigation_bar_visible", None)
-    if isinstance(facts, Mapping):
-        if immersive is None:
-            immersive = facts.get("immersive_or_fullscreen")
-        if navigation_visible is None:
-            navigation_visible = facts.get("navigation_bar_visible")
-    return {'immersive_or_fullscreen': immersive, 'navigation_bar_visible': navigation_visible}
+    return facts.to_dict() if facts is not None else None
 
 
 def canonicalize_trusted_scene(scene: UIScene) -> tuple[UIScene, tuple[tuple[str, str], ...], tuple[dict[str, Any],
@@ -158,8 +148,7 @@ def elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:
     return left.meaning.strip().casefold() == right.meaning.strip().casefold()
 
 
-def bounds_overlap(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> dict[str,
-    float]:
+def bounds_overlap(left: NormalizedBounds, right: NormalizedBounds) -> dict[str, float]:
     intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
     intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
     intersection = intersection_width * intersection_height

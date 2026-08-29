@@ -237,6 +237,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 },
                 "observation_errors": [],
                 "verification_errors": [],
+                "controller_transition_evidence": ["Controller 已验证动作后状态"],
                 "robot_result": [[2, 4], [12, 8]],
             },
             "before_frame_paths": before,
@@ -254,108 +255,6 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         self.report_path.write_text(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
-        )
-        return report
-
-    def _valid_reveal_system_navigation_report(self) -> dict:
-        report = self._valid_report()
-        report["candidate_action"] = "reveal_system_navigation"
-        report["before_observation"]["fingerprint"] = (
-            "fingerprint-execution-before"
-        )
-        report["confirmation_scope"]["fingerprint"] = (
-            "fingerprint-execution-before"
-        )
-        report["execution"].update(
-            {
-                "resolved_action": {
-                    "node_id": "reveal-system-navigation-001",
-                    "kind": "reveal_system_navigation",
-                    "normalized_point": None,
-                    "normalized_end_point": None,
-                    "text": None,
-                    "direction": None,
-                    "hold_seconds": None,
-                    "path_distance": None,
-                    "target_element_id": None,
-                    "destination_element_id": None,
-                    "before_fingerprint": "fingerprint-execution-before",
-                    "expected_effect": {
-                        "system_ui": {"navigation_bar_visible": True}
-                    },
-                },
-                "before_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "immersive-page",
-                    "summary": "沉浸页面，导航栏隐藏",
-                    "system_ui": {
-                        "immersive_or_fullscreen": True,
-                        "navigation_bar_visible": False,
-                    },
-                    "elements": [],
-                    "overlays": [],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-execution-before",
-                },
-                "after_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "immersive-page",
-                    "summary": "系统导航栏已经可见",
-                    "system_ui": {
-                        "immersive_or_fullscreen": True,
-                        "navigation_bar_visible": True,
-                    },
-                    "elements": [],
-                    "overlays": [],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-after",
-                },
-                "robot_result": {
-                    "action": "reveal_system_navigation",
-                    "edge": "bottom",
-                    "frame_size": [16, 16],
-                    "requested_grid": [[120, 491], [331, 490]],
-                    "corrected_grid": [[94, 486], [314, 485]],
-                    "client_path": [[2, 15], [8, 10]],
-                },
-            }
-        )
-        return report
-
-    def _valid_double_tap_report(self) -> dict:
-        report = self._valid_report()
-        report["candidate_action"] = "double_tap"
-        report["execution"].update(
-            {
-                "resolved_action": {
-                    "node_id": "double-tap-001",
-                    "kind": "double_tap",
-                    "normalized_point": [0.15, 0.25],
-                    "target_element_id": "source",
-                    "before_fingerprint": "fingerprint-execution-before",
-                    "expected_effect": {"scene_changed": True},
-                },
-                "after_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "detail",
-                    "summary": "双击后打开详情",
-                    "elements": [],
-                    "overlays": [],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-after",
-                },
-                "robot_result": [2, 4],
-                "hardware_receipt": {
-                    "seller_event_barrier_confirmed": True,
-                    "round_trip_position_confirmed": True,
-                    "mechanical_contact_ack": False,
-                    "click_count": 2,
-                    "click_count_restored_to": 1,
-                },
-            }
         )
         return report
 
@@ -406,6 +305,9 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 json.dumps(report, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+        result.to_dict = lambda: json.loads(
+            json.dumps(report["execution"], ensure_ascii=False)
+        )
         return credential, result
 
     def _preview_live(self, promoter: CapabilityRegistryPromoter):
@@ -473,85 +375,6 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(CapabilityAcceptanceError, message):
                     validate_acceptance_report(self.report_path)
 
-    def test_reveal_system_navigation_report_requires_structured_system_ui(self) -> None:
-        report = self._valid_reveal_system_navigation_report()
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        validated = validate_acceptance_report(self.report_path)
-
-        self.assertEqual(
-            "reveal_system_navigation", validated["candidate_action"]
-        )
-
-    def test_double_tap_report_requires_count_two_and_single_restore(self) -> None:
-        report = self._valid_double_tap_report()
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        validated = validate_acceptance_report(self.report_path)
-        self.assertEqual("double_tap", validated["candidate_action"])
-
-        for field, value in (("click_count", 1), ("click_count_restored_to", 2)):
-            with self.subTest(field=field):
-                report = self._valid_double_tap_report()
-                report["execution"]["hardware_receipt"][field] = value
-                self.report_path.write_text(
-                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                with self.assertRaisesRegex(CapabilityAcceptanceError, "双击验收"):
-                    validate_acceptance_report(self.report_path)
-
-    def test_reveal_system_navigation_rejects_summary_only_success(self) -> None:
-        report = self._valid_reveal_system_navigation_report()
-        report["execution"]["after_scene"]["system_ui"][
-            "navigation_bar_visible"
-        ] = "unknown"
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "导航栏"):
-            validate_acceptance_report(self.report_path)
-
-    def test_reveal_system_navigation_rejects_model_geometry(self) -> None:
-        report = self._valid_reveal_system_navigation_report()
-        report["execution"]["resolved_action"]["direction"] = "up"
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "模型坐标"):
-            validate_acceptance_report(self.report_path)
-
-    def test_reveal_system_navigation_rejects_bad_robot_receipt(self) -> None:
-        mutations = (
-            (
-                "实际像素端点",
-                lambda result: result.__setitem__("client_path", [[2, 15]]),
-            ),
-            (
-                "相机尺寸",
-                lambda result: result.__setitem__("frame_size", [15, 16]),
-            ),
-        )
-        for expected, mutation in mutations:
-            with self.subTest(expected=expected):
-                report = self._valid_reveal_system_navigation_report()
-                mutation(report["execution"]["robot_result"])
-                self.report_path.write_text(
-                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                with self.assertRaisesRegex(CapabilityAcceptanceError, expected):
-                    validate_acceptance_report(self.report_path)
-
     def test_report_rejects_wrong_physical_action_count(self) -> None:
         for value in (0, 2, True, "1"):
             with self.subTest(value=value):
@@ -574,230 +397,14 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(CapabilityAcceptanceError, message):
                     validate_acceptance_report(self.report_path)
 
-    def test_input_report_requires_exact_structured_value(self) -> None:
-        report = self._valid_report()
-        report["candidate_action"] = "input_verified_text"
-        report["calibration_evidence"] = None
-        report["execution"].update(
-            {
-                "resolved_action": {
-                    "kind": "input_verified_text",
-                    "text": "agent",
-                    "input_fragment": "agent",
-                    "input_method": "direct_latin",
-                    "prior_input_value": "",
-                    "expected_input_value": "agent",
-                    "target_element_id": "field",
-                    "before_fingerprint": "fingerprint-execution-before",
-                },
-                "before_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "input",
-                    "summary": "输入前",
-                    "elements": [
-                        {
-                            "element_id": "field",
-                            "role": "input",
-                            "meaning": "search_field",
-                            "label": "搜索",
-                            "bounds": [0.1, 0.1, 0.9, 0.2],
-                            "confidence": 0.95,
-                            "states": {
-                                "focused": True,
-                                "value": "",
-                                "keyboard_layout": "qwerty",
-                                "keyboard_input_mode": "direct_latin",
-                                "goal_relevant": True,
-                            },
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-execution-before",
-                },
-                "after_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "input",
-                    "summary": "输入后",
-                    "elements": [
-                        {
-                            "element_id": "field-after",
-                            "role": "input",
-                            "meaning": "search_field",
-                            "label": "搜索",
-                            "bounds": [0.1, 0.1, 0.9, 0.2],
-                            "confidence": 0.95,
-                            "states": {"value": "agent.com"},
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-after",
-                },
-            }
-        )
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+    def test_report_requires_controller_transition_evidence(self) -> None:
+        self._mutate_report(
+            lambda report: report["execution"].__setitem__(
+                "controller_transition_evidence", []
+            )
         )
 
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "文字不匹配"):
-            validate_acceptance_report(self.report_path)
-
-        report["execution"]["after_scene"]["elements"][0]["states"]["value"] = "agent"
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        validated = validate_acceptance_report(self.report_path)
-        self.assertEqual("input_verified_text", validated["candidate_action"])
-
-        report["execution"]["after_scene"]["screen_id"] = "other-input-screen"
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "App 或页面身份"):
-            validate_acceptance_report(self.report_path)
-
-    def test_input_report_requires_goal_relevant_unique_target(self) -> None:
-        report = self._valid_report()
-        report["candidate_action"] = "input_verified_text"
-        report["calibration_evidence"] = None
-        report["execution"].update(
-            {
-                "resolved_action": {
-                    "kind": "input_verified_text",
-                    "text": "agent",
-                    "input_fragment": "agent",
-                    "input_method": "direct_latin",
-                    "prior_input_value": "",
-                    "expected_input_value": "agent",
-                    "target_element_id": "field",
-                    "before_fingerprint": "fingerprint-execution-before",
-                },
-                "before_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "input",
-                    "summary": "输入前",
-                    "elements": [
-                        {
-                            "element_id": "field",
-                            "role": "input",
-                            "meaning": "search_field",
-                            "label": "搜索",
-                            "bounds": [0.1, 0.1, 0.9, 0.2],
-                            "confidence": 0.95,
-                            "states": {
-                                "focused": True,
-                                "value": "",
-                                "keyboard_layout": "qwerty",
-                                "keyboard_input_mode": "direct_latin",
-                                "goal_relevant": False,
-                            },
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-execution-before",
-                },
-                "after_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "input",
-                    "summary": "输入后",
-                    "elements": [
-                        {
-                            "element_id": "field",
-                            "role": "input",
-                            "meaning": "search_field",
-                            "label": "搜索",
-                            "bounds": [0.1, 0.1, 0.9, 0.2],
-                            "confidence": 0.95,
-                            "states": {"value": "agent"},
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-after",
-                },
-            }
-        )
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "缺少可信关联"):
-            validate_acceptance_report(self.report_path)
-
-    def test_input_report_rejects_missing_direct_latin_precondition(self) -> None:
-        report = self._valid_report()
-        report["candidate_action"] = "input_verified_text"
-        report["calibration_evidence"] = None
-        report["execution"].update(
-            {
-                "resolved_action": {
-                    "kind": "input_verified_text",
-                    "text": "agent",
-                    "input_fragment": "agent",
-                    "input_method": "direct_latin",
-                    "prior_input_value": "",
-                    "expected_input_value": "agent",
-                    "target_element_id": "field",
-                    "before_fingerprint": "fingerprint-execution-before",
-                },
-                "before_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "input",
-                    "summary": "输入前",
-                    "elements": [
-                        {
-                            "element_id": "field",
-                            "role": "input",
-                            "meaning": "search_field",
-                            "label": "搜索",
-                            "bounds": [0.1, 0.1, 0.9, 0.2],
-                            "confidence": 0.95,
-                            "states": {
-                                "focused": True,
-                                "value": "",
-                                "keyboard_layout": "qwerty",
-                                "keyboard_input_mode": "chinese_pinyin",
-                                "goal_relevant": True,
-                            },
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-execution-before",
-                },
-                "after_scene": {
-                    "foreground_app_id": "test-app",
-                    "screen_id": "input",
-                    "summary": "输入后",
-                    "elements": [
-                        {
-                            "element_id": "field",
-                            "role": "input",
-                            "meaning": "search_field",
-                            "label": "搜索",
-                            "bounds": [0.1, 0.1, 0.9, 0.2],
-                            "confidence": 0.95,
-                            "states": {"value": "agent"},
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "fingerprint-after",
-                },
-            }
-        )
-        self.report_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "direct_latin"):
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "transition evidence"):
             validate_acceptance_report(self.report_path)
 
     def test_report_rejects_confirmation_scope_fingerprint_drift(self) -> None:
@@ -811,35 +418,13 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityAcceptanceError, "确认作用域不一致"):
             validate_acceptance_report(self.report_path)
 
-    def test_drag_report_rejects_tampered_distance_or_duration(self) -> None:
-        mutations = (
-            ("路径距离", lambda report: report["execution"]["resolved_action"].__setitem__("path_distance", 0.1)),
-            ("固定的0.8秒", lambda report: report["execution"]["resolved_action"].__setitem__("hold_seconds", 1.2)),
+    def test_gesture_report_requires_calibration_evidence(self) -> None:
+        self._mutate_report(
+            lambda report: report.__setitem__("calibration_evidence", None)
         )
-        for message, mutation in mutations:
-            with self.subTest(message=message):
-                self._write_valid_report()
-                self._mutate_report(mutation)
-                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
-                    validate_acceptance_report(self.report_path)
 
-    def test_gesture_report_requires_calibration_and_physical_result_evidence(self) -> None:
-        mutations = (
-            (
-                "触控标定证据",
-                lambda report: report.__setitem__("calibration_evidence", None),
-            ),
-            (
-                "实际像素端点",
-                lambda report: report["execution"].__setitem__("robot_result", None),
-            ),
-        )
-        for message, mutation in mutations:
-            with self.subTest(message=message):
-                self._write_valid_report()
-                self._mutate_report(mutation)
-                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
-                    validate_acceptance_report(self.report_path)
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "触控标定证据"):
+            validate_acceptance_report(self.report_path)
 
     def test_calibration_requires_independent_validation_record(self) -> None:
         original = json.loads(self.calibration_path.read_text(encoding="utf-8"))

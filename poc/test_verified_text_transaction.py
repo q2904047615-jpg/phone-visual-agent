@@ -3,7 +3,6 @@ import unittest
 from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     is_direct_latin_segment,
-    keyboard_layout_switch_advances,
     local_pinyin,
     next_keyboard_layout_towards,
     plan_next_verified_input,
@@ -87,27 +86,6 @@ class VerifiedTextTransactionTests(unittest.TestCase):
         self.assertEqual(
             "qwerty",
             next_keyboard_layout_towards("symbol", "qwerty"),
-        )
-        self.assertFalse(
-            keyboard_layout_switch_advances(
-                current_layout="qwerty",
-                target_layout="numeric",
-                desired_layout="symbol",
-            )
-        )
-        self.assertTrue(
-            keyboard_layout_switch_advances(
-                current_layout="qwerty",
-                target_layout="symbol",
-                desired_layout="symbol",
-            )
-        )
-        self.assertFalse(
-            keyboard_layout_switch_advances(
-                current_layout="qwerty",
-                target_layout="numeric",
-                desired_layout="qwerty",
-            )
         )
 
     def test_keyboard_input_mode_policy_matches_user_routing(self) -> None:

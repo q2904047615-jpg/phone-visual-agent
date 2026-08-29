@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
+from agent.domain.validation import NormalizedBounds, dataclass_wire, reject_if
 import json
 import time
 from collections.abc import Mapping
@@ -19,8 +19,7 @@ from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 import agent.domain.qwen_task_context as qwen_task_context_domain
 import agent.domain.trusted_observation as trusted_observation_domain
 from agent.domain.semantic_action import SemanticAction
-from agent.domain.task_semantic_ir import TaskSemanticIR
-from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
+from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
@@ -31,34 +30,22 @@ SINGLE_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_ve
     'clear_verified_text', 'double_tap', 'long_press'})
 
 
-def _targets_single_element(action_or_kind: SemanticAction | str, params: Mapping[str, Any] | None=None) -> bool:
-    """Return whether this exact canonical action binds one observed element.
+def _targets_single_element(kind: str, params: Mapping[str, Any]) -> bool:
+    """Return whether this canonical action binds one observed element, including an anchored swipe."""
 
-    Ordinary viewport swipes remain screen actions.  A swipe becomes an
-    element action only when the canonical catalog binds its immutable
-    ``element_id``; Qwen never invents that identity or any coordinates.
-    """
-
-    if isinstance(action_or_kind, SemanticAction):
-        kind = action_or_kind.action
-        values = action_or_kind.params
-    else:
-        kind = str(action_or_kind or "").strip()
-        values = params or {}
-    return kind in SINGLE_ELEMENT_ACTIONS or (kind == 'swipe' and bool(str(values.get('element_id') or '').strip()))
+    return kind in SINGLE_ELEMENT_ACTIONS or (kind == 'swipe' and bool(str(params.get('element_id') or '').strip()))
 
 
 QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
-ACTIONABLE_EXACT_TEXT_ROLES = frozenset({'button', 'icon', 'input', 'tab', 'toggle', 'list_item', 'keyboard_key'})
 @dataclass(frozen=True)
 class VisualTargetRegion:
     kind: str
-    bounds: tuple[float, float, float, float]
+    bounds: NormalizedBounds
     description: str
     element_id: str = ""
     destination_element_id: str = ""
-    destination_bounds: tuple[float, float, float, float] | None = None
+    destination_bounds: NormalizedBounds | None = None
 
     def validate(self, observation: trusted_observation_domain.TrustedObservation, action: SemanticAction) -> None:
         expected = _canonical_target_region(action, observation)
@@ -106,13 +93,10 @@ class QwenVisualDecision:
             raise GenericStepPlanningError("blocked 不能携带动作目标区域。")
 
     def to_dict(self) -> dict[str, Any]:
-        return {'protocol_version': self.protocol_version, 'task_id': self.task_id, 'device_id': self.device_id,
-            'revision': self.revision, 'observation_id': self.observation_id, 'fingerprint': self.fingerprint,
-            'page_state': dict(self.page_state), 'trusted_observation': self.trusted_observation.to_dict(),
-            'status': self.proposal.status, 'next_action': self.proposal.action.to_dict(
-            ) if self.proposal.action else None, 'target_region': self.target_region.to_dict(
-            ) if self.target_region else None, 'expected_result': dict(self.expected_result),
-            'confidence': float(self.confidence), 'reason': self.reason}
+        value = dataclass_wire(self, omit=('proposal',))
+        value.update(status=self.proposal.status, next_action=self.proposal.action.to_dict(
+            ) if self.proposal.action else None, confidence=float(self.confidence))
+        return value
 
 
 class QwenVisualDecisionObserver:
@@ -168,14 +152,11 @@ class QwenVisualDecisionObserver:
             in canonical_choices], 'device_action_kinds': sorted(available_actions)}
         self.last_diagnostics = dict(base_diagnostics)
 
-        block = ('风险确认门未满足，本轮禁止提出外部状态动作。', 'effect_gate') if context.current_execution_class == 'effect' and (
-            not context.effect_action_allowed) else _exact_text_candidate_block(context,
-            trusted_observation) or _identity_text_candidate_block(context, trusted_observation)
-        if block is not None:
-            reason, block_code = block
+        if context.current_execution_class == 'effect' and not context.effect_action_allowed:
+            reason = '风险确认门未满足，本轮禁止提出外部状态动作。'
             decision = _local_blocked_decision(context, trusted_observation, reason=reason)
             self._metrics["final_blocked_count"] += 1
-            self.last_diagnostics.update({'local_safety_block': block_code, 'decision_status': 'blocked',
+            self.last_diagnostics.update({'local_safety_block': 'effect_gate', 'decision_status': 'blocked',
                 'elapsed_seconds': round(time.perf_counter() - started, 3)})
             return decision
 
@@ -227,12 +208,12 @@ def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
     # Qwen receives a presentation of the canonical catalog, not a separately
     # rebuilt action list.  Every action parameter and postcondition below is a
     # deterministic projection of the same immutable candidate that Policy
-    # later selects by digest and ID.
+    # later selects by ID.
     for candidate in formal_report.candidates:
         choices.append({'choice_id': f'choice_{len(choices) + 1}', 'action': candidate.action_kind,
             **dict(candidate.parameters), 'expected_result': canonical_candidate_expected_result(candidate,
             observation.scene), 'formal_candidate_id': candidate.candidate_id,
-            'formal_report_digest': formal_report.report_digest, 'formal_transition': candidate.transition.to_dict()})
+            'formal_transition': candidate.transition.to_dict()})
     return tuple(choices)
 
 
@@ -347,7 +328,7 @@ def _hydrate_canonical_selection(payload: Mapping[str, Any], *, context: qwen_ta
 
 def _canonical_target_region(action: SemanticAction,
     observation: trusted_observation_domain.TrustedObservation) -> VisualTargetRegion:
-    if _targets_single_element(action):
+    if _targets_single_element(action.action, action.params):
         element = observation.get_candidate(str(action.params.get('element_id') or '').strip())
         return VisualTargetRegion(kind='element', element_id=element.element_id, bounds=element.bounds,
             description=element.label or element.meaning)
@@ -383,220 +364,6 @@ def _normalize_available_action_kinds(value: Iterable[str] | None) -> frozenset[
     reject_if(unexpected, VisionAgentError('设备动作能力包含协议外动作：' + ', '.join(sorted(unexpected))))
     reject_if(not normalized, VisionAgentError("设备没有任何可供本地选择的 canonical 动作。"))
     return normalized
-
-
-def _typed_required_action_kinds(context: qwen_task_context_domain.QwenTaskContext) -> frozenset[str]:
-    """Read typed action requirements for identity/evidence checks only."""
-
-    semantic_ir = context.semantic_ir
-    if semantic_ir is None:
-        return frozenset()
-    active_id = str(context.current_subgoal.get("subgoal_id") or "")
-    subgoal = next((item for item in semantic_ir.subgoals if item.subgoal_id == active_id), None)
-    if subgoal is None:
-        return frozenset()
-    constraints = {item.constraint_id: item for item in semantic_ir.constraints}
-    return frozenset((str(constraints[constraint_ref].value) for constraint_ref
-        in subgoal.constraint_refs if constraint_ref in constraints
-        and constraints[constraint_ref].kind == 'required_action'))
-
-
-def _launcher_app_entry_candidate_ids(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation) -> tuple[str, ...]:
-    """Return one typed App entry before applying inner-page text gates."""
-
-    semantic_ir = context.semantic_ir
-    scene = observation.scene
-    if semantic_ir is None:
-        return ()
-    current_identity = f"{scene.foreground_app_id} {scene.screen_id}".casefold()
-    if not any((token in current_identity for token in ('launcher', 'home_screen', 'desktop'))):
-        return ()
-    active_id = str(context.current_subgoal.get("subgoal_id") or "")
-    typed_subgoal = next((item for item in semantic_ir.subgoals if item.subgoal_id == active_id), None)
-    surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
-    target_surface = surfaces.get(typed_subgoal.surface_ref) if typed_subgoal is not None else None
-    if target_surface is None or target_surface.kind != 'app':
-        return ()
-    app_name = str(target_surface.app_name or "").strip()
-    if not app_name:
-        return ()
-    matches = tuple((element.element_id for element in scene.elements if element.role in {'button', 'icon',
-        'list_item'} and element.label == app_name and (float(element.confidence) >= MIN_TARGET_CONFIDENCE)
-        and (element.states.get('goal_relevant') is True) and (element.states.get('fully_visible') is True)))
-    return matches if len(matches) == 1 else ()
-
-
-def _exact_text_candidate_block(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation) -> tuple[str, str] | None:
-    """Reject missing or ambiguous structured exact-text targets locally."""
-
-    if _launcher_app_entry_candidate_ids(context, observation):
-        return None
-    for required_text in context.exact_text_requirements:
-        identity_matches = _identity_scoped_exact_text_matches(context, observation, required_text)
-        if identity_matches is not None:
-            if not identity_matches:
-                return (f'当前可信页面身份中不存在逐字一致文字：{required_text}', 'exact_text_missing')
-            if len(identity_matches) != 1:
-                return (f'逐字一致页面身份不唯一：{required_text}，共{len(identity_matches)}个', 'exact_text_ambiguous')
-            continue
-        matches = _matching_exact_text_candidates(context, observation, required_text)
-        if not matches:
-            return (f'当前可信候选中不存在逐字一致文字：{required_text}', 'exact_text_missing')
-        if len(matches) != 1:
-            return (f'逐字一致文字目标不唯一：{required_text}，共{len(matches)}个', 'exact_text_ambiguous')
-    return None
-
-
-def _identity_text_candidate_block(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation) -> tuple[str, str] | None:
-    if _launcher_app_entry_candidate_ids(context, observation):
-        return None
-    for required_text in context.identity_text_requirements:
-        matches = _matching_identity_text_candidates(observation, required_text)
-        if not matches:
-            return (f"当前画面不存在收件人逐字身份：{required_text}", "identity_missing")
-        if len(matches) != 1:
-            return (f"当前画面收件人身份不唯一：{required_text}", "identity_ambiguous")
-    return None
-
-
-def _matching_identity_text_candidates(observation: trusted_observation_domain.TrustedObservation,
-    required_text: str) -> list[str]:
-    return _identity_candidate_ids(observation.scene, meanings={'recipient_identity', 'conversation_identity',
-        'conversation_title', 'page_title'}, text_matches=lambda item: required_text in (item.label, *item.evidence))
-
-
-_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS = frozenset({'swipe', 'back', 'home', 'open_recent_apps',
-    'reveal_system_navigation', 'wait_for_change'})
-
-_SURFACE_IDENTITY_TYPE_SUFFIXES = frozenset({'页', '页面', '界面', '屏幕', '窗口', '主页', '首页', '聊天页', '聊天页面', '对话页', '对话页面',
-    '详情页', '详情页面', '列表页', '列表页面', '设置页', '设置页面', ' page', ' screen', ' window', ' chat page', ' conversation page',
-    ' detail page', ' list page', ' settings page'})
-
-
-def _surface_identity_text_matches(label: str, required_text: str) -> bool:
-    """Match one literal title plus a bounded generic surface-type suffix."""
-
-    literal = label.strip()
-    required = required_text.strip()
-    if not literal or not required:
-        return False
-    if literal == required:
-        return True
-    if required.startswith(literal):
-        return required[len(literal) :].casefold() in _SURFACE_IDENTITY_TYPE_SUFFIXES
-    if literal.startswith(required):
-        return literal[len(required) :].casefold() in _SURFACE_IDENTITY_TYPE_SUFFIXES
-    return False
-
-
-def _matching_surface_identity_candidates(observation: trusted_observation_domain.TrustedObservation,
-    required_text: str) -> list[str]:
-    return _identity_candidate_ids(observation.scene, meanings={'conversation_title', 'page_title'},
-        text_matches=lambda item: _surface_identity_text_matches(item.label, required_text))
-
-
-def _identity_candidate_ids(scene: UIScene, *, meanings: set[str], text_matches: Callable[[UIElement],
-    bool]) -> list[str]:
-    return [item.element_id for item in scene.elements if float(item.confidence) >= MIN_TARGET_CONFIDENCE
-        and item.states.get('visible') is not False and (item.role != 'input') and (item.states.get('identity_anchor')
-        is True or item.states.get('goal_relevant') is True or item.meaning.strip().casefold() in meanings)
-        and text_matches(item)]
-
-
-def _surface_descriptor_identity_candidate_ids(scene: UIScene, required_text: str) -> tuple[str, ...]:
-    """Bind a generic page descriptor to its visible literal title.
-
-    A typed ``target_ui_label`` can name the current page while the physical
-    target is a separate input or button.  Only a strict generic type suffix
-    plus a shorter visible title establishes this relation.  Exact labels stay
-    element targets; zero or multiple titles never grant action authority.
-    """
-
-    required = str(required_text or "").strip()
-    if not required:
-        return ()
-    matches = tuple(_identity_candidate_ids(scene, meanings={'conversation_title', 'page_title'},
-        text_matches=lambda item: _surface_identity_text_matches(item.label, required)))
-    has_descriptor_title = any((element.element_id in matches and element.label.strip() != required for element
-        in scene.elements))
-    return matches if has_descriptor_title else ()
-
-
-def _identity_scoped_exact_text_matches(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation, required_text: str) -> list[str] | None:
-    """Resolve exact text as surface identity for non-element actions.
-
-    A literal carried by the typed goal may name the current page or
-    container (for example a conversation title) while the typed active
-    action is a viewport gesture or a coordinate-free system action.  In that
-    case the literal must still be uniquely visible, but binding the physical
-    action to that title would invert the entity relation.  Element-bound
-    actions deliberately keep the existing strict target requirement.
-    """
-
-    descriptor_matches = _surface_descriptor_identity_candidate_ids(observation.scene, required_text)
-    if descriptor_matches:
-        return list(descriptor_matches)
-    required_actions = _typed_required_action_kinds(context)
-    if len(required_actions) != 1 or not required_actions.issubset(_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS):
-        return None
-    return _matching_surface_identity_candidates(observation, required_text)
-
-
-def _matching_exact_text_candidates(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation, required_text: str) -> list[str]:
-    active_input_matches = _active_input_transaction_exact_candidate_ids(context, observation, required_text)
-    if active_input_matches is not None:
-        return active_input_matches
-    roles = set(context.exact_text_target_roles)
-    meanings = set(context.exact_text_target_meanings)
-    matches: list[str] = []
-    for element in observation.scene.elements:
-        if float(element.confidence) < MIN_TARGET_CONFIDENCE:
-            continue
-        literal_match = required_text in (element.label, *element.evidence)
-        if not literal_match:
-            continue
-        if roles and element.role not in roles:
-            continue
-        if meanings and element.meaning.strip().casefold() not in meanings:
-            continue
-        if context.current_execution_class != 'observe' and (not roles):
-            if element.role not in ACTIONABLE_EXACT_TEXT_ROLES:
-                continue
-        matches.append(element.element_id)
-    return matches
-
-
-def _active_input_transaction_exact_candidate_ids(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation, required_text: str) -> list[str] | None:
-    """Bind a non-empty visible prefix to its sole typed input field."""
-    semantic_ir = context.semantic_ir
-    if semantic_ir is None:
-        return None
-    active_id = str(context.current_subgoal.get("subgoal_id") or "")
-    fields = tuple((field for field in semantic_ir.input_fields if active_id in field.source_subgoal_ids
-        and field.field_label in {'', required_text}))
-    if len(fields) != 1:
-        return None
-    field = fields[0]
-    payload = next((item for item in semantic_ir.entities if item.entity_id == field.payload_ref), None)
-    if payload is None or payload.role != 'input_text' or (not isinstance(payload.value, str)) or (not payload.value):
-        return None
-
-    field_elements = [item for item in observation.scene.elements if item.states.get('input_field_id') ==
-        field.field_id]
-    if not any((isinstance(item.states.get('value'), str) and item.states['value'] for item in field_elements)):
-        return None
-    return [item.element_id for item in field_elements if item.role == 'input'
-        and item.meaning == 'application_text_input' and (float(item.confidence) >= MIN_TARGET_CONFIDENCE)
-        and (item.states.get('goal_relevant') is True) and (item.states.get('fully_visible') is True)
-        and (not field.field_label or item.states.get('input_field_label') == field.field_label)
-        and isinstance(item.states.get('value'), str) and bool(item.states['value'])
-        and payload.value.startswith(item.states['value']) and (item.label == item.states['value'])]
 
 
 def _local_blocked_decision(context: qwen_task_context_domain.QwenTaskContext,

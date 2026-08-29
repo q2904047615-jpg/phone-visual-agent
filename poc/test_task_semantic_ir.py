@@ -15,20 +15,16 @@ from agent.infrastructure.deepseek_failure_diagnostics import (
 from agent.domain.task_semantic_ir import (
     AUTOMATIC,
     CONFIRMATION_REQUIRED,
-    CriticalBinding,
     EffectIntent,
-    LocalRiskPolicyConfig,
     SemanticEntity,
     SemanticRiskAuthorityReport,
     SourceSpan,
     TaskSemanticIR,
     TaskSemanticIRError,
-    compile_runtime_graph_semantics,
     compile_formal_semantic_authority,
     apply_formal_semantic_risk_policy,
-    local_risk_policy_from_dict,
+    decide_effect_risk,
 )
-from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
 
 
 RAW_GOAL = "打开微信，进入文件传输助手，输入“你好”，然后发送。"
@@ -774,10 +770,7 @@ class TaskSemanticIRTests(unittest.TestCase):
         self.assertEqual((), authority.semantic_ir.input_fields)
 
     def test_current_send_failure_projects_to_automatic_typed_effect(self):
-        report = compile_runtime_graph_semantics(graph_from_payload())
-
-        self.assertFalse(report.authoritative)
-        self.assertFalse(report.execution_allowed)
+        report = compile_formal_semantic_authority(graph_from_payload())
         self.assertEqual([item.kind for item in report.semantic_ir.effects], ["send_message"])
         self.assertEqual(
             [item.policy for item in report.risk_decisions],
@@ -993,7 +986,7 @@ class TaskSemanticIRTests(unittest.TestCase):
             "仅向文件传输助手发送指定文字",
         )
         reports = [
-            compile_runtime_graph_semantics(
+            compile_formal_semantic_authority(
                 graph_from_payload(current_send_failure_payload(value))
             )
             for value in variants
@@ -1003,10 +996,6 @@ class TaskSemanticIRTests(unittest.TestCase):
             {report.risk_decisions[0].policy for report in reports},
             {AUTOMATIC},
         )
-        self.assertEqual(
-            {report.semantic_ir.semantic_digest for report in reports},
-            {reports[0].semantic_ir.semantic_digest},
-        )
 
     def test_constraint_location_never_changes_shadow_risk(self):
         in_subgoal = current_send_failure_payload()
@@ -1015,16 +1004,12 @@ class TaskSemanticIRTests(unittest.TestCase):
         at_graph["constraints"].append(moved)
 
         reports = (
-            compile_runtime_graph_semantics(graph_from_payload(in_subgoal)),
-            compile_runtime_graph_semantics(graph_from_payload(at_graph)),
+            compile_formal_semantic_authority(graph_from_payload(in_subgoal)),
+            compile_formal_semantic_authority(graph_from_payload(at_graph)),
         )
         self.assertEqual(
             [report.risk_decisions[0].policy for report in reports],
             [AUTOMATIC, AUTOMATIC],
-        )
-        self.assertEqual(
-            reports[0].semantic_ir.semantic_digest,
-            reports[1].semantic_ir.semantic_digest,
         )
 
     def test_default_policy_matches_frozen_fixture_cases(self):
@@ -1035,8 +1020,6 @@ class TaskSemanticIRTests(unittest.TestCase):
             / "role_aware_risk_cases.json"
         )
         cases = json.loads(fixture_path.read_text(encoding="utf-8"))["cases"]
-        policy = LocalRiskPolicyConfig()
-
         for index, case in enumerate(cases, start=1):
             with self.subTest(case_id=case["case_id"]):
                 effect = EffectIntent(
@@ -1045,12 +1028,11 @@ class TaskSemanticIRTests(unittest.TestCase):
                     expected_result_texts=(case.get("expected_result") or "结果可验证",),
                 )
                 self.assertEqual(
-                    policy.decide(effect).policy,
+                    decide_effect_risk(effect).policy,
                     case["expected_policy"],
                 )
 
     def test_default_policy_requires_confirmation_only_for_login_and_payment(self):
-        policy = LocalRiskPolicyConfig()
         confirmation_kinds = {"authentication", "financial_transaction"}
         automatic_kinds = {
             "send_message",
@@ -1066,59 +1048,28 @@ class TaskSemanticIRTests(unittest.TestCase):
 
         for index, kind in enumerate(sorted(confirmation_kinds), start=1):
             with self.subTest(kind=kind):
-                decision = policy.decide(
+                decision = decide_effect_risk(
                     EffectIntent(effect_id=f"effect_confirm_{index}", kind=kind)
                 )
                 self.assertEqual(CONFIRMATION_REQUIRED, decision.policy)
         for index, kind in enumerate(sorted(automatic_kinds), start=1):
             with self.subTest(kind=kind):
-                decision = policy.decide(
+                decision = decide_effect_risk(
                     EffectIntent(effect_id=f"effect_auto_{index}", kind=kind)
                 )
                 self.assertEqual(AUTOMATIC, decision.policy)
 
-    def test_policy_override_is_typed_and_versioned(self):
-        policy = LocalRiskPolicyConfig(
-            policy_id="team_policy",
-            version=3,
-            overrides=(("send_message", CONFIRMATION_REQUIRED),),
-        )
-        decision = policy.decide(
-            EffectIntent(effect_id="effect_send", kind="send_message")
-        )
-        self.assertEqual(decision.policy, CONFIRMATION_REQUIRED)
-        self.assertEqual(decision.policy_id, "team_policy")
-        self.assertEqual(decision.policy_version, 3)
+    def test_approved_risk_boundary_has_no_runtime_override(self):
+        decision = decide_effect_risk(EffectIntent(effect_id="effect_send", kind="send_message"))
+        self.assertEqual(AUTOMATIC, decision.policy)
+        self.assertEqual("default_low_friction", decision.policy_id)
+        self.assertEqual(2, decision.policy_version)
 
-    def test_frozen_default_policy_file_is_strict_and_loadable(self):
-        policy = load_local_risk_policy(
-            Path(__file__).parent / "config" / "local_risk_policy.v1.json"
-        )
-        self.assertEqual(policy, LocalRiskPolicyConfig())
+    def test_formal_report_never_grants_physical_execution(self):
+        report = compile_formal_semantic_authority(graph_from_payload())
 
-    def test_policy_file_rejects_extra_fields(self):
-        payload = LocalRiskPolicyConfig().to_dict()
-        payload["silent_allow_all"] = True
-        with self.assertRaisesRegex(TaskSemanticIRError, "字段不匹配"):
-            local_risk_policy_from_dict(payload)
-
-    def test_duplicate_policy_override_is_rejected(self):
-        policy = LocalRiskPolicyConfig(
-            overrides=(
-                ("send_message", AUTOMATIC),
-                ("send_message", CONFIRMATION_REQUIRED),
-            )
-        )
-        with self.assertRaisesRegex(TaskSemanticIRError, "override 重复"):
-            policy.validate()
-
-    def test_shadow_report_can_never_grant_execution(self):
-        report = compile_runtime_graph_semantics(graph_from_payload())
-
-        with self.assertRaisesRegex(TaskSemanticIRError, "不得携带执行权限"):
-            replace(report, authoritative=True).validate()
-        with self.assertRaisesRegex(TaskSemanticIRError, "不得携带执行权限"):
-            replace(report, execution_allowed=True).validate()
+        with self.assertRaisesRegex(TaskSemanticIRError, "元数据无效"):
+            replace(report, physical_execution_allowed=True).validate()
 
     def test_literal_source_span_must_bind_exact_value(self):
         entity = SemanticEntity(
@@ -1149,33 +1100,6 @@ class TaskSemanticIRTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(TaskSemanticIRError, "引用未知实体"):
-            semantic_ir.validate()
-
-    def test_binding_must_reference_effect_role(self):
-        entity = SemanticEntity(
-            entity_id="entity_target",
-            entity_type="opaque",
-            role="target",
-            value="卡片",
-        )
-        semantic_ir = TaskSemanticIR(
-            task_id="9abc",
-            device_id="device-local-01",
-            revision=1,
-            raw_goal="更新卡片",
-            surfaces=(),
-            entities=(entity,),
-            effects=(EffectIntent(effect_id="effect_update", kind="data_mutation"),),
-            critical_bindings=(
-                CriticalBinding(
-                    binding_id="binding_target",
-                    effect_id="effect_update",
-                    binding_kind="effect_target_equals",
-                    entity_ref="entity_target",
-                ),
-            ),
-        )
-        with self.assertRaisesRegex(TaskSemanticIRError, "未绑定 effect"):
             semantic_ir.validate()
 
     def test_formal_authority_removes_blanket_send_confirmation(self):
@@ -1236,10 +1160,7 @@ class TaskSemanticIRTests(unittest.TestCase):
         graph = graph_from_payload()
         authority = compile_formal_semantic_authority(graph)
 
-        self.assertEqual(len(authority.policy_traces), 1)
-        trace = authority.policy_traces[0]
-        self.assertTrue(trace.allowed)
-        self.assertEqual(trace.formal_policy, AUTOMATIC)
+        self.assertEqual([item.policy for item in authority.risk_decisions], [AUTOMATIC])
         projected = apply_formal_semantic_risk_policy(graph, authority)
         self.assertFalse(projected.risk_actions[0].confirmation_required)
 
@@ -1247,16 +1168,14 @@ class TaskSemanticIRTests(unittest.TestCase):
         authority = compile_formal_semantic_authority(graph_from_payload())
         self.assertEqual(1, len(authority.effect_previews))
         preview = authority.effect_previews[0]
-        self.assertEqual("send_message", preview.effect_kind)
-        self.assertEqual(["recipient"], [item.role for item in preview.targets])
-        self.assertEqual(["input_text"], [item.role for item in preview.payloads])
-        self.assertEqual(AUTOMATIC, preview.policy)
-        self.assertRegex(preview.preview_digest, r"^[0-9a-f]{64}$")
-        changed = replace(
-            preview,
-            payloads=(replace(preview.payloads[0], value="另一段文字"),),
-        )
-        self.assertNotEqual(preview.preview_digest, changed.preview_digest)
+        self.assertEqual("send_message", preview["effect_kind"])
+        self.assertEqual(["recipient"], [item["role"] for item in preview["targets"]])
+        self.assertEqual(["input_text"], [item["role"] for item in preview["payloads"]])
+        self.assertEqual(AUTOMATIC, preview["policy"])
+        from agent.domain.task_semantic_ir import effect_preview_digest
+        self.assertRegex(effect_preview_digest(preview), r"^[0-9a-f]{64}$")
+        changed = {**preview, "payloads": [{**preview["payloads"][0], "value": "另一段文字"}]}
+        self.assertNotEqual(effect_preview_digest(preview), effect_preview_digest(changed))
 
     def test_effect_result_with_payload_text_is_not_misclassified_as_input_value(self):
         authority = compile_formal_semantic_authority(graph_from_payload())
@@ -1267,16 +1186,6 @@ class TaskSemanticIRTests(unittest.TestCase):
         )
         self.assertEqual(1, len(effect_states))
         self.assertEqual("effect.result_visible", effect_states[0].predicate)
-        requirement = next(
-            item
-            for item in authority.semantic_ir.evidence_requirements
-            if item.desired_state_ref == effect_states[0].state_id
-        )
-        self.assertEqual(
-            ("visual_claim", "effect_receipt"),
-            requirement.allowed_sources,
-        )
-
         payload = current_send_failure_payload()
         next(
             item for item in payload["subgoals"] if item["subgoal_id"] == "send_message"
@@ -1291,12 +1200,6 @@ class TaskSemanticIRTests(unittest.TestCase):
             if item.source_subgoal_id == "send_message"
         )
         self.assertEqual("effect.applied", applied.predicate)
-        applied_requirement = next(
-            item
-            for item in receipt_only.semantic_ir.evidence_requirements
-            if item.desired_state_ref == applied.state_id
-        )
-        self.assertEqual(("effect_receipt",), applied_requirement.allowed_sources)
 
     def test_multiple_recipients_and_input_fields_compile_to_typed_refs(self):
         payload = current_send_failure_payload()

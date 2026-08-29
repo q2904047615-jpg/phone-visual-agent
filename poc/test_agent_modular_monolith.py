@@ -1484,7 +1484,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
             )
 
-    def test_task_semantic_ir_has_one_domain_identity_and_one_loader(self) -> None:
+    def test_task_semantic_ir_has_one_domain_identity_and_fixed_risk_boundary(self) -> None:
         import agent.domain.canonical_action_protocol as canonical_protocol
         import agent.application.deepseek_task_graph as deepseek_task_graph
         from agent.domain.task_semantic_ir import (
@@ -1494,15 +1494,12 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
         root = Path(__file__).resolve().parent
         domain_path = root / "agent" / "domain" / "task_semantic_ir.py"
-        loader_path = (
-            root
-            / "agent"
-            / "infrastructure"
-            / "file_system_risk_policy.py"
-        )
+        retired_loader = root / "agent" / "infrastructure" / "file_system_risk_policy.py"
+        retired_config = root / "config" / "local_risk_policy.v1.json"
         self.assertFalse((root / "task_semantic_ir.py").exists())
         self.assertTrue(domain_path.is_file())
-        self.assertTrue(loader_path.is_file())
+        self.assertFalse(retired_loader.exists())
+        self.assertFalse(retired_config.exists())
         self.assertIs(TaskSemanticIR, canonical_protocol.TaskSemanticIR)
         self.assertIs(
             compile_formal_semantic_authority,
@@ -1510,17 +1507,17 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
 
         domain_source = domain_path.read_text(encoding="utf-8")
-        loader_source = loader_path.read_text(encoding="utf-8")
         for forbidden in (
             "from pathlib",
             "Path(",
             ".read_text(",
             "def load_local_risk_policy(",
+            "LocalRiskPolicyConfig",
+            "effect_id_override",
             "agent.infrastructure",
         ):
             self.assertNotIn(forbidden, domain_source)
-        self.assertEqual(1, loader_source.count("def load_local_risk_policy("))
-        self.assertEqual(1, loader_source.count(".read_text("))
+        self.assertIn('DEFAULT_CONFIRMATION_EFFECT_KINDS = frozenset({"authentication", "financial_transaction"})', domain_source)
 
         legacy_imports: list[str] = []
         for path in root.rglob("*.py"):
@@ -1633,19 +1630,14 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.generic_goal import safe_goal_context
-        from agent.domain.message_intent import (
-            subgoal_binds_recipient,
-            subgoal_targets_recipient_control,
-        )
 
         root = Path(__file__).resolve().parent
         generic_goal_path = root / "agent" / "domain" / "generic_goal.py"
-        message_intent_path = root / "agent" / "domain" / "message_intent.py"
         observer_path = (
             root / "agent" / "infrastructure" / "generic_scene_observer.py"
         )
         self.assertFalse((root / "message_intent.py").exists())
-        self.assertTrue(message_intent_path.is_file())
+        self.assertFalse((root / "agent" / "domain" / "message_intent.py").exists())
         self.assertFalse(hasattr(generic_scene_observer, "_safe_goal_context"))
         self.assertFalse(hasattr(qwen_visual_decision, "safe_goal_context"))
         self.assertFalse(hasattr(qwen_visual_decision, "subgoal_binds_recipient"))
@@ -1656,50 +1648,11 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 {"objective": "选择 Alice", "values": [1, True, None]}
             ),
         )
-        self.assertTrue(subgoal_binds_recipient("Alice", "选择 Alice"))
-        self.assertTrue(
-            subgoal_targets_recipient_control("Alice", "选择 Alice")
-        )
-        self.assertFalse(
-            subgoal_targets_recipient_control("Alice", "编辑 Alice 的正文")
-        )
 
         generic_goal_source = generic_goal_path.read_text(encoding="utf-8")
-        message_intent_source = message_intent_path.read_text(encoding="utf-8")
         observer_source = observer_path.read_text(encoding="utf-8")
         self.assertEqual(1, generic_goal_source.count("def safe_goal_context("))
-        self.assertEqual(1, message_intent_source.count("def subgoal_binds_recipient("))
-        self.assertEqual(
-            1,
-            message_intent_source.count("def subgoal_targets_recipient_control("),
-        )
         self.assertNotIn("def _safe_goal_context(", observer_source)
-        for forbidden in (
-            "fastapi",
-            "pydantic",
-            "web_app",
-            "agent.application",
-            "agent.infrastructure",
-            "vision_agent",
-            "robot_core",
-        ):
-            self.assertNotIn(forbidden, message_intent_source)
-
-        legacy_imports: list[str] = []
-        for path in root.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.ImportFrom)
-                    and node.level == 0
-                    and node.module == "message_intent"
-                ):
-                    legacy_imports.append(str(path.relative_to(root)))
-                if isinstance(node, ast.Import):
-                    for item in node.names:
-                        if item.name == "message_intent":
-                            legacy_imports.append(str(path.relative_to(root)))
-        self.assertEqual([], legacy_imports)
 
     def test_qwen_task_context_has_one_domain_identity(self) -> None:
         import agent.application.qwen_visual_decision as qwen_visual_decision
@@ -1915,7 +1868,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         domain_source = domain_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class SingleStepGenericSceneObserver("))
         self.assertNotIn("class PostActionVisualContext:", source)
-        self.assertEqual(1, domain_source.count("class PostActionVisualContext:"))
+        self.assertEqual(1, domain_source.count("class PostActionVisualContext("))
         for forbidden in (
             "agent.application",
             "agent.infrastructure",
@@ -2066,7 +2019,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
         source = infrastructure_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class CapabilityAcceptanceError("))
-        self.assertEqual(1, source.count("class PromotionScope:"))
+        self.assertEqual(1, source.count("class PromotionScope("))
         self.assertEqual(1, source.count("class PromotionAuthority:"))
         self.assertEqual(1, source.count("class CapabilityRegistryPromoter:"))
         self.assertEqual(1, source.count("def validate_acceptance_report("))
@@ -2118,7 +2071,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertTrue(infrastructure_path.is_file())
         for value in (
             runtime.CapabilityTrial,
-            runtime.RecoveredCapabilityTrial,
             runtime.CapabilityAcceptanceManager,
         ):
             self.assertEqual(
@@ -2128,7 +2080,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
         source = infrastructure_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class CapabilityTrial:"))
-        self.assertEqual(1, source.count("class RecoveredCapabilityTrial:"))
+        self.assertNotIn("class RecoveredCapabilityTrial:", source)
         self.assertEqual(1, source.count("class CapabilityAcceptanceManager:"))
         self.assertEqual(1, source.count("def _atomic_write_json("))
         for forbidden in (
@@ -2301,18 +2253,16 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "robot_core",
         ):
             self.assertNotIn(forbidden, application_source)
-        self.assertIn("else LocalRiskPolicyConfig()", application_source)
+        self.assertNotIn("LocalRiskPolicyConfig", application_source)
+        self.assertNotIn("self.semantic_risk_policy", application_source)
+        self.assertNotIn("semantic_risk_policy:", application_source)
         self.assertNotIn("@dataclass", application_source)
         self.assertNotIn("class DynamicTaskGraph", application_source)
         self.assertNotIn("def _graph_from_payload", application_source)
 
         web_source = (root / "web_app.py").read_text(encoding="utf-8")
-        self.assertIn(
-            "from agent.infrastructure.file_system_risk_policy import "
-            "load_local_risk_policy",
-            web_source,
-        )
-        self.assertIn("semantic_risk_policy=load_local_risk_policy(", web_source)
+        self.assertNotIn("load_local_risk_policy", web_source)
+        self.assertNotIn("semantic_risk_policy=", web_source)
 
         legacy_imports: list[str] = []
         for path in root.rglob("*.py"):
@@ -2512,7 +2462,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         domain_source = domain_path.read_text(encoding="utf-8")
         infrastructure_source = infrastructure_path.read_text(encoding="utf-8")
         self.assertEqual(1, domain_source.count("class LocalFrameStability:"))
-        self.assertEqual(1, domain_source.count("class VisualObstruction:"))
+        self.assertEqual(1, domain_source.count("class VisualObstruction("))
         self.assertNotIn("class LocalFrameStability:", infrastructure_source)
         self.assertNotIn("class VisualObstruction:", infrastructure_source)
         for forbidden in (
@@ -2567,10 +2517,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertTrue(adapter_path.is_file())
         self.assertFalse((root / "trusted_observation.py").exists())
         self.assertFalse(hasattr(qwen_visual_decision, "TrustedObservation"))
-        self.assertIs(
-            TrustedObservation,
-            universal_agent_orchestrator.TrustedObservation,
-        )
+        self.assertFalse(hasattr(universal_agent_orchestrator, "TrustedObservation"))
         self.assertEqual(
             "agent.domain.trusted_observation",
             TrustedObservation.__module__,

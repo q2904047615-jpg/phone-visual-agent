@@ -6,13 +6,12 @@ from functools import lru_cache
 from importlib.resources import files
 import uuid
 from dataclasses import replace
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from agent.domain.generic_goal import GenericIntentError, _parse_json_object
 from agent.domain.task_semantic_ir import (
     SemanticRiskAuthorityReport,
     TaskSemanticIRError,
-    LocalRiskPolicyConfig,
     apply_formal_semantic_risk_policy,
     compile_formal_semantic_authority,
 )
@@ -24,16 +23,8 @@ from agent.domain.task_graph import (
     ReplanRecord,
     TaskGraphError,
     _apply_verified_navigation_completion,
-    _canonicalize_literal_visible_evidence_clauses,
     _graph_from_payload,
-    _normalize_explicit_target_surface,
-    _normalize_explicit_ui_label_payload,
-    _normalize_initial_premature_completed_status,
-    _normalize_local_navigation_execution_classes,
-    _normalize_redundant_prohibited_effect_conditions,
     _normalize_single_effect_result_string,
-    _normalize_terminal_single_navigation_payload,
-    _normalize_unique_active_frontier,
     _normalize_unique_planner_transport_aliases,
     _planner_transport_snapshot,
     _project_terminal_single_navigation_candidate,
@@ -53,12 +44,8 @@ class JsonTaskGraphProvider(Protocol):
 class DeepSeekTaskGraphPlanner:
     """Create and revise high-level task graphs without any execution capability."""
 
-    def __init__(self, provider: JsonTaskGraphProvider, *,
-        semantic_risk_policy: LocalRiskPolicyConfig | None=None) -> None:
+    def __init__(self, provider: JsonTaskGraphProvider) -> None:
         self.provider = provider
-        self.semantic_risk_policy = (
-            semantic_risk_policy if semantic_risk_policy is not None else LocalRiskPolicyConfig()
-        )
         self.last_raw_response = ""
         self.last_semantic_authority: SemanticRiskAuthorityReport | None = None
         self.last_semantic_authority_error = ""
@@ -83,16 +70,9 @@ class DeepSeekTaskGraphPlanner:
         prompt = _initial_prompt(text)
         graph = self._request_graph(prompt, task_id=resolved_task_id, device_id=device_id, revision=1,
             raw_user_goal=text, validate=False)
-        # Only deterministic, semantics-preserving local normalization is
-        # allowed.  A malformed or unsafe semantic answer is never repaired by
-        # another remote sample.
-        graph = _normalize_explicit_target_surface(graph, text)
-        graph = _normalize_redundant_prohibited_effect_conditions(graph)
-        graph = _normalize_initial_premature_completed_status(graph)
-        graph = _normalize_unique_active_frontier(graph)
-        # Reject malformed planner transport before semantic cutover so the
-        # formal projector never masks missing IDs, invalid enums or broken
-        # graph structure with a later migration error.
+        # The typed graph is the sole planning authority. Only the syntax-only
+        # wire normalizers in ``_request_graph`` run before this strict check;
+        # local code never rewrites its surface, frontier, status or semantics.
         graph.validate()
         graph = self._apply_formal_semantic_authority(graph)
         graph.validate()
@@ -109,15 +89,10 @@ class DeepSeekTaskGraphPlanner:
         self._require_provider()
         prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
         candidate = self._request_graph(prompt, task_id=graph.task_id, device_id=graph.device_id,
-            revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective, validate=False,
-            payload_normalizer=lambda payload: _normalize_terminal_single_navigation_payload(graph, observation,
-            trigger=trigger, payload=payload))
-        candidate = _normalize_redundant_prohibited_effect_conditions(candidate)
+            revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective, validate=False)
         candidate = _restore_completed_history_evidence(graph, candidate)
-        candidate = _canonicalize_literal_visible_evidence_clauses(graph, candidate, observation)
         candidate = _project_terminal_single_navigation_candidate(graph, candidate, observation, trigger=trigger)
         candidate = _apply_verified_navigation_completion(graph, candidate, observation, trigger=trigger)
-        candidate = _normalize_unique_active_frontier(candidate)
         # Validate the raw typed transport once before local projection.  The
         # revision-specific execution-class and EffectIntent invariants are
         # owned by _validate_replan_candidate below and must not be duplicated
@@ -159,7 +134,7 @@ class DeepSeekTaskGraphPlanner:
         self.last_semantic_authority = None
         self.last_semantic_authority_error = ""
         try:
-            authority = compile_formal_semantic_authority(graph, risk_policy=self.semantic_risk_policy)
+            authority = compile_formal_semantic_authority(graph)
             projected = apply_formal_semantic_risk_policy(graph, authority)
         except TaskSemanticIRError as exc:
             self.last_semantic_authority_error = str(exc)[:1000]
@@ -199,8 +174,7 @@ class DeepSeekTaskGraphPlanner:
         task_graph_domain._validate_revision(graph, candidate, observation)
 
     def _request_graph(self, prompt: str, *, task_id: str, device_id: str, revision: int, raw_user_goal: str,
-        validate: bool=True, payload_normalizer: Callable[[dict[str, Any]], dict[str,
-        Any]] | None=None) -> DynamicTaskGraph:
+        validate: bool=True) -> DynamicTaskGraph:
         raw = self.provider.chat_json([{'role': 'user', 'content': prompt}], max_tokens=2400)
         self.last_raw_response = raw
         try:
@@ -209,10 +183,6 @@ class DeepSeekTaskGraphPlanner:
             raise TaskGraphError(str(exc)) from exc
         payload = _normalize_single_effect_result_string(payload)
         payload = _normalize_unique_planner_transport_aliases(payload)
-        payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
-        payload = _normalize_local_navigation_execution_classes(payload)
-        if payload_normalizer is not None:
-            payload = payload_normalizer(payload)
         graph = _graph_from_payload(payload, task_id=task_id, device_id=device_id, revision=revision,
             raw_user_goal=raw_user_goal)
         if validate:

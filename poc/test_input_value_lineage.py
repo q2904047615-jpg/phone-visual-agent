@@ -22,12 +22,7 @@ from agent.domain.input_value_lineage import (
     InputValueLineageError,
     TYPED_INPUT_LINEAGE_VERSION,
     TypedInputLineage,
-    build_pending_chinese_preedit_lineage,
-    build_pending_ime_candidate_lineage,
-    build_pending_input_state_lineage,
-    build_pending_literal_lineage,
-    build_pending_newline_lineage,
-    build_pending_text_lineage,
+    build_pending_input_lineage,
 )
 from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore as TypedInputLineageStore,
@@ -775,12 +770,7 @@ class TypedInputLineageTests(unittest.TestCase):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         builder_names = (
-            "build_pending_text_lineage",
-            "build_pending_chinese_preedit_lineage",
-            "build_pending_newline_lineage",
-            "build_pending_input_state_lineage",
-            "build_pending_ime_candidate_lineage",
-            "build_pending_literal_lineage",
+            "build_pending_input_lineage",
             "build_verified_text_lineage",
             "build_verified_newline_lineage",
             "build_verified_literal_lineage",
@@ -792,10 +782,7 @@ class TypedInputLineageTests(unittest.TestCase):
             "_resolve_verified_input_surface",
         ):
             self.assertEqual(1, source.count(f"def {resolver}("))
-        shared_builders = {
-            "_pending_lineage": "_resolve_pending_input_surface",
-            "_verified_lineage": "_resolve_verified_input_surface",
-        }
+        shared_builders = {"_verified_lineage": "_resolve_verified_input_surface"}
         for helper, resolver in shared_builders.items():
             direct_calls = [
                 call
@@ -806,12 +793,19 @@ class TypedInputLineageTests(unittest.TestCase):
             self.assertIn(resolver, call_names)
             self.assertEqual(1, call_names.count("_build_input_lineage"))
             self.assertNotIn("TypedInputLineage", call_names)
+        verified_value_calls = [call.func.id for call in ast.walk(functions['_verified_value_lineage'])
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)]
+        self.assertEqual(1, verified_value_calls.count('_verified_lineage'))
+        self.assertNotIn('_build_input_lineage', verified_value_calls)
+        pending_calls = [call.func.id for call in ast.walk(functions['build_pending_input_lineage'])
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)]
+        self.assertEqual(1, pending_calls.count('_resolve_pending_input_surface'))
+        self.assertEqual(1, pending_calls.count('_build_input_lineage'))
         for name in builder_names:
-            helper = (
-                "_pending_lineage"
-                if name.startswith("build_pending_")
-                else "_verified_lineage"
-            )
+            if name == 'build_pending_input_lineage':
+                continue
+            helper = '_verified_lineage' if name == (
+                'build_verified_newline_lineage') else '_verified_value_lineage'
             direct_calls = [
                 call
                 for call in ast.walk(functions[name])
@@ -861,7 +855,7 @@ class TypedInputLineageTests(unittest.TestCase):
     def test_unknown_app_requires_related_screen_and_distinctive_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)
-            record = store.record_verified_literal_action(
+            record = store.record_verified_action(action_type='literal',
                 device_id=DEVICE,
                 resolved_action=resolved(),
                 before_scene=before_scene(),
@@ -893,7 +887,7 @@ class TypedInputLineageTests(unittest.TestCase):
     def test_local_surface_descriptor_bridges_arbitrary_model_identity_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)
-            record = store.record_verified_literal_action(
+            record = store.record_verified_action(action_type='literal',
                 device_id=DEVICE,
                 resolved_action=resolved(),
                 before_scene=before_scene(),
@@ -951,7 +945,7 @@ class TypedInputLineageTests(unittest.TestCase):
     def test_persisted_surface_exact_adjacent_cue_recovers_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = TypedInputLineageStore(Path(temp))
-            record = store.record_verified_literal_action(
+            record = store.record_verified_action(action_type='literal',
                 device_id=DEVICE,
                 resolved_action=resolved(),
                 before_scene=before_scene(),
@@ -981,7 +975,7 @@ class TypedInputLineageTests(unittest.TestCase):
     def test_next_verified_key_inherits_prior_known_surface_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)
-            first = store.record_verified_literal_action(
+            first = store.record_verified_action(action_type='literal',
                 device_id=DEVICE,
                 resolved_action=resolved(),
                 before_scene=before_scene(),
@@ -1026,7 +1020,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     "evidence": ["唯一完整可见键位"],
                 }
             )
-            second = store.record_verified_literal_action(
+            second = store.record_verified_action(action_type='literal',
                 device_id=DEVICE,
                 resolved_action=next_action,
                 before_scene=next_before,
@@ -1049,7 +1043,7 @@ class TypedInputLineageTests(unittest.TestCase):
             bad_receipt = receipt()
             bad_receipt["seller_event_barrier_confirmed"] = False
             with self.assertRaises(InputValueLineageError):
-                store.record_verified_literal_action(
+                store.record_verified_action(action_type='literal',
                     device_id=DEVICE,
                     resolved_action=resolved(),
                     before_scene=before_scene(),
@@ -1060,7 +1054,7 @@ class TypedInputLineageTests(unittest.TestCase):
             bad_action = resolved()
             bad_action["expected_input_value"] = EXPECTED + "x"
             with self.assertRaises(InputValueLineageError):
-                store.record_verified_literal_action(
+                store.record_verified_action(action_type='literal',
                     device_id=DEVICE,
                     resolved_action=bad_action,
                     before_scene=before_scene(),
@@ -1070,7 +1064,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
 
     def test_pending_lineage_uses_same_exact_chain_without_persisting(self) -> None:
-        record = build_pending_literal_lineage(
+        record = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=resolved(),
             before_scene=before_scene(),
@@ -1097,7 +1091,7 @@ class TypedInputLineageTests(unittest.TestCase):
         ):
             with self.subTest(meaning=meaning):
                 before, action = state_switch_case(meaning)
-                record = build_pending_input_state_lineage(
+                record = build_pending_input_lineage(
                     device_id=DEVICE,
                     resolved_action=action,
                     before_scene=before,
@@ -1133,7 +1127,7 @@ class TypedInputLineageTests(unittest.TestCase):
         literal_before["elements"][0]["states"][
             "input_field_id"
         ] = "input_field_1"
-        literal = build_pending_literal_lineage(
+        literal = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=resolved(),
             before_scene=literal_before,
@@ -1157,7 +1151,7 @@ class TypedInputLineageTests(unittest.TestCase):
         state_before["elements"][0]["states"][
             "input_field_id"
         ] = "input_field_1"
-        state = build_pending_input_state_lineage(
+        state = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=state_action,
             before_scene=state_before,
@@ -1194,7 +1188,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     "input_field_id"
                 ] = "input_field_1"
             text_store = TypedInputLineageStore(Path(text_temp))
-            text_record = text_store.record_verified_text_action(
+            text_record = text_store.record_verified_action(action_type='text',
                 device_id=DEVICE,
                 resolved_action=resolved_text(),
                 before_scene=text_before,
@@ -1218,7 +1212,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     "input_field_id"
                 ] = "input_field_1"
             literal_store = TypedInputLineageStore(Path(literal_temp))
-            literal_record = literal_store.record_verified_literal_action(
+            literal_record = literal_store.record_verified_action(action_type='literal',
                 device_id=DEVICE,
                 resolved_action=resolved(),
                 before_scene=literal_before,
@@ -1234,7 +1228,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 "input_field_id"
             ] = "input_field_2"
             with self.assertRaises(InputValueLineageError):
-                TypedInputLineageStore(Path(literal_temp) / "wrong").record_verified_literal_action(
+                TypedInputLineageStore(Path(literal_temp) / "wrong").record_verified_action(action_type='literal',
                     device_id=DEVICE,
                     resolved_action=resolved(),
                     before_scene=literal_before,
@@ -1245,7 +1239,7 @@ class TypedInputLineageTests(unittest.TestCase):
 
     def test_pending_ime_candidate_lineage_recovers_exact_committed_cue(self) -> None:
         before, action = ime_candidate_case()
-        record = build_pending_ime_candidate_lineage(
+        record = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=before,
@@ -1395,7 +1389,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     screen_id="multiline_input_acceptance",
                     bounds=(0.14, 0.27, 0.86, 0.45),
                 )
-                record = build_pending_ime_candidate_lineage(
+                record = build_pending_input_lineage(
                     device_id=DEVICE,
                     resolved_action=action,
                     before_scene=before,
@@ -1476,7 +1470,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     bounds=(0.14, 0.27, 0.86, 0.45),
                     input_mode=case.get("input_mode", "chinese_pinyin"),
                 )
-                record = build_pending_ime_candidate_lineage(
+                record = build_pending_input_lineage(
                     device_id=DEVICE,
                     resolved_action=action,
                     before_scene=before,
@@ -1653,7 +1647,7 @@ class TypedInputLineageTests(unittest.TestCase):
             with self.subTest(action=candidate_action), self.assertRaises(
                 InputValueLineageError
             ):
-                build_pending_ime_candidate_lineage(
+                build_pending_input_lineage(
                     device_id=DEVICE,
                     resolved_action=candidate_action,
                     before_scene=candidate_before,
@@ -1662,7 +1656,7 @@ class TypedInputLineageTests(unittest.TestCase):
 
     def test_pending_input_state_lineage_rejects_wrong_surface_value_and_expiry(self) -> None:
         before, action = state_switch_case()
-        record = build_pending_input_state_lineage(
+        record = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=before,
@@ -1713,7 +1707,7 @@ class TypedInputLineageTests(unittest.TestCase):
             )
             with self.subTest(action=candidate_action):
                 with self.assertRaises(InputValueLineageError):
-                    build_pending_input_state_lineage(
+                    build_pending_input_lineage(
                         device_id=DEVICE,
                         resolved_action=candidate_action,
                         before_scene=candidate_before,
@@ -1722,7 +1716,7 @@ class TypedInputLineageTests(unittest.TestCase):
         bad_receipt = receipt()
         bad_receipt["seller_event_barrier_confirmed"] = False
         with self.assertRaises(InputValueLineageError):
-            build_pending_input_state_lineage(
+            build_pending_input_lineage(
                 device_id=DEVICE,
                 resolved_action=action,
                 before_scene=before,
@@ -1890,7 +1884,7 @@ class TypedInputLineageTests(unittest.TestCase):
 
     def test_state_switch_live_audit_replay_preserves_exact_value_and_next_key(self) -> None:
         before, action = state_switch_case()
-        record = build_pending_input_state_lineage(
+        record = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=before,
@@ -1941,7 +1935,7 @@ class TypedInputLineageTests(unittest.TestCase):
 
     def test_state_switch_live_audit_requires_bound_lineage_and_exact_visible_cue(self) -> None:
         before, action = state_switch_case()
-        record = build_pending_input_state_lineage(
+        record = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=before,
@@ -1989,7 +1983,7 @@ class TypedInputLineageTests(unittest.TestCase):
 
     def test_pending_direct_text_lineage_never_persists_or_accepts_pinyin(self) -> None:
         action = resolved_text()
-        pending = build_pending_text_lineage(
+        pending = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=scene("", "before-fp"),
@@ -2010,7 +2004,7 @@ class TypedInputLineageTests(unittest.TestCase):
         pinyin = dict(action)
         pinyin["input_method"] = "chinese_pinyin"
         with self.assertRaises(InputValueLineageError):
-            build_pending_text_lineage(
+            build_pending_input_lineage(
                 device_id=DEVICE,
                 resolved_action=pinyin,
                 before_scene=scene("", "before-fp"),
@@ -2019,7 +2013,7 @@ class TypedInputLineageTests(unittest.TestCase):
         unknown_untyped["foreground_app_id"] = "unknown"
         unknown_untyped["app_id"] = "unknown"
         with self.assertRaises(InputValueLineageError):
-            build_pending_text_lineage(
+            build_pending_input_lineage(
                 device_id=DEVICE,
                 resolved_action=action,
                 before_scene=unknown_untyped,
@@ -2046,7 +2040,7 @@ class TypedInputLineageTests(unittest.TestCase):
                         "keyboard_geometry": {"anchors": {"q": [0.1, 0.8]}},
                     }
                 )
-                pending = build_pending_chinese_preedit_lineage(
+                pending = build_pending_input_lineage(
                     device_id=DEVICE,
                     resolved_action=resolved_chinese_preedit(
                         prior=prior,
@@ -2095,7 +2089,7 @@ class TypedInputLineageTests(unittest.TestCase):
         for action in (wrong_pinyin, wrong_effect, direct):
             with self.subTest(action=action):
                 with self.assertRaises(InputValueLineageError):
-                    build_pending_chinese_preedit_lineage(
+                    build_pending_input_lineage(
                         device_id=DEVICE,
                         resolved_action=action,
                         before_scene=before,
@@ -2116,7 +2110,7 @@ class TypedInputLineageTests(unittest.TestCase):
         )
         before["foreground_app_id"] = "unknown"
         before["app_id"] = "unknown"
-        pending = build_pending_text_lineage(
+        pending = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=resolved_text(prior=prior, fragment=fragment),
             before_scene=before,
@@ -2296,7 +2290,7 @@ class TypedInputLineageTests(unittest.TestCase):
             broken = resolved_text()
             broken["expected_input_value"] = "different"
             with self.assertRaises(InputValueLineageError):
-                store.record_verified_text_action(
+                store.record_verified_action(action_type='text',
                     device_id=DEVICE,
                     resolved_action=broken,
                     before_scene=scene("", "before-fp"),
@@ -2304,7 +2298,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     after_frames=surface_frames(),
                 )
             with self.assertRaises(InputValueLineageError):
-                store.record_verified_text_action(
+                store.record_verified_action(action_type='text',
                     device_id=DEVICE,
                     resolved_action=resolved_text(),
                     before_scene=scene("", "before-fp"),
@@ -2315,7 +2309,7 @@ class TypedInputLineageTests(unittest.TestCase):
     def test_successful_clear_discards_only_that_device_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)
-            store.record_verified_text_action(
+            store.record_verified_action(action_type='text',
                 device_id=DEVICE,
                 resolved_action=resolved_text(),
                 before_scene=scene("", "before-fp"),
@@ -2480,7 +2474,7 @@ class TypedInputLineageTests(unittest.TestCase):
         self,
     ) -> None:
         action, before, _after = newline_case()
-        pending = build_pending_newline_lineage(
+        pending = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=before,
@@ -2523,7 +2517,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     candidate["foreground_app_id"] = "unknown"
                     candidate["app_id"] = "unknown"
 
-                pending = build_pending_newline_lineage(
+                pending = build_pending_input_lineage(
                     device_id=DEVICE,
                     resolved_action=action,
                     before_scene=before,
@@ -2552,7 +2546,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     Path(temp),
                     clock=lambda: 1000.0,
                 )
-                verified = store.record_verified_newline_action(
+                verified = store.record_verified_action(action_type='newline',
                     device_id=DEVICE,
                     resolved_action=action,
                     before_scene=before,
@@ -2578,7 +2572,7 @@ class TypedInputLineageTests(unittest.TestCase):
         before["elements"][0]["states"].pop("input_field_id")
         before["elements"][1]["states"]["input_field_id"] = "unknown"
         with self.assertRaises(InputValueLineageError):
-            build_pending_newline_lineage(
+            build_pending_input_lineage(
                 device_id=DEVICE,
                 resolved_action=action,
                 before_scene=before,
@@ -2587,7 +2581,7 @@ class TypedInputLineageTests(unittest.TestCase):
 
     def test_pending_newline_projects_exact_value_into_same_typed_field(self) -> None:
         action, before, _after = newline_case()
-        pending = build_pending_newline_lineage(
+        pending = build_pending_input_lineage(
             device_id=DEVICE,
             resolved_action=action,
             before_scene=before,
@@ -2671,7 +2665,7 @@ class TypedInputLineageTests(unittest.TestCase):
         action, before, after = newline_case()
         with tempfile.TemporaryDirectory() as temp:
             store = TypedInputLineageStore(Path(temp), clock=lambda: 1000.0)
-            record = store.record_verified_newline_action(
+            record = store.record_verified_action(action_type='newline',
                 device_id=DEVICE,
                 resolved_action=action,
                 before_scene=before,
@@ -2700,7 +2694,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 "verified_trailing_newline"
             )
             with self.assertRaises(InputValueLineageError):
-                store.record_verified_newline_action(
+                store.record_verified_action(action_type='newline',
                     device_id=DEVICE,
                     resolved_action=action,
                     before_scene=before,

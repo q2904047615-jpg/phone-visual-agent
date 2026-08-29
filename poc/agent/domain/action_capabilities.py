@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from .validation import reject_if
-import hashlib
+from .validation import ValidatedDataclassWire, canonical_digest, reject_if
 import json
 import re
 from dataclasses import dataclass
@@ -27,13 +26,8 @@ class ActionCapabilityError(ValueError):
     pass
 
 
-def _digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',',
-        ':')).encode('utf-8')).hexdigest()
-
-
 @dataclass(frozen=True)
-class CapabilityGap:
+class CapabilityGap(ValidatedDataclassWire):
     device_id: str
     requested_action: str
     reason_code: str
@@ -51,14 +45,6 @@ class CapabilityGap:
         reject_if(set(self.supported_actions) - KNOWN_ACTION_CAPABILITIES, ActionCapabilityError("CapabilityGap 含未知 supported action。"))
         reject_if(self.profile_digest and (not re.fullmatch('[0-9a-f]{64}', self.profile_digest)), ActionCapabilityError("CapabilityGap profile_digest 无效。"))
 
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return {'protocol_version': self.protocol_version, 'device_id': self.device_id,
-            'requested_action': self.requested_action, 'reason_code': self.reason_code,
-            'supported_actions': list(self.supported_actions), 'required_parameters': list(self.required_parameters),
-            'profile_digest': self.profile_digest}
-
-
 @dataclass(frozen=True)
 class DeviceCapabilitySnapshot:
     device_id: str
@@ -75,7 +61,7 @@ class DeviceCapabilitySnapshot:
 
     @property
     def profile_digest(self) -> str:
-        return _digest(self.to_dict(include_digest=False))
+        return canonical_digest(self.to_dict(include_digest=False))
 
     @property
     def supported_actions(self) -> tuple[str, ...]:

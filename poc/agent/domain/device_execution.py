@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import DataclassWire, reject_if
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
@@ -41,7 +41,7 @@ class DeviceTaskRegistryPort(Protocol):
 
 
 @dataclass(frozen=True)
-class DeviceActionRequest:
+class DeviceActionRequest(DataclassWire):
     """Transport-only projection of one Controller-resolved action."""
 
     kind: str
@@ -95,15 +95,6 @@ class DeviceActionRequest:
     @staticmethod
     def _validate_point(value: tuple[int, int] | None, label: str) -> None:
         reject_if(not isinstance(value, tuple) or len(value) != 2 or any((isinstance(part, bool) or not isinstance(part, int) or (not 0 <= part <= 1000) for part in value)), DeviceExecutionError(f"{label}必须是0～1000整数坐标。"))
-
-    def to_dict(self) -> dict[str, Any]:
-        return {'kind': self.kind, 'point': list(self.point) if self.point is not None else None,
-            'end_point': list(self.end_point) if self.end_point is not None else None, 'direction': self.direction,
-            'hold_seconds': self.hold_seconds, 'input_fragment': self.input_fragment, 'input_method': self.input_method,
-            'input_pinyin': self.input_pinyin, 'keyboard_geometry': dict(self.keyboard_geometry) if isinstance(
-            self.keyboard_geometry, Mapping) else None, 'delete_count': self.delete_count,
-            'wait_seconds': self.wait_seconds}
-
 
 @dataclass(frozen=True)
 class DeviceExecutionResult:

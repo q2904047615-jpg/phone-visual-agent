@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import DataclassWire, canonical_digest, reject_if
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-import hashlib
-import json
 from typing import Any
 
 from .generic_goal import VisibleGoalEvidence
@@ -25,8 +23,7 @@ class AppSurfaceLineageError(RuntimeError):
 def _action_digest(action: Any) -> str:
     reject_if(action is None, AppSurfaceLineageError("动作摘要缺少语义动作。"))
     payload = action.to_dict() if callable(getattr(action, "to_dict", None)) else action
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_digest(payload)
 
 
 def _is_descendant(graph: DynamicTaskGraph, subgoal: Any, ancestor_id: str) -> bool:
@@ -59,7 +56,7 @@ def _find_subgoal(graph: DynamicTaskGraph, subgoal_id: str) -> Any | None:
 
 
 @dataclass(frozen=True)
-class VerifiedAppSurfaceLineage:
+class VerifiedAppSurfaceLineage(DataclassWire):
     session_id: str
     task_id: str
     device_id: str
@@ -70,9 +67,6 @@ class VerifiedAppSurfaceLineage:
     source_subgoal_id: str
     functional_foreground_app_id: str
     physical_actions: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
 
     def matches_foreground(self, foreground_app_id: str) -> bool:
         foreground = str(foreground_app_id or "").strip().casefold()

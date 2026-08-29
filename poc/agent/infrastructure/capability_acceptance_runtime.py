@@ -7,12 +7,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import threading
-from typing import Any, Callable, Mapping
 import uuid
+from typing import Any, Callable, Mapping
 
 from agent.infrastructure.capability_acceptance import (
     ACCEPTANCE_REPORT_VERSION,
@@ -20,11 +19,10 @@ from agent.infrastructure.capability_acceptance import (
     CapabilityRegistryPromoter,
     PromotionAuthority,
     PromotionScope,
-    action_execution_evidence_error,
-    exact_input_evidence_error,
     validated_calibration_evidence,
     validate_acceptance_report,
 )
+from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
 from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
 
 
@@ -40,24 +38,10 @@ def _payload(value: Any) -> dict[str, Any]:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
-    encoded = (json.dumps(dict(payload), ensure_ascii=False, indent=2) + '\n').encode('utf-8')
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
     try:
-        with temporary.open('xb') as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        return atomic_replace_bytes(Path(path), json_bytes(payload))
     except OSError as exc:
         raise CapabilityAcceptanceError(f"验收状态无法原子写入：{exc}") from exc
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return target
 
 
 def _sha256_paths(paths: list[str]) -> list[str]:
@@ -80,6 +64,16 @@ def _proposal_action(snapshot: Mapping[str, Any]) -> str:
     return str(action.get("action") or "").strip()
 
 
+class _RecoveredSession:
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self._payload = dict(payload)
+        self.physical_actions = int(payload.get("physical_actions", 0) or 0)
+        self.session_id = str(payload.get("session_id") or "")
+
+    def snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._payload, ensure_ascii=False))
+
+
 @dataclass
 class CapabilityTrial:
     trial_id: str
@@ -96,81 +90,29 @@ class CapabilityTrial:
     promotion_authority: PromotionAuthority | None = field(default=None, repr=False)
     promotion_result: dict[str, Any] | None = None
     confirmation_attempted: bool = False
+    read_only_recovered: bool = False
+    stored_snapshot: dict[str, Any] | None = field(default=None, repr=False)
     operation_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def snapshot(self) -> dict[str, Any]:
+        payload = json.loads(json.dumps(self.stored_snapshot, ensure_ascii=False)) if self.stored_snapshot else {}
         report: dict[str, Any] | None = None
         if self.report_path.is_file():
             try:
                 loaded = json.loads(self.report_path.read_text(encoding="utf-8"))
                 report = loaded if isinstance(loaded, dict) else None
             except (OSError, UnicodeError, ValueError, TypeError):
-                report = None
-        return {'trial_id': self.trial_id, 'candidate_action': self.candidate_action, 'text': self.text,
+                pass
+        payload.update({'trial_id': self.trial_id, 'candidate_action': self.candidate_action, 'text': self.text,
             'device_id': self.device_id, 'code_revision': self.code_revision,
             'calibration_evidence': self.calibration_evidence, 'session': self.session.snapshot(), 'report': report,
             'promotion_scope': self.promotion_authority.scope.to_dict() if self.promotion_authority is not None
             and (not self.promotion_authority.consumed) else None, 'promotion': self.promotion_result,
             'requires_restart': bool(self.promotion_result and self.promotion_result.get('requires_restart')),
-            'confirmation_attempted': self.confirmation_attempted}
-
-
-@dataclass
-class RecoveredCapabilityTrial:
-    """Read-only trial metadata; one-shot authorities never survive restart."""
-
-    trial_id: str
-    candidate_action: str
-    text: str
-    device_id: str
-    run_dir: Path
-    code_revision: str
-    report_path: Path
-    stored_snapshot: dict[str, Any] = field(repr=False)
-
-    def __post_init__(self) -> None:
-        raw_session = self.stored_snapshot.get("session")
-        session_snapshot = dict(raw_session) if isinstance(raw_session, Mapping) else {}
-
-        class RecoveredSession:
-            def __init__(self, payload: dict[str, Any]) -> None:
-                self._payload = payload
-                self.physical_actions = int(payload.get("physical_actions", 0) or 0)
-                self.session_id = str(payload.get("session_id") or "")
-
-            def snapshot(self) -> dict[str, Any]:
-                return json.loads(json.dumps(self._payload, ensure_ascii=False))
-
-        self.session = RecoveredSession(session_snapshot)
-        self.controller = None
-        self.orchestrator = None
-        self.promotion_authority = None
-        self.promotion_result = dict(self.stored_snapshot.get('promotion')) if isinstance(self.stored_snapshot.get(
-            'promotion'), Mapping) else None
-        if self.promotion_result is None:
-            try:
-                loaded_promotion = json.loads((self.run_dir / 'promotion.json').read_text(encoding='utf-8'))
-                if isinstance(loaded_promotion, dict):
-                    self.promotion_result = loaded_promotion
-            except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
-                pass
-
-    def snapshot(self) -> dict[str, Any]:
-        payload = json.loads(json.dumps(self.stored_snapshot, ensure_ascii=False))
-        report = None
-        if self.report_path.is_file():
-            try:
-                loaded = json.loads(self.report_path.read_text(encoding="utf-8"))
-                report = loaded if isinstance(loaded, dict) else None
-            except (OSError, UnicodeError, ValueError, TypeError):
-                report = None
-        payload.update({'trial_id': self.trial_id, 'candidate_action': self.candidate_action, 'text': self.text,
-            'device_id': self.device_id, 'code_revision': self.code_revision, 'session': self.session.snapshot(),
-            'report': report, 'promotion_scope': None, 'promotion': self.promotion_result,
-            'requires_restart': bool(self.promotion_result and self.promotion_result.get('requires_restart')),
-            'read_only_recovered': True})
+            'confirmation_attempted': self.confirmation_attempted})
+        if self.read_only_recovered:
+            payload['read_only_recovered'] = True
         return payload
-
 
 class CapabilityAcceptanceManager:
     """Run one provisional generic action without mutating product controllers."""
@@ -187,7 +129,7 @@ class CapabilityAcceptanceManager:
         self.code_revision_provider = code_revision_provider
         self.id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self.promoter_factory = promoter_factory or CapabilityRegistryPromoter
-        self._trials: dict[str, CapabilityTrial | RecoveredCapabilityTrial] = {}
+        self._trials: dict[str, CapabilityTrial] = {}
         self._guard = threading.RLock()
         self._recover_read_only_trials()
 
@@ -212,15 +154,28 @@ class CapabilityAcceptanceManager:
                     or resolved_dir.name != f'capability_acceptance_{trial_id}' or (not device_id) or (action not
                     in PROMOTABLE_ACTIONS) or (not text_value) or (not revision)):
                     continue
-                self._trials[trial_id] = RecoveredCapabilityTrial(trial_id=trial_id, candidate_action=action,
-                    text=text_value, device_id=device_id, run_dir=resolved_dir, code_revision=revision,
-                    report_path=resolved_dir / 'acceptance_report.json', stored_snapshot=stored)
+                promotion = stored.get('promotion')
+                if not isinstance(promotion, Mapping):
+                    try:
+                        promotion = json.loads((resolved_dir / 'promotion.json').read_text(encoding='utf-8'))
+                    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                        promotion = None
+                raw_session = stored.get('session')
+                raw_calibration = stored.get('calibration_evidence')
+                self._trials[trial_id] = CapabilityTrial(trial_id=trial_id, candidate_action=action,
+                    text=text_value, device_id=device_id, run_dir=resolved_dir, controller=None, orchestrator=None,
+                    session=_RecoveredSession(raw_session if isinstance(raw_session, Mapping) else {}),
+                    code_revision=revision, report_path=resolved_dir / 'acceptance_report.json',
+                    calibration_evidence=dict(raw_calibration) if isinstance(raw_calibration, Mapping) else None,
+                    promotion_result=dict(promotion) if isinstance(promotion, Mapping) else None,
+                    confirmation_attempted=bool(stored.get('confirmation_attempted')), read_only_recovered=True,
+                    stored_snapshot=stored)
             except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
                 continue
 
     @staticmethod
     def _require_live_trial(trial: Any) -> CapabilityTrial:
-        reject_if(isinstance(trial, RecoveredCapabilityTrial), CapabilityAcceptanceError('该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。'))
+        reject_if(trial.read_only_recovered, CapabilityAcceptanceError('该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。'))
         return trial
 
     @staticmethod
@@ -306,7 +261,7 @@ class CapabilityAcceptanceManager:
             trials = list(self._trials.values())
         requested: list[str] = []
         for trial in trials:
-            if isinstance(trial, RecoveredCapabilityTrial) or trial.report_path.exists():
+            if trial.read_only_recovered or trial.report_path.exists():
                 continue
             request_stop = getattr(trial.controller, "request_stop", None)
             if callable(request_stop):
@@ -332,6 +287,13 @@ class CapabilityAcceptanceManager:
             return str(graph["task_id"])
         return ""
 
+    def _report_identity(self, trial: CapabilityTrial, before_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        return {'version': ACCEPTANCE_REPORT_VERSION, 'trial_id': trial.trial_id,
+            'session_id': str(getattr(trial.session, 'session_id', '')), 'task_id': self._task_id(before_snapshot),
+            'device_id': trial.device_id, 'candidate_action': trial.candidate_action,
+            'calibration_evidence': trial.calibration_evidence, 'code_revision': trial.code_revision,
+            'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+
     def _write_pass_or_fail_report(self, trial: CapabilityTrial, *, before_snapshot: Mapping[str, Any],
         result: Any) -> dict[str, Any]:
         execution = _payload(result)
@@ -343,11 +305,6 @@ class CapabilityAcceptanceManager:
         action_outcome = str(getattr(result, "action_outcome", "") or "").strip()
         observation_errors = list(getattr(result, "observation_errors", ()) or ())
         verification_errors = list(getattr(result, "verification_errors", ()) or ())
-        if trial.candidate_action == 'input_verified_text':
-            exact_error = exact_input_evidence_error(execution)
-            if exact_error:
-                verification_errors.append(exact_error)
-                action_outcome = "mismatched"
         before_scene = getattr(result, "before_scene", None)
         after_scene = getattr(result, "after_scene", None)
         before_fingerprint = str(getattr(before_scene, "fingerprint", "") or "")
@@ -358,31 +315,24 @@ class CapabilityAcceptanceManager:
         confirmation_scope = dict(confirmation_scope) if isinstance(confirmation_scope, Mapping) else {}
         before_observation_id = str(confirmation_scope.get('observation_id') or '')
         scoped_before_fingerprint = str(confirmation_scope.get('fingerprint') or '')
-        action_evidence_error = action_execution_evidence_error(trial.candidate_action, execution)
-        if action_evidence_error:
-            verification_errors.append(action_evidence_error)
-            action_outcome = "mismatched"
         passed = bool(not isinstance(physical_actions, bool) and physical_actions == 1
             and (resolved_kind == trial.candidate_action) and (action_outcome == 'matched')
             and (not observation_errors) and (not verification_errors) and (len(before_paths) == 4)
             and (len(after_paths) == 4) and before_fingerprint and scoped_before_fingerprint and after_fingerprint
             and (before_fingerprint != after_fingerprint) and (scoped_before_fingerprint != after_fingerprint)
-            and before_observation_id and after_observation_id and (before_observation_id != after_observation_id))
+            and before_observation_id and after_observation_id and (before_observation_id != after_observation_id)
+            and bool(execution.get('controller_transition_evidence')))
         execution['resolved_action'] = {**(execution.get('resolved_action') if isinstance(execution.get(
             'resolved_action'), dict) else {}), 'kind': resolved_kind}
         execution["observation_errors"] = observation_errors
         execution["verification_errors"] = verification_errors
-        report = {'version': ACCEPTANCE_REPORT_VERSION, 'trial_id': trial.trial_id,
-            'session_id': str(getattr(trial.session, 'session_id', '')), 'task_id': self._task_id(before_snapshot),
-            'device_id': trial.device_id, 'candidate_action': trial.candidate_action,
-            'calibration_evidence': trial.calibration_evidence, 'status': 'passed' if passed else 'failed',
-            'code_revision': trial.code_revision, 'physical_actions': physical_actions,
+        report = {**self._report_identity(trial, before_snapshot), 'status': 'passed' if passed else 'failed',
+            'physical_actions': physical_actions,
             'action_outcome': action_outcome, 'confirmation_scope': confirmation_scope,
             'before_observation': {'observation_id': before_observation_id, 'fingerprint': scoped_before_fingerprint},
             'after_observation': {'observation_id': after_observation_id, 'fingerprint': after_fingerprint},
             'execution': execution, 'before_frame_paths': before_paths, 'after_frame_paths': after_paths,
-            'before_frame_sha256': _sha256_paths(before_paths), 'after_frame_sha256': _sha256_paths(after_paths),
-            'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+            'before_frame_sha256': _sha256_paths(before_paths), 'after_frame_sha256': _sha256_paths(after_paths)}
         if passed:
             candidate_path = trial.run_dir / "acceptance_report.candidate.json"
             _atomic_write_json(candidate_path, report)
@@ -408,17 +358,13 @@ class CapabilityAcceptanceManager:
         if result is not None:
             observation_errors.extend((str(value) for value in getattr(result, 'observation_errors', ()) or ()))
             verification_errors.extend((str(value) for value in getattr(result, 'verification_errors', ()) or ()))
-        failure = {'version': ACCEPTANCE_REPORT_VERSION, 'trial_id': trial.trial_id,
-            'session_id': str(getattr(trial.session, 'session_id', '')), 'task_id': self._task_id(before_snapshot),
-            'device_id': trial.device_id, 'candidate_action': trial.candidate_action,
-            'calibration_evidence': trial.calibration_evidence, 'status': 'failed',
-            'code_revision': trial.code_revision, 'physical_actions': request_actions,
+        failure = {**self._report_identity(trial, before_snapshot), 'status': 'failed',
+            'physical_actions': request_actions,
             'action_outcome': str(getattr(result, 'action_outcome', '') or 'observation_failed'),
             'confirmation_scope': dict(before_snapshot.get('confirmation_scope')) if isinstance(before_snapshot.get(
             'confirmation_scope'), Mapping) else {}, 'error': str(exc), 'evidence': evidence,
             'observation_errors': list(dict.fromkeys(observation_errors)),
-            'verification_errors': list(dict.fromkeys(verification_errors)),
-            'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+            'verification_errors': list(dict.fromkeys(verification_errors))}
         _atomic_write_json(trial.report_path, failure)
         return failure
 

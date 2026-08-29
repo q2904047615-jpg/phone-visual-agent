@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
-import hashlib
-import json
+from agent.domain.validation import NormalizedBounds, NormalizedPoint, dataclass_wire, reject_if
 import math
-import os
 import statistics
 import time
 import re
@@ -35,12 +32,7 @@ from agent.domain.action_capabilities import build_device_capability_snapshot
 from agent.domain.input_value_lineage import (
     InputValueLineageError,
     TypedInputLineage,
-    build_pending_chinese_preedit_lineage,
-    build_pending_ime_candidate_lineage,
-    build_pending_input_state_lineage,
-    build_pending_literal_lineage,
-    build_pending_newline_lineage,
-    build_pending_text_lineage,
+    build_pending_input_lineage,
     input_app_identity_compatible,
     input_screen_identity_compatible,
 )
@@ -61,6 +53,7 @@ from agent.infrastructure.orientation_safety import (
     validate_device_id,
 )
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
+from agent.infrastructure.model_failure_diagnostics import model_failure_payload, persist_model_failure_payload
 from agent.domain.vision_model import VisionAgentError
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import UIElement, UIScene, UISceneError
@@ -75,44 +68,12 @@ from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keybo
 
 
 QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"
-MAX_REDACTED_QWEN_RESPONSE_CHARS = 16000
-_IMAGE_DATA_URL_RE = re.compile('data:image/[^;\\s\\"\']+;base64,[A-Za-z0-9+/=_-]+', re.IGNORECASE)
-_SECRET_FIELD_RE = re.compile(
-    r"(?P<prefix>[\"']?(?:authorization|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|token|secret|password)[\"']?\s*[:=]\s*)"
-    r"(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
-    re.IGNORECASE,
-)
-_UNQUOTED_SECRET_FIELD_RE = re.compile(
-    r"(?P<prefix>[\"']?(?:authorization|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|token|secret|password)[\"']?\s*[:=]\s*)"
-    r"(?![\"'])(?P<value>[^,}\]\s]+)",
-    re.IGNORECASE,
-)
-_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
-_URL_SECRET_RE = re.compile(
-    r"(?P<prefix>[?&](?:api[_-]?key|access[_-]?token|token|secret|password)=)"
-    r"[^&#\s\"']+",
-    re.IGNORECASE,
-)
-_URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
-_OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 
 _POST_NAVIGATION_RESULT_KINDS = frozenset({'tap_semantic', 'double_tap', 'swipe', 'back', 'home', 'open_recent_apps'})
 _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset({'scene_changed', 'content_changed', 'current_video_changed',
     'description', 'app_id', 'screen_id'})
 _VISUAL_FOCUS_KEYS = frozenset({'subgoal_id', 'objective', 'constraints', 'completion_conditions', 'execution_class',
     'goal_entities'})
-
-
-def _first_valid_lineage(builders: tuple[Callable[..., TypedInputLineage], ...],
-    **values: Any) -> TypedInputLineage | None:
-    for builder in builders:
-        try:
-            return builder(**values)
-        except (InputValueLineageError, TypeError, ValueError):
-            continue
-    return None
 
 
 def _sanitized_visual_focus(value: Any) -> dict[str, Any] | None:
@@ -126,9 +87,7 @@ def _sanitized_visual_focus(value: Any) -> dict[str, Any] | None:
         return None
     focus = dict(value)
     goal_entities = dict(focus["goal_entities"])
-    # Observation phases are minted only after a physical action by this
-    # module.  A model, user payload or stale goal draft cannot pre-authorize
-    # an action-result observation mode.
+    # Only this adapter may mint an action-result observation phase after physical execution.
     goal_entities.pop("observation_phase", None)
     focus["goal_entities"] = goal_entities
     return focus
@@ -179,14 +138,7 @@ def _post_action_observation_context(goal: GenericIntentDraft, resolved: Resolve
 
 
 def _post_action_visual_context(resolved: ResolvedSemanticAction) -> PostActionVisualContext | None:
-    """Project one locally validated canonical transition into Qwen context.
-
-    The adapter calls this only after the device executor reports one physical
-    action.  The summary intentionally carries neither coordinates nor a
-    success verdict; the new pixels and Controller still own verification.
-    Legacy/non-formal test actions have no typed transition and therefore do
-    not mint cross-step context.
-    """
+    """Project a typed executed transition without coordinates or a success verdict."""
 
     raw_expectations = resolved.formal_transition.get("expectations")
     if not isinstance(raw_expectations, list) or not raw_expectations:
@@ -354,14 +306,7 @@ def stable_qwerty_ocr_anchors(frames: tuple[Image.Image, ...] | list[Image.Image
 
 def stable_text_ocr_grounding(frames: tuple[Image.Image, ...] | list[Image.Image], scene: UIScene,
     action: SemanticAction, *, ocr_recognizer: Any=recognize_ocr) -> LocalPointGrounding | None:
-    """Refine one coarse point with a stable exact-label OCR match.
-
-    The canonical action and its target are already fixed before this helper
-    runs.  OCR may only refine that target's point; it cannot add candidates,
-    change the action, or make an ambiguous label executable.  Any unavailable,
-    duplicate, unstable, or distant OCR result simply keeps the existing model
-    center.
-    """
+    """Refine a fixed canonical target point only from a stable unique exact-label OCR match."""
 
     if action.action not in {'tap_semantic', 'dismiss_overlay', 'double_tap', 'long_press'}:
         return None
@@ -384,8 +329,7 @@ def stable_text_ocr_grounding(frames: tuple[Image.Image, ...] | list[Image.Image
     if len(compact_label) < 2 or len(compact_label) > 64:
         return None
 
-    def unique_match_geometry(frame: Image.Image) -> tuple[tuple[float, float, float, float], tuple[float,
-        float]] | None:
+    def unique_match_geometry(frame: Image.Image) -> tuple[NormalizedBounds, NormalizedPoint] | None:
         payload = ocr_recognizer(frame.convert('RGB'), 'zh-Hans-CN', scale=1.5)
         matches = find_text(payload, label)
         if len(matches) != 1 or frame.width <= 0 or frame.height <= 0:
@@ -404,8 +348,7 @@ def stable_text_ocr_grounding(frames: tuple[Image.Image, ...] | list[Image.Image
         if newest is None:
             return None
         proposed_point = element.center
-        # If Qwen's center already agrees with the exact visible label, keep
-        # the original point and avoid spending a second local OCR call.
+        # Keep an already matching Qwen center and avoid another local OCR pass.
         if math.dist(proposed_point, newest[1]) <= 0.025:
             return None
 
@@ -443,22 +386,6 @@ def stable_text_ocr_grounding(frames: tuple[Image.Image, ...] | list[Image.Image
         return None
 
 
-def _redact_qwen_failure_response(raw: str) -> str:
-    redacted = _IMAGE_DATA_URL_RE.sub("[REDACTED_IMAGE_DATA_URL]", str(raw or ""))
-    redacted = _SECRET_FIELD_RE.sub(
-        lambda match: (
-            f"{match.group('prefix')}{match.group('quote')}"
-            f"[REDACTED_SECRET]{match.group('quote')}"
-        ),
-        redacted,
-    )
-    redacted = _UNQUOTED_SECRET_FIELD_RE.sub(lambda match: f'{match.group('prefix')}[REDACTED_SECRET]', redacted)
-    redacted = _BEARER_RE.sub("Bearer [REDACTED_SECRET]", redacted)
-    redacted = _URL_SECRET_RE.sub(lambda match: f'{match.group('prefix')}[REDACTED_SECRET]', redacted)
-    redacted = _URL_USERINFO_RE.sub(r"\1[REDACTED_CREDENTIALS]@", redacted)
-    return _OPENAI_STYLE_SECRET_RE.sub("[REDACTED_SECRET]", redacted)
-
-
 def _persist_qwen_failure_diagnostic(*, evidence_dir: Path | None, prefix: str, raw_response: str, error: Exception,
     diagnostics: dict[str, Any] | None=None) -> Path | None:
     """Persist bounded redacted model output without changing failure policy."""
@@ -466,28 +393,21 @@ def _persist_qwen_failure_diagnostic(*, evidence_dir: Path | None, prefix: str, 
     raw = str(raw_response or "")
     if evidence_dir is None or not raw:
         return None
-    output_dir = Path(evidence_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prefix or ""))[:96]
-    target = output_dir / f"{safe_prefix or 'observation'}_qwen_failure.json"
-    redacted = _redact_qwen_failure_response(raw)
-    bounded = redacted[:MAX_REDACTED_QWEN_RESPONSE_CHARS]
-    public_error = _redact_qwen_failure_response(str(error))[:1000]
     details = diagnostics if isinstance(diagnostics, dict) else {}
-    payload = {'artifact_version': QWEN_FAILURE_DIAGNOSTIC_VERSION,
-        'failed_stage': str(details.get('failed_stage') or 'unknown')[:120],
-        'error_type': str(details.get('error_type') or classify_qwen_error(error, raw_response=raw))[:120],
-        'error_message': public_error, 'raw_response_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(),
-        'raw_response_length': len(raw), 'redacted_response_truncated': len(redacted) > len(bounded),
-        'redacted_raw_response': bounded}
-    encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-    temporary = output_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temporary.write_bytes(encoded)
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return target
+    payload = model_failure_payload(
+        artifact_version=QWEN_FAILURE_DIAGNOSTIC_VERSION,
+        raw=raw,
+        failed_stage=str(details.get('failed_stage') or 'unknown'),
+        error_type=str(details.get('error_type') or classify_qwen_error(error, raw_response=raw)),
+        error_message=str(error),
+    )
+    return persist_model_failure_payload(
+        payload,
+        evidence_dir=evidence_dir,
+        prefix=prefix,
+        default_prefix='observation',
+        suffix='qwen_failure',
+    )
 
 
 def persist_observer_failure_diagnostic(observer: Any, *, evidence_dir: Path | None, prefix: str,
@@ -530,29 +450,16 @@ class GenericActionExecutionResult:
     orientation_credential: OrientationCredential | None = None
 
     def __post_init__(self) -> None:
-        # Capture helpers intentionally build mutable lists while sampling.  The
-        # completed execution result is a live promotion source, so freeze both
-        # frame collections at the result boundary instead of exposing a
-        # list-shaped object that the promotion validator must reject.
+        # Freeze sampling lists because a completed result is a live promotion source.
         object.__setattr__(self, "after_frames", tuple(self.after_frames))
         object.__setattr__(self, "before_frames", tuple(self.before_frames))
         object.__setattr__(self, 'controller_transition_evidence', tuple(self.controller_transition_evidence))
 
     def to_dict(self) -> dict[str, Any]:
-        return {'requested_action': self.requested_action.to_dict(), 'rebound_action': self.rebound_action.to_dict(),
-            'resolved_action': self.resolved_action.to_dict(), 'before_scene': self.before_scene.to_dict(),
-            'after_scene': self.after_scene.to_dict(), 'planned_scene_fingerprint': self.planned_scene_fingerprint,
-            'confirmation_frame_identity_verified': self.confirmation_frame_identity_verified,
-            'confirmation_frame_delta': self.confirmation_frame_delta, 'physical_actions': self.physical_actions,
-            'primary_input_confirmation_reused': self.primary_input_confirmation_reused,
-            'action_outcome': self.action_outcome, 'verification_errors': list(self.verification_errors),
-            'robot_result': self.robot_result, 'hardware_receipt': dict(self.hardware_receipt) if self.hardware_receipt
-            is not None else None, 'evidence': list(self.evidence), 'after_frame_count': len(self.after_frames),
-            'after_frame_paths': list(self.after_frame_paths), 'observation_errors': list(self.observation_errors),
-            'controller_transition_evidence': list(self.controller_transition_evidence),
-            'before_frame_count': len(self.before_frames), 'before_frame_paths': list(self.before_frame_paths),
-            'orientation_credential': self.orientation_credential.to_dict() if self.orientation_credential
-            is not None else None}
+        value = dataclass_wire(self, omit=('after_frames', 'before_frames'))
+        value.update(after_frame_count=len(self.after_frames), before_frame_count=len(self.before_frames),
+            robot_result=self.robot_result)
+        return value
 
 
 class GenericSingleActionAdapter:
@@ -563,19 +470,13 @@ class GenericSingleActionAdapter:
         'drag'})
     GEOMETRY_BOUND_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'input_verified_text',
         'press_enter', 'clear_verified_text', 'long_press', 'drag'})
-    INDEPENDENT_GEOMETRY_AUDIT_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap',
-        'input_verified_text', 'press_enter', 'clear_verified_text', 'long_press', 'drag'})
+    INDEPENDENT_GEOMETRY_AUDIT_KINDS = GEOMETRY_BOUND_KINDS
     LOCAL_INPUT_AUXILIARY_MEANINGS = frozenset({'ime_exact_candidate', 'input_exact_literal_key',
         'input_exact_enter_key', 'switch_keyboard_layout', 'switch_keyboard_case', 'switch_keyboard_input_mode'})
 
     @classmethod
     def _primary_input_confirmation_reusable(cls, requested: SemanticAction, scene: UIScene) -> bool:
-        """Return whether one strict input audit may survive local recapture.
-
-        The caller has already compared the planned and fresh four-frame sets.
-        This predicate only accepts the exact canonical goal element minted by
-        the dedicated input audit; ordinary compact controls never qualify.
-        """
+        """Allow recapture reuse only for the canonical element minted by the strict input audit."""
 
         if (requested.action not in {'tap_semantic', 'press_enter', 'input_verified_text',
             'clear_verified_text'} or not str(requested.params.get('formal_candidate_id') or '').strip()):
@@ -654,38 +555,21 @@ class GenericSingleActionAdapter:
         declared = capability_provider() if callable(capability_provider) else {}
         if not isinstance(declared, dict):
             declared = {}
-
-        def available(action: str, method_name: str) -> bool:
-            return callable(getattr(self.robot, method_name, None)) and bool(declared.get(action, True))
-
+        methods = {'tap_semantic': 'vision_tap_relative', 'dismiss_overlay': 'vision_dismiss_overlay_relative',
+            'double_tap': 'vision_double_tap_relative', 'reveal_system_navigation': 'vision_reveal_system_navigation',
+            'back': 'vision_android_back', 'home': 'vision_android_home',
+            'open_recent_apps': 'vision_android_recent_apps', 'input_verified_text': 'vision_type_text_with_layout',
+            'long_press': 'vision_long_press_relative', 'drag': 'vision_drag_relative'}
         supported = {'wait_for_change'} if bool(declared.get('wait_for_change', True)) else set()
-        if available('tap_semantic', 'vision_tap_relative'):
-            supported.add("tap_semantic")
-        if available('dismiss_overlay', 'vision_dismiss_overlay_relative'):
-            supported.add("dismiss_overlay")
-        if available('double_tap', 'vision_double_tap_relative'):
-            supported.add("double_tap")
+        supported.update((action for action, method in methods.items() if bool(declared.get(action,
+            True)) and callable(getattr(self.robot, method, None))))
         if (bool(declared.get('swipe', True)) and any((callable(getattr(self.robot, f'vision_swipe_{direction}',
             None)) for direction in ('up', 'down', 'left', 'right')))):
             supported.add("swipe")
-        if available('reveal_system_navigation', 'vision_reveal_system_navigation'):
-            supported.add("reveal_system_navigation")
-        if available('back', 'vision_android_back'):
-            supported.add("back")
-        if available('home', 'vision_android_home'):
-            supported.add("home")
-        if available('open_recent_apps', 'vision_android_recent_apps'):
-            supported.add("open_recent_apps")
-        if available('input_verified_text', 'vision_type_text_with_layout'):
-            supported.add("input_verified_text")
-        if available('tap_semantic', 'vision_tap_relative'):
+        if 'tap_semantic' in supported:
             supported.add("press_enter")
         if bool(declared.get('input_verified_text', True)) and callable(getattr(self.robot, 'vision_clear_text', None)):
             supported.add("clear_verified_text")
-        if available('long_press', 'vision_long_press_relative'):
-            supported.add("long_press")
-        if available('drag', 'vision_drag_relative'):
-            supported.add("drag")
         return frozenset(supported)
 
     def capability_snapshot(self) -> Any:
@@ -754,15 +638,19 @@ class GenericSingleActionAdapter:
         reject_if(frame.width < 400 or frame.height < 700, GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。"))
         return frame
 
-    def _capture_confirmation_frames(self, *, evidence_dir: Path | None, prefix: str) -> tuple[list[Image.Image],
-        tuple[str, ...]]:
-        """Capture four fresh local frames without re-interpreting the scene."""
-
+    def _capture_frame_burst(self) -> list[Image.Image]:
         frames: list[Image.Image] = []
         for index in range(4):
             frames.append(self._capture_frame())
             if index < 3 and self.frame_interval:
                 time.sleep(self.frame_interval)
+        return frames
+
+    def _capture_confirmation_frames(self, *, evidence_dir: Path | None, prefix: str) -> tuple[list[Image.Image],
+        tuple[str, ...]]:
+        """Capture four fresh local frames without re-interpreting the scene."""
+
+        frames = self._capture_frame_burst()
         stability = measure_local_stability(frames)
         paths = self._save_frames(frames, evidence_dir, prefix)
         reject_if(not stability.stable, GenericActionAdapterError(f'确认前本地多帧稳定性检查未通过：{stability.reason}', evidence=paths))
@@ -770,11 +658,7 @@ class GenericSingleActionAdapter:
 
     def _capture_scene_once(self, goal: GenericIntentDraft, *, evidence_dir: Path | None=None,
         prefix: str) -> tuple[UIScene, list[Image.Image], tuple[str, ...]]:
-        frames: list[Image.Image] = []
-        for index in range(4):
-            frames.append(self._capture_frame())
-            if index < 3 and self.frame_interval:
-                time.sleep(self.frame_interval)
+        frames = self._capture_frame_burst()
         paths = self._save_frames(frames, evidence_dir, prefix)
         try:
             scene = self._observe_scene(frames, goal.to_dict())
@@ -803,9 +687,7 @@ class GenericSingleActionAdapter:
         evidence_dir: Path | None,
         prefix: str,
     ) -> tuple[UIScene, list[Image.Image], tuple[str, ...]]:
-        # One fresh closed-loop step may make at most one Qwen request.  Local
-        # frame collection can wait for stability, but an invalid observation
-        # is returned immediately instead of resampling the model.
+        # One step permits one Qwen request; stability sampling never triggers model resampling.
         try:
             return self._capture_scene_once(goal, evidence_dir=evidence_dir, prefix=f'{prefix}_attempt_1')
         except GenericActionAdapterError as exc:
@@ -815,16 +697,7 @@ class GenericSingleActionAdapter:
 
     @staticmethod
     def _requires_post_action_relative_clarity(resolved: ResolvedSemanticAction) -> bool:
-        """Return whether the action preserves a comparable input surface.
-
-        Text mutations keep the keyboard/page structure in place, so their
-        post-action frame sharpness can be compared with the fresh pre-action
-        frames.  Focusing an input is different: opening the soft keyboard
-        replaces a large part of the frame and changes the score even when the
-        new view is plainly readable.  Focus still passes the ordinary stable
-        frame and trusted-observation clarity gates; it must not use this
-        content-sensitive *relative* comparison.
-        """
+        """Use relative clarity only when an action preserves a comparable input surface."""
 
         return resolved.kind in {'input_verified_text', 'press_enter', 'clear_verified_text'}
 
@@ -897,7 +770,7 @@ class GenericSingleActionAdapter:
         before_frames: tuple[Image.Image, ...], resolved: ResolvedSemanticAction,
         input_lineage_override: TypedInputLineage | None, evidence_dir: Path | None,
         evidence_prefix: str) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str,
-        ...], tuple[str, ...]]:
+        ...], tuple[str, ...], tuple[str, ...]]:
         action_timeout = self._post_action_timeout_for(resolved)
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, action_timeout))
@@ -926,11 +799,12 @@ class GenericSingleActionAdapter:
         after = self._reconcile_literal_key_visual_wrap(resolved, before, after)
         after = self._reconcile_verified_text_horizontal_suffix(resolved, before, after)
         try:
-            self.controller.verify_after_action(resolved, before, after)
+            controller_evidence = self.controller.verify_after_action(resolved, before, after)
             verification_errors: tuple[str, ...] = ()
         except UniversalActionError as exc:
+            controller_evidence = ()
             verification_errors = (f"第1轮动作结果不匹配：{exc}",)
-        return (after, tuple(frames), paths, all_paths, (), verification_errors)
+        return (after, tuple(frames), paths, all_paths, (), verification_errors, controller_evidence)
 
     @staticmethod
     def _reconcile_literal_key_visual_wrap(resolved: ResolvedSemanticAction, before: UIScene,
@@ -1117,14 +991,13 @@ class GenericSingleActionAdapter:
     @staticmethod
     def _pending_input_lineage(resolved: ResolvedSemanticAction, device_id: str, before: UIScene,
         hardware_receipt: dict[str, Any] | None) -> TypedInputLineage | None:
-        values = {"device_id": device_id, "resolved_action": resolved.to_dict(), "before_scene": before.to_dict()}
-        if hardware_receipt is not None:
-            return _first_valid_lineage((build_pending_newline_lineage, build_pending_literal_lineage,
-                build_pending_ime_candidate_lineage, build_pending_input_state_lineage), **values,
-                hardware_receipt=hardware_receipt)
-        if resolved.kind == 'input_verified_text':
-            return _first_valid_lineage((build_pending_text_lineage, build_pending_chinese_preedit_lineage), **values)
-        return None
+        if hardware_receipt is None and resolved.kind != 'input_verified_text':
+            return None
+        try:
+            return build_pending_input_lineage(device_id=device_id, resolved_action=resolved.to_dict(),
+                before_scene=before.to_dict(), hardware_receipt=hardware_receipt)
+        except (InputValueLineageError, TypeError, ValueError):
+            return None
 
     def _record_verified_input_lineage(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene,
         after_frames: tuple[Image.Image, ...], hardware_receipt: dict[str, Any] | None) -> None:
@@ -1134,14 +1007,13 @@ class GenericSingleActionAdapter:
         values = {'device_id': self.device_id, 'resolved_action': resolved.to_dict(), 'before_scene': before.to_dict(),
             'after_scene': after.to_dict(), 'after_frames': after_frames}
         try:
-            if resolved.kind == 'input_verified_text':
-                store.record_verified_text_action(**values)
-            elif resolved.kind == 'clear_verified_text':
+            if resolved.kind == 'clear_verified_text':
                 store.discard(self.device_id)
-            elif resolved.kind == 'press_enter' and hardware_receipt is not None:
-                store.record_verified_newline_action(**values, hardware_receipt=hardware_receipt)
-            elif hardware_receipt is not None:
-                store.record_verified_literal_action(**values, hardware_receipt=hardware_receipt)
+                return
+            action_type = 'text' if resolved.kind == 'input_verified_text' else 'newline' if resolved.kind == (
+                'press_enter') else 'literal' if hardware_receipt is not None else None
+            if action_type is not None:
+                store.record_verified_action(**values, action_type=action_type, hardware_receipt=hardware_receipt)
         except (InputValueLineageError, OSError, TypeError, ValueError):
             pass
 
@@ -1174,24 +1046,13 @@ class GenericSingleActionAdapter:
                 evidence_prefix}_before')
         try:
             rebind_planned_scene = planned_scene
-            # The fresh four-frame window has already proved the pixels are the
-            # same as the fingerprint-bound planning scene.  Re-reading those
-            # identical pixels with Qwen cannot add independent authority and
-            # formerly spent up to three extra calls (scene + two crops).
-            # Rebind the immutable canonical candidate against that same scene;
-            # bounds, uniqueness and controller reachability remain local gates.
+            # Rebind the canonical candidate after four-frame identity; another Qwen read adds no authority.
             rebound = self._rebind_action(
                 requested_action,
                 rebind_planned_scene,
                 before,
                 local_frame_identity_verified=local_frame_identity_verified,
-                # A verified text-input action never executes at the input
-                # element's model-drawn center.  Once the original and fresh
-                # four-frame sets prove the pixels are unchanged, bind the
-                # unique focused input by its exact semantic/state identity
-                # and execute only from the fresh input-structure keyboard
-                # geometry below.  Tap, clear, long-press and drag retain the
-                # strict planned/fresh geometry-overlap gate.
+                # Verified text uses fresh keyboard geometry; other actions retain planned/fresh overlap checks.
                 require_geometry_overlap=not (
                     local_frame_identity_verified
                     and requested_action.action == "input_verified_text"
@@ -1207,9 +1068,7 @@ class GenericSingleActionAdapter:
             try:
                 local_point_grounding = self.text_point_grounder(before_frames, before, rebound)
             except Exception:
-                # OCR is a precision aid, not another product boundary.  If it
-                # is unavailable or inconclusive, retain the canonical target's
-                # existing point instead of blocking an otherwise legal action.
+                # OCR refines precision only; an inconclusive result keeps the canonical point.
                 local_point_grounding = None
         try:
             resolved = self.controller.resolve_one(rebound, before, confirmed=True,
@@ -1230,7 +1089,7 @@ class GenericSingleActionAdapter:
         robot_result: Any = None
         hardware_receipt: dict[str, Any] | None = None
 
-        def executor_point(point: tuple[float, float] | None) -> tuple[int, int] | None:
+        def executor_point(point: NormalizedPoint | None) -> tuple[int, int] | None:
             if point is None:
                 return None
             return (max(0, min(1000, round(point[0] * 1000))), max(0, min(1000, round(point[1] * 1000))))
@@ -1273,6 +1132,7 @@ class GenericSingleActionAdapter:
                 all_after_paths,
                 observation_errors,
                 verification_errors,
+                controller_transition_evidence,
             ) = self._observe_stable_post_action_scene(
                 goal,
                 before=before,
@@ -1287,14 +1147,6 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
                 observation_errors=tuple(getattr(exc, 'observation_errors', ())), verification_errors=tuple(getattr(exc,
                 'verification_errors', ()))) from exc
-
-        controller_transition_evidence: tuple[str, ...] = ()
-        if not verification_errors:
-            try:
-                controller_transition_evidence = self.controller.transition_evidence_from_verified_action(resolved,
-                    before, after)
-            except UniversalActionError as exc:
-                verification_errors = verification_errors + (f'控制器转换证据复核失败：{exc}',)
 
         if not verification_errors:
             self._record_verified_input_lineage(resolved, before, after, after_frames, hardware_receipt)

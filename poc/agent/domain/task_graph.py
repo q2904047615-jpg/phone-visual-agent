@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import ValidatedDataclassWire, dataclass_wire, reject_if
 import json
 import re
 import uuid
@@ -13,19 +13,10 @@ from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-20-deepseek-typed-task-graph-v4"
 SUBGOAL_EXTERNAL_IMPACTS = frozenset({'read_only', 'navigation_only', 'external_state', 'unknown'})
-RISK_TYPES = frozenset({'message_or_communication', 'content_publication', 'account_relationship_change',
-    'membership_change', 'permission_role_change', 'data_mutation', 'data_deletion', 'transaction_or_payment',
-    'account_or_permission_change', 'unknown_external_effect'})
 PLANNER_EXECUTION_CLASSES = frozenset({'observe', 'navigate', 'effect', 'unknown'})
 PLANNER_EFFECT_KINDS = frozenset({'send_message', 'publish_content', 'relationship_change', 'membership_change',
     'data_mutation', 'authentication', 'financial_transaction', 'sensitive_permission_change',
     'irreversible_account_deletion', 'irreversible_data_deletion'})
-_RUNTIME_RISK_TYPE_BY_EFFECT_KIND = {'send_message': 'message_or_communication',
-    'publish_content': 'content_publication', 'relationship_change': 'account_relationship_change',
-    'membership_change': 'membership_change', 'data_mutation': 'data_mutation',
-    'authentication': 'account_or_permission_change', 'financial_transaction': 'transaction_or_payment',
-    'sensitive_permission_change': 'permission_role_change',
-    'irreversible_account_deletion': 'account_or_permission_change', 'irreversible_data_deletion': 'data_deletion'}
 _RUNTIME_IMPACT_BY_EXECUTION_CLASS = {'observe': 'read_only', 'navigate': 'navigation_only', 'effect': 'external_state',
     'unknown': 'unknown'}
 NON_EFFECT_RESULT_PATTERN = re.compile(
@@ -37,27 +28,9 @@ NON_EFFECT_RESULT_PATTERN = re.compile(
     r"\b(?:send|submit|publish|follow|comment|pay|login|authorize|delete|modify|save|sync)\b",
     re.IGNORECASE,
 )
-_PROHIBITED_EFFECT_FAMILY_PATTERNS = {'send': re.compile('发送|\\bsend\\b', re.IGNORECASE),
-    'search': re.compile('搜索|\\bsearch\\b', re.IGNORECASE), 'submit': re.compile('提交|\\bsubmit\\b', re.IGNORECASE),
-    'publish': re.compile('发布|\\bpublish\\b', re.IGNORECASE), 'follow': re.compile('关注|\\bfollow\\b', re.IGNORECASE),
-    'comment': re.compile('评论|\\bcomment\\b', re.IGNORECASE),
-    'financial': re.compile('付款|支付|转账|\\b(?:pay|payment|transfer)\\b', re.IGNORECASE),
-    'authentication': re.compile('登录|认证|\\b(?:login|log\\s+in|authenticate)\\b', re.IGNORECASE),
-    'authorization': re.compile('授权|权限|\\b(?:authorize|permission)\\b', re.IGNORECASE),
-    'deletion': re.compile('删除|清除|\\b(?:delete|erase)\\b', re.IGNORECASE),
-    'mutation': re.compile('修改|保存|同步|\\b(?:modify|save|sync)\\b', re.IGNORECASE)}
-_NEGATIVE_EFFECT_CLAUSE_SPLIT_PATTERN = re.compile('(?:，|,|。|；|;|且|并且|\\band\\b)', re.IGNORECASE)
-_VISIBLE_NEGATIVE_STATE_PATTERN = re.compile(
-    r"页面|界面|输入框|按钮|控件|气泡|列表|弹窗|结果|"
-    r"可见|显示|不存在|消失|为空|"
-    r"\b(?:page|screen|input|button|control|bubble|list|dialog|result|"
-    r"visible|shown|absent|missing|empty)\b",
-    re.IGNORECASE,
-)
 _EXECUTION_CLASS_BY_RUNTIME_IMPACT = {value: key for key, value in _RUNTIME_IMPACT_BY_EXECUTION_CLASS.items()}
 GRAPH_STATUSES = frozenset({'ready', 'running', 'awaiting_confirmation', 'completed', 'blocked'})
 SUBGOAL_STATUSES = frozenset({'pending', 'active', 'completed', 'blocked', 'skipped'})
-RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
 REPLAN_TRIGGERS = frozenset({'observation_changed', 'action_result_matched', 'action_mismatch',
     'action_result_mismatch', 'subgoal_completed', 'risk_detected', 'constraint_discovered', 'recovery_needed'})
 VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION = '2026-08-16-verified-action-transition-v1'
@@ -72,12 +45,6 @@ FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN = re.compile(
     r"\b[xy]\s*[:=]\s*\d+|"
     r"\b(?:coordinate|keycode|system[ _-]?command|shell[ _-]?command)\b"
     r")",
-    re.IGNORECASE,
-)
-NATURAL_ACTION_INTENT_PATTERN = re.compile(
-    r"(?:点击|轻触|点按|滑动|上划|下划|左划|右划|长按|拖动|输入|"
-    r"返回|回到主页|按下|\b(?:tap|click|swipe|long[ _-]?press|drag|"
-    r"type[ _-]?text|input[ _-]?text|press[ _-]?key)\b)",
     re.IGNORECASE,
 )
 TARGET_SURFACES = frozenset({"device", "system", "current_surface"})
@@ -137,19 +104,6 @@ DIRECT_PROHIBITION_CLAUSE_PATTERN = re.compile(
 
 class TaskGraphError(ValueError):
     pass
-
-
-def _wire_record(value: Any) -> dict[str, Any]:
-    """Serialize a validated dataclass with JSON list semantics for tuples."""
-
-    def convert(item: Any) -> Any:
-        if isinstance(item, dict):
-            return {key: convert(nested) for key, nested in item.items()}
-        if isinstance(item, (tuple, list)):
-            return [convert(nested) for nested in item]
-        return item
-
-    return convert(asdict(value))
 
 
 @dataclass(frozen=True)
@@ -218,10 +172,6 @@ class CompletionCondition:
 @dataclass(frozen=True)
 class RiskAction:
     risk_id: str
-    description: str
-    external_effect: str
-    risk_type: str
-    risk_level: str
     subgoal_ids: tuple[str, ...]
     confirmation_required: bool = True
     effect_kind: str = ""
@@ -231,12 +181,6 @@ class RiskAction:
 
     def validate(self) -> None:
         _validate_id(self.risk_id, "风险 ID")
-        _require_text(self.description, "effect_intents.description")
-        _require_text(self.external_effect, "effect_intents.expected_results")
-        _reject_low_level_instruction(self.description, "effect_intents.description")
-        _reject_low_level_instruction(self.external_effect, 'effect_intents.expected_results')
-        reject_if(self.risk_type not in RISK_TYPES, TaskGraphError(f"通用风险类型无效：{self.risk_type}"))
-        reject_if(self.risk_level not in RISK_LEVELS, TaskGraphError(f"风险等级无效：{self.risk_level}"))
         reject_if(not isinstance(self.confirmation_required, bool), TaskGraphError(f'effect_intents.local_policy.confirmation_required 必须是布尔值：{self.risk_id}'))
         _validate_id_list(self.subgoal_ids, "effect_intents.source_subgoal_ids", required=True)
         if self.effect_kind:
@@ -273,11 +217,7 @@ class Subgoal:
         _validate_text_list(self.completion_evidence, 'subgoals.completion_evidence', required=False)
         _validate_id_list(self.risk_action_ids, 'subgoals.effect_ids', required=False)
         reject_if(self.external_impact not in SUBGOAL_EXTERNAL_IMPACTS, TaskGraphError(f'子目标执行类别无效：{self.external_impact}'))
-        # Free-form prose is not an input-value authority. Canonical
-        # payload ownership is validated later by TaskSemanticIR's typed
-        # InputFieldIntent + required_action binding.  In particular, visible,
-        # focused, editable and empty preparation states must never be forced to
-        # repeat the future input payload merely because they mention a field.
+        # Only typed InputFieldIntent owns input values; free-form preparation prose never does.
         reject_if(self.status == 'completed' and (not self.completion_evidence), TaskGraphError(f"已完成子目标缺少完成证据：{self.subgoal_id}"))
         reject_if(self.status != 'completed' and self.completion_evidence, TaskGraphError(f"未完成子目标不能携带完成证据：{self.subgoal_id}"))
 
@@ -296,15 +236,8 @@ class ReplanRecord:
 
 
 @dataclass(frozen=True)
-class VerifiedActionTransition:
-    """Controller-owned receipt for exactly one confirmed action transition.
-
-    This receipt is deliberately not visual evidence.  It proves which scoped
-    action was consumed and which fresh observation followed it.  A typed
-    controller-transition reference may complete only its bound navigation-only
-    transition; subsequent page content, global visual state and external-state
-    claims still have to be grounded independently and cannot reuse the receipt.
-    """
+class VerifiedActionTransition(ValidatedDataclassWire):
+    """Controller receipt for one scoped action followed by one fresh observation."""
 
     receipt_id: str
     session_id: str
@@ -355,13 +288,8 @@ class VerifiedActionTransition:
         reject_if(self.outcome == 'mismatched' and (not self.errors), TaskGraphError("mismatched 动作转换回执必须包含验证错误。"))
         reject_if(self.outcome == 'matched' and self.before_fingerprint == self.after_fingerprint, TaskGraphError("matched 动作转换回执必须绑定变化后的 fingerprint。"))
 
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return _wire_record(self)
-
-
 @dataclass(frozen=True)
-class ControllerTransitionEvidenceRef:
+class ControllerTransitionEvidenceRef(ValidatedDataclassWire):
     ref_id: str
     receipt_id: str
     subgoal_id: str
@@ -374,13 +302,8 @@ class ControllerTransitionEvidenceRef:
             _require_text(getattr(self, field_name), f'controller_transition_evidence.{field_name}')
         reject_if(not self.ref_id.startswith(f'controller_transition:{self.receipt_id}:'), TaskGraphError("控制器转换证据 ref_id 未绑定 receipt_id。"))
 
-    def to_dict(self) -> dict[str, str]:
-        self.validate()
-        return _wire_record(self)
-
-
 @dataclass(frozen=True)
-class VisualClaimEvidenceRef:
+class VisualClaimEvidenceRef(ValidatedDataclassWire):
     ref_id: str
     claim_id: str
     scene_id: str
@@ -396,13 +319,8 @@ class VisualClaimEvidenceRef:
         reject_if(not re.fullmatch('[0-9a-f]{64}', self.claim_id), TaskGraphError("视觉 claim_id 必须是 SHA-256。"))
         reject_if(self.ref_id != f'visual_claim:{self.scene_id}:{self.claim_id}', TaskGraphError("视觉 claim ref_id 未绑定 scene_id/claim_id。"))
 
-    def to_dict(self) -> dict[str, str]:
-        self.validate()
-        return _wire_record(self)
-
-
 @dataclass(frozen=True)
-class ObservedState:
+class ObservedState(ValidatedDataclassWire):
     scene_id: str
     summary: str
     visible_evidence: tuple[str, ...]
@@ -440,11 +358,6 @@ class ObservedState:
             reject_if(item.ref_id in visual_ref_ids, TaskGraphError("视觉 claim ref_id 重复。"))
             visual_ref_ids.add(item.ref_id)
 
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return _wire_record(self)
-
-
 def _goal_wire(goal: GraphGoal) -> dict[str, Any]:
     return {'objective': goal.objective, 'target_apps': [asdict(app) for app in goal.target_apps],
         'entities': dict(goal.entities)}
@@ -458,7 +371,7 @@ def _literal_strings(value: Any) -> tuple[str, ...]:
 
 
 def _condition_wire(condition: CompletionCondition) -> dict[str, Any]:
-    return _wire_record(condition)
+    return dataclass_wire(condition)
 
 
 def _effect_wire(effect: RiskAction, *, local_policy: bool) -> dict[str, Any]:
@@ -467,7 +380,7 @@ def _effect_wire(effect: RiskAction, *, local_policy: bool) -> dict[str, Any]:
         'expected_results': list(effect.expected_result_texts)}
     if local_policy:
         value['local_policy'] = {'effect_id': effect.risk_id, 'confirmation_required': effect.confirmation_required,
-            'policy_level': effect.risk_level}
+            'policy_level': 'high' if effect.confirmation_required else 'low'}
     return value
 
 
@@ -569,7 +482,7 @@ class DynamicTaskGraph:
             in self.completion_conditions], 'effect_intents': [_effect_wire(item,
             local_policy=True) for item in self.risk_actions], 'subgoals': subgoals,
             'active_subgoal_id': self.active_subgoal_id, 'clarification_questions': list(self.clarification_questions),
-            'replan_history': [_wire_record(item) for item in self.replan_history]}
+            'replan_history': [dataclass_wire(item) for item in self.replan_history]}
         value['current_subgoal'] = next((item for item in subgoals if item['subgoal_id'] == self.active_subgoal_id),
             None)
         return value
@@ -662,44 +575,6 @@ class DynamicTaskGraph:
         }
 
 
-
-
-
-
-def _normalize_initial_premature_completed_status(graph: DynamicTaskGraph) -> DynamicTaskGraph:
-    """Repair only a uniquely contradicted initial ``completed`` marker.
-
-    Initial planning has no observation evidence.  When every substantive graph
-    field still describes one safe runnable frontier, ``completed`` cannot be a
-    semantic result; it is the sole inconsistent enum value.  Anything involving
-    completion evidence, ambiguity, risk, clarification or a blocked node remains
-    under the strict validator and remote repair path.
-    """
-
-    if graph.status != 'completed':
-        return graph
-
-
-    if graph.clarification_questions or graph.risk_actions:
-        return graph
-    if any((condition.satisfied or condition.evidence for condition in graph.completion_conditions)):
-        return graph
-    if (any((item.status in {'completed', 'blocked', 'skipped'} or item.completion_evidence
-        or item.risk_action_ids for item in graph.subgoals))):
-        return graph
-
-    completed_ids: set[str] = set()
-    frontier = tuple((item for item in graph.subgoals if item.status in {'pending',
-        'active'} and all((dependency in completed_ids for dependency in item.depends_on))))
-    if len(frontier) != 1:
-        return graph
-    selected = frontier[0]
-    if (graph.active_subgoal_id != selected.subgoal_id or selected.external_impact not in {'read_only',
-        'navigation_only'}):
-        return graph
-    return replace(graph, status="running")
-
-
 def build_exact_input_task_graph(raw_goal: str, *, exact_input_text: str, device_id: str,
     task_id: str | None=None) -> DynamicTaskGraph:
     """Build a typed graph for one explicitly authorized input value."""
@@ -759,125 +634,6 @@ def _build_exact_graph(*, goal_text: str, device_id: str, task_id: str | None, o
     return graph
 
 
-def _pure_prohibited_effect_families(value: str) -> frozenset[str]:
-    """Classify a clause that contains only a prohibited-effect invariant.
-
-    This is intentionally narrower than general negation detection.  Visible
-    absence states remain visual completion conditions, while controller-side
-    statements such as "the send action did not occur" can be recognized as
-    redundant with an explicit global prohibition.
-    """
-
-    clauses = tuple((clause.strip() for clause in _NEGATIVE_EFFECT_CLAUSE_SPLIT_PATTERN.split(str(value
-        or '').strip()) if clause.strip()))
-    if not clauses:
-        return frozenset()
-    families: set[str] = set()
-    for clause in clauses:
-        if not NON_EFFECT_RESULT_PATTERN.search(clause) or _VISIBLE_NEGATIVE_STATE_PATTERN.search(clause):
-            return frozenset()
-        clause_families = {family for family, pattern in _PROHIBITED_EFFECT_FAMILY_PATTERNS.items() if pattern.search(
-            clause)}
-        if not clause_families:
-            return frozenset()
-        families.update(clause_families)
-    return frozenset(families)
-
-
-def _normalize_redundant_prohibited_effect_conditions(graph: DynamicTaskGraph) -> DynamicTaskGraph:
-    """Keep pure effect prohibitions as constraints, not visual outcomes.
-
-    Removal is a fail-safe reduction of model authority: the original global
-    constraint remains byte-for-byte present, no completion is minted, and a
-    dedicated read-only negative-state subgoal prevents normalization when the
-    user actually asked to inspect an absence.  Mixed positive/negative visual
-    conditions and evidence-bearing claims remain under the strict validator.
-    """
-
-    constraint_families = frozenset().union(*(_pure_prohibited_effect_families(item) for item in graph.constraints))
-    if not constraint_families or len(graph.completion_conditions) <= 1:
-        return graph
-
-    observed_negative_families: set[str] = set()
-    for subgoal in graph.subgoals:
-        if subgoal.external_impact != 'read_only':
-            continue
-        for text in (subgoal.objective, *subgoal.completion_conditions):
-            observed_negative_families.update(_pure_prohibited_effect_families(text))
-
-    retained: list[CompletionCondition] = []
-    for condition in graph.completion_conditions:
-        description_families = _pure_prohibited_effect_families(condition.description)
-        evidence_families = tuple((_pure_prohibited_effect_families(item) for item in condition.evidence_required))
-        combined = description_families.union(*evidence_families)
-        redundant = bool(not condition.evidence and description_families and evidence_families
-            and all(evidence_families) and combined.issubset(constraint_families)
-            and combined.isdisjoint(observed_negative_families))
-        if not redundant:
-            retained.append(condition)
-
-    if not retained or len(retained) == len(graph.completion_conditions):
-        return graph
-    return replace(graph, completion_conditions=tuple(retained))
-
-
-def _normalize_explicit_target_surface(graph: DynamicTaskGraph, raw_goal: str) -> DynamicTaskGraph:
-    """Preserve an explicit device/current-surface scope without inventing an App."""
-
-    if graph.goal.target_apps or graph.goal.entities.get('target_surface'):
-        return graph
-    text = "".join(str(raw_goal or "").lower().split())
-    if re.search('当前(?:页面|界面|应用|app|前台)|本页|这个页面', text):
-        surface = "current_surface"
-    elif re.search('(?:回到|返回|按)(?:手机)?(?:主页|桌面|home)|系统设置|通知栏', text):
-        surface = "system"
-    elif re.search('手机|设备|屏幕', text):
-        surface = "device"
-    else:
-        return graph
-    return replace(graph, goal=replace(graph.goal, entities={**graph.goal.entities, 'target_surface': surface}))
-
-
-def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGraph:
-    """Repair active markers only when the dependency graph has one safe frontier.
-
-    DeepSeek may occasionally leave a downstream node active while its dependency
-    is still unfinished, or activate both the current and its direct successor.
-    The dependency DAG already determines the only runnable node in that case.
-    Independent runnable roots remain ambiguous and are deliberately left for the
-    strict validator to reject.
-    """
-
-    if graph.status not in {'ready', 'running', 'awaiting_confirmation'}:
-        return graph
-    # When every semantic node is already terminal and every global condition
-    # carries completion evidence, the only coherent graph status is
-    # ``completed``.  Repair that one enum value locally instead of rejecting a
-    # model response whose facts already prove the terminal state.  Any stale
-    # active pointer, unfinished node, clarification or unsatisfied condition
-    # remains ambiguous and continues through the strict validator unchanged.
-    if (graph.active_subgoal_id is None and graph.subgoals and (not graph.clarification_questions) and all((item.status
-        in {'completed', 'skipped'} for item in graph.subgoals)) and graph.completion_conditions
-        and all((item.satisfied and item.evidence for item in graph.completion_conditions))):
-        return replace(graph, status="completed")
-    completed_ids = {item.subgoal_id for item in graph.subgoals if item.status == 'completed'}
-    frontier = tuple((item for item in graph.subgoals if item.status in {'pending',
-        'active'} and all((dependency in completed_ids for dependency in item.depends_on))))
-    if len(frontier) != 1:
-        return graph
-    selected = frontier[0]
-    if selected.external_impact not in {'read_only', 'navigation_only'} or selected.risk_action_ids:
-        return graph
-    active_ids = tuple((item.subgoal_id for item in graph.subgoals if item.status == 'active'))
-    if active_ids == (selected.subgoal_id,) and graph.active_subgoal_id == selected.subgoal_id:
-        return graph
-    normalized_subgoals = tuple((replace(item, status='active') if item.subgoal_id ==
-        selected.subgoal_id else replace(item, status='pending') if item.status == 'active' else item for item
-        in graph.subgoals))
-    return replace(graph, status='ready' if graph.status == 'awaiting_confirmation' else graph.status,
-        subgoals=normalized_subgoals, active_subgoal_id=selected.subgoal_id)
-
-
 def _planner_transport_snapshot(graph: DynamicTaskGraph) -> dict[str, Any]:
     """Serialize only the current typed planner transport."""
 
@@ -891,10 +647,6 @@ def _planner_transport_snapshot(graph: DynamicTaskGraph) -> dict[str, Any]:
         'clarification_questions': list(graph.clarification_questions)}
 
 
-
-
-
-
 def _graph_from_payload(payload: dict[str, Any], *, task_id: str, device_id: str, revision: int,
     raw_user_goal: str) -> DynamicTaskGraph:
     _expect_keys(payload, {'status', 'goal', 'constraints', 'completion_conditions', 'effect_intents', 'subgoals',
@@ -905,16 +657,13 @@ def _graph_from_payload(payload: dict[str, Any], *, task_id: str, device_id: str
         'goal.target_apps')))
     entities = dict(_expect_dict(raw_goal.get("entities"), "goal.entities"))
     entities = _normalize_unique_input_newline_escapes(entities, raw_user_goal=raw_user_goal)
-    # Some JSON providers materialize an optional example field as null or an
-    # empty string.  Treat only those two representations as absence.  Any
-    # non-empty value still goes through the strict exact-input validation.
+    # Optional examples may be null/empty; every non-empty value remains strictly validated.
     optional_input_text = entities.get("input_text")
     if optional_input_text is None or optional_input_text == '':
         entities.pop("input_text", None)
     goal = GraphGoal(objective=_require_text(raw_goal.get('objective'), 'goal.objective'), target_apps=target_apps,
         entities=entities)
-    # Validate typed recipient/payload entities before any redundant effect
-    # result reference can be normalized.
+    # Validate typed entities before normalizing redundant effect-result references.
     goal.validate()
     active_value = payload.get("active_subgoal_id")
     active_subgoal_id = None if active_value is None else str(active_value).strip()
@@ -946,14 +695,7 @@ def _graph_from_payload(payload: dict[str, Any], *, task_id: str, device_id: str
 
 
 def _normalize_unique_input_newline_escapes(entities: dict[str, Any], *, raw_user_goal: str) -> dict[str, Any]:
-    """Repair only one semantics-preserving JSON over-escape in input payloads.
-
-    Some providers emit the two literal characters ``\\n`` inside an already
-    parsed JSON string even though the user authority contains a real LF.  The
-    repair is allowed only when replacing every exact ``\\n`` token produces a
-    literal substring of the untouched user goal.  All other model text stays
-    unchanged and therefore cannot gain user-literal authority.
-    """
+    """Repair ``\\n`` only when its LF form occurs verbatim in the untouched user goal."""
 
     def normalized(value: Any) -> Any:
         if not isinstance(value, str) or '\\n' not in value or value in raw_user_goal:
@@ -1026,13 +768,7 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
         TaskGraphError("禁止或未发生状态不能声明为 effect_intent。"),
     )
     if any(result not in allowed_results for result in expected_results):
-        # expected_results is a redundant textual reference to the bound
-        # result.  A single-effect graph has only one possible effect owner, so
-        # its sole final goal condition is an equally authoritative reference
-        # when copied exactly.  Otherwise repair only the uniquely determined
-        # source reference.  Multiple effects, duplicate final conditions,
-        # cross-subgoal alternatives, missing results and prohibited/non-effect
-        # states remain fail-closed.
+        # Repair only a uniquely owned redundant expected_result; ambiguous graphs remain fail-closed.
         exact_unique_goal_result = effect_count == 1 and len(source_subgoal_ids) == 1 and (len(expected_results) ==
             1) and (sum((result == expected_results[0] for result in goal_completion_results)) == 1)
         exact_unique_source_result = len(source_results) == 1 and (not DIRECT_PROHIBITION_CLAUSE_PATTERN.search(
@@ -1043,9 +779,7 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
             expected_results = source_results
         else:
             raise TaskGraphError('effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。')
-    required_type = _RUNTIME_RISK_TYPE_BY_EFFECT_KIND[kind]
-    return RiskAction(risk_id=effect_id, description=expected_results[0], external_effect=expected_results[0],
-        risk_type=required_type, risk_level='low', subgoal_ids=source_subgoal_ids, confirmation_required=False,
+    return RiskAction(risk_id=effect_id, subgoal_ids=source_subgoal_ids, confirmation_required=False,
         effect_kind=kind, target_roles=target_roles, payload_roles=payload_roles,
         expected_result_texts=expected_results)
 
@@ -1111,10 +845,7 @@ _VISUAL_IDENTITY_GENERIC_TOKENS = tuple(
     "process|flow|main title|title|heading|text|verbatim|current|target|original|the|is".split("|")
 )
 
-# Structured scene IDs are intentionally stable lower-case identifiers, while
-# user goals may name the same generic screen category in Chinese.  Keep this
-# bridge deliberately small and semantic: it may ground a container category,
-# but it must never replace the stricter verbatim-title check above.
+# This small semantic bridge maps generic screen categories without replacing verbatim title checks.
 _VISUAL_IDENTITY_SEMANTIC_ALIASES = {'conversation': (re.compile('聊天|会话'),
     re.compile('(?<![a-z0-9])(?:chat|conversation)(?![a-z0-9])', re.I)), 'browser': (re.compile('浏览器'),
     re.compile('(?<![a-z0-9])browser(?![a-z0-9])', re.I)),
@@ -1142,12 +873,7 @@ def _visual_identity_semantic_keys(value: str) -> frozenset[str]:
 
 
 def _is_semantic_only_visual_identity(value: str, semantic_keys: frozenset[str] | None=None) -> bool:
-    """Return whether an identity contains only a generic container category.
-
-    A semantic alias such as ``chat`` may prove that the current surface is a
-    conversation surface.  It must not erase an additional named qualifier:
-    ``Alice chat`` still requires evidence for Alice, not merely any chat page.
-    """
+    """Return whether an identity contains only a generic container category."""
 
     compact = _compact_identity_text(value)
     keys = semantic_keys or _visual_identity_semantic_keys(value)
@@ -1202,12 +928,7 @@ def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
 
 
 def named_visual_identity_is_grounded(texts: tuple[str, ...], facts: tuple[str, ...]) -> bool:
-    """Return whether a named visual container is grounded by structured facts.
-
-    Unnamed element/state descriptions are outside this page-identity gate. A
-    real named page, screen, view, panel, or card must have at least one
-    structured identity fact; prose summaries are intentionally not sufficient.
-    """
+    """Require structured facts for every named visual container identity."""
 
     anchor = _named_visual_identity_anchor(texts)
     if not anchor:
@@ -1216,14 +937,7 @@ def named_visual_identity_is_grounded(texts: tuple[str, ...], facts: tuple[str, 
 
 
 def _restore_completed_history_evidence(previous: DynamicTaskGraph, candidate: DynamicTaskGraph) -> DynamicTaskGraph:
-    """Keep controller-owned completion history immutable across model replans.
-
-    A model must still return every completed node with the same status and
-    semantics; deletion, resurrection, or any other field mutation remains a
-    validation error. Only the historical evidence tuple is restored from the
-    trusted previous graph, so omission or paraphrase cannot erase or rewrite
-    controller-accepted history.
-    """
+    """Restore only controller-owned evidence after the model preserves completed-node semantics."""
 
     completed = {item.subgoal_id: item for item in previous.subgoals if item.status == 'completed'}
     restored = tuple((replace(item, completion_evidence=completed[
@@ -1309,49 +1023,6 @@ def _complete_exact_conditions(conditions: tuple[CompletionCondition, ...], subg
     return tuple(completed)
 
 
-def _normalize_terminal_single_navigation_payload(previous: DynamicTaskGraph, observation: ObservedState, *,
-    trigger: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Discard malformed invented work after a proven terminal navigation."""
-
-    current = _terminal_navigation_target(previous, observation, trigger)
-    expected_goal = {'objective': previous.goal.objective,
-        'target_apps': [asdict(item) for item in previous.goal.target_apps], 'entities': dict(previous.goal.entities)}
-    if current is None or not isinstance(payload, dict) or payload.get('goal') != expected_goal:
-        return payload
-    raw_subgoals = payload.get("subgoals")
-    if not isinstance(raw_subgoals, list):
-        return payload
-    raw_current = next((item for item in raw_subgoals if isinstance(item,
-        dict) and item.get('subgoal_id') == current.subgoal_id), None)
-    try:
-        candidate_current = _subgoal_from_payload(raw_current)
-        raw_conditions = payload.get("completion_conditions")
-        if not isinstance(raw_conditions, list):
-            return payload
-        candidate_conditions = tuple(_condition_from_payload(item) for item in raw_conditions)
-    except TaskGraphError:
-        return payload
-    valid_refs = _valid_observation_refs(observation)
-    if (candidate_current.status != 'completed' or not _same_subgoal_semantics(current,
-        candidate_current) or (not candidate_current.completion_evidence) or (not valid_refs)
-        or (not set(candidate_current.completion_evidence).issubset(valid_refs))
-        or (len(candidate_conditions) != len(previous.completion_conditions)) or any(((new.condition_id,
-        new.description, new.evidence_required) != (old.condition_id, old.description, old.evidence_required) for old,
-        new in zip(previous.completion_conditions, candidate_conditions)))):
-        return payload
-    completed = _complete_exact_conditions(previous.completion_conditions, current.completion_conditions,
-        candidate_current.completion_evidence)
-    if completed is None:
-        return payload
-    return {'status': 'completed', 'goal': expected_goal, 'constraints': list(previous.constraints),
-        'completion_conditions': [_wire_record(item) for item in completed], 'effect_intents': [],
-        'subgoals': [{'subgoal_id': current.subgoal_id, 'objective': current.objective, 'status': 'completed',
-        'depends_on': list(current.depends_on), 'constraints': list(current.constraints),
-        'completion_conditions': list(current.completion_conditions),
-        'completion_evidence': list(candidate_current.completion_evidence), 'effect_ids': [],
-        'execution_class': 'navigate'}], 'active_subgoal_id': None, 'clarification_questions': []}
-
-
 def _project_terminal_single_navigation_candidate(previous: DynamicTaskGraph, candidate: DynamicTaskGraph,
     observation: ObservedState, *, trigger: str) -> DynamicTaskGraph:
     current = _terminal_navigation_target(previous, observation, trigger)
@@ -1395,77 +1066,6 @@ def _finalize_terminal_graph_from_exact_subgoal_conditions(graph: DynamicTaskGra
     return replace(graph, status="completed", completion_conditions=tuple(completed), active_subgoal_id=None)
 
 
-def _canonicalize_literal_visible_evidence_clauses(previous: DynamicTaskGraph, candidate: DynamicTaskGraph,
-    observation: ObservedState) -> DynamicTaskGraph:
-    """Bind a model's exact visible clause to its full controller-owned fact.
-
-    Models sometimes copy one complete clause from a longer visible summary
-    instead of copying the entire evidence item.  This normalization remains
-    fail-closed: only a sufficiently specific, punctuation-delimited literal
-    clause with exactly one source is replaced by that source.  Paraphrases,
-    identifiers, partial phrases and ambiguous matches remain invalid.
-    """
-
-    visible = tuple(observation.visible_evidence)
-    visible_set = frozenset(visible)
-    typed_refs_by_fact: dict[str, set[str]] = {}
-    typed_refs_by_claim_id: dict[str, set[str]] = {}
-    for item in observation.visual_claim_evidence_refs:
-        typed_refs_by_fact.setdefault(item.fact, set()).add(item.ref_id)
-        typed_refs_by_claim_id.setdefault(item.claim_id, set()).add(item.ref_id)
-
-    def authority_value(source: str) -> str:
-        refs = typed_refs_by_fact.get(source, set())
-        return next(iter(refs)) if len(refs) == 1 else source
-
-    def normalized(value: str) -> str:
-        return " ".join(str(value or "").strip().casefold().split())
-
-    clause_sources: dict[str, set[str]] = {}
-    for source in visible:
-        for clause in re.split('[，,。.;；！？!?]+', source):
-            key = normalized(clause)
-            if key:
-                clause_sources.setdefault(key, set()).add(source)
-
-    def canonicalize(claims: tuple[str, ...]) -> tuple[str, ...]:
-        result: list[str] = []
-        for claim in claims:
-            if claim.startswith(('controller_transition:', 'visual_claim:')):
-                result.append(claim)
-                continue
-            if re.fullmatch('[0-9a-f]{64}', claim):
-                matching_refs = typed_refs_by_claim_id.get(claim, set())
-                if len(matching_refs) == 1:
-                    result.append(next(iter(matching_refs)))
-                    continue
-            if claim in visible_set:
-                result.append(authority_value(claim))
-                continue
-            key = normalized(claim)
-            semantic_chars = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", key)
-            sources = clause_sources.get(key, set())
-            if len(semantic_chars) >= 6 and len(sources) == 1:
-                result.append(authority_value(next(iter(sources))))
-            else:
-                result.append(claim)
-        return tuple(dict.fromkeys(result))
-
-    old_conditions = {item.condition_id: item for item in previous.completion_conditions}
-
-    def newly_satisfied(item: CompletionCondition) -> bool:
-        old = old_conditions.get(item.condition_id)
-        return item.satisfied and (old is None or not old.satisfied)
-
-    conditions = tuple((replace(item, evidence=canonicalize(item.evidence)) if newly_satisfied(item) else item for item
-        in candidate.completion_conditions))
-    old_subgoals = {item.subgoal_id: item for item in previous.subgoals}
-    subgoals = tuple((replace(item, completion_evidence=canonicalize(item.completion_evidence)) if item.status ==
-        'completed' and (item.subgoal_id not in old_subgoals
-        or old_subgoals[item.subgoal_id].status != 'completed') else item for item in candidate.subgoals))
-    return replace(candidate, completion_conditions=conditions, subgoals=subgoals)
-
-
 def _validate_revision(previous: DynamicTaskGraph, candidate: DynamicTaskGraph, observation: ObservedState) -> None:
     reject_if(candidate.goal != previous.goal, TaskGraphError("重规划不能改写用户目标、目标 App 或目标实体。"))
     reject_if(not set(previous.constraints).issubset(candidate.constraints), TaskGraphError("重规划不能删除已有全局约束。"))
@@ -1504,12 +1104,10 @@ def _validate_revision(previous: DynamicTaskGraph, candidate: DynamicTaskGraph, 
     old_risks = _by_attr(previous.risk_actions, "risk_id")
     new_risks = _by_attr(candidate.risk_actions, "risk_id")
     _reject_missing_refs(tuple(old_risks), new_risks, "重规划不能删除既有风险：")
-    risk_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     for (risk_id, old) in old_risks.items():
         new = new_risks[risk_id]
         reject_if(
-            not _same_fields(old, new, ('description', 'external_effect', 'risk_type',
-            'confirmation_required')) or risk_order[new.risk_level] < risk_order[old.risk_level]
+            old.confirmation_required and not new.confirmation_required
             or (not set(old.subgoal_ids).issubset(new.subgoal_ids)),
             TaskGraphError(f"重规划不能改写或降低既有风险：{risk_id}"),
         )
@@ -1721,197 +1319,8 @@ def _reject_low_level_completion_evidence(value: str, path: str) -> None:
         _reject_low_level_instruction(value, path, allow_negated=True)
 
 
-def _normalize_explicit_ui_label_payload(payload: dict[str, Any], raw_user_goal: str) -> dict[str, Any]:
-    """Separate one quoted action-like UI label from high-level state prose."""
-
-    source = str(raw_user_goal or "")
-    patterns = (
-        re.compile(
-            r"(?:目标(?:入口|控件|元素)?的?)?"
-            r"(?:可见)?(?:文字|标签|名称)\s*(?:是|为|：|:)\s*"
-            r"[“‘\"]([^”’\"\r\n]{1,80})[”’\"]",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"[“‘\"]([^”’\"\r\n]{1,80})[”’\"]\s*"
-            r"(?:入口|按钮|选项|标签|控件|元素)",
-            re.IGNORECASE,
-        ),
-    )
-    action_like_labels = list(dict.fromkeys((match.group(1).strip() for pattern in patterns for match
-        in pattern.finditer(source) if NATURAL_ACTION_INTENT_PATTERN.search(match.group(1).strip()))))
-    if not action_like_labels:
-        return payload
-    reject_if(len(action_like_labels) != 1, TaskGraphError("用户目标包含多个动作词字面 UI 标签，无法唯一绑定。"))
-    label = action_like_labels[0]
-
-    value = json.loads(json.dumps(payload, ensure_ascii=False))
-    raw_goal = value.get("goal")
-    if not isinstance(raw_goal, dict):
-        return value
-    entities = raw_goal.get("entities")
-    if not isinstance(entities, dict):
-        return value
-    existing = entities.get("target_ui_label")
-    reject_if(existing not in (None, '', label), TaskGraphError("DeepSeek 返回的 target_ui_label 与用户字面标签冲突。"))
-    entities["target_ui_label"] = label
-
-    def replace_label(item: Any) -> Any:
-        if not isinstance(item, str):
-            return item
-        normalized = item
-        for literal in (f'“{label}”', f'‘{label}’', f'"{label}"', label):
-            normalized = normalized.replace(literal, "目标入口")
-        normalized = re.sub('(?:可见)?(?:文字|标签|名称)\\s*(?:是|为|：|:)\\s*目标入口', '目标入口', normalized)
-        if '长按' in label:
-            normalized = re.sub('(?:被\\s*)?长按(?:完成|成功)?', '处于当前页面可见的本机临时结果状态', normalized)
-        if '拖动' in label:
-            normalized = re.sub('(?:被\\s*)?拖动\\s*(?:到|至|进入)?', '位于当前页面的本机临时目标位置', normalized)
-        return normalized
-
-    raw_goal["objective"] = replace_label(raw_goal.get("objective"))
-    for (collection, text_key, list_key) in ((value.get('completion_conditions'), 'description', 'evidence_required'),
-        (value.get('subgoals'), 'objective', 'completion_conditions')):
-        if not isinstance(collection, list):
-            continue
-        for item in collection:
-            if not isinstance(item, dict):
-                continue
-            item[text_key] = replace_label(item.get(text_key))
-            items = item.get(list_key)
-            if isinstance(items, list):
-                item[list_key] = [replace_label(nested) for nested in items]
-    return value
-
-
-_EXTERNAL_EFFECT_PATTERN = re.compile(
-    r"发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|退出登录|付款|支付|购买|"
-    r"下单|同步|上传|send|submit|save|publish|delete|follow|comment|like|favorite|join|"
-    r"log\s*in|sign\s*in|pay|purchase|place\s+order|sync|upload",
-    re.IGNORECASE,
-)
-_NEGATED_EFFECT_PREFIX_PATTERN = re.compile(
-    r"(?:不要|不得|不应|不能|不会|尚未|未|无需|禁止|do\s+not|don't|must\s+not|"
-    r"should\s+not|cannot|can't|without|never|not\s+yet)\s*"
-    r"(?:(?:执行|进行|触发|产生|发生|任何|该|此|execute|perform|trigger|cause|any|the)\s*)?"
-    r"(?:(?:发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|退出登录|付款|支付|"
-    r"购买|下单|同步|上传|send\w*|submit\w*|save\w*|publish\w*|delete\w*|follow\w*|"
-    r"comment\w*|like\w*|favorite\w*|join\w*|log\s*in|sign\s*in|pay\w*|purchase\w*|"
-    r"place\s+order|sync\w*|upload\w*)\s*(?:或|和|、|/|以及|and|or)\s*)*$",
-    re.IGNORECASE,
-)
-_LOCAL_INPUT_PATTERN = re.compile(
-    r"输入|键入|填写|写入|录入|追加|换行|回车|"
-    r"\b(?:type|enter|input|fill|write|newline|line\s+break|press\s+enter)\b",
-    re.IGNORECASE,
-)
-_REFRESH_PATTERN = re.compile(
-    r"(?:刷新|重新加载|重新载入).{0,16}(?:当前)?(?:页面|网页|标签页)|"
-    r"(?:当前)?(?:页面|网页|标签页).{0,16}(?:刷新|重新加载|重新载入)|"
-    r"\b(?:refresh|reload)\b.{0,24}\b(?:current\s+)?(?:page|tab|view)\b|"
-    r"\b(?:current\s+)?(?:page|tab|view)\b.{0,24}\b(?:refresh|reload)\b",
-    re.IGNORECASE,
-)
-_REFRESH_CONTROL_PATTERN = re.compile(
-    r"(?:刷新|重新加载|重新载入).{0,8}(?:按钮|图标|控件)|"
-    r"(?:按钮|图标|控件).{0,8}(?:刷新|重新加载|重新载入)|"
-    r"\b(?:refresh|reload)\b.{0,12}\b(?:button|icon|control)\b|"
-    r"\b(?:button|icon|control)\b.{0,12}\b(?:refresh|reload)\b",
-    re.IGNORECASE,
-)
-_CURRENT_SURFACE_PATTERN = re.compile('当前|本页|这个(?:页面|界面|视图)|\\b(?:current|this)\\s+(?:page|tab|view|screen|browser)\\b',
-    re.IGNORECASE)
-_RECENTS_PATTERNS = tuple((re.compile(value, re.IGNORECASE) for value
-    in ('系统|设备|当前(?:界面|页面|前台)|\\b(?:system|device|current[_\\s-]?(?:surface|screen|view))\\b',
-    '最近任务|任务概览|后台(?:任务|应用)|\\brecents?\\b|\\brecent\\s+(?:tasks?|apps?)\\b|\\boverview\\s+(?:screen|view)\\b',
-    '应用预览卡片|预览卡片|任务卡片|应用卡片|\\bapp\\s+(?:preview\\s+)?card\\b|\\btask\\s+card\\b',
-    '划掉|滑走|移出|移除|关闭|清除|\\bswipe\\b.{0,80}\\b(?:away|off)\\b|\\bdismiss\\b|\\bremove\\b|\\bclose\\b|\\bclear\\b')))
-
-
-def _subgoal_context(item: dict[str, Any]) -> str:
-    return ' '.join((str(item.get('objective') or ''),) + tuple((str(value) for value
-        in item.get('completion_conditions', []) if isinstance(value, str))))
-
-
-def _bound_effect_subgoals(effects: Any) -> set[str]:
-    return {str(subgoal_id) for effect in (effects if isinstance(effects,
-        list) else ()) for subgoal_id in (effect.get('source_subgoal_ids', []) if isinstance(effect,
-        dict) and isinstance(effect.get('source_subgoal_ids'), list) else ())}
-
-
-def _has_positive_external_effect(text: str) -> bool:
-    for match in _EXTERNAL_EFFECT_PATTERN.finditer(text):
-        prefix = re.split(r"[，。；;,.]", text[max(0, match.start() - 96):match.start()])[-1]
-        if not _NEGATED_EFFECT_PREFIX_PATTERN.search(prefix):
-            return True
-    return False
-
-
-def _normalize_local_navigation_execution_classes(payload: dict[str, Any]) -> dict[str, Any]:
-    """Classify local input, refresh and recent-card work in one payload pass."""
-
-    if not isinstance(payload, dict) or not isinstance(payload.get('subgoals'), list):
-        return payload
-    goal = payload.get("goal")
-    entities = goal.get("entities") if isinstance(goal, dict) else None
-    effects = payload.get("effect_intents")
-    effects_by_id = {str(effect.get('effect_id') or ''): effect for effect in effects if isinstance(effects,
-        list) and isinstance(effect, dict)}
-    bound = _bound_effect_subgoals(effects)
-    fields = entities.get("input_fields") if isinstance(entities, dict) else None
-    has_input = bool(isinstance(entities, dict) and (isinstance(entities.get('input_text'),
-        str) and entities['input_text'] or (isinstance(fields, list) and any((isinstance(field,
-        dict) and isinstance(field.get('text'), str) and field['text'] for field in fields)))))
-    target_surface = str(entities.get("target_surface") or "") if isinstance(entities, dict) else ""
-    goal_objective = str(goal.get("objective") or "") if isinstance(goal, dict) else ""
-    removed: set[str] = set()
-    normalized: list[Any] = []
-    changed = False
-    for item in payload['subgoals']:
-        if not isinstance(item, dict) or item.get('execution_class') not in {'effect', 'unknown'}:
-            normalized.append(item)
-            continue
-        subgoal_id = str(item.get("subgoal_id") or "")
-        context = _subgoal_context(item)
-        combined = f"{goal_objective} {context}"
-        effect_ids = tuple(value for value in item.get("effect_ids", ()) if isinstance(value, str) and value)
-        removable_refresh_effects = bool(effect_ids) and all((isinstance(effects_by_id.get(effect_id),
-            dict) and effects_by_id[effect_id].get('kind') == 'data_mutation'
-            and (effects_by_id[effect_id].get('payload_entity_roles') == [])
-            and (effects_by_id[effect_id].get('source_subgoal_ids') == [subgoal_id]) for effect_id in effect_ids))
-        local_input = bool(has_input and item.get('effect_ids') == [] and (subgoal_id not in bound)
-            and _LOCAL_INPUT_PATTERN.search(context) and (not _has_positive_external_effect(context)))
-        local_refresh = bool(isinstance(effects, list) and (item.get('effect_ids') == [] or removable_refresh_effects)
-            and (_REFRESH_PATTERN.search(combined) or (_CURRENT_SURFACE_PATTERN.search(combined)
-            and _REFRESH_CONTROL_PATTERN.search(context))) and re.search('刷新|重新加载|重新载入|\\brefresh\\b|\\breload\\b',
-            context, re.IGNORECASE) and (not _has_positive_external_effect(combined)))
-        recent_dismissal = bool(isinstance(effects, list) and item.get('effect_ids') == [] and (subgoal_id not
-            in bound) and _RECENTS_PATTERNS[0].search(target_surface) and all((pattern.search(context) for pattern
-            in _RECENTS_PATTERNS[1:])))
-        if local_input or local_refresh or recent_dismissal:
-            normalized.append({**item, "execution_class": "navigate", "effect_ids": []})
-            removed.update(effect_ids if local_refresh else ())
-            changed = True
-        else:
-            normalized.append(item)
-    if not changed:
-        return payload
-    result = {**payload, "subgoals": normalized}
-    if removed:
-        result['effect_intents'] = [effect for effect in effects if not isinstance(effect,
-            dict) or str(effect.get('effect_id') or '') not in removed]
-    return result
-
-
 def _normalize_unique_planner_transport_aliases(payload: dict[str, Any]) -> dict[str, Any]:
-    """Repair only bijective schema leaks without changing task semantics.
-
-    The public planner protocol stores ``target_surface`` in ``goal.entities``
-    and uses planner execution classes.  The corresponding runtime impact names
-    are internal projections with a one-to-one mapping, so moving or translating
-    these exact known values is deterministic.  Conflicts and unknown values are
-    intentionally left untouched for strict validation to reject.
-    """
+    """Normalize only bijective planner/runtime aliases; leave conflicts for strict validation."""
 
     if not isinstance(payload, dict):
         return payload
@@ -1942,14 +1351,7 @@ def _normalize_unique_planner_transport_aliases(payload: dict[str, Any]) -> dict
 
 
 def _normalize_single_effect_result_string(payload: dict[str, Any]) -> dict[str, Any]:
-    """Wrap one non-empty result string without changing its meaning.
-
-    ``expected_results`` is formally an array, but a provider can serialize
-    the same single result as a scalar string. This one-step normalization is
-    unique and syntax-only; every value still passes the ordinary exact
-    source/final-condition binding checks. Empty or non-string shapes remain
-    rejected.
-    """
+    """Wrap one non-empty scalar result before ordinary exact source binding."""
 
     effects = payload.get("effect_intents")
     if not isinstance(effects, list):

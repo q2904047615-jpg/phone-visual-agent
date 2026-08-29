@@ -681,18 +681,14 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
             fingerprint="after-launcher-same-name",
             camera_alignment=aligned_camera_facts(),
         )
-        controller.verify_after_action(
+        evidence = controller.verify_after_action(
             resolved,
             before,
             different_surface_same_name,
         )
         self.assertIn(
             "控制器确认目标元素已消失：示例应用",
-            controller.transition_evidence_from_verified_action(
-                resolved,
-                before,
-                different_surface_same_name,
-            ),
+            evidence,
         )
 
         after_absent = replace(
@@ -710,14 +706,10 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
                 ),
             ),
         )
-        controller.verify_after_action(resolved, before, after_absent)
+        evidence = controller.verify_after_action(resolved, before, after_absent)
         self.assertIn(
             "控制器确认目标元素已消失：示例应用",
-            controller.transition_evidence_from_verified_action(
-                resolved,
-                before,
-                after_absent,
-            ),
+            evidence,
         )
 
     def test_targeted_transport_uses_relative_path_but_viewport_keeps_preset(self):
@@ -764,7 +756,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
             action="home",
             params={
                 "formal_candidate_id": "candidate.home",
-                "formal_report_digest": "a" * 64,
                 "formal_transition": {
                     "transition_id": "transition.home",
                     "precondition_claim_ids": ["claim.surface"],
@@ -845,7 +836,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
                     }
                 },
                 "formal_candidate_id": "candidate.input",
-                "formal_report_digest": "b" * 64,
                 "formal_transition": {
                     "transition_id": "transition.input",
                     "precondition_claim_ids": ["claim.field"],
@@ -936,7 +926,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
                     }
                 },
                 "formal_candidate_id": "candidate.chinese-input",
-                "formal_report_digest": "d" * 64,
                 "formal_transition": {
                     "transition_id": "transition.chinese-input",
                     "precondition_claim_ids": ["claim.field"],
@@ -1032,7 +1021,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
                     }
                 },
                 "formal_candidate_id": "candidate.direct-preedit",
-                "formal_report_digest": "e" * 64,
                 "formal_transition": {
                     "transition_id": "transition.direct-preedit",
                     "precondition_claim_ids": ["claim.field"],
@@ -1134,7 +1122,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
                     }
                 },
                 "formal_candidate_id": "candidate.focus-input",
-                "formal_report_digest": "c" * 64,
                 "formal_transition": {
                     "transition_id": "transition.focus-input",
                     "precondition_claim_ids": ["claim.coarse-input"],
@@ -1255,7 +1242,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
                     }
                 },
                 "formal_candidate_id": "candidate.enter",
-                "formal_report_digest": "c" * 64,
                 "formal_transition": {
                     "transition_id": "transition.enter",
                     "precondition_claim_ids": ["claim.enter"],
@@ -1631,7 +1617,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 action="tap_semantic",
                 params={
                     "formal_candidate_id": "candidate-literal-2",
-                    "formal_report_digest": "a" * 64,
                     "formal_transition": {
                         "transition_id": "transition-literal-2",
                         "precondition_claim_ids": ["claim-input-live"],
@@ -1743,7 +1728,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 action="press_enter",
                 params={
                     "formal_candidate_id": "candidate-enter",
-                    "formal_report_digest": "a" * 64,
                     "formal_transition": {
                         "transition_id": "transition-enter",
                         "precondition_claim_ids": ["claim-enter"],
@@ -1965,7 +1949,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 action="input_verified_text",
                 params={
                     "formal_candidate_id": "candidate-type-body",
-                    "formal_report_digest": "a" * 64,
                     "formal_transition": {
                         "transition_id": "transition-type-body",
                         "precondition_claim_ids": ["claim-body-empty"],
@@ -2315,7 +2298,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 action="input_verified_text",
                 params={
                     "formal_candidate_id": "candidate-append-second",
-                    "formal_report_digest": "a" * 64,
                     "formal_transition": {
                         "transition_id": "transition-append-second",
                         "precondition_claim_ids": ["claim-append-second"],
@@ -4634,9 +4616,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 "device_id": credential.device_id,
                 "physical_actions": 1,
                 "action_outcome": "matched",
-                "execution": {
-                    "orientation_credential": credential.to_dict(),
-                },
+                "execution": result.to_dict(),
                 "before_frame_paths": list(result.before_frame_paths),
             },
             orientation_credential=credential,

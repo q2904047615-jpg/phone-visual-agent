@@ -14,6 +14,9 @@ from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.verified_text_transaction import plan_from_input_states
 from agent.domain.canonical_action_protocol import (
     CANONICAL_ACTION_PROTOCOL,
+    CanonicalActionProtocolError,
+    StateExpectation,
+    TypedStateTransition,
     canonical_candidate_expected_result,
     compile_canonical_action_catalog,
 )
@@ -353,7 +356,6 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         )
         for candidate in report.candidates:
             self.assertNotIn("element_id", candidate.parameters)
-            self.assertEqual(("surface_current",), candidate.subject_refs)
             self.assertTrue(candidate.transition.exploratory)
             self.assertEqual(
                 "surface.viewport",
@@ -539,31 +541,8 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                     {"direction": "up", "element_id": "preview"},
                     candidate.parameters,
                 )
-                self.assertIn("surface_current", candidate.subject_refs)
-                self.assertEqual(2, len(candidate.subject_refs))
-                self.assertEqual(
-                    {"surface_current"},
-                    {item.subject_ref for item in report.affordances},
-                )
-                target_subjects = {
-                    claim.subject_ref
-                    for claim in report.claims
-                    if claim.predicate == "element.label"
-                    and claim.value == label
-                }
-                self.assertEqual(1, len(target_subjects))
-                target_subject = next(iter(target_subjects))
-                target_claim_ids = {
-                    claim.claim_id
-                    for claim in report.claims
-                    if claim.subject_ref == target_subject
-                }
-                self.assertTrue(target_claim_ids)
-                self.assertTrue(
-                    target_claim_ids.issubset(
-                        set(candidate.transition.precondition_claim_ids)
-                    )
-                )
+                target_subject = candidate.transition.expectations[0].subject_ref
+                self.assertTrue(target_subject.startswith("element_"))
                 self.assertEqual(
                     [(target_subject, "element.exists", "absent")],
                     [
@@ -2098,6 +2077,43 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             {"tap_semantic", "home"},
         )
         self.assertEqual(["home"], [item.action_kind for item in report.candidates])
+
+    def test_state_expectation_is_the_only_wire_normalizer(self) -> None:
+        expectation = StateExpectation.from_dict({
+            "subject_ref": "surface_current",
+            "predicate": "surface.navigation_depth",
+            "operator": "changed",
+            "value": None,
+        })
+        transition = TypedStateTransition(
+            transition_id="transition_current",
+            expectations=(expectation,),
+            exploratory=False,
+        )
+
+        self.assertEqual(
+            {
+                "subject_ref": "surface_current",
+                "predicate": "surface.navigation_depth",
+                "operator": "changed",
+            },
+            transition.to_dict()["expectations"][0],
+        )
+
+    def test_state_expectation_rejects_ambiguous_value_shapes(self) -> None:
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "等值条件缺少"):
+            StateExpectation.from_dict({
+                "subject_ref": "surface_current",
+                "predicate": "surface.kind",
+                "operator": "equals",
+            })
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "非等值条件不得携带"):
+            StateExpectation.from_dict({
+                "subject_ref": "surface_current",
+                "predicate": "surface.navigation_depth",
+                "operator": "changed",
+                "value": "unexpected",
+            })
 
 
 if __name__ == "__main__":

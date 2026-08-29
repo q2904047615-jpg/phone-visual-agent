@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .validation import DataclassWire
+
 
 @dataclass(frozen=True)
 class LocalFrameStability:
@@ -20,12 +22,9 @@ class LocalFrameStability:
 
 
 @dataclass(frozen=True)
-class VisualObstruction:
+class VisualObstruction(DataclassWire):
     """A locally detected opaque region that can invalidate visual evidence."""
 
     kind: str
     bounds: tuple[int, int, int, int]
     reason: str
-
-    def to_dict(self) -> dict[str, object]:
-        return {'kind': self.kind, 'bounds': list(self.bounds), 'reason': self.reason}

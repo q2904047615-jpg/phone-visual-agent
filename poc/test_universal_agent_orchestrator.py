@@ -12,6 +12,7 @@ from PIL import Image
 
 from agent.application import UniversalAgentSessionState
 from agent.domain import (
+    AppSurfaceLineageAuthority,
     DeviceTaskRegistryError,
     EvidenceStoreError,
     VerifiedAppSurfaceLineage,
@@ -30,12 +31,15 @@ from agent.domain.task_graph import (
     _graph_from_payload,
 )
 from agent.domain.canonical_action_protocol import GenericStepProposal
-from agent.domain.generic_goal import safe_goal_context
+from agent.domain.generic_goal import VisibleGoalEvidence, safe_goal_context
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_action_adapter import GenericActionExecutionResult
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene
-from agent.domain.universal_action_controller import ResolvedSemanticAction
+from agent.domain.universal_action_controller import (
+    CONTROLLER_INPUT_PREEDIT_PENDING,
+    ResolvedSemanticAction,
+)
 from agent.domain.vision_model import VisionAgentError
 from agent.application.vision_usage import VisionSessionUsageLedger
 from agent.infrastructure.deepseek_failure_diagnostics import (
@@ -412,11 +416,6 @@ def _multifield_graph(
 
 
 def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
-    risk_type = (
-        "transaction_or_payment"
-        if impact == "external_state"
-        else "unknown_external_effect"
-    )
     graph = DynamicTaskGraph(
         task_id="task-1",
         device_id="device-1",
@@ -446,16 +445,6 @@ def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
         risk_actions=(
             RiskAction(
                 risk_id="risk-1",
-                description=(
-                    "向商户付款20元" if impact == "external_state" else "影响不明确"
-                ),
-                external_effect=(
-                    "已向商户付款20元"
-                    if impact == "external_state"
-                    else "可能改变外部状态"
-                ),
-                risk_type=risk_type,
-                risk_level="high",
                 subgoal_ids=("subgoal-1",),
                 effect_kind=(
                     "financial_transaction"
@@ -826,7 +815,6 @@ class FakeQwenObserver:
                 params.update(
                     {
                         "formal_candidate_id": candidate.candidate_id,
-                        "formal_report_digest": catalog.report_digest,
                         "formal_transition": candidate.transition.to_dict(),
                     }
                 )
@@ -2085,7 +2073,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
-            result = orchestrator._try_advance_visible_presence_subgoal(
+            result = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=FakeTrustedObservation(
@@ -2093,7 +2081,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                     scene=scene,
                 ),
             )
-            wrong_app = orchestrator._try_advance_visible_presence_subgoal(
+            wrong_app = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=FakeTrustedObservation(
@@ -2164,7 +2152,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=graph,
             )
-            result = orchestrator._try_advance_visible_presence_subgoal(
+            result = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=graph,
                 trusted_observation=FakeTrustedObservation(
@@ -2280,7 +2268,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 device_id=initial.device_id,
                 scene=scene,
             )
-            result = orchestrator._try_advance_visible_presence_subgoal(
+            result = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=trusted,
@@ -2298,7 +2286,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 ),
                 fingerprint="two-recent-task-cards",
             )
-            ambiguous = orchestrator._try_advance_visible_presence_subgoal(
+            ambiguous = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=FakeTrustedObservation(
@@ -2418,7 +2406,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
-            result = orchestrator._try_advance_visible_presence_subgoal(
+            result = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=FakeTrustedObservation(
@@ -2426,7 +2414,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                     scene=scene,
                 ),
             )
-            wrong_surface = orchestrator._try_advance_visible_presence_subgoal(
+            wrong_surface = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=FakeTrustedObservation(
@@ -2481,7 +2469,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             with self.subTest(app_id=target_app.app_id, text=text):
                 self.assertEqual(
                     expected,
-                    UniversalAgentOrchestrator._presence_names_only_target_app_surface(
+                    VisibleGoalEvidence.names_only_target_app(
                         text,
                         target_app,
                     ),
@@ -2489,13 +2477,13 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         browser = TargetApp(app_id="browser", app_name="浏览器")
         self.assertTrue(
-            UniversalAgentOrchestrator._presence_references_target_app_identity(
+            VisibleGoalEvidence.references_target_app(
                 "读取浏览器打开后页面的主标题或错误提示",
                 browser,
             )
         )
         self.assertFalse(
-            UniversalAgentOrchestrator._presence_names_only_target_app_surface(
+            VisibleGoalEvidence.names_only_target_app(
                 "读取浏览器打开后页面的主标题或错误提示",
                 browser,
             )
@@ -2503,7 +2491,7 @@ class UniversalAgentStartTests(unittest.TestCase):
 
     def test_app_foreground_presence_phrase_is_narrow(self) -> None:
         self.assertTrue(
-            UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
+            VisibleGoalEvidence.idempotent_app_foreground(
                 "浏览器应用已启动"
             )
         )
@@ -2515,7 +2503,7 @@ class UniversalAgentStartTests(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 self.assertFalse(
-                    UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
+                    VisibleGoalEvidence.idempotent_app_foreground(
                         value
                     )
                 )
@@ -2638,7 +2626,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
-            result = orchestrator._try_advance_visible_presence_subgoal(
+            result = orchestrator._try_advance_visible_subgoal(
                 session,
                 graph=initial,
                 trusted_observation=trusted,
@@ -4016,7 +4004,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             physical_actions=1,
         )
 
-        actual = orchestrator._try_advance_visible_text_read_subgoal(
+        actual = orchestrator._try_advance_visible_subgoal(
             session,
             graph=graph,
             trusted_observation=observation,
@@ -4143,7 +4131,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             scene=replace(_scene(), app_id="com.tencent.mm")
         )
 
-        carried = UniversalAgentOrchestrator._carry_verified_app_surface_lineage(
+        carried = AppSurfaceLineageAuthority.carry(
             session=session,
             previous=graph,
             revised=revised,
@@ -4162,7 +4150,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(
-            UniversalAgentOrchestrator._carry_verified_app_surface_lineage(
+            AppSurfaceLineageAuthority.carry(
                 session=session,
                 previous=graph,
                 revised=revised,
@@ -4198,7 +4186,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             scene=replace(_scene(), app_id="com.example.other")
         )
         self.assertIsNone(
-            UniversalAgentOrchestrator._carry_verified_app_surface_lineage(
+            AppSurfaceLineageAuthority.carry(
                 session=session,
                 previous=graph,
                 revised=revised,
@@ -4410,7 +4398,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             verified_app_surface_lineage=lineage,
         )
 
-        upgraded = UniversalAgentOrchestrator._refresh_verified_app_surface_lineage(
+        upgraded = AppSurfaceLineageAuthority.refresh(
             session=session,
             graph=graph,
             prior_observation=SimpleNamespace(scene=prior_scene),
@@ -4424,7 +4412,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             elements=(replace(title, label="其他页面"),),
         )
         self.assertIsNone(
-            UniversalAgentOrchestrator._refresh_verified_app_surface_lineage(
+            AppSurfaceLineageAuthority.refresh(
                 session=session,
                 graph=graph,
                 prior_observation=SimpleNamespace(scene=prior_scene),
@@ -4477,7 +4465,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             completion_conditions=("主标题等于指定文字",),
         )
         self.assertFalse(
-            UniversalAgentOrchestrator._is_visible_text_read_subgoal(subgoal)
+            VisibleGoalEvidence.visible_text_read(subgoal)
         )
 
         graph = self._named_app_page_graph(app_id="browser", app_name="浏览器")
@@ -4497,7 +4485,7 @@ class UniversalAgentStartTests(unittest.TestCase):
         planner = FakeDeepSeekPlanner(graph)
         result = self._orchestrator(
             planner, FakeQwenObserver(), FakeAdapter(ambiguous_scene)
-        )._try_advance_visible_text_read_subgoal(
+        )._try_advance_visible_subgoal(
             SimpleNamespace(
                 session_id="session-ambiguous",
                 device_id="device-1",
@@ -4577,19 +4565,19 @@ class UniversalAgentStartTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+            VisibleGoalEvidence.foreground_matches(
                 scene=runtime_scene,
                 target_apps=target_apps,
             )
         )
         self.assertFalse(
-            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+            VisibleGoalEvidence.foreground_matches(
                 scene=unrelated_scene,
                 target_apps=target_apps,
             )
         )
         self.assertFalse(
-            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+            VisibleGoalEvidence.foreground_matches(
                 scene=launcher_scene,
                 target_apps=target_apps,
             )
@@ -4648,7 +4636,7 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(0, session.physical_actions)
         self.assertIn(
             "foreground_app",
-            UniversalAgentOrchestrator._presence_surface_classes(
+            VisibleGoalEvidence.surface_classes(
                 "Local tool is in the foreground"
             ),
         )
@@ -4745,13 +4733,13 @@ class UniversalAgentStartTests(unittest.TestCase):
     def test_start_advances_unique_list_item_selected_by_visible_title_prefix(self) -> None:
         self.assertEqual(
             ("通用动作真机验",),
-            UniversalAgentOrchestrator._presence_title_prefixes(
+            VisibleGoalEvidence.title_prefixes(
                 "定位标题开头为通用动作真机验的唯一卡片"
             ),
         )
         self.assertEqual(
             ("weekly report",),
-            UniversalAgentOrchestrator._presence_title_prefixes(
+            VisibleGoalEvidence.title_prefixes(
                 "locate the card whose title starts with Weekly Report card"
             ),
         )
@@ -4932,7 +4920,7 @@ class UniversalAgentStartTests(unittest.TestCase):
         )
 
         self.assertFalse(
-            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+            VisibleGoalEvidence.foreground_matches(
                 scene=other_app_scene,
                 target_apps=graph.goal.target_apps,
             )
@@ -4943,7 +4931,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             screen_id="unknown_screen",
         )
         self.assertFalse(
-            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+            VisibleGoalEvidence.foreground_matches(
                 scene=unknown_scene,
                 target_apps=graph.goal.target_apps,
             )
@@ -6135,123 +6123,12 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
 
         self.assertFalse(
-            UniversalAgentOrchestrator._is_presence_only_read_only_subgoal(
+            VisibleGoalEvidence.presence_only(
                 subgoal
             )
         )
 
-    def test_unique_focused_input_mints_one_local_zero_action_state_fact(self) -> None:
-        focused_scene = _scene(
-            role="input",
-            meaning="application_text_input",
-            label="",
-            states={"focused": True, "value": ""},
-        )
-        observation = FakeTrustedObservation(
-            device_id="device-1",
-            scene=focused_scene,
-        )
-        subgoal = SimpleNamespace(
-            completion_conditions=("输入框处于聚焦状态",),
-        )
-
-        fact = UniversalAgentOrchestrator._zero_action_visible_state_fact(
-            subgoal,
-            observation,
-        )
-
-        self.assertEqual(
-            "当前可信画面的局部控件状态："
-            "element_id=candidate-1, role=input, focused=true。",
-            fact,
-        )
-
-    def test_focus_state_fact_fails_closed_for_untrusted_or_unrelated_shapes(self) -> None:
-        base = _scene(
-            role="input",
-            meaning="application_text_input",
-            label="",
-            states={"focused": True, "value": ""},
-        )
-        focus_subgoal = SimpleNamespace(
-            completion_conditions=("输入框处于聚焦状态",),
-        )
-        value_subgoal = SimpleNamespace(
-            completion_conditions=("输入框内容为 codex",),
-        )
-        duplicate = replace(
-            base,
-            elements=(
-                base.elements[0],
-                replace(base.elements[0], element_id="candidate-2"),
-            ),
-        )
-        cases = {
-            "not_focused": replace(
-                base,
-                elements=(
-                    replace(
-                        base.elements[0],
-                        states={**base.elements[0].states, "focused": False},
-                    ),
-                ),
-            ),
-            "wrong_role": replace(
-                base,
-                elements=(replace(base.elements[0], role="button"),),
-            ),
-            "low_confidence": replace(
-                base,
-                elements=(replace(base.elements[0], confidence=0.70),),
-            ),
-            "not_goal_relevant": replace(
-                base,
-                elements=(
-                    replace(
-                        base.elements[0],
-                        states={
-                            **base.elements[0].states,
-                            "goal_relevant": False,
-                        },
-                    ),
-                ),
-            ),
-            "duplicate": duplicate,
-        }
-        for name, scene in cases.items():
-            with self.subTest(case=name):
-                observation = FakeTrustedObservation(
-                    device_id="device-1",
-                    scene=scene,
-                )
-                self.assertIsNone(
-                    UniversalAgentOrchestrator._zero_action_visible_state_fact(
-                        focus_subgoal,
-                        observation,
-                    )
-                )
-
-        conflicted = FakeTrustedObservation(
-            device_id="device-1",
-            scene=base,
-        )
-        conflicted.candidate_conflicts = (
-            {"kind": "ambiguous", "element_ids": ["candidate-1"]},
-        )
-        self.assertIsNone(
-            UniversalAgentOrchestrator._zero_action_visible_state_fact(
-                focus_subgoal,
-                conflicted,
-            )
-        )
-        self.assertIsNone(
-            UniversalAgentOrchestrator._zero_action_visible_state_fact(
-                value_subgoal,
-                FakeTrustedObservation(device_id="device-1", scene=base),
-            )
-        )
-
-    def test_visible_page_and_focused_input_advance_as_one_safe_prefix(self) -> None:
+    def test_visible_page_advances_once_before_focused_input_reobservation(self) -> None:
         base = _graph()
         open_page = replace(
             base.subgoals[0],
@@ -6362,10 +6239,10 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual(
-            ["completed", "completed", "active"],
+            ["completed", "active", "pending"],
             [item.status for item in session.task_graph.subgoals],
         )
-        self.assertEqual("type-text", session.task_graph.active_subgoal_id)
+        self.assertEqual("focus-input", session.task_graph.active_subgoal_id)
         self.assertEqual([], qwen.calls)
         self.assertEqual(0, session.physical_actions)
         self.assertEqual(0, adapter.execute_calls)
@@ -6549,7 +6426,6 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             previous=previous,
             revised=revised,
             current_subgoal_id=page.subgoal_id,
-            accepted_prefix=(page.subgoal_id,),
             unsupported_subgoal_id=external.subgoal_id,
         )
 
@@ -6569,7 +6445,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                     completion_conditions=(completion_condition,),
                 )
                 self.assertTrue(
-                    UniversalAgentOrchestrator._is_presence_only_read_only_subgoal(
+                    VisibleGoalEvidence.presence_only(
                         subgoal
                     )
                 )
@@ -6747,12 +6623,12 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                     completion_conditions=(completion_condition,),
                 )
                 self.assertFalse(
-                    UniversalAgentOrchestrator._is_presence_only_read_only_subgoal(
+                    VisibleGoalEvidence.presence_only(
                         subgoal
                     )
                 )
 
-    def test_start_consumes_only_the_visible_safe_presence_prefix_before_qwen(self) -> None:
+    def test_start_consumes_one_visible_presence_step_before_reobservation(self) -> None:
         base = _graph()
         initial = replace(
             base,
@@ -6853,9 +6729,9 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual(3, session.task_graph.revision)
-        self.assertEqual("target-page-visible", session.task_graph.active_subgoal_id)
-        self.assertEqual(2, len(planner.replan_calls))
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("second-visible", session.task_graph.active_subgoal_id)
+        self.assertEqual(1, len(planner.replan_calls))
         self.assertEqual(0, len(qwen.calls))
         self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(0, adapter.execute_calls)
@@ -6961,7 +6837,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             )
 
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual("second-page-visible", session.task_graph.active_subgoal_id)
+        self.assertEqual("second-item-visible", session.task_graph.active_subgoal_id)
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
         self.assertEqual(0, len(qwen.calls))
         self.assertEqual("needs_reobservation", session.status)
@@ -7133,6 +7009,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7213,6 +7090,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7285,6 +7163,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7363,6 +7242,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7458,6 +7338,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7600,6 +7481,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=(CONTROLLER_INPUT_PREEDIT_PENDING,),
             before_scene=before,
             after_scene=after,
             resolved_action=resolved,
@@ -7651,6 +7533,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=after,
             after_scene=final_after,
             resolved_action=ResolvedSemanticAction(
@@ -7739,6 +7622,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=(CONTROLLER_INPUT_PREEDIT_PENDING,),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7785,6 +7669,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=after,
             after_scene=committed,
             resolved_action=ResolvedSemanticAction(
@@ -7857,6 +7742,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -7916,6 +7802,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=final_before,
             after_scene=final_after,
             resolved_action=ResolvedSemanticAction(
@@ -8016,6 +7903,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=("控制器确认目标元素状态",),
             before_scene=before_base,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -8062,6 +7950,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 result=SimpleNamespace(
                     **{
                         **vars(result),
+                        "controller_transition_evidence": (),
                         "before_scene": wrong_target,
                         "resolved_action": replace(
                             result.resolved_action,
@@ -8128,6 +8017,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             action_outcome="matched",
             physical_actions=1,
             verification_errors=(),
+            controller_transition_evidence=(CONTROLLER_INPUT_PREEDIT_PENDING,),
             before_scene=before,
             after_scene=after,
             resolved_action=ResolvedSemanticAction(
@@ -8168,10 +8058,10 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             ),
         )
 
-    def test_input_microstep_rejects_wrong_after_value(self) -> None:
+    def test_input_microstep_requires_controller_transition_evidence(self) -> None:
         graph = self._input_graph()
         before = self._input_scene("", fingerprint="wrong-before")
-        after = self._input_scene("lixe", fingerprint="wrong-after")
+        after = self._input_scene("live", fingerprint="verified-after")
         action = SemanticAction(
             node_id="wrong-step",
             action="input_verified_text",

@@ -22,14 +22,7 @@ def _ratio_bounds(left: int, top: int, right: int, bottom: int, *, width: int, h
 
 
 def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction, ...]:
-    """Detect shallow partial-width dark bands attached to the image top.
-
-    Seller previews can paint an opaque coordinate readout over the camera
-    surface.  Its pixel size changes with window/DPI scaling, so detection is
-    based on relative geometry and contrast instead of a fixed crop or app
-    coordinate.  Full-width status bars, narrow phone letterboxing, and deep
-    dark panels are deliberately excluded.
-    """
+    """Detect shallow partial-width top overlays using relative geometry and contrast."""
 
     source = image.convert("L")
     analysis_width = min(270, source.width)
@@ -205,13 +198,7 @@ def measure_local_stability(frames: list[Image.Image], *, threshold: float | Non
 
 def measure_static_band_identity_delta(reference_frames: list[Image.Image] | tuple[Image.Image, ...],
     candidate_frames: list[Image.Image] | tuple[Image.Image, ...]) -> float:
-    """Compare camera framing while tolerating changes in central App content.
-
-    The outer-band descriptor deliberately excludes most of the editable or
-    scrollable center.  Each candidate is matched to its closest fresh
-    pre-action reference, then the median candidate distance is returned so a
-    single transient frame cannot establish camera-return authority.
-    """
+    """Compare outer camera framing while tolerating central App-content changes."""
 
     references = tuple(reference_frames)
     candidates = tuple(candidate_frames)
@@ -229,13 +216,7 @@ def measure_static_band_identity_delta(reference_frames: list[Image.Image] | tup
 
 
 def measure_frame_sharpness(image: Image.Image) -> float:
-    """Return a local, content-agnostic sharpness score for frame selection.
-
-    Stability and sharpness serve different purposes: the outer UI bands prove
-    that the page/camera has not moved, while this score chooses the clearest
-    full frame from that already-stable group.  It never changes page state or
-    relaxes the stability gate.
-    """
+    """Score sharpness only to choose among frames that already passed stability."""
 
     source = image.convert("L")
     max_width = 360

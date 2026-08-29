@@ -140,7 +140,8 @@ def _evaluate_case(
     try:
         frames, frame_paths = _load_frames(case, path)
         context = QwenTaskContext.from_dict(dict(case["task_context"]))
-        pre_observation_block = context.pre_observation_block_reason
+        pre_observation_block = ('本地效果确认门未满足，本轮禁止调用观察或决策模型。'
+            if context.current_execution_class == 'effect' and not context.effect_action_allowed else None)
         if pre_observation_block:
             status = "blocked"
             score = _score(case, status=status, decision=None)
@@ -179,7 +180,12 @@ def _evaluate_case(
             }
         scene = scene_observer.observe(
             frames=frames,
-            goal_context=context.to_observation_context(),
+            goal_context={'device_id': context.device_id,
+                'objective': str(context.current_subgoal.get('objective') or ''),
+                'entities': dict(context.goal.get('entities') or {}),
+                'constraints': [*context.global_constraints, *context.current_subgoal.get('constraints', ())],
+                'completion_conditions': list(context.current_subgoal.get('completion_conditions') or []),
+                'execution_class': context.current_execution_class},
         )
         observation = build_trusted_observation(
             frames=frames,

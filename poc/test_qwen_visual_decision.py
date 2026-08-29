@@ -18,10 +18,7 @@ from agent.infrastructure.observation_images import local_frame_fingerprint
 from agent.application.qwen_visual_decision import (
     QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
     QwenVisualDecisionObserver,
-    _exact_text_candidate_block,
-    _identity_text_candidate_block,
     _hydrate_canonical_selection,
-    _launcher_app_entry_candidate_ids,
     _deterministic_exact_selection_payload,
     _selection_choices,
 )

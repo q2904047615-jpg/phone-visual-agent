@@ -6,9 +6,6 @@ import json
 from typing import Any
 
 
-FORMAT_ERROR_TYPES = frozenset({'invalid_json', 'truncated_json', 'protocol_invalid'})
-
-
 def classify_qwen_error(error: BaseException | str, *, raw_response: str='') -> str:
     """Classify Qwen failures without weakening any protocol validation."""
 

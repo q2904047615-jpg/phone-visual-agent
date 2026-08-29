@@ -369,7 +369,6 @@ class RecentAppsActionTests(unittest.TestCase):
             action="open_recent_apps",
             params={
                 "formal_candidate_id": "candidate.open_recent_apps",
-                "formal_report_digest": "e" * 64,
                 "formal_transition": {
                     "transition_id": "transition.open_recent_apps",
                     "precondition_claim_ids": ["claim.surface"],

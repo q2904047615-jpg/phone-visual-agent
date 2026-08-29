@@ -272,7 +272,6 @@ class ScriptedQwen:
             params={
                 **action.params,
                 "formal_candidate_id": candidate.candidate_id,
-                "formal_report_digest": catalog.report_digest,
                 "formal_transition": candidate.transition.to_dict(),
             },
         )

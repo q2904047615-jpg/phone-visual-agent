@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import ValidatedDataclassWire, reject_if
 from dataclasses import dataclass
 from typing import Any
 
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
-from agent.domain.canonical_action_protocol import StateExpectation
+from agent.domain.canonical_action_protocol import CanonicalActionProtocolError, StateExpectation
 from agent.domain.vision_model import VisionAgentError
 
 
@@ -18,7 +18,7 @@ POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被�
 
 
 @dataclass(frozen=True)
-class PostActionVisualContext:
+class PostActionVisualContext(ValidatedDataclassWire):
     """One executed canonical action awaiting fresh visual verification."""
 
     canonical_action_kind: str
@@ -36,12 +36,6 @@ class PostActionVisualContext:
         for expectation in self.expected_postconditions:
             expectation.validate()
 
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return {'protocol_version': self.protocol_version, 'execution_state': self.execution_state,
-            'outcome': self.outcome, 'canonical_action_kind': self.canonical_action_kind,
-            'expected_postconditions': [item.to_dict() for item in self.expected_postconditions]}
-
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> 'PostActionVisualContext':
         reject_if(
@@ -53,17 +47,10 @@ class PostActionVisualContext:
         reject_if(not isinstance(raw_expectations, list), VisionAgentError("动作后视觉上下文的typed后置条件必须是数组。"))
         expectations: list[StateExpectation] = []
         for item in raw_expectations:
-            reject_if(not isinstance(item, dict), VisionAgentError("动作后视觉上下文包含无效typed后置条件。"))
-            required = {"subject_ref", "predicate", "operator"}
-            allowed = required | {"value"}
-            reject_if(not required.issubset(item) or set(item) - allowed, VisionAgentError("动作后视觉上下文包含无效typed后置条件。"))
-            operator = item.get("operator")
-            if operator in {'equals', 'not_equals'}:
-                reject_if('value' not in item, VisionAgentError("动作后视觉上下文的等值条件缺少value。"))
-            elif 'value' in item:
-                raise VisionAgentError("动作后视觉上下文的非等值条件不得携带value。")
-            expectations.append(StateExpectation(subject_ref=str(item.get('subject_ref') or ''),
-                predicate=str(item.get('predicate') or ''), operator=str(operator or ''), value=item.get('value')))
+            try:
+                expectations.append(StateExpectation.from_dict(item))
+            except CanonicalActionProtocolError as exc:
+                raise VisionAgentError(f"动作后视觉上下文包含无效typed后置条件：{exc}") from exc
         context = cls(protocol_version=str(value.get('protocol_version') or ''),
             execution_state=str(value.get('execution_state') or ''), outcome=str(value.get('outcome') or ''),
             canonical_action_kind=str(value.get('canonical_action_kind') or ''),

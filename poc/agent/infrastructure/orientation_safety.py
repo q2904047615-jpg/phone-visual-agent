@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
-import hashlib
+from agent.domain.validation import NormalizedPoint, dataclass_wire, reject_if
 import re
 import threading
 import uuid
@@ -13,8 +12,9 @@ from typing import Any
 
 from PIL import Image, ImageFilter
 
+from agent.infrastructure.observation_images import local_frame_fingerprint as frame_fingerprint
 
-ORIENTATION_AUDIT_PROTOCOL_VERSION = "2026-08-15-orientation-audit-v2"
+
 ORIENTATION_CREDENTIAL_VERSION = "2026-08-24-orientation-credential-v2"
 MIN_ORIENTATION_CONFIDENCE = 0.80
 MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA = 18.0
@@ -58,11 +58,6 @@ def camera_layout_orientation(size: tuple[int, int]) -> str:
     if height > width:
         return "portrait"
     return "square"
-
-
-def frame_fingerprint(frame: Image.Image) -> str:
-    compact = frame.convert("L").resize((64, 96), Image.Resampling.BILINEAR)
-    return hashlib.sha256(compact.tobytes()).hexdigest()[:20]
 
 
 @dataclass(frozen=True)
@@ -165,12 +160,7 @@ class OrientationCredential:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {'version': self.version, 'credential_id': self.credential_id, 'source': self.source,
-            'device_id': self.device_id, 'scene_fingerprint': self.scene_fingerprint,
-            'frame_fingerprint': self.frame_fingerprint, 'evidence_frame_fingerprint': self.evidence_frame_fingerprint,
-            'frame_size': list(self.frame_size), 'camera_layout_orientation': self.camera_layout_orientation,
-            'phone_content_rotation': self.phone_content_rotation, 'confidence': float(self.confidence),
-            'evidence': list(self.evidence)}
+        return dataclass_wire(self, omit=('_audit_seal',))
 
     @classmethod
     def from_dict(cls, value: Any) -> 'OrientationCredential':
@@ -193,21 +183,14 @@ class OrientationCredential:
         return item
 
 
-
 def _mint_locally_verified_qwerty_credential(*, device_id: str, scene_fingerprint: str, frame: Image.Image,
     anchors: dict[str, Any]) -> OrientationCredential:
-    """Mint one action credential from stable local QWERTY row evidence.
-
-    The caller supplies anchors returned by the production multi-frame OCR
-    row snapper.  This function independently validates the complete upright
-    row ordering before binding the resulting one-shot seal to the actual
-    frame consumed by the physical execution gate.
-    """
+    """Bind independently validated upright QWERTY rows to one consumed-frame credential."""
 
     required = ("q", "p", "a", "l", "z", "m", "backspace")
     reject_if(not isinstance(anchors, dict) or set(anchors) != set(required), OrientationSafetyError("本地方向审计缺少完整 QWERTY 七点。"))
 
-    points: dict[str, tuple[float, float]] = {}
+    points: dict[str, NormalizedPoint] = {}
     for key in required:
         value = anchors.get(key)
         reject_if(
@@ -245,13 +228,7 @@ def _mint_locally_verified_qwerty_credential(*, device_id: str, scene_fingerprin
 def _mint_single_step_scene_credential(*, device_id: str, scene_fingerprint: str, frame: Image.Image,
     camera_layout_orientation_value: str, phone_content_rotation: str, confidence: float, evidence: tuple[str,
     ...]) -> OrientationCredential:
-    """Bind the sole step observation's direction facts to fresh local pixels.
-
-    The model fact is already part of the parsed, fingerprint-bound UIScene.
-    This function performs no model call.  It only validates that fact against
-    the actual frame size and mints the same one-shot live seal used by the
-    physical execution gate.
-    """
+    """Bind the sole step's parsed direction facts to fresh pixels and one live credential."""
 
     local_layout = camera_layout_orientation(tuple(frame.size))
     reject_if(camera_layout_orientation_value != local_layout, OrientationSafetyError('单步画面方向与本地稳定帧尺寸不一致。'))

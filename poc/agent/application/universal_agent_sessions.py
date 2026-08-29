@@ -104,6 +104,24 @@ class UniversalAgentSessionApplicationService:
     def active_snapshots(self) -> list[dict[str, Any]]:
         return self._sessions.active_snapshots()
 
+    def _ensure_ready_or_invalidate(self, orchestrator: UniversalAgentOrchestratorPort,
+        session: AgentSession) -> None:
+        try:
+            self._ensure_device_ready(session.device_id)
+        except AgentDeviceRuntimeError:
+            try:
+                orchestrator.invalidate_confirmation(session, reason='device_readiness_failed')
+            except Exception:
+                pass
+            raise
+
+    def _exclusive_operation(self, session: AgentSession, operation: Callable[[], Any]) -> AgentSessionOperationResult:
+        before_actions = session.physical_actions
+        with self._exclusive_device_session(session.device_id):
+            result = operation()
+        return AgentSessionOperationResult(session=session, operation=result,
+            physical_actions=max(0, session.physical_actions - before_actions))
+
     def start(self, command: StartUniversalAgentSessionCommand) -> StartUniversalAgentSessionResult:
         orchestrator = self._orchestrator()
         self._require_start_available(orchestrator, command.device_id)
@@ -127,63 +145,34 @@ class UniversalAgentSessionApplicationService:
     def approve_effects(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
         Any] | None) -> AgentSessionOperationResult:
         self._ensure_device_ready(session.device_id)
-        before_actions = session.physical_actions
         reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('调用 Qwen 处理受限效果前必须确认完整效果作用域。'))
         require_session_device(session, str(confirmation.get('device_id') or ''))
         orchestrator = self._orchestrator()
-        with self._exclusive_device_session(session.device_id):
-            result = orchestrator.approve_effects(session, confirmation)
-        physical_actions = session.physical_actions - before_actions
-        reject_if(physical_actions not in {0, 1}, AgentSessionCommandError("一次效果确认产生了超过一个物理动作。"))
-        return AgentSessionOperationResult(session=session, operation=result, physical_actions=physical_actions)
+        response = self._exclusive_operation(session, lambda: orchestrator.approve_effects(session, confirmation))
+        reject_if(response.physical_actions not in {0, 1}, AgentSessionCommandError("一次效果确认产生了超过一个物理动作。"))
+        return response
 
     def confirm(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
         Any] | None) -> AgentSessionOperationResult:
         orchestrator = self._orchestrator()
-        try:
-            self._ensure_device_ready(session.device_id)
-        except AgentDeviceRuntimeError:
-            try:
-                orchestrator.invalidate_confirmation(session, reason='device_readiness_failed')
-            except Exception:
-                pass
-            raise
-        before_actions = session.physical_actions
+        self._ensure_ready_or_invalidate(orchestrator, session)
         reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('执行一个动作前必须提交完整且明确的确认作用域。'))
-        with self._exclusive_device_session(session.device_id):
-            result = orchestrator.confirm_one(session, confirmation)
-        return AgentSessionOperationResult(session=session, operation=result, physical_actions=max(0,
-            session.physical_actions - before_actions))
+        return self._exclusive_operation(session, lambda: orchestrator.confirm_one(session, confirmation))
 
     def refresh(self, session: AgentSession, *, requested_device_id: str) -> AgentSessionOperationResult:
         require_session_device(session, requested_device_id)
         self._ensure_device_ready(session.device_id)
-        before_actions = session.physical_actions
-        with self._exclusive_device_session(session.device_id):
-            decision = self._orchestrator().refresh_decision(session)
-        return AgentSessionOperationResult(session=session, operation=decision, physical_actions=max(0,
-            session.physical_actions - before_actions))
+        return self._exclusive_operation(session, lambda: self._orchestrator().refresh_decision(session))
 
     def run_automatic(self, session: AgentSession, *, requested_device_id: str, confirmed: bool,
         confirmation: Mapping[str, Any] | None, max_physical_actions: int,
         max_iterations: int) -> AgentSessionOperationResult:
         require_session_device(session, requested_device_id)
         orchestrator = self._orchestrator()
-        try:
-            self._ensure_device_ready(session.device_id)
-        except AgentDeviceRuntimeError:
-            try:
-                orchestrator.invalidate_confirmation(session, reason='device_readiness_failed')
-            except Exception:
-                pass
-            raise
-        before_actions = session.physical_actions
+        self._ensure_ready_or_invalidate(orchestrator, session)
         reject_if(confirmed is True or confirmation is not None, AgentSessionCommandError('安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。'))
-        with self._exclusive_device_session(session.device_id):
-            result = orchestrator.run_autonomous_safe_loop(session, max_physical_actions=max_physical_actions,
-                max_iterations=max_iterations)
-        return AgentSessionOperationResult(session=session, operation=result, physical_actions=max(0,
-            session.physical_actions - before_actions))
+        return self._exclusive_operation(session, lambda: orchestrator.run_autonomous_safe_loop(session,
+            max_physical_actions=max_physical_actions, max_iterations=max_iterations))
 
     def cancel(self, session_id: str, *, requested_device_id: str) -> AgentSessionOperationResult:
         with self._sessions.locked(session_id) as session:

@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-from .validation import reject_if
-import hashlib
+from .validation import ValidatedDataclassWire, canonical_digest, reject_if, wire_value
 import json
 import re
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 
 TASK_SEMANTIC_IR_PROTOCOL = "2026-08-20-task-semantic-ir-v3"
 RISK_POLICY_PROTOCOL = "2026-08-18-local-risk-policy-v1"
-COMPILATION_REPORT_PROTOCOL = "2026-08-20-semantic-compilation-v1"
 AUTHORITY_REPORT_PROTOCOL = "2026-08-20-typed-effect-authority-v1"
-POLICY_TRACE_PROTOCOL = "2026-08-20-semantic-policy-trace-v1"
 EFFECT_PREVIEW_PROTOCOL = "2026-08-19-effect-preview-v1"
 AUTOMATIC = "automatic"
 CONFIRMATION_REQUIRED = "confirmation_required"
@@ -28,7 +25,6 @@ REQUIRED_ACTION_KINDS = frozenset({'tap_semantic', 'double_tap', 'swipe', 'long_
     'dismiss_overlay', 'reveal_system_navigation'})
 STATE_PREDICATES = frozenset({'input.value_equals', 'surface.state_visible', 'effect.applied', 'effect.result_visible',
     'observation.matches_description'})
-EVIDENCE_SOURCE_KINDS = frozenset({"visual_claim", "controller_transition", "effect_receipt"})
 SUBGOAL_IMPACTS = frozenset({"read_only", "navigation_only", "external_state", "unknown"})
 _ID = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 _EXTERNAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -103,23 +99,8 @@ def _json_value(value: Any, name: str) -> Any:
         raise TaskSemanticIRError(f"{name} 不是 JSON 值。") from exc
 
 
-def _jsonify(value: Any) -> Any:
-    if hasattr(value, 'to_dict'):
-        return value.to_dict()
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return [_jsonify(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _jsonify(item) for key, item in value.items()}
-    return value
-
-
-def _wire(record: Any) -> dict[str, Any]:
-    return {item.name: _jsonify(getattr(record, item.name)) for item in fields(record)}
-
-
 def _digest(value: Any) -> str:
-    payload = json.dumps(_jsonify(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return canonical_digest(wire_value(value))
 
 
 def _unique(items: tuple[Any, ...], attr: str, name: str) -> dict[str, Any]:
@@ -128,14 +109,8 @@ def _unique(items: tuple[Any, ...], attr: str, name: str) -> dict[str, Any]:
     return values
 
 
-class _Record:
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return _wire(self)
-
-
 @dataclass(frozen=True)
-class SourceSpan(_Record):
+class SourceSpan(ValidatedDataclassWire):
     start: int
     end: int
 
@@ -148,7 +123,7 @@ class SourceSpan(_Record):
 
 
 @dataclass(frozen=True)
-class SemanticEntity(_Record):
+class SemanticEntity(ValidatedDataclassWire):
     entity_id: str
     entity_type: str
     role: str
@@ -168,7 +143,7 @@ class SemanticEntity(_Record):
 
 
 @dataclass(frozen=True)
-class SurfaceRef(_Record):
+class SurfaceRef(ValidatedDataclassWire):
     surface_id: str
     kind: str
     app_id: str = ""
@@ -183,7 +158,7 @@ class SurfaceRef(_Record):
 
 
 @dataclass(frozen=True)
-class EffectIntent(_Record):
+class EffectIntent(ValidatedDataclassWire):
     effect_id: str
     kind: str
     target_refs: tuple[str, ...] = ()
@@ -204,21 +179,7 @@ class EffectIntent(_Record):
 
 
 @dataclass(frozen=True)
-class CriticalBinding(_Record):
-    binding_id: str
-    effect_id: str
-    binding_kind: str
-    entity_ref: str
-
-    def validate(self) -> None:
-        for (value, name) in ((self.binding_id, 'binding_id'), (self.effect_id, 'effect_id'), (self.entity_ref,
-            'entity_ref')):
-            _valid_id(value, name)
-        reject_if(self.binding_kind not in {'effect_target_equals', 'effect_payload_equals'}, TaskSemanticIRError(f"binding_kind 无效：{self.binding_kind}"))
-
-
-@dataclass(frozen=True)
-class ConstraintIntent(_Record):
+class ConstraintIntent(ValidatedDataclassWire):
     constraint_id: str
     kind: str
     subject_refs: tuple[str, ...] = ()
@@ -237,7 +198,7 @@ class ConstraintIntent(_Record):
 
 
 @dataclass(frozen=True)
-class DesiredState(_Record):
+class DesiredState(ValidatedDataclassWire):
     state_id: str
     subject_ref: str
     predicate: str
@@ -254,19 +215,7 @@ class DesiredState(_Record):
 
 
 @dataclass(frozen=True)
-class EvidenceRequirement(_Record):
-    requirement_id: str
-    desired_state_ref: str
-    allowed_sources: tuple[str, ...]
-
-    def validate(self) -> None:
-        _valid_id(self.requirement_id, "requirement_id")
-        _valid_id(self.desired_state_ref, "desired_state_ref")
-        reject_if(not self.allowed_sources or any((item not in EVIDENCE_SOURCE_KINDS for item in self.allowed_sources)), TaskSemanticIRError("evidence allowed_sources 无效。"))
-
-
-@dataclass(frozen=True)
-class SemanticSubgoal(_Record):
+class SemanticSubgoal(ValidatedDataclassWire):
     subgoal_id: str
     surface_ref: str
     status: str
@@ -286,7 +235,7 @@ class SemanticSubgoal(_Record):
 
 
 @dataclass(frozen=True)
-class InputFieldIntent(_Record):
+class InputFieldIntent(ValidatedDataclassWire):
     field_id: str
     payload_ref: str
     field_label: str = ""
@@ -302,7 +251,7 @@ class InputFieldIntent(_Record):
 
 
 @dataclass(frozen=True)
-class TaskSemanticIR(_Record):
+class TaskSemanticIR(ValidatedDataclassWire):
     task_id: str
     device_id: str
     revision: int
@@ -310,10 +259,8 @@ class TaskSemanticIR(_Record):
     surfaces: tuple[SurfaceRef, ...]
     entities: tuple[SemanticEntity, ...]
     effects: tuple[EffectIntent, ...]
-    critical_bindings: tuple[CriticalBinding, ...] = ()
     constraints: tuple[ConstraintIntent, ...] = ()
     desired_states: tuple[DesiredState, ...] = ()
-    evidence_requirements: tuple[EvidenceRequirement, ...] = ()
     subgoals: tuple[SemanticSubgoal, ...] = ()
     input_fields: tuple[InputFieldIntent, ...] = ()
     protocol_version: str = TASK_SEMANTIC_IR_PROTOCOL
@@ -325,9 +272,8 @@ class TaskSemanticIR(_Record):
         reject_if(isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1, TaskSemanticIRError("revision 必须是正整数。"))
         _required_text(self.raw_goal, "raw_goal")
         groups = ((self.surfaces, 'surface_id', 'surface'), (self.entities, 'entity_id', 'entity'), (self.effects,
-            'effect_id', 'effect'), (self.critical_bindings, 'binding_id', 'binding'), (self.constraints,
-            'constraint_id', 'constraint'), (self.desired_states, 'state_id', 'state'), (self.evidence_requirements,
-            'requirement_id', 'evidence'), (self.subgoals, 'subgoal_id', 'subgoal'), (self.input_fields, 'field_id',
+            'effect_id', 'effect'), (self.constraints, 'constraint_id', 'constraint'), (self.desired_states,
+            'state_id', 'state'), (self.subgoals, 'subgoal_id', 'subgoal'), (self.input_fields, 'field_id',
             'input field'))
         maps = {name: _unique(items, attr, name) for items, attr, name in groups}
         for (items, _, _) in groups:
@@ -344,11 +290,6 @@ class TaskSemanticIR(_Record):
         for effect in self.effects:
             reject_if(set((*effect.target_refs, *effect.payload_refs)) - entity_ids, TaskSemanticIRError(f"EffectIntent 引用未知实体：{effect.effect_id}"))
             reject_if(set(effect.source_subgoal_ids) - subgoal_ids, TaskSemanticIRError(f"EffectIntent 引用未知子目标：{effect.effect_id}"))
-        for binding in self.critical_bindings:
-            reject_if(binding.effect_id not in effect_ids or binding.entity_ref not in entity_ids, TaskSemanticIRError(f"CriticalBinding 引用不存在：{binding.binding_id}"))
-            effect = maps["effect"][binding.effect_id]
-            expected = effect.target_refs if binding.binding_kind == "effect_target_equals" else effect.payload_refs
-            reject_if(binding.entity_ref not in expected, TaskSemanticIRError(f"CriticalBinding 未绑定 effect 对应角色：{binding.binding_id}"))
         for subgoal in self.subgoals:
             reject_if(
                 subgoal.surface_ref not in surface_ids or set(subgoal.constraint_refs) - constraint_ids
@@ -365,19 +306,8 @@ class TaskSemanticIR(_Record):
                 TaskSemanticIRError(f"InputFieldIntent 引用不存在：{item.field_id}"),
             )
 
-    @property
-    def semantic_digest(self) -> str:
-        self.validate()
-        value = self.to_dict()
-        authoritative = {item.constraint_id for item in self.constraints if item.authoritative}
-        value["constraints"] = [item for item in value["constraints"] if item["constraint_id"] in authoritative]
-        value['subgoals'] = [{**item, 'constraint_refs': [ref for ref in item['constraint_refs'] if ref
-            in authoritative]} for item in value['subgoals']]
-        return _digest(value)
-
-
 @dataclass(frozen=True)
-class RiskDecision(_Record):
+class RiskDecision(ValidatedDataclassWire):
     effect_id: str
     policy: str
     matched_rule: str
@@ -391,129 +321,29 @@ class RiskDecision(_Record):
         _valid_id(self.policy_id, "policy_id")
 
 
-@dataclass(frozen=True)
-class LocalRiskPolicyConfig(_Record):
-    policy_id: str = "default_low_friction"
-    version: int = 2
-    confirmation_effect_kinds: frozenset[str] = DEFAULT_CONFIRMATION_EFFECT_KINDS
-    overrides: tuple[tuple[str, str], ...] = ()
-    protocol_version: str = RISK_POLICY_PROTOCOL
+def _risk_policy_wire() -> dict[str, Any]:
+    return {'protocol_version': RISK_POLICY_PROTOCOL, 'policy_id': 'default_low_friction', 'version': 2,
+        'confirmation_effect_kinds': sorted(DEFAULT_CONFIRMATION_EFFECT_KINDS), 'overrides': []}
 
-    def validate(self) -> None:
-        reject_if(self.protocol_version != RISK_POLICY_PROTOCOL or self.version < 1, TaskSemanticIRError("风险策略版本无效。"))
-        _valid_id(self.policy_id, "policy_id")
-        reject_if(any((not _ID.fullmatch(kind) for kind in self.confirmation_effect_kinds)), TaskSemanticIRError("confirmation_effect_kinds 无效。"))
-        ids = [effect_kind for effect_kind, policy in self.overrides]
-        reject_if(len(ids) != len(set(ids)), TaskSemanticIRError("风险策略 override 重复。"))
-        reject_if(
-            any((not _ID.fullmatch(effect_kind) or policy not in RISK_POLICIES for effect_kind,
-            policy in self.overrides)),
-            TaskSemanticIRError("风险策略 override 无效。"),
-        )
 
-    def decide(self, effect: EffectIntent) -> RiskDecision:
-        self.validate()
-        effect.validate()
-        override = dict(self.overrides).get(effect.kind)
-        policy = override or (CONFIRMATION_REQUIRED if effect.kind in self.confirmation_effect_kinds else AUTOMATIC)
-        return RiskDecision(effect.effect_id, policy, f'effect_kind:{effect.kind}' if override
-            is None else 'effect_id_override', self.policy_id, self.version)
+def decide_effect_risk(effect: EffectIntent) -> RiskDecision:
+    effect.validate()
+    policy = CONFIRMATION_REQUIRED if effect.kind in DEFAULT_CONFIRMATION_EFFECT_KINDS else AUTOMATIC
+    decision = RiskDecision(effect.effect_id, policy, f'effect_kind:{effect.kind}', 'default_low_friction', 2)
+    decision.validate()
+    return decision
 
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return {'protocol_version': self.protocol_version, 'policy_id': self.policy_id, 'version': self.version,
-            'confirmation_effect_kinds': sorted(self.confirmation_effect_kinds), 'overrides': [{'effect_id': effect_id,
-            'policy': policy} for effect_id, policy in self.overrides]}
+
+def effect_preview_digest(preview: Mapping[str, Any]) -> str:
+    return _digest(dict(preview))
 
 
 @dataclass(frozen=True)
-class EffectEntityPreview(_Record):
-    entity_ref: str
-    role: str
-    entity_type: str
-    value: Any
-
-    def validate(self) -> None:
-        _valid_id(self.entity_ref, "preview.entity_ref")
-        _valid_id(self.role, "preview.role")
-        _required_text(self.entity_type, "preview.entity_type")
-        _json_value(self.value, "preview.value")
-
-
-@dataclass(frozen=True)
-class EffectPreview(_Record):
-    task_id: str
-    device_id: str
-    revision: int
-    effect_id: str
-    effect_kind: str
-    targets: tuple[EffectEntityPreview, ...]
-    payloads: tuple[EffectEntityPreview, ...]
-    policy: str
-    policy_id: str
-    policy_version: int
-    expected_result_texts: tuple[str, ...] = ()
-    protocol_version: str = EFFECT_PREVIEW_PROTOCOL
-
-    def validate(self) -> None:
-        reject_if(
-            self.protocol_version != EFFECT_PREVIEW_PROTOCOL or self.policy not in RISK_POLICIES or self.revision < 1
-            or (self.policy_version < 1),
-            TaskSemanticIRError("effect preview 元数据无效。"),
-        )
-        for (value, name) in ((self.task_id, 'task_id'), (self.device_id, 'device_id')):
-            _valid_id(value, name, external=True)
-        for value in (self.effect_id, self.effect_kind, self.policy_id):
-            _valid_id(value, "effect preview id")
-        for item in (*self.targets, *self.payloads):
-            item.validate()
-
-    @property
-    def preview_digest(self) -> str:
-        return _digest(self.to_dict())
-
-
-@dataclass(frozen=True)
-class SemanticCompilationReport(_Record):
+class SemanticRiskAuthorityReport(ValidatedDataclassWire):
     semantic_ir: TaskSemanticIR
-    risk_policy: LocalRiskPolicyConfig
+    risk_policy: dict[str, Any]
     risk_decisions: tuple[RiskDecision, ...]
-    warnings: tuple[str, ...] = ()
-    authoritative: bool = False
-    execution_allowed: bool = False
-    protocol_version: str = COMPILATION_REPORT_PROTOCOL
-
-    def validate(self) -> None:
-        reject_if(self.protocol_version != COMPILATION_REPORT_PROTOCOL or self.authoritative or self.execution_allowed, TaskSemanticIRError("semantic compilation 不得携带执行权限。"))
-        self.semantic_ir.validate()
-        self.risk_policy.validate()
-        reject_if({item.effect_id for item in self.risk_decisions} != {item.effect_id for item in self.semantic_ir.effects}, TaskSemanticIRError("risk decisions 未覆盖全部 effect。"))
-        for item in self.risk_decisions:
-            item.validate()
-
-
-@dataclass(frozen=True)
-class RiskPolicyTrace(_Record):
-    effect_id: str
-    effect_kind: str
-    formal_policy: str
-    allowed: bool
-    reason: str
-
-    def validate(self) -> None:
-        for value in (self.effect_id, self.effect_kind):
-            _valid_id(value, "policy trace id")
-        reject_if(self.formal_policy not in RISK_POLICIES or not isinstance(self.allowed, bool), TaskSemanticIRError("policy trace 无效。"))
-        _required_text(self.reason, "policy trace reason")
-
-
-@dataclass(frozen=True)
-class SemanticRiskAuthorityReport(_Record):
-    semantic_ir: TaskSemanticIR
-    risk_policy: LocalRiskPolicyConfig
-    risk_decisions: tuple[RiskDecision, ...]
-    policy_traces: tuple[RiskPolicyTrace, ...]
-    effect_previews: tuple[EffectPreview, ...]
+    effect_previews: tuple[dict[str, Any], ...]
     source_graph_digest: str
     authoritative_scope: str = "semantic_task_and_risk"
     physical_execution_allowed: bool = False
@@ -527,35 +357,17 @@ class SemanticRiskAuthorityReport(_Record):
         )
         reject_if(not re.fullmatch('[0-9a-f]{64}', self.source_graph_digest), TaskSemanticIRError("source_graph_digest 无效。"))
         self.semantic_ir.validate()
-        self.risk_policy.validate()
+        reject_if(self.risk_policy != _risk_policy_wire(), TaskSemanticIRError("风险策略不是当前唯一批准边界。"))
         effect_ids = {item.effect_id for item in self.semantic_ir.effects}
-        reject_if(
-            {item.effect_id for item in self.risk_decisions} != effect_ids or {item.effect_id for item
-            in self.policy_traces} != effect_ids or {item.effect_id for item in self.effect_previews} != effect_ids,
-            TaskSemanticIRError("semantic authority 未逐 effect 覆盖。"),
-        )
-        for item in (*self.risk_decisions, *self.policy_traces, *self.effect_previews):
+        reject_if({item.effect_id for item in self.risk_decisions} != effect_ids or {str(item.get('effect_id') or '')
+            for item in self.effect_previews} != effect_ids, TaskSemanticIRError("semantic authority 未逐 effect 覆盖。"))
+        for item in self.risk_decisions:
             item.validate()
-
-
-def local_risk_policy_from_dict(payload: Mapping[str, Any]) -> LocalRiskPolicyConfig:
-    reject_if(
-        not isinstance(payload, Mapping) or set(payload) != {'protocol_version', 'policy_id', 'version',
-        'confirmation_effect_kinds', 'overrides'},
-        TaskSemanticIRError("风险策略字段不匹配。"),
-    )
-    kinds = payload.get("confirmation_effect_kinds")
-    overrides = payload.get("overrides")
-    reject_if(not isinstance(kinds, list) or not isinstance(overrides, list), TaskSemanticIRError("风险策略集合必须是数组。"))
-    parsed: list[tuple[str, str]] = []
-    for item in overrides:
-        reject_if(not isinstance(item, Mapping) or set(item) != {'effect_id', 'policy'}, TaskSemanticIRError("风险策略 override 字段无效。"))
-        parsed.append((str(item["effect_id"]), str(item["policy"])))
-    config = LocalRiskPolicyConfig(protocol_version=str(payload['protocol_version']),
-        policy_id=str(payload['policy_id']), version=payload['version'],
-        confirmation_effect_kinds=frozenset((str(item) for item in kinds)), overrides=tuple(parsed))
-    config.validate()
-    return config
+        reject_if(any((set(item) != {'task_id', 'device_id', 'revision', 'effect_id', 'effect_kind', 'targets',
+            'payloads', 'policy', 'policy_id', 'policy_version', 'expected_result_texts', 'protocol_version'}
+            or item.get('protocol_version') != EFFECT_PREVIEW_PROTOCOL or item.get('policy') not in RISK_POLICIES
+            or item.get('policy_id') != 'default_low_friction' or item.get('policy_version') != 2
+            for item in self.effect_previews)), TaskSemanticIRError("effect preview 元数据无效。"))
 
 
 def _source_span(raw_goal: str, value: Any) -> SourceSpan | None:
@@ -612,8 +424,7 @@ def _surface_for_subgoal(subgoal: Any, surfaces: tuple[SurfaceRef, ...]) -> str:
     return apps[0] if len(apps) == 1 else surfaces[0].surface_id
 
 
-def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyConfig |
-    None=None) -> SemanticCompilationReport:
+def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[RiskDecision, ...]]:
     task_id = str(getattr(graph, "task_id", "")).strip()
     device_id = str(getattr(graph, "device_id", "")).strip()
     revision = getattr(graph, "revision", 0)
@@ -676,7 +487,6 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
 
     runtime_subgoals = {str(getattr(item, "subgoal_id", "")): item for item in subgoals}
     effects: list[EffectIntent] = []
-    warnings: list[str] = []
     for (index, risk) in enumerate(tuple(getattr(graph, 'risk_actions', ()) or ()), 1):
         runtime_id = str(getattr(risk, "risk_id", "") or "")
         kind = str(getattr(risk, "effect_kind", "") or "generic_effect")
@@ -691,15 +501,9 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
             ('target',)))
         payloads = _entity_refs(entity_tuple, tuple(getattr(risk, 'payload_roles',
             ()) or ()) or _PAYLOAD_ROLES.get(kind, ('input_text', 'value')))
-        if not targets:
-            warnings.append(f"effect_{runtime_id}:missing_typed_target")
         effects.append(EffectIntent(effect_id, kind, targets, payloads, source_ids, expected,
             {'runtime_effect_id': runtime_id, 'planner_declared_typed_effect': bool(getattr(risk, 'effect_kind', ''))}))
     effect_tuple = tuple(effects)
-    bindings = tuple((CriticalBinding(f'binding_{effect.effect_id}_{kind}_{index}', effect.effect_id, f'effect_{
-        kind}_equals', ref) for effect in effect_tuple for kind, refs in (('target', effect.target_refs), ('payload',
-        effect.payload_refs)) for index, ref in enumerate(refs, 1)))
-
     constraints: list[ConstraintIntent] = []
     exact_ids: list[str] = []
     for entity in entity_tuple:
@@ -749,7 +553,6 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
             effect_refs.setdefault(subgoal_id, []).append(effect.effect_id)
     surfaces_tuple = tuple(surfaces)
     desired: list[DesiredState] = []
-    evidence: list[EvidenceRequirement] = []
     desired_refs: dict[str, list[str]] = {}
 
     def add_state(description: str, owner: str, surface: str) -> None:
@@ -759,18 +562,15 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
             str) and item.value and (item.value.casefold() in description.casefold()) and _EDITABLE.search(description)]
         if len(active_effects) == 1:
             receipt_only = bool(re.search(r"动作已执行|操作已执行|效果已触发|action executed|effect applied", description, re.I))
-            specs = [(active_effects[0], 'effect.applied' if receipt_only else 'effect.result_visible', True,
-                ('effect_receipt',) if receipt_only else ('visual_claim', 'effect_receipt'))]
+            specs = [(active_effects[0], 'effect.applied' if receipt_only else 'effect.result_visible', True)]
         elif input_matches:
-            specs = [(item.entity_id, "input.value_equals", item.value, ("visual_claim",)) for item in input_matches]
+            specs = [(item.entity_id, "input.value_equals", item.value) for item in input_matches]
         else:
-            specs = [(surface, 'observation.matches_description', description, ('visual_claim',
-                'controller_transition'))]
-        for (subject, predicate, value, sources) in specs:
+            specs = [(surface, 'observation.matches_description', description)]
+        for (subject, predicate, value) in specs:
             state_id = f"state_{len(desired) + 1}"
             desired.append(DesiredState(state_id, subject, predicate, value, owner))
             desired_refs.setdefault(owner, []).append(state_id)
-            evidence.append(EvidenceRequirement(f"evidence_{len(evidence) + 1}", state_id, sources))
 
     semantic_subgoals: list[SemanticSubgoal] = []
     for subgoal in subgoals:
@@ -844,39 +644,32 @@ def compile_runtime_graph_semantics(graph: Any, *, risk_policy: LocalRiskPolicyC
             constraint_id)) if item.subgoal_id == owner else item for item in semantic_subgoals]
 
     semantic_ir = TaskSemanticIR(task_id, device_id, revision, raw_goal, surfaces_tuple, entity_tuple, effect_tuple,
-        bindings, tuple(constraints), tuple(desired), tuple(evidence), tuple(semantic_subgoals), tuple(typed_fields))
+        tuple(constraints), tuple(desired), tuple(semantic_subgoals), tuple(typed_fields))
     semantic_ir.validate()
-    policy = risk_policy or LocalRiskPolicyConfig()
-    decisions = tuple(policy.decide(effect) for effect in effect_tuple)
-    report = SemanticCompilationReport(semantic_ir, policy, decisions,
-        (f'runtime_graph_digest:{_runtime_graph_digest(graph)}', *warnings))
-    report.validate()
-    return report
+    return semantic_ir, tuple(map(decide_effect_risk, effect_tuple))
 
 
-def compile_formal_semantic_authority(graph: Any, *, risk_policy: LocalRiskPolicyConfig |
-    None=None) -> SemanticRiskAuthorityReport:
+def compile_formal_semantic_authority(graph: Any) -> SemanticRiskAuthorityReport:
     reject_if(
         any((not str(getattr(item, 'effect_kind', '') or '') for item in getattr(graph, 'risk_actions', ()) or ())),
         TaskSemanticIRError("正式语义权威只接受由 typed effect_intents 创建的风险条目。"),
     )
-    compilation = compile_runtime_graph_semantics(graph, risk_policy=risk_policy)
-    decisions = {item.effect_id: item for item in compilation.risk_decisions}
-    entities = {item.entity_id: item for item in compilation.semantic_ir.entities}
-    traces = tuple((RiskPolicyTrace(effect.effect_id, effect.kind, decisions[effect.effect_id].policy,
-        effect.kind != 'generic_effect', 'typed_effect_local_policy') for effect in compilation.semantic_ir.effects))
-
-    def preview(ref: str) -> EffectEntityPreview:
+    semantic_ir, risk_decisions = _compile_runtime_graph_semantics(graph)
+    decisions = {item.effect_id: item for item in risk_decisions}
+    entities = {item.entity_id: item for item in semantic_ir.entities}
+    def preview(ref: str) -> dict[str, Any]:
         entity = entities[ref]
-        return EffectEntityPreview(ref, entity.role, entity.entity_type, entity.value)
+        return {'entity_ref': ref, 'role': entity.role, 'entity_type': entity.entity_type, 'value': entity.value}
 
-    previews = tuple((EffectPreview(compilation.semantic_ir.task_id, compilation.semantic_ir.device_id,
-        compilation.semantic_ir.revision, effect.effect_id, effect.kind, tuple(map(preview, effect.target_refs)),
-        tuple(map(preview, effect.payload_refs)), decisions[effect.effect_id].policy,
-        decisions[effect.effect_id].policy_id, decisions[effect.effect_id].policy_version,
-        effect.expected_result_texts) for effect in compilation.semantic_ir.effects))
-    report = SemanticRiskAuthorityReport(compilation.semantic_ir, compilation.risk_policy, compilation.risk_decisions,
-        traces, previews, _runtime_graph_digest(graph))
+    previews = tuple(({'task_id': semantic_ir.task_id, 'device_id': semantic_ir.device_id,
+        'revision': semantic_ir.revision, 'effect_id': effect.effect_id, 'effect_kind': effect.kind,
+        'targets': list(map(preview, effect.target_refs)), 'payloads': list(map(preview, effect.payload_refs)),
+        'policy': decisions[effect.effect_id].policy, 'policy_id': decisions[effect.effect_id].policy_id,
+        'policy_version': decisions[effect.effect_id].policy_version,
+        'expected_result_texts': list(effect.expected_result_texts), 'protocol_version': EFFECT_PREVIEW_PROTOCOL}
+        for effect in semantic_ir.effects))
+    report = SemanticRiskAuthorityReport(semantic_ir, _risk_policy_wire(), risk_decisions, previews,
+        _runtime_graph_digest(graph))
     report.validate()
     return report
 
@@ -891,8 +684,7 @@ def apply_formal_semantic_risk_policy(graph: Any, authority: SemanticRiskAuthori
         risk_id = str(getattr(risk, "risk_id", ""))
         decision = decisions.get(risk_id)
         reject_if(decision is None, TaskSemanticIRError(f"正式风险权威遗漏 runtime effect：{risk_id}"))
-        projected.append(replace(risk, confirmation_required=decision.policy == CONFIRMATION_REQUIRED,
-            risk_level='high' if decision.policy == CONFIRMATION_REQUIRED else 'low'))
+        projected.append(replace(risk, confirmation_required=decision.policy == CONFIRMATION_REQUIRED))
     active_id = str(getattr(graph, "active_subgoal_id", "") or "")
     active = next((item for item in getattr(graph, 'subgoals', ()) or () if getattr(item, 'subgoal_id',
         '') == active_id), None)

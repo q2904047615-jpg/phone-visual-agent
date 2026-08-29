@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import DataclassWire, NormalizedBounds, NormalizedPoint, dataclass_wire, reject_if
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 import math
 from typing import Any
 
@@ -44,6 +44,7 @@ MIN_DRAG_DISTANCE = 0.08
 MAX_DRAG_DISTANCE = 0.90
 DRAG_DURATION_SECONDS = 0.8
 MIN_DRAG_RESULT_DISPLACEMENT = 0.04
+CONTROLLER_INPUT_PREEDIT_PENDING = "input_transition=preedit_pending"
 
 
 class UniversalActionError(RuntimeError):
@@ -51,17 +52,17 @@ class UniversalActionError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class LocalPointGrounding:
+class LocalPointGrounding(DataclassWire):
     """Stable local evidence refining one already-selected target point."""
 
     source: str
     scene_fingerprint: str
     element_id: str
     label: str
-    model_bounds: tuple[float, float, float, float]
-    proposed_point: tuple[float, float]
-    grounded_bounds: tuple[float, float, float, float]
-    grounded_point: tuple[float, float]
+    model_bounds: NormalizedBounds
+    proposed_point: NormalizedPoint
+    grounded_bounds: NormalizedBounds
+    grounded_point: NormalizedPoint
     matched_frames: int
     inspected_frames: int
 
@@ -111,21 +112,14 @@ class LocalPointGrounding:
         vertical_gap = max(0.0, grounded_top - model_bottom, model_top - grounded_bottom)
         reject_if(math.hypot(horizontal_gap, vertical_gap) > MAX_LOCAL_GROUNDING_BOX_GAP, UniversalActionError("本地文字框与模型目标框不属于同一邻近区域。"))
 
-    def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        for key in ('model_bounds', 'proposed_point', 'grounded_bounds', 'grounded_point'):
-            value[key] = list(value[key])
-        return value
-
-
 @dataclass(frozen=True)
 class ResolvedSemanticAction:
     """One device-independent action resolved from one fresh scene."""
 
     node_id: str
     kind: str
-    normalized_point: tuple[float, float] | None = None
-    normalized_end_point: tuple[float, float] | None = None
+    normalized_point: NormalizedPoint | None = None
+    normalized_end_point: NormalizedPoint | None = None
     text: str | None = None
     input_fragment: str | None = None
     input_method: str | None = None
@@ -143,18 +137,14 @@ class ResolvedSemanticAction:
     expected_effect: dict[str, Any] = field(default_factory=dict)
     formal_candidate_id: str = ""
     formal_transition: dict[str, Any] = field(default_factory=dict)
-    proposed_normalized_point: tuple[float, float] | None = None
+    proposed_normalized_point: NormalizedPoint | None = None
     point_grounding: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        for key in ('normalized_point', 'normalized_end_point', 'proposed_normalized_point'):
-            if value[key] is not None:
-                value[key] = list(value[key])
-            elif key == 'proposed_normalized_point':
+        value = dataclass_wire(self)
+        for key in ('proposed_normalized_point', 'point_grounding'):
+            if value[key] is None:
                 value.pop(key)
-        if self.point_grounding is None:
-            value.pop("point_grounding", None)
         return value
 
 
@@ -254,16 +244,10 @@ class UniversalActionController:
                 and (input_step.current_text == '') and is_direct_latin_segment(input_step.segment)):
                 expected_effect['element_state'] = {'meaning': element.meaning, 'states': expected_states}
             reject_if(expected_effect.get('element_state') != {'meaning': element.meaning, 'states': expected_states}, UniversalActionError('精确文字输入的后置条件没有绑定下一确定性分段。'))
-            eligible_inputs = tuple((candidate for candidate in scene.elements if candidate.role == 'input'
-                and float(candidate.confidence) >= self.min_confidence and (candidate.states.get('visible')
-                is not False)
-                and (candidate.element_id == element.element_id if formal_candidate_id else candidate.states.get(
-                'goal_relevant') is True) and (candidate.states.get('focused') is True)
-                and (candidate.states.get('keyboard_layout') == 'qwerty')
-                and (candidate.states.get('keyboard_input_mode') == input_step.required_mode)
-                and (not input_step.required_case_mode or candidate.states.get('keyboard_case_mode') ==
-                input_step.required_case_mode) and (not candidate.states.get('ime_preedit_text'))))
-            reject_if(len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id, UniversalActionError('精确文字输入要求当前画面只有一个符合安全条件的目标输入框。'))
+            self._require_unique_input(scene, element, formal=bool(formal_candidate_id), required_states={
+                'keyboard_layout': 'qwerty', 'keyboard_input_mode': input_step.required_mode,
+                **({'keyboard_case_mode': input_step.required_case_mode} if input_step.required_case_mode else {}),
+            }, require_empty_preedit=True, error='精确文字输入要求当前画面只有一个符合安全条件的目标输入框。')
             return resolved('input_verified_text', normalized_point=element.center, text=text,
                 input_fragment=input_step.segment, input_method=input_step.kind, input_pinyin=input_step.pinyin or None,
                 prior_input_value=input_step.current_text, expected_input_value=input_step.expected_value,
@@ -286,15 +270,8 @@ class UniversalActionController:
                 observed_preedit) + extra_delete_units
             reject_if(not 1 <= delete_count <= 100, UniversalActionError("清空文字的已验证字符数必须在1～100之间。"))
             reject_if(not formal_candidate_id and element.states.get('goal_relevant') is not True, UniversalActionError("清空文字目标必须由当前画面证明与当前目标相关。"))
-            eligible_inputs = tuple((candidate for candidate in scene.elements if candidate.role == 'input'
-                and float(candidate.confidence) >= self.min_confidence and (candidate.states.get('visible')
-                is not False)
-                and (candidate.element_id == element.element_id if formal_candidate_id else candidate.states.get(
-                'goal_relevant') is True) and (candidate.states.get('focused') is True)
-                and isinstance(candidate.states.get('value'), str)
-                and isinstance(candidate.states.get('ime_preedit_text', ''),
-                str) and (bool(candidate.states.get('value')) or bool(candidate.states.get('ime_preedit_text')))))
-            reject_if(len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id, UniversalActionError('清空文字要求当前画面只有一个符合安全条件的非空目标输入框。'))
+            self._require_unique_input(scene, element, formal=bool(formal_candidate_id), require_text=True,
+                error='清空文字要求当前画面只有一个符合安全条件的非空目标输入框。')
             expected_state = expected_effect.get("element_state")
             reject_if(not isinstance(expected_state, dict), UniversalActionError("清空文字必须声明输入框空值后置条件。"))
             reject_if(
@@ -335,8 +312,7 @@ class UniversalActionController:
                 target_element_id=source.element_id, destination_element_id=destination.element_id,
                 hold_seconds=DRAG_DURATION_SECONDS, path_distance=distance)
         if action.action == 'reveal_system_navigation':
-            unexpected = set(action.params) - {'expected_effect', 'formal_candidate_id', 'formal_report_digest',
-                'formal_transition'}
+            unexpected = set(action.params) - {'expected_effect', 'formal_candidate_id', 'formal_transition'}
             reject_if(unexpected, UniversalActionError('系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。'))
             self._require_hidden_immersive_navigation(scene)
             reject_if(expected_effect != REVEAL_SYSTEM_NAVIGATION_EFFECT, UniversalActionError('系统导航栏唤出动作必须精确声明导航栏可见后置条件。'))
@@ -358,6 +334,22 @@ class UniversalActionController:
         if action.action in {'back', 'home', 'open_recent_apps', 'wait_for_change'}:
             return resolved()
         raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
+
+    def _require_unique_input(self, scene: UIScene, target: UIElement, *, formal: bool,
+        required_states: Mapping[str, Any] | None=None, require_empty_preedit: bool=False,
+        require_text: bool=False, error: str) -> None:
+        required_states = required_states or {}
+        candidates = tuple(element for element in scene.elements if element.role == 'input'
+            and float(element.confidence) >= self.min_confidence and element.states.get('visible') is not False
+            and (element.element_id == target.element_id if formal else element.states.get('goal_relevant') is True)
+            and element.states.get('focused') is True
+            and all(element.states.get(key) == value for key, value in required_states.items())
+            and (not require_empty_preedit or not element.states.get('ime_preedit_text'))
+            and (not require_text or (isinstance(element.states.get('value'), str)
+                and isinstance(element.states.get('ime_preedit_text', ''), str)
+                and bool(element.states.get('value') or element.states.get('ime_preedit_text')))))
+        reject_if(len(candidates) != 1 or candidates[0].element_id != target.element_id,
+            UniversalActionError(error))
 
     def _validate_local_text_clear(self, element: UIElement, scene: UIScene, *, formal: bool=False) -> None:
         reject_if(
@@ -442,43 +434,26 @@ class UniversalActionController:
                 UniversalActionError('换行键没有绑定 multiline newline 与精确输入结果。'),
             )
             reject_if(input_element.states.get('input_multiline') is not True, UniversalActionError("当前输入框没有本地多行字段凭据。"))
-        elif element.meaning == 'switch_keyboard_layout':
-            current = states.get("current_layout")
-            target = states.get("target_layout")
-            reject_if(
-                states.get('keyboard_layout_switch') is not True
-                or input_element.states.get('keyboard_layout') != current or current not in {'qwerty', 'numeric',
-                'symbol'} or (target not in {'qwerty', 'numeric',
-                'symbol'}) or (current == target) or (expected_states != {'value': prior_value,
-                'keyboard_layout': target}),
-                UniversalActionError("键盘布局切换方向或后置条件无效。"),
-            )
-        elif element.meaning == 'switch_keyboard_case':
-            current = states.get("current_mode")
-            target = states.get("target_mode")
-            reject_if(
-                states.get('keyboard_case_switch') is not True
-                or input_element.states.get('keyboard_layout') != 'qwerty'
-                or input_element.states.get('keyboard_input_mode') != 'direct_latin'
-                or (input_element.states.get('keyboard_case_mode') != current) or (current not in {'lower',
-                'upper'}) or (target not in {'lower', 'upper'}) or (current == target)
-                or (expected_states != {'value': prior_value, 'keyboard_case_mode': target}),
-                UniversalActionError("键盘大小写切换方向或后置条件无效。"),
-            )
-        elif element.meaning == 'switch_keyboard_input_mode':
-            current = states.get("current_mode")
-            target = states.get("target_mode")
-            reject_if(
-                states.get('keyboard_input_mode_switch') is not True
-                or input_element.states.get('keyboard_layout') != 'qwerty'
-                or input_element.states.get('keyboard_input_mode') != current or (current not in {'direct_latin',
-                'chinese_pinyin'}) or (target not in {'direct_latin',
-                'chinese_pinyin'}) or (current == target) or (expected_states != {'value': prior_value,
-                'keyboard_input_mode': target}),
-                UniversalActionError("键盘输入模式切换方向或后置条件无效。"),
-            )
+        elif element.meaning in {'switch_keyboard_layout', 'switch_keyboard_case', 'switch_keyboard_input_mode'}:
+            specs = {
+                'switch_keyboard_layout': ('keyboard_layout_switch', 'current_layout', 'target_layout',
+                    'keyboard_layout', {'qwerty', 'numeric', 'symbol'}, {}, '键盘布局切换方向或后置条件无效。'),
+                'switch_keyboard_case': ('keyboard_case_switch', 'current_mode', 'target_mode',
+                    'keyboard_case_mode', {'lower', 'upper'}, {'keyboard_layout': 'qwerty',
+                    'keyboard_input_mode': 'direct_latin'}, '键盘大小写切换方向或后置条件无效。'),
+                'switch_keyboard_input_mode': ('keyboard_input_mode_switch', 'current_mode', 'target_mode',
+                    'keyboard_input_mode', {'direct_latin', 'chinese_pinyin'}, {'keyboard_layout': 'qwerty'},
+                    '键盘输入模式切换方向或后置条件无效。'),
+            }
+            flag, current_key, target_key, state_key, modes, fixed_states, message = specs[element.meaning]
+            current, target = states.get(current_key), states.get(target_key)
+            required_input_states = {**fixed_states, state_key: current}
+            reject_if(states.get(flag) is not True or current not in modes or target not in modes
+                or current == target or any(input_element.states.get(key) != value for key,
+                value in required_input_states.items()) or expected_states != {'value': prior_value,
+                state_key: target}, UniversalActionError(message))
 
-    def verify_after_action(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene) -> None:
+    def verify_after_action(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene) -> tuple[str, ...]:
         before.validate()
         after.validate()
         if resolved.kind != 'wait_for_change':
@@ -501,8 +476,9 @@ class UniversalActionController:
         reject_if(expected_app and after.foreground_app_id != expected_app, UniversalActionError(f'动作后前台 App 不符合预期：{after.foreground_app_id} != {expected_app}'))
         expected_screen = str(expected.get("screen_id") or "").strip()
         reject_if(expected_screen and after.screen_id != expected_screen, UniversalActionError(f'动作后页面不符合预期：{after.screen_id} != {expected_screen}'))
+        input_preedit_pending = False
         if resolved.kind in {'input_verified_text', 'press_enter', 'clear_verified_text'}:
-            self._verify_exact_input_value(resolved, before, after)
+            input_preedit_pending = self._verify_exact_input_value(resolved, before, after)
         if expected.get('element_absent') is not None:
             self._verify_expected_element_absent(resolved, before, after)
         if resolved.formal_candidate_id:
@@ -538,6 +514,24 @@ class UniversalActionController:
             self._verify_drag_result(resolved, before, after)
         if resolved.kind == 'reveal_system_navigation':
             self._verify_revealed_system_navigation(resolved, before, after)
+        evidence: list[str] = []
+        if any((expected.get(key) is True for key in ('scene_changed', 'content_changed',
+            'current_video_changed'))):
+            evidence.append(f'控制器确认动作前后场景指纹发生变化：{before.fingerprint} -> {after.fingerprint}')
+        if expected_app:
+            evidence.append(f"控制器确认前台 App 为 {expected_app}")
+        if expected_screen:
+            evidence.append(f"控制器确认页面为 {expected_screen}")
+        if element_state is not None:
+            evidence.append(CONTROLLER_INPUT_PREEDIT_PENDING if input_preedit_pending else
+                f"控制器确认目标元素状态：{str(element_state.get('meaning') or '').strip()} "
+                f"{dict(element_state.get('states') or {})}")
+        element_absent = expected.get("element_absent")
+        if isinstance(element_absent, Mapping):
+            identity = str(element_absent.get('label') or '').strip() or str(element_absent.get('meaning')
+                or '').strip() or str(element_absent.get('element_id') or '').strip()
+            evidence.append(f"控制器确认目标元素已消失：{identity}")
+        return tuple(evidence)
 
     @staticmethod
     def _require_hidden_immersive_navigation(scene: UIScene) -> Any:
@@ -552,7 +546,7 @@ class UniversalActionController:
         reject_if(after.system_ui.navigation_bar_visible is not True, UniversalActionError("动作后缺少结构化导航栏可见证据。"))
 
     @staticmethod
-    def _validate_gesture_point(point: tuple[float, float], *, label: str) -> None:
+    def _validate_gesture_point(point: NormalizedPoint, *, label: str) -> None:
         x, y = point
         reject_if(
             not (GESTURE_EDGE_MARGIN <= x <= 1.0 - GESTURE_EDGE_MARGIN
@@ -568,8 +562,7 @@ class UniversalActionController:
         reject_if(dict(absence) != expected, UniversalActionError('元素绑定滑动的消失目标与当前可信元素不一致。'))
 
     @classmethod
-    def _targeted_swipe_path(cls, element: UIElement, direction: str) -> tuple[tuple[float, float], tuple[float,
-        float]]:
+    def _targeted_swipe_path(cls, element: UIElement, direction: str) -> tuple[NormalizedPoint, NormalizedPoint]:
         left, top, right, bottom = element.bounds
         width = right - left
         height = bottom - top
@@ -603,13 +596,7 @@ class UniversalActionController:
 
     @staticmethod
     def _element_identity_surface_is_continuous(before: UIScene, after: UIScene) -> bool:
-        """Return whether observation-local element identity may carry over.
-
-        ``element_id`` is minted independently for every observation.  It can
-        therefore help identify a surviving element only while the typed
-        surface itself is continuous; it is never a global identity across a
-        navigation transition.
-        """
+        """Carry an observation-local element identity only across a continuous typed surface."""
 
         if scene_surface_kind(before) != scene_surface_kind(after):
             return False
@@ -625,8 +612,7 @@ class UniversalActionController:
         return True
 
     @staticmethod
-    def _element_regions_stably_overlap(before_bounds: tuple[float, float, float, float], after_bounds: tuple[float,
-        float, float, float]) -> bool:
+    def _regions_stably_overlap(before_bounds: NormalizedBounds, after_bounds: NormalizedBounds) -> bool:
         left = max(before_bounds[0], after_bounds[0])
         top = max(before_bounds[1], after_bounds[1])
         right = min(before_bounds[2], after_bounds[2])
@@ -653,7 +639,7 @@ class UniversalActionController:
             return True
         if not surface_is_continuous:
             return False
-        spatially_continuous = cls._element_regions_stably_overlap(before_target.bounds, after_element.bounds)
+        spatially_continuous = cls._regions_stably_overlap(before_target.bounds, after_element.bounds)
         return spatially_continuous and (after_element.element_id == before_target.element_id or label_matches)
 
     def _verify_expected_element_absent(self, resolved: ResolvedSemanticAction, before: UIScene,
@@ -900,7 +886,7 @@ class UniversalActionController:
         self._validate_gesture_point(target.center, label="长按落点")
         reject_if(math.dist(resolved.normalized_point, target.center) > 1e-06, UniversalActionError("长按落点与动作前目标中心不一致。"))
 
-    def _verify_exact_input_value(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene) -> None:
+    def _verify_exact_input_value(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene) -> bool:
         expected = resolved.expected_input_value if resolved.kind in {'input_verified_text',
             'press_enter'} else resolved.text
         target_id = str(resolved.input_element_id or resolved.target_element_id or '').strip()
@@ -945,28 +931,25 @@ class UniversalActionController:
                 else:
                     candidates = tuple((element for element in after.elements if element.role == 'input'
                         and float(element.confidence) >= self.min_confidence and (element.states.get('visible')
-                        is not False) and self._input_regions_stably_overlap(before_input.bounds, element.bounds)))
+                        is not False) and self._regions_stably_overlap(before_input.bounds, element.bounds)))
         reject_if(len(candidates) != 1, UniversalActionError("动作后无法唯一绑定原目标输入框。"))
         states = candidates[0].states
         reject_if('value' not in states or not isinstance(states['value'], str), UniversalActionError("动作后缺少输入框 states.value 精确文字证据。"))
         actual = states["value"]
+        preedit_pending = False
         if resolved.input_method == 'chinese_pinyin':
             reject_if(actual != resolved.prior_input_value, UniversalActionError('拼音键入后应用输入值在候选确认前已意外变化。'))
             reject_if(states.get('ime_preedit_text') != resolved.input_pinyin, UniversalActionError("动作后缺少逐字一致的拼音组合证据。"))
             reject_if(states.get('ime_exact_candidate_text') != resolved.input_fragment, UniversalActionError("动作后缺少唯一逐字一致的中文候选。"))
+            preedit_pending = True
         elif (
             resolved.kind == "input_verified_text"
             and resolved.input_method == "direct_latin"
             and actual != expected
         ):
-            # Some system keyboards keep an exact Latin key sequence in an
-            # IME composition buffer until its visible identical candidate is
-            # selected.  This is verified progress, not a committed App value.
-            # Admit it only when the same typed field remains empty at the
-            # prior value and one locally audited candidate proves the exact
-            # fragment and resulting value.  The next physical action must
-            # still select that candidate and verify the committed App value.
+            # Exact Latin preedit is progress only when one local candidate binds the same typed field and value.
             reject_if(not self._is_exact_direct_latin_preedit_transition(resolved, after, candidates[0]), UniversalActionError(f'动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。'))
+            preedit_pending = True
         elif actual != expected:
             raise UniversalActionError(f'动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。')
         if resolved.kind == 'clear_verified_text' and before_input.states.get('ime_preedit_text'):
@@ -974,6 +957,7 @@ class UniversalActionController:
             reject_if(states.get('focused') is not True, UniversalActionError("清空动作后原typed输入框不再聚焦。"))
         after_input = candidates[0]
         reject_if(not self._input_scene_identity_is_stable(before, after, before_input, after_input), UniversalActionError("输入动作后 App 或页面身份发生变化。"))
+        return preedit_pending
 
     def _is_exact_direct_latin_preedit_transition(self, resolved: ResolvedSemanticAction, after: UIScene,
         after_input: UIElement) -> bool:
@@ -1025,7 +1009,7 @@ class UniversalActionController:
             after_family = input_screen_identity_family(after.screen_id)
             if (not before_family or before_family != after_family) and (not typed_field_identity):
                 return False
-        if not (cls._input_regions_stably_overlap(before_input.bounds, after_input.bounds) or typed_field_identity):
+        if not (cls._regions_stably_overlap(before_input.bounds, after_input.bounds) or typed_field_identity):
             return False
         if before_states.get('focused') is not True or after_states.get('focused') is not True:
             return False
@@ -1056,19 +1040,6 @@ class UniversalActionController:
             == after.camera_alignment.phone_content_rotation
         )
 
-    @staticmethod
-    def _input_regions_stably_overlap(before_bounds: tuple[float, float, float, float], after_bounds: tuple[float,
-        float, float, float]) -> bool:
-        left = max(before_bounds[0], after_bounds[0])
-        top = max(before_bounds[1], after_bounds[1])
-        right = min(before_bounds[2], after_bounds[2])
-        bottom = min(before_bounds[3], after_bounds[3])
-        intersection = max(0.0, right - left) * max(0.0, bottom - top)
-        before_area = max(0.0, before_bounds[2] - before_bounds[0]) * max(0.0, before_bounds[3] - before_bounds[1])
-        after_area = max(0.0, after_bounds[2] - after_bounds[0]) * max(0.0, after_bounds[3] - after_bounds[1])
-        smaller = min(before_area, after_area)
-        return intersection > 0 and smaller > 0 and intersection / smaller >= 0.60
-
     @classmethod
     def scenes_semantically_equivalent(cls, before: UIScene, after: UIScene) -> bool:
         """Ignore camera noise and model box jitter when comparing scenes."""
@@ -1086,9 +1057,7 @@ class UniversalActionController:
                     (
                         element.role.casefold(),
                         element.label.casefold(),
-                        # Visible text plus role/states is stronger cross-frame
-                        # identity than model-authored meaning wording.  For an
-                        # unlabeled icon we still need meaning to identify it.
+                        # Prefer visible text plus role/state; unlabeled icons still need meaning.
                         (
                             ""
                             if element.label.strip()
@@ -1105,61 +1074,6 @@ class UniversalActionController:
         before.validate()
         after.validate()
         return signature(before) == signature(after)
-
-    def transition_evidence_from_verified_action(self, resolved: ResolvedSemanticAction, before: UIScene,
-        after: UIScene) -> tuple[str, ...]:
-        """Describe a transition already accepted by ``verify_after_action``.
-
-        These facts describe only the verified transition. DeepSeek remains
-        the sole author of task completion.  This method deliberately does
-        not verify again; the physical adapter calls the verifier exactly once
-        before asking for this evidence projection.
-        """
-
-        expected = resolved.expected_effect
-        evidence: list[str] = []
-
-        scene_change_requested = any((expected.get(key) is True for key in ('scene_changed', 'content_changed',
-            'current_video_changed')))
-        if scene_change_requested:
-            if not before.fingerprint or not after.fingerprint:
-                return ()
-            if before.fingerprint == after.fingerprint:
-                return ()
-            evidence.append(f'控制器确认动作前后场景指纹发生变化：{before.fingerprint} -> {after.fingerprint}')
-
-        expected_app = str(expected.get("app_id") or "").strip()
-        if expected_app:
-            if after.foreground_app_id != expected_app:
-                return ()
-            evidence.append(f"控制器确认前台 App 为 {expected_app}")
-
-        expected_screen = str(expected.get("screen_id") or "").strip()
-        if expected_screen:
-            if after.screen_id != expected_screen:
-                return ()
-            evidence.append(f"控制器确认页面为 {expected_screen}")
-
-        element_state = expected.get("element_state")
-        if element_state is not None:
-            if not isinstance(element_state, dict):
-                return ()
-            meaning = str(element_state.get("meaning") or "").strip()
-            states = dict(element_state.get("states") or {})
-            try:
-                element = after.resolve_unique(meaning=meaning, states=states, min_confidence=self.min_confidence)
-            except UISceneError:
-                return ()
-            evidence.append(f'控制器确认目标元素状态：{element.meaning} {element.states}')
-
-        element_absent = expected.get("element_absent")
-        if isinstance(element_absent, Mapping):
-            self._verify_expected_element_absent(resolved, before, after)
-            identity = str(element_absent.get('label') or '').strip() or str(element_absent.get('meaning')
-                or '').strip() or str(element_absent.get('element_id') or '').strip()
-            evidence.append(f"控制器确认目标元素已消失：{identity}")
-
-        return tuple(evidence)
 
     def _resolve_target(self, action: SemanticAction, scene: UIScene, *, prefix: str='',
         required_role: str | None=None) -> UIElement:
@@ -1192,7 +1106,7 @@ class UniversalActionController:
         local_point_grounding: LocalPointGrounding | None=None) -> ResolvedSemanticAction:
         reject_if(element.role == 'container', UniversalActionError("页面容器不是可点击控件，禁止执行点击。"))
         normalized_point = element.center
-        proposed_point: tuple[float, float] | None = None
+        proposed_point: NormalizedPoint | None = None
         grounding_payload: dict[str, Any] | None = None
         if local_point_grounding is not None:
             reject_if(scene is None, UniversalActionError("本地落点证据缺少当前场景绑定。"))

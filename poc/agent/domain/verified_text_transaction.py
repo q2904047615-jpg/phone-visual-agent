@@ -50,16 +50,6 @@ def next_keyboard_layout_towards(current_layout: Any, desired_layout: Any) -> st
     return KEYBOARD_LAYOUT_PATH[current_index + (1 if desired_index > current_index else -1)]
 
 
-def keyboard_layout_switch_advances(*, current_layout: Any, target_layout: Any, desired_layout: Any) -> bool:
-    """Accept a visible direct edge or the sole shortest-path next hop."""
-
-    if (current_layout not in KEYBOARD_LAYOUT_PATH or target_layout not in KEYBOARD_LAYOUT_PATH or desired_layout not
-        in KEYBOARD_LAYOUT_PATH or (current_layout == target_layout)):
-        return False
-    return bool(target_layout == desired_layout or target_layout == next_keyboard_layout_towards(current_layout,
-        desired_layout))
-
-
 def local_pinyin(text: str) -> str:
     reject_if(not _CHINESE_RE.fullmatch(text), VerifiedTextTransactionError("拼音分段必须全部为中文。"))
     try:
@@ -108,12 +98,7 @@ class VerifiedInputStep:
 
 
 def required_keyboard_input_mode_for_step(step: VerifiedInputStep) -> str | None:
-    """Return the one input mode required before executing ``step``.
-
-    Letters use direct Latin, Chinese uses pinyin, and complex symbols first
-    return to direct Latin before entering the symbol layout. Digits, spaces
-    and newline keys do not require a Chinese/English mode transition.
-    """
+    """Return the direct-Latin or Chinese-pinyin mode required before ``step``."""
 
     if step.kind in {'direct_latin', 'chinese_pinyin'}:
         return step.required_mode

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
+from agent.domain.validation import NormalizedPoint, reject_if
 import json
 import re
 import threading
@@ -25,11 +25,7 @@ POC_ROOT = Path(__file__).resolve().parents[2]
 WEB_OUTPUT_DIR = seller_gui.OUTPUT_DIR / "web"
 CONTROL_CONFIG_PATH = POC_ROOT / "controller_config.json"
 
-# A normal seller control window is portrait and tall enough to contain the
-# phone camera view plus its bottom controls.  Startup/error dialogs can share
-# the same title fragment, but are small landscape windows.  Keep controller
-# presence separate from camera readiness so callers never execute against a
-# blocking dialog that merely happens to be visible.
+# Controller presence and camera readiness stay separate because small dialogs share the seller title.
 MIN_CAMERA_CLIENT_WIDTH = 300
 MIN_CAMERA_CLIENT_HEIGHT = 500
 
@@ -42,12 +38,11 @@ def controller_client_has_camera(width: int, height: int) -> bool:
     return seller_gui.seller_layout_has_full_camera(width, height)
 
 
-def oriented_navigation_ratio(x_ratio: float, y_ratio: float, *, landscape: bool) -> tuple[float, float]:
+def oriented_navigation_ratio(x_ratio: float, y_ratio: float, *, landscape: bool) -> NormalizedPoint:
     """Map portrait Android navigation coordinates into the observed layout."""
 
     if landscape:
-        # The camera feed rotates counter-clockwise when the phone enters
-        # landscape: portrait (x, y) becomes landscape (y, 1 - x).
+        # Landscape camera rotation maps portrait (x, y) to (y, 1 - x).
         return y_ratio, 1.0 - x_ratio
     return x_ratio, y_ratio
 
@@ -114,16 +109,11 @@ QWERTY_ANCHOR_KEYS = ("q", "p", "a", "l", "z", "m", "backspace")
 
 def qwerty_keyboard_config_from_anchors(anchors: dict[str, Any], *, key_hold: float=0.18,
     inter_key_wait: float=0.12) -> dict[str, Any]:
-    """Build and validate a QWERTY profile from seven relative anchor points.
-
-    Anchor coordinates use the vision agent's 0..1000 coordinate space.  The
-    visual model identifies only the row endpoints and backspace; all letter
-    centers are then calculated locally and deterministically.
-    """
+    """Build deterministic QWERTY centers from seven validated 0..1000 anchor points."""
 
     reject_if(not isinstance(anchors, dict), WorkflowNotReady("动态拼音键盘缺少 anchors。"))
 
-    points: dict[str, tuple[float, float]] = {}
+    points: dict[str, NormalizedPoint] = {}
     for key in QWERTY_ANCHOR_KEYS:
         value = anchors.get(key)
         reject_if(
@@ -147,18 +137,11 @@ def qwerty_keyboard_config_from_anchors(anchors: dict[str, Any], *, key_hold: fl
     q_x, top_step, top_y = row("q", "p", 10)
     observed_a_x, _observed_middle_step, middle_y = row("a", "l", 9)
     observed_z_x, _observed_bottom_step, bottom_y = row("z", "m", 7)
-    # A complete audited keyboard can legitimately place its bottom row close
-    # to the lower edge of the normalized frame.  Keep a small center margin,
-    # while leaving row order and spacing as the authoritative geometry checks.
+    # Permit a low bottom row while keeping row order/spacing authoritative.
     reject_if(not 450.0 <= top_y < middle_y < bottom_y <= 980.0, WorkflowNotReady("动态拼音键盘行位置或上下顺序异常，拒绝执行。"))
     reject_if(not 35.0 <= middle_y - top_y <= 140.0, WorkflowNotReady("动态拼音键盘第一、二行间距异常。"))
     reject_if(not 35.0 <= bottom_y - middle_y <= 140.0, WorkflowNotReady("动态拼音键盘第二、三行间距异常。"))
-    # Vision models reliably locate the keyboard rows and the Q/P endpoints,
-    # but may report A/L and Z/M as the visible row bounds instead of the
-    # literal key centers.  Use those four anchors as coarse QWERTY evidence,
-    # then normalize the two indented rows from the measured Q..P key pitch.
-    # This keeps letter clicks deterministic without trusting imprecise
-    # per-letter visual coordinates.
+    # Normalize indented QWERTY rows from measured Q..P pitch instead of trusting imprecise key centers.
     reject_if(not q_x - top_step * 0.5 <= observed_a_x <= q_x + top_step * 2.0, WorkflowNotReady("动态拼音键盘第二行缩进异常。"))
     reject_if(not points['p'][0] - top_step * 2.0 <= points['l'][0] <= points['p'][0] + top_step * 0.5, WorkflowNotReady("动态拼音键盘第二行右端位置异常。"))
     reject_if(not q_x - top_step * 0.5 <= observed_z_x <= q_x + top_step * 3.0, WorkflowNotReady("动态拼音键盘第三行缩进异常。"))
@@ -193,9 +176,7 @@ class RobotController:
         self.stop_event = threading.Event()
         self._stop_state_lock = threading.Lock()
         self.operation_lock = threading.Lock()
-        # The browser MJPEG preview and the vision worker can otherwise call
-        # the seller window capture routine at the same time. On Windows that
-        # occasionally returns a transient, truncated client bitmap.
+        # Serialize preview/vision capture to avoid transient truncated Windows bitmaps.
         self.capture_lock = threading.RLock()
         self._last_click_receipt: dict[str, Any] | None = None
         self._last_long_press_receipt: dict[str, Any] | None = None
@@ -333,25 +314,36 @@ class RobotController:
         with seller_gui.temporarily_park_cursor_outside_camera(hwnd):
             return self._capture_phone(hwnd)
 
+    def _authorized_frame(self, action: str) -> tuple[int, Image.Image]:
+        hwnd, _title = seller_gui.find_window(self.title)
+        frame = self._capture_phone(hwnd)
+        self._consume_physical_execution(action, frame)
+        return hwnd, frame
+
+    @staticmethod
+    def _grid_pixel(frame: Image.Image, point: NormalizedPoint) -> tuple[int, int]:
+        return tuple(min(size - 1, max(0, int(round(value * (size - 1) / 1000))))
+            for value, size in zip(point, frame.size))
+
+    def _verified_click(self, x: int, y: int, *, action: str, label: str,
+        click_count: int=1) -> tuple[int, int]:
+        self._require_verified_action(action, label)
+        return self._vision_press_relative(x, y, action=action,
+            hold_seconds=float(load_controller_config()['tap_hold']), click_count=click_count)
+
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         """Tap a Qwen3-VL coordinate expressed on a 1000×1000 grid."""
-        self._require_verified_action("tap_semantic", "点击")
-        return self._vision_press_relative(x, y, action='tap_semantic',
-            hold_seconds=float(load_controller_config()['tap_hold']))
+        return self._verified_click(x, y, action='tap_semantic', label='点击')
 
     def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
         """Dismiss one observed overlay through its separately verified entry."""
 
-        self._require_verified_action("dismiss_overlay", "关闭弹层")
-        return self._vision_press_relative(x, y, action='dismiss_overlay',
-            hold_seconds=float(load_controller_config()['tap_hold']))
+        return self._verified_click(x, y, action='dismiss_overlay', label='关闭弹层')
 
     def vision_double_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         """Execute one canonical double-tap through seller click-count two."""
 
-        self._require_verified_action("double_tap", "双击")
-        return self._vision_press_relative(x, y, action='double_tap',
-            hold_seconds=float(load_controller_config()['tap_hold']), click_count=2)
+        return self._verified_click(x, y, action='double_tap', label='双击', click_count=2)
 
     def vision_long_press_relative(self, x: int, y: int, hold_seconds: float=0.8) -> tuple[int, int]:
         """Long-press one calibrated visual target without changing its point."""
@@ -360,14 +352,10 @@ class RobotController:
         self._last_long_press_receipt = None
         reject_if(not 0.5 <= float(hold_seconds) <= 2.0, ValueError("通用长按时间必须在0.5～2.0秒之间。"))
         reject_if(not (0 <= x <= 1000 and 0 <= y <= 1000), ValueError("视觉 Agent 坐标必须在0～1000之间。"))
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution("long_press", frame)
+        hwnd, frame = self._authorized_frame('long_press')
         from agent.infrastructure.tap_calibration import corrected_grid_point
 
-        corrected_x, corrected_y = corrected_grid_point(x, y, (frame.width, frame.height), self.calibration_path)
-        point = (min(frame.width - 1, max(0, int(round(corrected_x * (frame.width - 1) / 1000)))), min(frame.height - 1,
-            max(0, int(round(corrected_y * (frame.height - 1) / 1000)))))
+        point = self._grid_pixel(frame, corrected_grid_point(x, y, frame.size, self.calibration_path))
         self._checkpoint()
         receipt = seller_gui.long_press_client_point(hwnd, point[0], point[1], hold_seconds=float(hold_seconds))
         reject_if(not isinstance(receipt, dict), RuntimeError("控制端没有返回长按事件栅栏凭据。"))
@@ -401,20 +389,11 @@ class RobotController:
         values = (start_x, start_y, end_x, end_y)
         reject_if(any((not 0 <= value <= 1000 for value in values)), ValueError(f"{label}视觉坐标必须全部在0～1000之间。"))
         reject_if((start_x, start_y) == (end_x, end_y), ValueError(f"{label}起点和终点不能相同。"))
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution(action, frame)
+        hwnd, frame = self._authorized_frame(action)
         from agent.infrastructure.tap_calibration import corrected_grid_point
 
-        corrected_start = corrected_grid_point(start_x, start_y, (frame.width, frame.height), self.calibration_path)
-        corrected_end = corrected_grid_point(end_x, end_y, (frame.width, frame.height), self.calibration_path)
-
-        def to_pixel(point: tuple[float, float]) -> tuple[int, int]:
-            return (min(frame.width - 1, max(0, int(round(point[0] * (frame.width - 1) / 1000)))), min(frame.height - 1,
-                max(0, int(round(point[1] * (frame.height - 1) / 1000)))))
-
-        start = to_pixel(corrected_start)
-        end = to_pixel(corrected_end)
+        start, end = (self._grid_pixel(frame, corrected_grid_point(x, y, frame.size, self.calibration_path))
+            for x, y in ((start_x, start_y), (end_x, end_y)))
         reject_if(start == end, ValueError(f"标定后的{label}起点和终点重合。"))
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
@@ -425,18 +404,13 @@ class RobotController:
         """Reveal transient system navigation with one locally derived edge path."""
 
         self._require_verified_action('reveal_system_navigation', '系统边缘唤出导航栏')
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution('reveal_system_navigation', frame)
+        hwnd, frame = self._authorized_frame('reveal_system_navigation')
         from agent.infrastructure.tap_calibration import reveal_system_navigation_path
 
         evidence = reveal_system_navigation_path((frame.width, frame.height), self.calibration_path)
         corrected = evidence["corrected_grid"]
 
-        def to_pixel(point: list[int]) -> tuple[int, int]:
-            return (int(round(point[0] * (frame.width - 1) / 1000)), int(round(point[1] * (frame.height - 1) / 1000)))
-
-        start, end = (to_pixel(point) for point in corrected)
+        start, end = (self._grid_pixel(frame, tuple(point)) for point in corrected)
         reject_if(start == end, ValueError("系统边缘轨迹纠偏后起终点重合。"))
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
@@ -447,21 +421,13 @@ class RobotController:
         click_count: int=1) -> tuple[int, int]:
         reject_if(not (0 <= x <= 1000 and 0 <= y <= 1000), ValueError("视觉 Agent 坐标必须在0～1000之间。"))
         self._last_click_receipt = None
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution(action, frame)
-        # Multi-position calibration corrects camera-to-physical XY distortion.
-        # Dedicated Android navigation stays on its independently validated
-        # ratios and intentionally does not pass through this transform.
+        hwnd, frame = self._authorized_frame(action)
+        # Calibration corrects visual XY; dedicated Android navigation keeps its own validated ratios.
         from agent.infrastructure.tap_calibration import corrected_grid_point
 
-        x, y = corrected_grid_point(x, y, (frame.width, frame.height), self.calibration_path)
-        point = (min(frame.width - 1, max(0, int(round(x * (frame.width - 1) / 1000)))), min(frame.height - 1, max(0,
-            int(round(y * (frame.height - 1) / 1000)))))
+        point = self._grid_pixel(frame, corrected_grid_point(x, y, frame.size, self.calibration_path))
         self._checkpoint()
-        # Seller click-count is persistent global UI state.  Bind it to this
-        # one canonical request and always restore one afterwards so a later
-        # ordinary tap can never inherit double-tap behavior.
+        # Seller click-count persists globally, so bind it to this request and restore one.
         receipt = None
         try:
             seller_gui.configure_click_count(hwnd, click_count)
@@ -479,17 +445,12 @@ class RobotController:
 
     def _vision_nav_tap(self, x_ratio: float, y_ratio: float, *, action: str) -> tuple[int, int]:
         self._last_click_receipt = None
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution(action, frame)
+        hwnd, frame = self._authorized_frame(action)
         x_ratio, y_ratio = oriented_navigation_ratio(x_ratio, y_ratio, landscape=frame.width > frame.height)
         point = (min(frame.width - 1, max(0, int(round(frame.width * x_ratio)))), min(frame.height - 1, max(0,
             int(round(frame.height * y_ratio)))))
         self._checkpoint()
-        # The seller control persists the previous "连点次数" value.
-        # Navigation must be one atomic tap just like a visual target tap;
-        # otherwise one Back/Home request can issue multiple physical taps and
-        # make the observed transition non-deterministic.
+        # Navigation must reset persistent click-count state to one atomic tap.
         seller_gui.configure_single_click_count(hwnd)
         receipt = seller_gui.click_client_point(hwnd, point[0], point[1], countdown=0,
             hold_seconds=float(load_controller_config()['tap_hold']), require_event_barrier=True)
@@ -499,31 +460,24 @@ class RobotController:
         return point
 
     def vision_android_home(self) -> tuple[int, int]:
-        # This is the independently verified Android system Home primitive.
-        # It must never inherit ordinary semantic-tap authority because it is
-        # not an App/browser "home page" element.
-        self._require_verified_action("home", "Android系统Home")
-        cfg = load_controller_config()
-        return self._vision_nav_tap(float(cfg['android_home_x_ratio']), float(cfg['android_home_y_ratio']),
-            action='home')
+        # Android Home is an independent system primitive, not semantic App navigation.
+        return self._vision_system_navigation('home', 'android_home', 'Android系统Home')
 
     def vision_android_back(self) -> tuple[int, int]:
-        self._require_verified_action("back", "返回")
-        cfg = load_controller_config()
-        return self._vision_nav_tap(float(cfg['android_back_x_ratio']), float(cfg['android_back_y_ratio']),
-            action='back')
+        return self._vision_system_navigation('back', 'android_back', '返回')
 
     def vision_android_recent_apps(self) -> tuple[int, int]:
-        self._require_verified_action('open_recent_apps', 'Android系统最近任务')
+        return self._vision_system_navigation('open_recent_apps', 'android_recents', 'Android系统最近任务')
+
+    def _vision_system_navigation(self, action: str, config_prefix: str, label: str) -> tuple[int, int]:
+        self._require_verified_action(action, label)
         cfg = load_controller_config()
-        return self._vision_nav_tap(float(cfg['android_recents_x_ratio']), float(cfg['android_recents_y_ratio']),
-            action='open_recent_apps')
+        return self._vision_nav_tap(float(cfg[f'{config_prefix}_x_ratio']), float(cfg[f'{config_prefix}_y_ratio']),
+            action=action)
 
     def _vision_swipe(self, direction: str) -> None:
         self._require_verified_action("swipe", "滑动")
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution("swipe", frame)
+        hwnd, _frame = self._authorized_frame('swipe')
         self._checkpoint()
         seller_gui.configure_swipe(hwnd, direction)
         seller_gui.trigger_selected_action(hwnd)
@@ -585,16 +539,10 @@ class RobotController:
             keyboard_cfg = qwerty_keyboard_config_from_anchors(keyboard_layout.get('anchors'),
                 key_hold=float(configured_keyboard['key_hold']),
                 inter_key_wait=float(configured_keyboard['inter_key_wait']))
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution("input_verified_text", frame)
+        hwnd, frame = self._authorized_frame('input_verified_text')
         reject_if(frame.width < 400 or frame.height < 700, RobotWorkflowError("键盘画面尺寸异常，拒绝执行拼音点击。"))
         seller_gui.configure_single_click_count(hwnd)
-        # Editing the seller control's click-count field changes focus and can
-        # leave the physical actuator settling.  Starting the first phone tap
-        # immediately after that UI edit caused an intermittent duplicated
-        # first letter on real hardware.  Move away from the camera and give
-        # the controller/actuator a short deterministic settling window.
+        # After click-count edits, park the cursor and allow a deterministic actuator settling window.
         seller_gui.clear_seller_camera_overlay(hwnd)
         self._sleep(float(configured_keyboard.get("pre_key_wait", 0.45)))
         for (index, key) in enumerate(pinyin):
@@ -609,12 +557,7 @@ class RobotController:
         seller_gui.clear_seller_camera_overlay(hwnd)
 
     def vision_clear_text(self, keyboard_layout: dict[str, Any] | None=None, delete_count: int | None=None) -> None:
-        """Clear a focused phone input field using the visible keyboard.
-
-        The visual model may call this only after it has observed both the
-        keyboard and the exact incorrect text. The validated character count
-        determines the exact number of physical backspace taps.
-        """
+        """Clear a focused field with the exact validated count on its visible keyboard."""
         self._require_verified_action("input_verified_text", "输入文字")
         reject_if(isinstance(delete_count, bool) or not isinstance(delete_count, int) or (not 1 <= delete_count <= 100), WorkflowNotReady('退格次数必须是视觉确认后的1～100之间整数，拒绝固定次数清空。'))
         cfg = load_controller_config()
@@ -639,9 +582,7 @@ class RobotController:
                 backspace_y_ratio = float(backspace[1]) / 1000.0
             else:
                 raise WorkflowNotReady('当前键盘布局不支持安全退格。')
-        hwnd, _title = seller_gui.find_window(self.title)
-        frame = self._capture_phone(hwnd)
-        self._consume_physical_execution("input_verified_text", frame)
+        hwnd, frame = self._authorized_frame('input_verified_text')
         point = (min(frame.width - 1, max(0, int(round(frame.width * backspace_x_ratio)))), min(frame.height - 1, max(0,
             int(round(frame.height * backspace_y_ratio)))))
         seller_gui.configure_single_click_count(hwnd)
@@ -691,23 +632,20 @@ class MockRobotController(RobotController):
             'seller_event_barrier_confirmed': True, 'round_trip_position_confirmed': True,
             'mechanical_contact_ack': False, 'click_count': click_count}
 
-    def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
-        self._consume_mock_execution("tap_semantic")
-        self.executions.append({"action": "tap", "coordinate": [x, y]})
-        self._record_mock_click_receipt()
-        return x, y
+    def _mock(self, authority: str, action: str, *, result: Any=None, click_count: int=0,
+        **payload: Any) -> Any:
+        self._consume_mock_execution(authority)
+        self.executions.append({'action': action, **payload})
+        if click_count:
+            self._record_mock_click_receipt(click_count)
+        return result
 
-    def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
-        self._consume_mock_execution("dismiss_overlay")
-        self.executions.append({"action": "dismiss_overlay", "coordinate": [x, y]})
-        self._record_mock_click_receipt()
-        return x, y
-
-    def vision_double_tap_relative(self, x: int, y: int) -> tuple[int, int]:
-        self._consume_mock_execution("double_tap")
-        self.executions.append({"action": "double_tap", "coordinate": [x, y]})
-        self._record_mock_click_receipt(2)
-        return x, y
+    def _verified_click(self, x: int, y: int, *, action: str, label: str,
+        click_count: int=1) -> tuple[int, int]:
+        del label
+        recorded = {'tap_semantic': 'tap', 'dismiss_overlay': 'dismiss_overlay',
+            'double_tap': 'double_tap'}[action]
+        return self._mock(action, recorded, result=(x, y), click_count=click_count, coordinate=[x, y])
 
     def vision_long_press_relative(self, x: int, y: int, hold_seconds: float=0.8) -> tuple[int, int]:
         self._consume_mock_execution("long_press")
@@ -718,16 +656,13 @@ class MockRobotController(RobotController):
 
     def vision_drag_relative(self, start_x: int, start_y: int, end_x: int, end_y: int) -> tuple[tuple[int, int],
         tuple[int, int]]:
-        self._consume_mock_execution("drag")
-        self.executions.append({'action': 'drag', 'start': [start_x, start_y], 'end': [end_x, end_y]})
-        return (start_x, start_y), (end_x, end_y)
+        return self._mock('drag', 'drag', result=((start_x, start_y), (end_x, end_y)), start=[start_x, start_y],
+            end=[end_x, end_y])
 
     def vision_swipe_relative(self, start_x: int, start_y: int, end_x: int, end_y: int,
         direction: str) -> tuple[tuple[int, int], tuple[int, int]]:
-        self._consume_mock_execution("swipe")
-        self.executions.append({'action': 'swipe_relative', 'direction': direction, 'start': [start_x, start_y],
-            'end': [end_x, end_y]})
-        return (start_x, start_y), (end_x, end_y)
+        return self._mock('swipe', 'swipe_relative', result=((start_x, start_y), (end_x, end_y)),
+            direction=direction, start=[start_x, start_y], end=[end_x, end_y])
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
         self._require_verified_action('reveal_system_navigation', '系统边缘唤出导航栏')
@@ -738,54 +673,22 @@ class MockRobotController(RobotController):
         self.executions.append(dict(evidence))
         return evidence
 
-    def vision_android_home(self) -> tuple[int, int]:
-        self._consume_mock_execution("home")
-        self.executions.append({"action": "android_home"})
-        self._record_mock_click_receipt()
-        return 500, 976
+    def _vision_system_navigation(self, action: str, config_prefix: str, label: str) -> tuple[int, int]:
+        del config_prefix, label
+        recorded, point = {'home': ('android_home', (500, 976)), 'back': ('android_back', (910, 976)),
+            'open_recent_apps': ('android_recent_apps', (315, 976))}[action]
+        return self._mock(action, recorded, result=point, click_count=1)
 
-    def vision_android_back(self) -> tuple[int, int]:
-        self._consume_mock_execution("back")
-        self.executions.append({"action": "android_back"})
-        self._record_mock_click_receipt()
-        return 910, 976
-
-    def vision_android_recent_apps(self) -> tuple[int, int]:
-        self._consume_mock_execution("open_recent_apps")
-        self.executions.append({"action": "android_recent_apps"})
-        self._record_mock_click_receipt()
-        return 315, 976
-
-    def vision_swipe_up(self) -> None:
-        self._consume_mock_execution("swipe")
-        self.executions.append({"action": "swipe_up"})
-
-    def vision_swipe_down(self) -> None:
-        self._consume_mock_execution("swipe")
-        self.executions.append({"action": "swipe_down"})
-
-    def vision_swipe_left(self) -> None:
-        self._consume_mock_execution("swipe")
-        self.executions.append({"action": "swipe_left"})
-
-    def vision_swipe_right(self) -> None:
-        self._consume_mock_execution("swipe")
-        self.executions.append({"action": "swipe_right"})
+    def _vision_swipe(self, direction: str) -> None:
+        self._mock('swipe', f'swipe_{direction}')
 
     def vision_type_text_with_layout(self, text: str, keyboard_layout: dict[str, Any]) -> None:
-        self._consume_mock_execution("input_verified_text")
-        self.executions.append({'action': 'type_text', 'text': text, 'keyboard_layout': keyboard_layout})
+        self._mock('input_verified_text', 'type_text', text=text, keyboard_layout=keyboard_layout)
 
     def vision_type_pinyin(self, text: str, pinyin: str, keyboard_layout: dict[str, Any] | None=None) -> None:
-        self._consume_mock_execution("input_verified_text")
-        record: dict[str, Any] = {'action': 'type_pinyin', 'text': text, 'pinyin': pinyin}
-        if keyboard_layout is not None:
-            record["keyboard_layout"] = keyboard_layout
-        self.executions.append(record)
+        self._mock('input_verified_text', 'type_pinyin', text=text, pinyin=pinyin,
+            **({'keyboard_layout': keyboard_layout} if keyboard_layout is not None else {}))
 
     def vision_clear_text(self, keyboard_layout: dict[str, Any] | None=None, delete_count: int | None=None) -> None:
-        self._consume_mock_execution("input_verified_text")
-        record: dict[str, Any] = {'action': 'clear_text', 'delete_count': delete_count}
-        if keyboard_layout is not None:
-            record["keyboard_layout"] = keyboard_layout
-        self.executions.append(record)
+        self._mock('input_verified_text', 'clear_text', delete_count=delete_count,
+            **({'keyboard_layout': keyboard_layout} if keyboard_layout is not None else {}))

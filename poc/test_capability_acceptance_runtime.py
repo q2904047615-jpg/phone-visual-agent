@@ -173,6 +173,7 @@ class FakeTrialResult:
         self.after_scene = SimpleNamespace(fingerprint="fingerprint-after")
         self.observation_errors = ()
         self.verification_errors = ()
+        self.controller_transition_evidence = ("Controller 已验证动作后状态",)
         self.robot_result = (
             ((2, 4), (12, 8))
             if action == "drag"
@@ -240,7 +241,10 @@ class FakeTrialResult:
             "physical_actions": self.physical_actions,
             "action_outcome": self.action_outcome,
             "observation_errors": [],
-            "verification_errors": [],
+            "verification_errors": list(self.verification_errors),
+            "controller_transition_evidence": list(
+                self.controller_transition_evidence
+            ),
             "robot_result": self.robot_result,
             "hardware_receipt": self.hardware_receipt,
             "before_frame_paths": list(self.before_frame_paths),
@@ -790,50 +794,6 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         )
         self.assertIsNotNone(trial.promotion_authority)
 
-    def test_long_press_report_rejects_missing_or_tampered_event_barrier(self):
-        self.proposed_action = "long_press"
-        trial = self.manager.start(
-            device_id="device-a",
-            candidate_action="long_press",
-            text="长按一个安全项目并观察上下文菜单。",
-        )
-        self.manager.confirm(
-            "trial-001",
-            trial.session.snapshot()["confirmation_scope"],
-        )
-        original = json.loads(trial.report_path.read_text(encoding="utf-8"))
-        mutations = (
-            lambda report: report["execution"].pop("hardware_receipt"),
-            lambda report: report["execution"]["hardware_receipt"].__setitem__(
-                "hold_started_after_barrier", False
-            ),
-            lambda report: report["execution"]["hardware_receipt"].__setitem__(
-                "changed_pixels", 119
-            ),
-            lambda report: report["execution"]["hardware_receipt"].__setitem__(
-                "return_changed_pixels", 119
-            ),
-            lambda report: report["execution"]["hardware_receipt"].__setitem__(
-                "post_barrier_settle_seconds", 0.0
-            ),
-            lambda report: report["execution"]["hardware_receipt"].__setitem__(
-                "requested_hold_seconds", 0.7
-            ),
-        )
-        for mutate in mutations:
-            with self.subTest(mutation=mutate):
-                report = json.loads(json.dumps(original))
-                mutate(report)
-                trial.report_path.write_text(
-                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                with self.assertRaisesRegex(
-                    CapabilityAcceptanceError,
-                    "事件栅栏|保压时长",
-                ):
-                    validate_acceptance_report(trial.report_path)
-
     def test_report_separates_confirmed_and_execution_fresh_fingerprints(self):
         trial = self.manager.start(
             device_id="device-a",
@@ -858,7 +818,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             report["execution"]["resolved_action"]["before_fingerprint"],
         )
 
-    def test_drag_without_verified_source_movement_fails_closed(self):
+    def test_controller_drag_mismatch_is_preserved_without_reinterpretation(self):
         trial = self.manager.start(
             device_id="device-a",
             candidate_action="drag",
@@ -866,14 +826,13 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         )
         original_confirm = trial.orchestrator.confirm_one
 
-        def confirm_without_movement(session, confirmation):
+        def confirm_with_controller_mismatch(session, confirmation):
             result = original_confirm(session, confirmation)
-            payload = result.to_dict()
-            payload["after_scene"]["elements"][0]["bounds"] = [0.1, 0.2, 0.2, 0.3]
-            result.to_dict = lambda: payload
+            result.action_outcome = "mismatched"
+            result.verification_errors = ("缺少源元素向终点显著移动",)
             return result
 
-        trial.orchestrator.confirm_one = confirm_without_movement
+        trial.orchestrator.confirm_one = confirm_with_controller_mismatch
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "未满足验收通过标准"):
             self.manager.confirm(
@@ -890,7 +849,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         )
         self.assertIsNone(trial.promotion_authority)
 
-    def test_wrong_exact_input_is_failed_and_has_no_promotion_authority(self):
+    def test_controller_input_mismatch_is_preserved_without_reinterpretation(self):
         self.proposed_action = "input_verified_text"
         trial = self.manager.start(
             device_id="device-a",
@@ -898,6 +857,15 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             text="让当前空输入框显示 agent，但不要提交。",
         )
         confirmation = trial.session.snapshot()["confirmation_scope"]
+        original_confirm = trial.orchestrator.confirm_one
+
+        def confirm_with_controller_mismatch(session, scope):
+            result = original_confirm(session, scope)
+            result.action_outcome = "mismatched"
+            result.verification_errors = ("文字不匹配",)
+            return result
+
+        trial.orchestrator.confirm_one = confirm_with_controller_mismatch
 
         with self.assertRaisesRegex(
             CapabilityAcceptanceError,

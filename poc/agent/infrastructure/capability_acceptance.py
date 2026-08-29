@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
+from agent.domain.validation import DataclassWire, reject_if
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -12,10 +12,10 @@ import os
 from pathlib import Path
 import threading
 from typing import Any, Callable, Mapping
-import uuid
 
 from PIL import Image, UnidentifiedImageError
 from agent.infrastructure.orientation_safety import OrientationCredential, OrientationSafetyError, frame_fingerprint
+from agent.infrastructure.atomic_files import atomic_replace_bytes, write_new_bytes
 
 from agent.infrastructure.device_exclusivity import InterProcessLease
 from agent.infrastructure.tap_calibration import (
@@ -26,13 +26,6 @@ from agent.infrastructure.tap_calibration import (
     TapCalibrationError,
 )
 from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
-from agent.domain.ui_scene import UIScene, UISceneError
-from agent.domain.universal_action_controller import (
-    ResolvedSemanticAction,
-    UniversalActionController,
-    UniversalActionError,
-)
-from agent.domain.verified_text_transaction import is_direct_latin_segment
 
 
 ACCEPTANCE_REPORT_VERSION = 3
@@ -133,210 +126,6 @@ def _calibration_evidence(value: Any, *, action: str) -> dict[str, Any] | None:
     )
     return {'version': version, 'sha256': digest, 'frame_size': [float(item) for item in frame_size],
         'coverage_bounds': bounds, 'validation_coverage_bounds': validation_bounds}
-
-
-def exact_input_evidence_error(execution: Any) -> str:
-    """Return a fail-closed error when an input report lacks exact target evidence."""
-
-    if not isinstance(execution, dict):
-        return "输入验收 execution 必须是对象。"
-    resolved = execution.get("resolved_action")
-    before_scene = execution.get("before_scene")
-    after_scene = execution.get("after_scene")
-    if not all((isinstance(value, dict) for value in (resolved, before_scene, after_scene))):
-        return "输入验收缺少结构化 resolved_action/before_scene/after_scene。"
-    expected = resolved.get("text")
-    target_id = str(resolved.get("target_element_id") or "").strip()
-    if not isinstance(expected, str) or not is_direct_latin_segment(expected) or (not target_id):
-        return "输入验收缺少精确文字或目标输入框身份。"
-
-    before_elements = before_scene.get("elements")
-    after_elements = after_scene.get("elements")
-    if not isinstance(before_elements, list) or not isinstance(after_elements, list):
-        return "输入验收缺少动作前后元素证据。"
-    before_matches = [item for item in before_elements if isinstance(item,
-        dict) and item.get('element_id') == target_id and (item.get('role') == 'input')
-        and isinstance(item.get('confidence'), (int, float)) and (not isinstance(item.get('confidence'),
-        bool)) and (float(item['confidence']) >= 0.72)]
-    if len(before_matches) != 1:
-        return "输入验收无法唯一绑定动作前目标输入框。"
-    before_input = before_matches[0]
-    before_states = before_input.get("states")
-    if not isinstance(before_states, dict):
-        return "输入验收缺少动作前输入框 states。"
-    if before_states.get('focused') is not True:
-        return "输入验收要求动作前输入框已聚焦。"
-    if before_states.get('goal_relevant') is not True:
-        return "输入验收要求动作前输入框与当前目标明确相关。"
-    if before_states.get('value') != '':
-        return "输入验收只允许从动作前确认的空输入框开始。"
-    if before_states.get('keyboard_layout') != 'qwerty':
-        return "输入验收要求动作前画面确认 QWERTY 键盘。"
-    if before_states.get('keyboard_input_mode') != 'direct_latin':
-        return "输入验收要求动作前画面确认 direct_latin 拉丁按键模式。"
-    eligible_before = [item for item in before_elements if isinstance(item,
-        dict) and item.get('role') == 'input' and isinstance(item.get('confidence'), (int,
-        float)) and (not isinstance(item.get('confidence'),
-        bool)) and (float(item['confidence']) >= 0.72) and isinstance(item.get('states'),
-        dict) and (item['states'].get('visible') is not False) and (item['states'].get('goal_relevant') is True)
-        and (item['states'].get('focused') is True) and (item['states'].get('value') == '')
-        and (item['states'].get('keyboard_layout') == 'qwerty')
-        and (item['states'].get('keyboard_input_mode') == 'direct_latin')]
-    if len(eligible_before) != 1 or eligible_before[0].get('element_id') != target_id:
-        return "输入验收要求动作前只有一个符合安全条件的目标输入框。"
-    if (str(before_scene.get('foreground_app_id') or '').strip() != str(after_scene.get('foreground_app_id')
-        or '').strip() or str(before_scene.get('screen_id') or '').strip() != str(after_scene.get('screen_id')
-        or '').strip()):
-        return "输入验收动作后 App 或页面身份发生变化。"
-
-    def visible_states(item: dict[str, Any]) -> dict[str, Any] | None:
-        states = item.get("states")
-        return states if isinstance(states, dict) else None
-
-    exact_id = [item for item in after_elements if isinstance(item,
-        dict) and item.get('element_id') == target_id and (item.get('role') == 'input')
-        and isinstance(item.get('confidence'), (int, float)) and (not isinstance(item.get('confidence'),
-        bool)) and (float(item['confidence']) >= 0.72) and (visible_states(item) is not None)
-        and (visible_states(item).get('visible') is not False)]
-    if exact_id:
-        candidates = exact_id
-    else:
-        candidates = [item for item in after_elements if isinstance(item,
-            dict) and item.get('role') == 'input' and isinstance(item.get('confidence'), (int,
-            float)) and (not isinstance(item.get('confidence'),
-            bool)) and (float(item['confidence']) >= 0.72) and (visible_states(item) is not None)
-            and (visible_states(item).get('visible') is not False) and (str(item.get('meaning')
-            or '').casefold() == str(before_input.get('meaning') or '').casefold()) and (str(item.get('label')
-            or '').casefold() == str(before_input.get('label') or '').casefold())]
-    if len(candidates) != 1:
-        return "输入验收无法唯一绑定动作后目标输入框。"
-    states = candidates[0].get("states")
-    if not isinstance(states, dict) or not isinstance(states.get('value'), str):
-        return "输入验收缺少动作后 states.value 精确文字证据。"
-    actual = states["value"]
-    if actual != expected:
-        return f"输入验收文字不匹配：实际 {actual!r}，预期 {expected!r}。"
-    return ""
-
-
-def _normalized_point(value: Any, *, field: str) -> tuple[float, float] | None:
-    if value is None:
-        return None
-    reject_if(
-        not isinstance(value, (list, tuple)) or len(value) != 2 or any((isinstance(item, bool) or not isinstance(item,
-        (int, float)) for item in value)),
-        CapabilityAcceptanceError(f"验收执行字段 {field} 格式无效。"),
-    )
-    return float(value[0]), float(value[1])
-
-
-def action_execution_evidence_error(action: str, execution: Any) -> str:
-    """Independently replay controller verification from persisted scenes."""
-
-    if not isinstance(execution, dict):
-        return "验收 execution 必须是对象。"
-    raw_resolved = execution.get("resolved_action")
-    raw_before = execution.get("before_scene")
-    raw_after = execution.get("after_scene")
-    if not all((isinstance(value, dict) for value in (raw_resolved, raw_before, raw_after))):
-        return "验收缺少结构化 resolved_action/before_scene/after_scene。"
-    try:
-        expected_effect = raw_resolved.get("expected_effect") or {}
-        reject_if(not isinstance(expected_effect, dict), CapabilityAcceptanceError("验收执行字段 expected_effect 格式无效。"))
-        hold_seconds = raw_resolved.get("hold_seconds")
-        path_distance = raw_resolved.get("path_distance")
-        for (field, value) in (('hold_seconds', hold_seconds), ('path_distance', path_distance)):
-            reject_if(value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))), CapabilityAcceptanceError(f"验收执行字段 {field} 格式无效。"))
-        resolved_kind = str(raw_resolved.get("kind") or "").strip()
-        resolved_text = raw_resolved.get('text') if isinstance(raw_resolved.get('text'), str) else None
-        resolved = ResolvedSemanticAction(node_id=str(raw_resolved.get('node_id') or 'acceptance'), kind=resolved_kind,
-            normalized_point=_normalized_point(raw_resolved.get('normalized_point'), field='normalized_point'),
-            normalized_end_point=_normalized_point(raw_resolved.get('normalized_end_point'),
-            field='normalized_end_point'), text=resolved_text,
-            input_fragment=str(raw_resolved.get('input_fragment') or '') or None if raw_resolved.get('input_fragment')
-            is not None else None, input_method=str(raw_resolved.get('input_method') or '') or None,
-            input_pinyin=str(raw_resolved.get('input_pinyin') or '') or None,
-            prior_input_value=str(raw_resolved.get('prior_input_value') or '') if raw_resolved.get('prior_input_value')
-            is not None else None, expected_input_value=str(raw_resolved.get('expected_input_value')
-            or '') if raw_resolved.get('expected_input_value') is not None else None,
-            direction=raw_resolved.get('direction') if isinstance(raw_resolved.get('direction'), str) else None,
-            hold_seconds=float(hold_seconds) if hold_seconds is not None else None,
-            path_distance=float(path_distance) if path_distance is not None else None,
-            target_element_id=str(raw_resolved.get('target_element_id') or '').strip() or None,
-            destination_element_id=str(raw_resolved.get('destination_element_id') or '').strip() or None,
-            before_fingerprint=str(raw_resolved.get('before_fingerprint') or '').strip(),
-            expected_effect=dict(expected_effect))
-        if resolved.kind != action:
-            return "执行动作类型与候选动作类型不一致。"
-        before = UIScene.from_dict(raw_before)
-        after = UIScene.from_dict(raw_after)
-        UniversalActionController().verify_after_action(resolved, before, after)
-    except (CapabilityAcceptanceError, UISceneError, UniversalActionError, ValueError) as exc:
-        return f"验收动作证据无法通过控制器复核：{exc}"
-    robot_result = execution.get("robot_result")
-
-    def pixel_point(value: Any) -> bool:
-        return bool(isinstance(value, (list, tuple)) and len(value) == 2 and all((isinstance(item,
-            int) and (not isinstance(item, bool)) and (item >= 0) for item in value)))
-
-    if action == 'long_press':
-        if not pixel_point(robot_result):
-            return "长按验收缺少机械臂返回的实际像素落点。"
-        receipt = execution.get("hardware_receipt")
-        if not isinstance(receipt, dict):
-            return "长按验收缺少控制端事件栅栏凭据。"
-        required_true = ('seller_event_barrier_confirmed', 'round_trip_position_confirmed',
-            'hold_started_after_barrier')
-        if (receipt.get('version') != '2026-08-16-seller-gui-contact-barrier-v3'
-            or receipt.get('channel') != 'right_button_stationary_touch' or any((receipt.get(field)
-            is not True for field in required_true))):
-            return "长按验收的控制端事件栅栏凭据无效。"
-        receipt_hold = receipt.get("requested_hold_seconds")
-        if (resolved.hold_seconds is None or isinstance(receipt_hold, bool) or (not isinstance(receipt_hold, (int,
-            float))) or (abs(float(receipt_hold) - float(resolved.hold_seconds)) > 1e-06)):
-            return "长按验收的事件栅栏保压时长与已解析动作不一致。"
-        offset = receipt.get("barrier_offset_pixels")
-        changed = receipt.get("changed_pixels")
-        return_changed = receipt.get("return_changed_pixels")
-        elapsed = receipt.get("barrier_elapsed_ms")
-        settle = receipt.get("post_barrier_settle_seconds")
-        if (isinstance(offset, bool) or not isinstance(offset, int) or (not 1 <= offset <= 3) or isinstance(changed,
-            bool) or (not isinstance(changed, int)) or (changed < 120) or isinstance(return_changed,
-            bool) or (not isinstance(return_changed, int)) or (return_changed < 120) or isinstance(elapsed,
-            bool) or (not isinstance(elapsed, (int, float))) or (not 0.0 <= float(elapsed) <= 5000.0)
-            or isinstance(settle, bool) or (not isinstance(settle, (int, float))) or (not 0.4 <= float(settle) <= 0.6)):
-            return "长按验收的控制端事件栅栏测量值无效。"
-    if action == 'double_tap':
-        if not pixel_point(robot_result):
-            return "双击验收缺少机械臂返回的实际像素落点。"
-        receipt = execution.get("hardware_receipt")
-        if (not isinstance(receipt, dict) or receipt.get('seller_event_barrier_confirmed') is not True
-            or receipt.get('round_trip_position_confirmed') is not True or (receipt.get('mechanical_contact_ack')
-            is not False) or (receipt.get('click_count') != 2) or (receipt.get('click_count_restored_to') != 1)):
-            return "双击验收缺少连点次数为2且已恢复单击的事件栅栏凭据。"
-    if action == 'drag':
-        if (not isinstance(robot_result, (list, tuple)) or len(robot_result) != 2
-            or (not all((pixel_point(point) for point in robot_result)))
-            or (tuple(robot_result[0]) == tuple(robot_result[1]))):
-            return "拖动验收缺少机械臂返回的两个不同实际像素端点。"
-    if action == 'reveal_system_navigation':
-        geometry_fields = ('normalized_point', 'normalized_end_point', 'text', 'direction', 'hold_seconds',
-            'path_distance', 'target_element_id', 'destination_element_id')
-        if any((raw_resolved.get(field) is not None for field in geometry_fields)):
-            return "系统边缘唤栏验收的已解析动作不能携带模型坐标、方向或距离。"
-        client_path = robot_result.get('client_path') if isinstance(robot_result, dict) else None
-        requested_grid = robot_result.get('requested_grid') if isinstance(robot_result, dict) else None
-        corrected_grid = robot_result.get('corrected_grid') if isinstance(robot_result, dict) else None
-        grid_path = lambda value: bool(isinstance(value, (list, tuple)) and len(value) == 2 and all((isinstance(point,
-            (list, tuple)) and len(point) == 2 and all((isinstance(item, int) and (not isinstance(item,
-            bool)) and (0 <= item <= 1000) for item in point)) for point in value)))
-        if (not isinstance(robot_result, dict) or robot_result.get('action') != 'reveal_system_navigation'
-            or robot_result.get('edge') != 'bottom' or (not isinstance(client_path, (list,
-            tuple))) or (len(client_path) != 2) or (not all((pixel_point(point) for point in client_path)))
-            or (tuple(client_path[0]) == tuple(client_path[1])) or (not grid_path(requested_grid))
-            or (not grid_path(corrected_grid))):
-            return "系统边缘唤栏验收缺少受限语义和两个不同实际像素端点。"
-    return ""
 
 
 class CapabilityAcceptanceError(RuntimeError):
@@ -491,13 +280,15 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     reject_if(not isinstance(observation_errors, list) or observation_errors, CapabilityAcceptanceError("验收报告包含观察错误，不能晋级。"))
     verification_errors = execution.get("verification_errors")
     reject_if(not isinstance(verification_errors, list) or verification_errors, CapabilityAcceptanceError("验收报告包含验证错误，不能晋级。"))
-    evidence_error = action_execution_evidence_error(action, execution)
-    reject_if(evidence_error, CapabilityAcceptanceError(evidence_error))
-    if action == 'input_verified_text':
-        exact_error = exact_input_evidence_error(execution)
-        reject_if(exact_error, CapabilityAcceptanceError(exact_error))
-    before_scene = execution["before_scene"]
-    after_scene = execution["after_scene"]
+    transition_evidence = execution.get("controller_transition_evidence")
+    reject_if(
+        not isinstance(transition_evidence, list) or not transition_evidence
+        or any(not isinstance(item, str) or not item.strip() for item in transition_evidence),
+        CapabilityAcceptanceError("验收报告缺少 Controller 已验证的 typed transition evidence。"),
+    )
+    before_scene = execution.get("before_scene")
+    after_scene = execution.get("after_scene")
+    reject_if(not isinstance(before_scene, dict) or not isinstance(after_scene, dict), CapabilityAcceptanceError("验收报告缺少动作前后场景。"))
     reject_if(str(after_scene.get('fingerprint') or '') != after['fingerprint'], CapabilityAcceptanceError("动作后场景 fingerprint 与验收观察不一致。"))
     execution_before_fingerprint = str(before_scene.get("fingerprint") or "")
     reject_if(not execution_before_fingerprint, CapabilityAcceptanceError("执行前场景缺少 fingerprint。"))
@@ -536,18 +327,6 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
             in {'unknown', orientation_credential.phone_content_rotation},
             CapabilityAcceptanceError('主场景方向事实与独立方向凭据冲突，不能晋级。'),
         )
-    if calibration_evidence is not None:
-        width, height = before_frame_size
-        robot_result = execution.get("robot_result")
-        if action in {'double_tap', 'long_press'}:
-            points = [robot_result]
-        elif action == 'reveal_system_navigation':
-            points = list(robot_result["client_path"])
-        else:
-            points = list(robot_result)
-        reject_if(any((not 0 <= int(point[0]) < width or not 0 <= int(point[1]) < height for point in points)), CapabilityAcceptanceError('手势验收机械臂实际像素端点超出动作前画面范围。'))
-        reject_if(action == 'reveal_system_navigation' and robot_result.get('frame_size') != [width, height], CapabilityAcceptanceError('系统边缘唤栏回执的相机尺寸与动作前证据不一致。'))
-
     normalized = dict(report)
     normalized.update({'trial_id': trial_id, 'session_id': session_id, 'task_id': task_id, 'device_id': device_id,
         'candidate_action': action, 'calibration_evidence': calibration_evidence, 'before_observation': before,
@@ -557,17 +336,12 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class PromotionScope:
+class PromotionScope(DataclassWire):
     trial_id: str
     device_id: str
     action: str
     report_sha256: str
     registry_sha256: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {'trial_id': self.trial_id, 'device_id': self.device_id, 'action': self.action,
-            'report_sha256': self.report_sha256, 'registry_sha256': self.registry_sha256}
-
 
 _PROMOTION_AUTHORITY_FACTORY_TOKEN = object()
 
@@ -600,6 +374,12 @@ def _validate_live_promotion_source(*, report: Mapping[str, Any], orientation_cr
     reject_if(not matching_frames, CapabilityAcceptanceError("能力晋级 live 方向凭据未绑定动作前帧对象。"))
     execution = report.get("execution")
     reject_if(not isinstance(execution, Mapping), CapabilityAcceptanceError("能力晋级报告缺少执行对象。"))
+    live_execution = getattr(execution_result, "to_dict", lambda: None)()
+    try:
+        same_execution = json.dumps(dict(execution), ensure_ascii=False, sort_keys=True) == json.dumps(dict(live_execution), ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        same_execution = False
+    reject_if(not same_execution, CapabilityAcceptanceError("能力晋级报告 execution 不是本进程已验证动作结果的完整序列化视图。"))
     reject_if(execution.get('orientation_credential') != orientation_credential.to_dict(), CapabilityAcceptanceError("能力晋级报告方向凭据不是 live 对象的序列化视图。"))
     reject_if(report.get('physical_actions') != physical_actions, CapabilityAcceptanceError("能力晋级报告与 live 动作计数不一致。"))
     reject_if(report.get('action_outcome') != getattr(execution_result, 'action_outcome', None), CapabilityAcceptanceError("能力晋级报告与 live 动作结果不一致。"))
@@ -737,30 +517,17 @@ class CapabilityRegistryPromoter:
     @staticmethod
     def _write_new_file(path: Path, payload: bytes) -> None:
         try:
-            with path.open('xb') as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
+            write_new_bytes(path, payload)
         except FileExistsError as exc:
             raise CapabilityAcceptanceError(f"晋级证据文件已经存在：{path.name}。") from exc
         except OSError as exc:
             raise CapabilityAcceptanceError(f"晋级证据无法写入：{path.name}：{exc}") from exc
 
     def _replace_registry(self, payload: bytes) -> None:
-        temporary = self.registry_path.parent / f'.{self.registry_path.name}.{uuid.uuid4().hex}.tmp'
         try:
-            with temporary.open('xb') as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._replace_file(temporary, self.registry_path)
+            atomic_replace_bytes(self.registry_path, payload, replace_file=self._replace_file)
         except OSError as exc:
             raise CapabilityAcceptanceError(f"设备注册表原子替换失败：{exc}") from exc
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def promote(self, report_path: Path, *, confirmation: Mapping[str, Any], authority: PromotionAuthority) -> dict[str,
         Any]:

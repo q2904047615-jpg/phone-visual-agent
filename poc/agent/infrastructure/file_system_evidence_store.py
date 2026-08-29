@@ -7,9 +7,9 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Callable
-import uuid
 
 from agent.domain import EvidenceStoreError
+from agent.infrastructure.atomic_files import atomic_replace_bytes
 
 
 class FileSystemAgentEvidenceStore:
@@ -40,22 +40,10 @@ class FileSystemAgentEvidenceStore:
         except (TypeError, ValueError, EvidenceStoreError) as exc:
             raise EvidenceStoreError(f"证据不能序列化：{exc}") from exc
 
-        self.run_dir.mkdir(parents=True, exist_ok=True)
         target = self.run_dir / clean_name
-        temporary = self.run_dir / f".{clean_name}.{uuid.uuid4().hex}.tmp"
         try:
-            with temporary.open('x', encoding='utf-8', newline='\n') as handle:
-                handle.write(encoded)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._replace_file(temporary, target)
+            atomic_replace_bytes(target, (encoded + '\n').encode('utf-8'), replace_file=self._replace_file)
         except OSError as exc:
-            try:
-                if temporary.exists():
-                    temporary.unlink()
-            except OSError:
-                pass
             raise EvidenceStoreError(f'证据原子写入失败：{clean_name}：{exc}') from exc
         return target
 

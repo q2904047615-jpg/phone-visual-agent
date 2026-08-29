@@ -128,13 +128,7 @@ def _point_in_convex_hull(point: tuple[float, float], hull: Sequence[Sequence[fl
 
 
 def build_calibration(samples: Sequence[dict[str, object]], frame_size: tuple[int, int]) -> dict[str, object]:
-    """Build target->command correction from browser touch observations.
-
-    Each sample contains the camera-space target/command point and the target
-    and observed browser coordinates.  The browser plane is used only as an
-    independent touch sensor; the saved correction remains in camera-normalized
-    coordinates, which is what RobotController consumes.
-    """
+    """Build camera-normalized target-to-command correction from independent touch observations."""
 
     reject_if(len(samples) < 6, TapCalibrationError("多位置校准至少需要6个有效触点。"))
     width, height = frame_size

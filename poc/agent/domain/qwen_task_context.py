@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-from .validation import reject_if
+from collections.abc import Iterator, Mapping
+from .validation import dataclass_wire, reject_if
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 import agent.domain.generic_goal as generic_goal_domain
-import agent.domain.message_intent as message_intent_domain
 from agent.domain.task_semantic_ir import TaskSemanticIR
 from agent.domain.vision_model import VisionAgentError
 
 
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-20-deepseek-typed-task-graph-v4"
-SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset({SUPPORTED_TASK_CONTEXT_PROTOCOL})
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 ALLOWED_TASK_STATUSES = {'ready', 'running', 'awaiting_confirmation', 'completed', 'blocked'}
@@ -61,7 +59,7 @@ class QwenTaskContext(Mapping[str, Any]):
         return context
 
     def validate(self) -> None:
-        reject_if(self.protocol_version not in SUPPORTED_TASK_CONTEXT_PROTOCOLS, VisionAgentError(f'不支持的DeepSeek任务上下文协议：{self.protocol_version}'))
+        reject_if(self.protocol_version != SUPPORTED_TASK_CONTEXT_PROTOCOL, VisionAgentError(f'不支持的DeepSeek任务上下文协议：{self.protocol_version}'))
         reject_if(not TASK_ID_PATTERN.fullmatch(self.task_id), VisionAgentError(f"task_id 格式无效：{self.task_id!r}"))
         reject_if(not DEVICE_ID_PATTERN.fullmatch(self.device_id), VisionAgentError(f"device_id 格式无效：{self.device_id!r}"))
         reject_if(isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1, VisionAgentError("revision 必须是正整数。"))
@@ -102,8 +100,7 @@ class QwenTaskContext(Mapping[str, Any]):
         subgoal_effect_ids = _text_tuple(self.current_subgoal.get('effect_ids') or [], 'current_subgoal.effect_ids')
         reject_if(len(subgoal_effect_ids) != len(set(subgoal_effect_ids)), VisionAgentError("current_subgoal.effect_ids 含重复效果ID。"))
         gate_allowed = {'required', 'state', 'effect_ids', 'effect_action_allowed'}
-        if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
-            gate_allowed.add("scope")
+        gate_allowed.add("scope")
         reject_if(set(self.effect_gate) != gate_allowed, VisionAgentError("effect_gate 字段不完整或包含协议外字段。"))
         required = self.effect_gate.get("required")
         allowed = self.effect_gate.get("effect_action_allowed")
@@ -120,14 +117,13 @@ class QwenTaskContext(Mapping[str, Any]):
             VisionAgentError('effect_intents、current_subgoal 与 effect_gate 效果ID不一致。'),
         )
 
-        if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
-            scope = _require_dict(self.effect_gate.get('scope'), 'effect_gate.scope')
-            scope_allowed = {"task_id", "device_id", "revision", "subgoal_id"}
-            reject_if(set(scope) != scope_allowed, VisionAgentError('effect_gate.scope 字段缺失或包含协议外字段。'))
-            expected_scope = {'task_id': self.task_id, 'device_id': self.device_id, 'revision': self.revision,
-                'subgoal_id': str(self.current_subgoal['subgoal_id'])}
-            for (field, expected) in expected_scope.items():
-                reject_if(type(scope[field]) is not type(expected) or scope[field] != expected, VisionAgentError(f'effect_gate.scope.{field} 与当前上下文不一致。'))
+        scope = _require_dict(self.effect_gate.get('scope'), 'effect_gate.scope')
+        scope_allowed = {"task_id", "device_id", "revision", "subgoal_id"}
+        reject_if(set(scope) != scope_allowed, VisionAgentError('effect_gate.scope 字段缺失或包含协议外字段。'))
+        expected_scope = {'task_id': self.task_id, 'device_id': self.device_id, 'revision': self.revision,
+            'subgoal_id': str(self.current_subgoal['subgoal_id'])}
+        for (field, expected) in expected_scope.items():
+            reject_if(type(scope[field]) is not type(expected) or scope[field] != expected, VisionAgentError(f'effect_gate.scope.{field} 与当前上下文不一致。'))
 
         external = self.current_execution_class in {"effect", "unknown"}
         reject_if(self.current_execution_class == 'unknown', VisionAgentError("unknown 子目标禁止进入视觉动作协议。"))
@@ -143,72 +139,7 @@ class QwenTaskContext(Mapping[str, Any]):
 
     @property
     def effect_action_allowed(self) -> bool:
-        return bool(self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL
-            and self.effect_gate['effect_action_allowed'])
-
-    @property
-    def pre_observation_block_reason(self) -> str | None:
-        """Return the local gate that must run before either Qwen call."""
-
-        if self.current_execution_class == 'unknown':
-            return "unknown 子目标禁止调用观察或决策模型。"
-        if self.current_execution_class == 'effect':
-            if not self.effect_action_allowed:
-                return "本地效果确认门未满足，本轮禁止调用观察或决策模型。"
-        return None
-
-    @property
-    def exact_text_requirements(self) -> tuple[str, ...]:
-        """Return only literals whose active operation is literal selection.
-
-        ``target_ui_label`` is visual context, not a second action authority.
-        A phrase such as ``刷新图标`` or ``发送键`` may describe an icon whose
-        visible label is empty.  Pre-blocking Qwen because that phrase is not
-        present verbatim duplicates the canonical catalog and turns ordinary
-        semantic navigation into a product boundary.  Recipient selection is
-        different: the requested party is user data and must remain exact.
-        Typed input payloads and field identities are enforced by the typed
-        input transaction rather than by this visual-label gate.
-        """
-
-        values: list[str] = []
-        for recipient in self.recipient_values:
-            if message_intent_domain.subgoal_targets_recipient_control(recipient, self.current_subgoal):
-                if recipient not in values:
-                    values.append(recipient)
-        return tuple(values)
-
-    @property
-    def recipient_values(self) -> tuple[str, ...]:
-        entities = self.goal.get("entities") or {}
-        reject_if(not isinstance(entities, dict), VisionAgentError("goal.entities 必须是JSON对象。"))
-        values: list[str] = []
-        recipient = entities.get("recipient")
-        if recipient is not None:
-            values.append(recipient)
-        recipients = entities.get("recipients")
-        if recipients is not None:
-            reject_if(not isinstance(recipients, list) or not 1 <= len(recipients) <= 32, VisionAgentError("goal.entities.recipients 格式无效。"))
-            values.extend(recipients)
-        reject_if(
-            any((not isinstance(item, str) or not item or len(item) > 100 or (item != item.strip()) or ('\n' in item)
-            or ('\r' in item) for item in values)) or len(values) != len(set(values)),
-            VisionAgentError("goal.entities recipient/recipients 格式无效。"),
-        )
-        return tuple(values)
-
-    @property
-    def identity_text_requirements(self) -> tuple[str, ...]:
-        entities = self.goal.get("entities") or {}
-        reject_if(not isinstance(entities, dict), VisionAgentError("goal.entities 必须是JSON对象。"))
-        return tuple((recipient for recipient in self.recipient_values if message_intent_domain.subgoal_binds_recipient(
-            recipient, self.current_subgoal) and (not message_intent_domain.subgoal_targets_recipient_control(recipient,
-            self.current_subgoal))))
-
-    @property
-    def exact_text_target_roles(self) -> tuple[str, ...]:
-        # Role/meaning hints are observation facts, not task-authority fields.
-        return ()
+        return bool(self.effect_gate['effect_action_allowed'])
 
     @property
     def requested_input_text(self) -> str | None:
@@ -234,42 +165,17 @@ class QwenTaskContext(Mapping[str, Any]):
         reject_if(not isinstance(raw, str) or not raw or len(raw) > 4000 or ('\r' in raw), VisionAgentError("goal.entities.input_text 必须为1～4000个字符。"))
         return raw
 
-    @property
-    def exact_text_target_meanings(self) -> tuple[str, ...]:
-        return ()
-
     def to_dict(self) -> dict[str, Any]:
-        return {'protocol_version': self.protocol_version, 'task_id': self.task_id, 'device_id': self.device_id,
-            'revision': self.revision, 'task_status': self.task_status, 'goal': dict(self.goal),
-            'global_constraints': list(self.global_constraints),
-            'goal_completion_conditions': [dict(item) for item in self.goal_completion_conditions],
-            'current_subgoal': dict(self.current_subgoal), 'current_execution_class': self.current_execution_class,
-            'effect_intents': [dict(item) for item in self.effect_intents], 'effect_gate': dict(self.effect_gate)}
+        return dataclass_wire(self, omit=('semantic_ir',))
 
     def __getitem__(self, key: str) -> Any:
         return self.to_dict()[key]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         return iter(self.to_dict())
 
     def __len__(self) -> int:
         return len(self.to_dict())
-
-    def to_observation_context(self) -> dict[str, Any]:
-        """Small read-only goal context for candidate discovery.
-
-        The decision selector still receives ``to_dict()`` in full. This view
-        removes task-graph bookkeeping that the observation model cannot use,
-        reducing malformed or truncated scene JSON without hiding the active
-        objective, entities, constraints, completion conditions, or device.
-        """
-
-        return {'device_id': self.device_id, 'objective': str(self.current_subgoal.get('objective') or ''),
-            'entities': dict(self.goal.get('entities') or {}), 'constraints': [*self.global_constraints,
-            *_text_tuple(self.current_subgoal.get('constraints') or [], 'current_subgoal.constraints')],
-            'completion_conditions': list(self.current_subgoal.get('completion_conditions') or []),
-            'execution_class': self.current_execution_class}
-
 
 def _require_dict(value: Any, name: str) -> dict[str, Any]:
     reject_if(not isinstance(value, dict), VisionAgentError(f"{name} 必须是JSON对象。"))

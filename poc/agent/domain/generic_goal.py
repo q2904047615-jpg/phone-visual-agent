@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import ValidatedDataclassWire, reject_if
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 from .canonical_action_kinds import expected_idempotent_system_surface_kind
@@ -23,12 +23,8 @@ class GenericIntentError(ValueError):
 
 
 @dataclass(frozen=True)
-class GenericIntentDraft:
-    """Read-only projection of the authoritative typed task graph.
-
-    This carrier has no risk or action veto.  Risk is decided by the typed
-    policy and action availability by the canonical action catalog.
-    """
+class GenericIntentDraft(ValidatedDataclassWire):
+    """Read-only task-graph projection with no risk or action authority."""
 
     understood: bool
     app_id: str = ""
@@ -54,14 +50,6 @@ class GenericIntentDraft:
         _validate_json_value(self.success_criteria, "success_criteria")
         for value in (*self.constraints, *self.account_effects):
             reject_if(not isinstance(value, str) or not value.strip(), GenericIntentError("约束和账号影响必须是非空字符串。"))
-
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        value = asdict(self)
-        value["constraints"] = list(self.constraints)
-        value["account_effects"] = list(self.account_effects)
-        return value
-
 
 _INPUT_TERMS = ('输入框', '文本框', '搜索框', '编辑框', '地址栏', '字段进入编辑', '字段获得焦点', '字段内容', '草稿区域', '草稿字段', 'input field',
     'search box', 'text field', 'editable field', 'draft field', 'draft area', 'address bar', 'textbox', 'input_text',
@@ -279,17 +267,6 @@ class VisibleGoalEvidence:
         item = candidates[0]
         return f"当前可信画面的局部控件状态：element_id={item.element_id}, role=input, focused=true。"
 
-    @classmethod
-    def zero_action_fact(cls, subgoal: Any, observation: Any) -> str | None:
-        conditions = tuple((str(item or '').strip().casefold() for item in getattr(subgoal, 'completion_conditions',
-            ()) or () if str(item or '').strip()))
-        focus = re.compile(
-            r"(?:输入框|文本框|输入区域).{0,10}(?:聚焦|焦点)|焦点.{0,10}(?:输入框|文本框|输入区域)|"
-            r"(?:input|textbox|text field).{0,20}(?:focused|focus)"
-        )
-        return cls.focused_input_fact(observation) if conditions and all((focus.search(item) for item
-            in conditions)) else None
-
     @staticmethod
     def binding_terms(*values: Any) -> frozenset[str]:
         text = " ".join(str(value or "").casefold().replace("_", " ") for value in values)
@@ -472,6 +449,20 @@ class VisibleGoalEvidence:
             '是否为', 'equals', 'contains', 'exactly', 'whether')))))
 
     @classmethod
+    def visible_text_read_fact(cls, subgoal: Any, scene: Any, observation: Any) -> str | None:
+        if not cls.visible_text_read(subgoal):
+            return None
+        candidates = [item for item in scene.elements if str(item.label or '').strip() and any((marker
+            in str(item.meaning or '').casefold() for marker in ('title', 'heading', 'error', 'status_message')))
+            and cls.safe_element(item, observation, roles=frozenset({'text', 'dialog', 'container'}),
+            goal_relevant=True)]
+        if len(candidates) != 1:
+            return None
+        item = candidates[0]
+        return ("当前可信画面读取结果："
+            f"element_id={item.element_id}, role={item.role}, meaning={item.meaning}, label={item.label}。")
+
+    @classmethod
     def unique_candidate(cls, scene: Any, observation: Any) -> Any | None:
         candidate = scene.unique_trusted_goal_element(min_confidence=MIN_TARGET_CONFIDENCE)
         if candidate is not None:
@@ -486,7 +477,8 @@ class VisibleGoalEvidence:
         return None if competing else candidate
 
     @classmethod
-    def evidence(cls, graph: DynamicTaskGraph, subgoal: Any, observation: Any) -> tuple[str, ...] | None:
+    def evidence(cls, graph: DynamicTaskGraph, subgoal: Any, observation: Any, *,
+        app_surface_lineage: Any | None=None) -> tuple[str, ...] | None:
         scene = getattr(observation, "scene", None)
         if scene is None:
             return None
@@ -497,9 +489,18 @@ class VisibleGoalEvidence:
         typed_surface = cls.typed_system_surface_fact(graph, subgoal.subgoal_id, scene)
         target_apps = cls.referenced_target_apps(graph, text, subgoal.subgoal_id)
         app_matches = bool(target_apps and cls.foreground_matches(scene, target_apps))
-        if target_apps and (not app_matches):
+        lineage_matches = bool(app_surface_lineage is not None
+            and callable(getattr(app_surface_lineage, 'matches_foreground', None))
+            and app_surface_lineage.matches_foreground(str(getattr(scene, 'foreground_app_id', '')))
+            and any((str(app.app_id).casefold() == str(getattr(app_surface_lineage, 'app_id', '')).casefold()
+            and str(app.app_name).casefold() == str(getattr(app_surface_lineage, 'app_name', '')).casefold()
+            for app in target_apps)))
+        if target_apps and not (app_matches or lineage_matches):
             return None
         page_facts = cls.page_identity_facts(scene)
+        if cls.visible_text_read(subgoal):
+            fact = cls.visible_text_read_fact(subgoal, scene, observation)
+            return (scene.summary, fact, *page_facts) if fact else None
         named_surface = cls.named_presence_grounded(scene, conditions)
         destination = subgoal.external_impact == 'navigation_only' and bool(surfaces) and surfaces.issubset({'page',
             'destination', 'foreground_app'})

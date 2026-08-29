@@ -1,8 +1,4 @@
-"""Generic bridge to the seller-supplied robot control window.
-
-This module contains only camera capture and primitive pointer/navigation
-operations.  Task planning and App semantics belong to the canonical agent.
-"""
+"""Camera capture and primitive input bridge for the seller-supplied robot window."""
 
 from __future__ import annotations
 
@@ -18,8 +14,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageGrab
 
-# 新旧版本标题分别包含“智联新途机械臂控制端”和
-# “智联新途AI机械臂控制端”，只匹配稳定前缀。
+# 新旧标题只共享稳定的“智联新途”前缀。
 DEFAULT_WINDOW_TITLE = "智联新途"
 BASELINE_CLIENT_WIDTH = 540
 DEFAULT_CAMERA_HEIGHT = 960
@@ -56,9 +51,6 @@ _enable_per_monitor_dpi_awareness()
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP = 0x0202
-MK_LBUTTON = 0x0001
 SW_RESTORE = 9
 GA_ROOT = 2
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -75,8 +67,7 @@ KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 INPUT_KEYBOARD = 1
 
-# 卖家控制端底部控制条的固定横坐标。纵坐标使用“客户区底部向上偏移”
-# 计算，以兼容窗口标题栏高度变化。
+# 底栏横坐标固定，纵坐标按客户区底部偏移以适应标题栏变化。
 ACTION_BUTTON_X = 130
 ACTION_DROPDOWN_X = 176
 CLICK_COUNT_INPUT_X = 308
@@ -96,8 +87,7 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
 
-# Explicit signatures are required on 64-bit Windows.  Without them ctypes
-# may truncate HWND values returned by WindowFromPoint/GetAncestor.
+# Explicit 64-bit signatures prevent HWND truncation.
 user32.WindowFromPoint.argtypes = [POINT]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
@@ -181,8 +171,7 @@ def ensure_window_fully_visible(hwnd: int) -> None:
     _left, _top, client_width, client_height = client_geometry(hwnd)
     required_height = seller_required_client_height(client_width, client_height)
 
-    # Only auto-expand layouts that look like a real camera window.  Small
-    # startup/error dialogs must continue to fail closed.
+    # Auto-expand only plausible camera windows; small dialogs fail closed.
     portrait_candidate = client_height > client_width >= MIN_AUTO_LAYOUT_WIDTH
     desired_client_height = max(client_height, required_height) if portrait_candidate else client_height
 
@@ -269,10 +258,7 @@ def seller_layout_has_full_camera(client_width: int, client_height: int,
     if not landscape:
         return int(client_height) >= seller_required_client_height(client_width, client_height, baseline_height)
 
-    # A rotated 540x960 phone becomes 960x540.  The vendor window clips its
-    # second toolbar row in this orientation; the camera and first-row controls
-    # remain usable for the verified Back recovery action.  Small landscape
-    # startup dialogs can share the title, so require a plausible camera size.
+    # Rotated camera layouts may clip row two; require plausible camera size before Back recovery.
     scale = seller_layout_scale(client_width, client_height)
     expected_width = baseline_height * scale
     ratio = int(client_width) / int(client_height)
@@ -316,9 +302,7 @@ def _validate_camera_region_unoccluded(hwnd: int, *, camera_height: int=DEFAULT_
     visible_height = seller_camera_height(width, height, camera_height)
     reject_if(width <= 0 or visible_height <= 0, RuntimeError("控制端相机区域没有有效大小。"))
 
-    # Avoid borders and the seller toolbar.  Every point must belong to the
-    # controller (or one of its child windows); one foreign owner means the
-    # camera is still covered and the capture is unsafe.
+    # Sample only camera interior owned by the controller tree; any foreign owner blocks capture.
     samples = ((0.2, 0.15), (0.5, 0.15), (0.8, 0.15), (0.2, 0.5), (0.5, 0.5), (0.8, 0.5), (0.2, 0.82), (0.5, 0.82),
         (0.8, 0.82))
     foreign: list[tuple[int, int, int]] = []
@@ -365,6 +349,36 @@ def camera_crop(image: Image.Image, camera_height: int) -> Image.Image:
     return image.crop((0, 0, image.width, height))
 
 
+@contextmanager
+def _active_cursor_lease(hwnd: int, *, settle_seconds: float=0.1):
+    """Temporarily activate the seller window and always restore the cursor."""
+
+    original = POINT()
+    reject_if(not user32.GetCursorPos(ctypes.byref(original)), ctypes.WinError())
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.SetForegroundWindow(hwnd)
+    if settle_seconds > 0:
+        time.sleep(settle_seconds)
+    try:
+        yield
+    finally:
+        user32.SetCursorPos(original.x, original.y)
+
+
+def _round_trip_position_barrier(hwnd: int, point: POINT, *, client_x: int, client_width: int,
+    baseline: np.ndarray) -> tuple[int, int, int, float]:
+    """Prove that the seller GUI processed a move away and back."""
+
+    offset = SELLER_POSITION_BARRIER_OFFSET if client_x + SELLER_POSITION_BARRIER_OFFSET < client_width else -SELLER_POSITION_BARRIER_OFFSET
+    started = time.monotonic()
+    user32.SetCursorPos(point.x + offset, point.y)
+    changed_pixels, _ = _wait_for_seller_position_state(hwnd, baseline, expect_changed=True)
+    offset_state = _capture_seller_position_overlay(hwnd)
+    user32.SetCursorPos(point.x, point.y)
+    return_changed_pixels, _ = _wait_for_seller_position_state(hwnd, offset_state, expect_changed=True)
+    return offset, changed_pixels, return_changed_pixels, time.monotonic() - started
+
+
 def click_client_point(hwnd: int, x: int, y: int, countdown: int, hold_seconds: float, *,
     require_event_barrier: bool=False, click_count: int=1) -> dict[str, object] | None:
     _, _, width, height = client_geometry(hwnd)
@@ -375,55 +389,32 @@ def click_client_point(hwnd: int, x: int, y: int, countdown: int, hold_seconds: 
     screen_point = POINT(x, y)
     reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(screen_point)), ctypes.WinError())
 
-    old_cursor = POINT()
-    user32.GetCursorPos(ctypes.byref(old_cursor))
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    if require_event_barrier:
-        # Let Windows finish activating the seller window before establishing
-        # the event-order baseline.  Per-key text input keeps its existing fast
-        # path and is intentionally outside this single-action batch.
-        time.sleep(0.1)
-
-    for remaining in range(countdown, 0, -1):
-        reject_if(user32.GetAsyncKeyState(VK_ESCAPE) & 32768, RuntimeError("用户按下 Esc，已取消执行。"))
-        print(f"{remaining} 秒后执行物理点击；按 Esc 取消……", flush=True)
-        time.sleep(1)
-
     pressed = False
     changed_pixels = 0
     return_changed_pixels = 0
     barrier_seconds = 0.0
-    try:
-        user32.SetCursorPos(screen_point.x, screen_point.y)
-        target_state = _stable_seller_position_baseline(hwnd) if require_event_barrier else None
-        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-        pressed = True
-        # 实机验证表明 0.08 秒过短：机械臂会下压，但手机可能收不到触摸。
-        time.sleep(hold_seconds)
-        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        pressed = False
-
-        if require_event_barrier:
-            assert target_state is not None
-            offset = (
-                SELLER_POSITION_BARRIER_OFFSET
-                if x + SELLER_POSITION_BARRIER_OFFSET < width
-                else -SELLER_POSITION_BARRIER_OFFSET
-            )
-            barrier_started = time.monotonic()
-            user32.SetCursorPos(screen_point.x + offset, screen_point.y)
-            changed_pixels, _ = _wait_for_seller_position_state(hwnd, target_state, expect_changed=True)
-            offset_state = _capture_seller_position_overlay(hwnd)
+    with _active_cursor_lease(hwnd, settle_seconds=0.1 if require_event_barrier else 0.0):
+        for remaining in range(countdown, 0, -1):
+            _check_escape("用户按下 Esc，已取消执行。")
+            print(f"{remaining} 秒后执行物理点击；按 Esc 取消……", flush=True)
+            time.sleep(1)
+        try:
             user32.SetCursorPos(screen_point.x, screen_point.y)
-            return_changed_pixels, _ = _wait_for_seller_position_state(hwnd, offset_state, expect_changed=True)
-            barrier_seconds = time.monotonic() - barrier_started
-        time.sleep(0.12)
-    finally:
-        if pressed:
+            target_state = _stable_seller_position_baseline(hwnd) if require_event_barrier else None
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            pressed = True
+            # 实机验证表明 0.08 秒过短：机械臂会下压，但手机可能收不到触摸。
+            time.sleep(hold_seconds)
             user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            pressed = False
+            if target_state is not None:
+                offset, changed_pixels, return_changed_pixels, barrier_seconds = _round_trip_position_barrier(
+                    hwnd, screen_point, client_x=x, client_width=width, baseline=target_state)
             time.sleep(0.12)
-        user32.SetCursorPos(old_cursor.x, old_cursor.y)
+        finally:
+            if pressed:
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                time.sleep(0.12)
 
     if not require_event_barrier:
         return None
@@ -495,44 +486,26 @@ def long_press_client_point(hwnd: int, x: int, y: int, *, hold_seconds: float) -
 
     point = POINT(x, y)
     reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(point)), ctypes.WinError())
-    old_cursor = POINT()
-    user32.GetCursorPos(ctypes.byref(old_cursor))
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.1)
-    user32.SetCursorPos(point.x, point.y)
-    _check_escape("用户按下 Esc，已取消长按。")
-    baseline = _stable_seller_position_baseline(hwnd)
-    offset = (
-        SELLER_POSITION_BARRIER_OFFSET
-        if x + SELLER_POSITION_BARRIER_OFFSET < width
-        else -SELLER_POSITION_BARRIER_OFFSET
-    )
     pressed = False
     changed_pixels = 0
     return_changed_pixels = 0
     barrier_seconds = 0.0
-    try:
-        user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
-        pressed = True
-        barrier_started = time.monotonic()
-        user32.SetCursorPos(point.x + offset, point.y)
-        changed_pixels, _ = _wait_for_seller_position_state(hwnd, baseline, expect_changed=True)
-        offset_state = _capture_seller_position_overlay(hwnd)
+    with _active_cursor_lease(hwnd):
         user32.SetCursorPos(point.x, point.y)
-        return_changed_pixels, _ = _wait_for_seller_position_state(hwnd, offset_state, expect_changed=True)
-        barrier_seconds = time.monotonic() - barrier_started
-        # The seller GUI returning from its synchronous handler proves event
-        # ordering, but its native Z command has no documented contact ACK.
-        # Keep the pen stationary for a calibrated descent window before the
-        # requested semantic hold interval starts.
-        sleep_interruptible(SELLER_TOUCH_DOWN_SETTLE_SECONDS)
-        sleep_interruptible(float(hold_seconds))
-    finally:
-        if pressed:
-            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
-            time.sleep(0.12)
-        user32.SetCursorPos(old_cursor.x, old_cursor.y)
+        _check_escape("用户按下 Esc，已取消长按。")
+        baseline = _stable_seller_position_baseline(hwnd)
+        try:
+            user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+            pressed = True
+            offset, changed_pixels, return_changed_pixels, barrier_seconds = _round_trip_position_barrier(
+                hwnd, point, client_x=x, client_width=width, baseline=baseline)
+            # The GUI handler proves event ordering but not mechanical contact.
+            sleep_interruptible(SELLER_TOUCH_DOWN_SETTLE_SECONDS)
+            sleep_interruptible(float(hold_seconds))
+        finally:
+            if pressed:
+                user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                time.sleep(0.12)
     return {'version': '2026-08-16-seller-gui-contact-barrier-v3', 'channel': 'right_button_stationary_touch',
         'seller_event_barrier_confirmed': True, 'round_trip_position_confirmed': True,
         'hold_started_after_barrier': True, 'requested_hold_seconds': float(hold_seconds),
@@ -558,32 +531,26 @@ def drag_client_path(hwnd: int, start: tuple[int, int], end: tuple[int, int], *,
     reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(start_point)), ctypes.WinError())
     reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(end_point)), ctypes.WinError())
 
-    old_cursor = POINT()
-    user32.GetCursorPos(ctypes.byref(old_cursor))
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.1)
-    user32.SetCursorPos(start_point.x, start_point.y)
-    _check_escape("用户按下 Esc，已取消拖动。")
     pressed = False
-    try:
-        user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
-        pressed = True
-        time.sleep(0.12)
-        step_count = int(steps)
-        delay = max(0.01, (float(duration_seconds) - 0.12) / step_count)
-        for index in range(1, step_count + 1):
-            _check_escape("用户按下 Esc，已停止拖动。")
-            ratio = index / step_count
-            x = round(start_point.x + (end_point.x - start_point.x) * ratio)
-            y = round(start_point.y + (end_point.y - start_point.y) * ratio)
-            user32.SetCursorPos(x, y)
-            time.sleep(delay)
-    finally:
-        if pressed:
-            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+    with _active_cursor_lease(hwnd):
+        user32.SetCursorPos(start_point.x, start_point.y)
+        _check_escape("用户按下 Esc，已取消拖动。")
+        try:
+            user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+            pressed = True
             time.sleep(0.12)
-        user32.SetCursorPos(old_cursor.x, old_cursor.y)
+            step_count = int(steps)
+            delay = max(0.01, (float(duration_seconds) - 0.12) / step_count)
+            for index in range(1, step_count + 1):
+                _check_escape("用户按下 Esc，已停止拖动。")
+                ratio = index / step_count
+                user32.SetCursorPos(round(start_point.x + (end_point.x - start_point.x) * ratio),
+                    round(start_point.y + (end_point.y - start_point.y) * ratio))
+                time.sleep(delay)
+        finally:
+            if pressed:
+                user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                time.sleep(0.12)
 
 
 def _check_escape(message: str='用户按下 Esc，已停止执行。') -> None:
@@ -608,17 +575,12 @@ def click_client_control(hwnd: int, x: int, y: int, hold: float=0.08) -> None:
 
     point = POINT(x, y)
     reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(point)), ctypes.WinError())
-    old_cursor = POINT()
-    user32.GetCursorPos(ctypes.byref(old_cursor))
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.1)
-    user32.SetCursorPos(point.x, point.y)
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(hold)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-    time.sleep(0.12)
-    user32.SetCursorPos(old_cursor.x, old_cursor.y)
+    with _active_cursor_lease(hwnd):
+        user32.SetCursorPos(point.x, point.y)
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(hold)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.12)
 
 
 def press_virtual_key(key_code: int) -> None:
@@ -696,15 +658,7 @@ def cursor_parking_screen_point(window_rect: tuple[int, int, int, int], virtual_
 
 @contextmanager
 def temporarily_park_cursor_outside_camera(hwnd: int):
-    """Keep the pointer away from the camera only for one scoped operation.
-
-    Seller v1.0.1018 shows an opaque PX/MM tooltip while the system pointer is
-    over its camera preview.  The previous implementation always moved the
-    pointer to a desktop corner and left it there after every capture/action.
-    This lease moves only when the user's pointer is actually over the camera,
-    restores it when the lease ends, and does not overwrite a position the
-    user selected while the lease was active.
-    """
+    """Temporarily park a pointer over the camera and restore it unless the user moved it."""
 
     original = POINT()
     reject_if(not user32.GetCursorPos(ctypes.byref(original)), ctypes.WinError())
@@ -758,8 +712,7 @@ def configure_swipe(hwnd: int, direction: str) -> None:
     _, _, width, height = client_geometry(hwnd)
     control_x, control_y = seller_control_point(width, height, ACTION_DROPDOWN_X)
     click_client_control(hwnd, control_x, control_y)
-    # 下拉选项顺序由卖家文档和实机确认：
-    # 上划、下划、左划、右划、下拉、起点。
+    # 下拉顺序：上划、下划、左划、右划、下拉、起点。
     press_virtual_key(VK_HOME)
     for _ in range(index):
         press_virtual_key(VK_DOWN)

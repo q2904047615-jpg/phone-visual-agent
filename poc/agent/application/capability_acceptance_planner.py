@@ -33,14 +33,7 @@ _SEMANTIC_CONTRACTS: Final[dict[str, tuple[str, str]]] = {'tap_semantic': ('ç›®æ
 
 
 class CapabilityAcceptanceTaskGraphPlanner:
-    """Deterministic graph contract used only to certify one primitive.
-
-    Production sessions continue to use ``DeepSeekTaskGraphPlanner``.  A
-    capability trial has a narrower job: prove that one already selected
-    primitive can pass the normal Qwen, policy, controller and re-observation
-    gates.  Re-running stochastic task decomposition here adds no safety and
-    makes the same physical primitive depend on incidental graph wording.
-    """
+    """Build the deterministic graph used only to certify one preselected primitive."""
 
     def __init__(self, candidate_action: str) -> None:
         action = str(candidate_action or "").strip()

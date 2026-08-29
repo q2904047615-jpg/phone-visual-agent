@@ -219,14 +219,14 @@ class TypedPlannerTransportTests(unittest.TestCase):
         candidate["subgoals"].append(
             {
                 "subgoal_id": "invented_send",
-                "objective": "发送画面中已有的草稿",
+                "objective": "继续查看新页面中的其他内容",
                 "status": "active",
                 "depends_on": ["step"],
                 "constraints": [],
-                "completion_conditions": ["草稿已发送"],
+                "completion_conditions": ["其他内容可见"],
                 "completion_evidence": [],
-                "effect_ids": ["missing_effect"],
-                "execution_class": "effect",
+                "effect_ids": [],
+                "execution_class": "navigate",
             }
         )
         candidate["active_subgoal_id"] = "invented_send"
@@ -322,63 +322,40 @@ class TypedPlannerTransportTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
-    def test_current_page_refresh_cannot_be_upgraded_to_unbound_effect(self):
-        for objective in (
-            "点击当前浏览器顶部可见的刷新图标，重新加载当前页面",
-            "Reload the current page",
-        ):
-            with self.subTest(objective=objective):
+    def test_malformed_local_navigation_is_rejected_without_semantic_rewrite(self):
+        cases = (
+            ("点击当前浏览器顶部可见的刷新图标，重新加载当前页面", "effect"),
+            ("Reload the current page", "effect"),
+        )
+        for objective, execution_class in cases:
+            with self.subTest(objective=objective, execution_class=execution_class):
                 raw = payload(objective=objective)
-                raw["subgoals"][0]["execution_class"] = "effect"
-                raw["subgoals"][0]["effect_ids"] = []
-                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
-                    objective,
-                    device_id="phone-1",
-                )
-                self.assertEqual((), graph.risk_actions)
-                self.assertEqual(
-                    "navigation_only",
-                    graph.subgoals[0].external_impact,
-                )
-
-        split_context = payload(
-            objective="点击当前浏览器顶部可见的刷新图标，重新加载当前页面"
-        )
-        split_context["subgoals"][0].update(
-            {
-                "subgoal_id": "click_refresh",
-                "objective": "点击当前浏览器顶部可见的刷新图标",
-                "completion_conditions": ["刷新图标已被点击"],
-                "execution_class": "effect",
-                "effect_ids": [],
-            }
-        )
-        split_graph = DeepSeekTaskGraphPlanner(FakeProvider(split_context)).plan(
-            split_context["goal"]["objective"],
-            device_id="phone-1",
-        )
-        self.assertEqual("navigation_only", split_graph.subgoals[0].external_impact)
-
-        for objective, execution_class in (
-            ("点击当前浏览器顶部的刷新按钮", "unknown"),
-            ("点击当前界面唯一的重新加载图标", "effect"),
-            ("Click the refresh button in the current browser", "unknown"),
-        ):
-            with self.subTest(
-                current_surface_control=objective,
-                execution_class=execution_class,
-            ):
-                raw = payload(objective=objective)
-                raw["subgoals"][0]["status"] = "pending"
                 raw["subgoals"][0]["execution_class"] = execution_class
                 raw["subgoals"][0]["effect_ids"] = []
-                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
-                    objective,
-                    device_id="phone-1",
-                )
-                self.assertEqual("navigation_only", graph.subgoals[0].external_impact)
-                self.assertEqual("active", graph.subgoals[0].status)
-                self.assertEqual("step", graph.active_subgoal_id)
+                with self.assertRaisesRegex(
+                    TaskGraphError,
+                    "execution_class 无效|effect 子目标必须引用",
+                ):
+                    DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
+        unknown = payload(objective="Click the refresh button in the current browser")
+        unknown["subgoals"][0]["execution_class"] = "unknown"
+        unknown_graph = DeepSeekTaskGraphPlanner(FakeProvider(unknown)).plan(
+            unknown["goal"]["objective"],
+            device_id="phone-1",
+        )
+        self.assertEqual("unknown", unknown_graph.subgoals[0].external_impact)
+
+        valid = payload(objective="点击当前浏览器顶部可见的刷新图标")
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(valid)).plan(
+            valid["goal"]["objective"],
+            device_id="phone-1",
+        )
+        self.assertEqual("navigation_only", graph.subgoals[0].external_impact)
+        self.assertEqual("active", graph.subgoals[0].status)
 
         bound_refresh = payload(
             objective=(
@@ -394,7 +371,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
             {
                 "subgoal_id": "click_refresh",
                 "objective": "点击当前页面可见的刷新按钮，使多行输入框恢复为空白",
-                "status": "pending",
+                "status": "active",
                 "completion_conditions": ["多行输入框恢复为空白"],
                 "execution_class": "effect",
                 "effect_ids": ["clear_input"],
@@ -411,31 +388,22 @@ class TypedPlannerTransportTests(unittest.TestCase):
                 "expected_results": ["多行输入框恢复为空白"],
             }
         ]
-        normalized_bound_refresh = DeepSeekTaskGraphPlanner(
+        typed_bound_refresh = DeepSeekTaskGraphPlanner(
             FakeProvider(bound_refresh)
         ).plan(
             bound_refresh["goal"]["objective"],
             device_id="phone-1",
         )
-        self.assertEqual((), normalized_bound_refresh.risk_actions)
+        self.assertEqual(1, len(typed_bound_refresh.risk_actions))
         self.assertEqual(
-            "navigation_only",
-            normalized_bound_refresh.subgoals[0].external_impact,
+            "external_state",
+            typed_bound_refresh.subgoals[0].external_impact,
         )
-        self.assertEqual("active", normalized_bound_refresh.subgoals[0].status)
+        self.assertEqual("active", typed_bound_refresh.subgoals[0].status)
         self.assertEqual(
             "click_refresh",
-            normalized_bound_refresh.active_subgoal_id,
+            typed_bound_refresh.active_subgoal_id,
         )
-
-        true_effect = copy.deepcopy(bound_refresh)
-        true_effect["goal"]["objective"] = "刷新当前页面后提交表单"
-        true_effect["subgoals"][0]["objective"] = "刷新当前页面后提交表单"
-        with self.assertRaises(TaskGraphError):
-            DeepSeekTaskGraphPlanner(FakeProvider(true_effect)).plan(
-                true_effect["goal"]["objective"],
-                device_id="phone-1",
-            )
 
         for objective in (
             "刷新当前页面后提交表单",
@@ -498,7 +466,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     {
                         "objective": objective,
                         "completion_conditions": [result],
-                        "execution_class": "effect",
+                        "execution_class": "navigate",
                         "effect_ids": [],
                     }
                 )
@@ -511,6 +479,14 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     "navigation_only",
                     graph.subgoals[0].external_impact,
                 )
+
+                malformed = copy.deepcopy(raw)
+                malformed["subgoals"][0]["execution_class"] = "effect"
+                with self.assertRaisesRegex(TaskGraphError, "effect 子目标必须引用"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(malformed)).plan(
+                        goal,
+                        device_id="phone-1",
+                    )
 
         real_effect = payload(objective="在聊天应用中发送你好")
         real_effect["goal"]["target_apps"] = []
@@ -552,7 +528,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
                             f"输入框逐字显示{input_text.splitlines()[0]}，"
                             "且未提交或发送"
                         ],
-                        "execution_class": "effect",
+                        "execution_class": "navigate",
                         "effect_ids": [],
                     }
                 )
@@ -565,13 +541,21 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     graph.subgoals[0].external_impact,
                 )
 
+                malformed = copy.deepcopy(raw)
+                malformed["subgoals"][0]["execution_class"] = "effect"
+                with self.assertRaisesRegex(TaskGraphError, "effect 子目标必须引用"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(malformed)).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
         newline = payload(objective="输入两行文字并保留真实换行")
         newline["goal"]["entities"]["input_text"] = "first line\nsecond line"
         newline["subgoals"][0].update(
             {
                 "objective": "按一次真正的换行键",
                 "completion_conditions": ["当前值追加一个真实换行"],
-                "execution_class": "effect",
+                "execution_class": "navigate",
                 "effect_ids": [],
             }
         )
@@ -665,7 +649,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
             {
                 "objective": "在主题字段填写周报",
                 "completion_conditions": ["主题字段逐字显示周报"],
-                "execution_class": "unknown",
+                "execution_class": "navigate",
                 "effect_ids": [],
             }
         )
@@ -677,7 +661,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
             multifield_graph.subgoals[0].external_impact,
         )
 
-    def test_local_input_normalization_preserves_external_effect_rejections(self):
+    def test_unbound_input_effects_are_rejected_without_semantic_rewrite(self):
         for objective, subgoal_objective, entities in (
             (
                 "输入消息并发送",
@@ -757,7 +741,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
                 ],
                 "completion_evidence": [],
                 "effect_ids": [],
-                "execution_class": "effect",
+                "execution_class": "navigate",
             },
         ]
         raw["active_subgoal_id"] = "locate_input"
@@ -1001,7 +985,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
         self.assertEqual((), graph.risk_actions)
         self.assertEqual("navigation_only", graph.subgoals[0].external_impact)
 
-    def test_pure_prohibited_effect_condition_remains_only_a_constraint(self):
+    def test_pure_prohibited_effect_condition_is_not_silently_removed(self):
         raw = payload(objective="在输入框保留草稿且不要发送")
         raw["completion_conditions"].append(
             {
@@ -1018,13 +1002,13 @@ class TypedPlannerTransportTests(unittest.TestCase):
             device_id="phone-1",
         )
 
-        self.assertEqual(("done",), tuple(
+        self.assertEqual(("done", "not_sent"), tuple(
             item.condition_id for item in graph.completion_conditions
         ))
         self.assertIn("不得发送、删除或清空任何内容", graph.constraints)
         self.assertEqual((), graph.risk_actions)
 
-    def test_replan_drops_unsupported_satisfied_prohibition_without_granting_completion(self):
+    def test_replan_rejects_satisfied_prohibition_without_visible_evidence(self):
         initial = payload(objective="在输入框保留草稿且不要发送")
         negative = {
             "condition_id": "not_sent",
@@ -1045,24 +1029,19 @@ class TypedPlannerTransportTests(unittest.TestCase):
             device_id="phone-1",
         )
 
-        revised = planner.replan(
-            graph,
-            ObservedState(
-                scene_id="scene-still-editing",
-                summary="输入表面仍可见",
-                visible_evidence=("输入表面仍可见",),
-            ),
-            trigger="observation_changed",
-            reason="当前画面已更新",
-        )
+        with self.assertRaisesRegex(TaskGraphError, "缺少可见证据"):
+            planner.replan(
+                graph,
+                ObservedState(
+                    scene_id="scene-still-editing",
+                    summary="输入表面仍可见",
+                    visible_evidence=("输入表面仍可见",),
+                ),
+                trigger="observation_changed",
+                reason="当前画面已更新",
+            )
 
-        self.assertEqual(("done",), tuple(
-            item.condition_id for item in revised.completion_conditions
-        ))
-        self.assertFalse(revised.completion_conditions[0].satisfied)
-        self.assertEqual("running", revised.status)
-
-    def test_prohibition_normalization_is_cross_effect_and_not_app_specific(self):
+    def test_prohibition_conditions_are_not_silently_removed(self):
         cases = (
             ("不得搜索或提交", "未搜索、未提交", "没有搜索或提交动作发生"),
             ("不得保存或发布", "未保存、未发布", "没有保存或发布动作发生"),
@@ -1088,7 +1067,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     device_id="phone-1",
                 )
 
-                self.assertEqual(("done",), tuple(
+                self.assertEqual(("done", "negative_effect"), tuple(
                     item.condition_id for item in graph.completion_conditions
                 ))
                 self.assertEqual((constraint,), graph.constraints)

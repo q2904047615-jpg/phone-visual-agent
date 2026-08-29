@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from .validation import reject_if
+from .validation import NormalizedBounds, NormalizedPoint, ValidatedDataclassWire, dataclass_wire, reject_if
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 
 UI_SCENE_PROTOCOL_VERSION = "2026-08-14-ui-scene-v3"
 MIN_TARGET_CONFIDENCE = 0.72
-MIN_CAMERA_ALIGNMENT_CONFIDENCE = 0.80
-
 # A low-confidence dynamic background must never authorize a screen-wide action.
 # It may only expose one locally trustworthy, goal-relevant element for the
 # downstream exact-element gates.
@@ -47,7 +45,7 @@ def camera_alignment_evidence_is_safe(value: Any) -> bool:
 
 
 @dataclass(frozen=True)
-class SystemUIFacts:
+class SystemUIFacts(ValidatedDataclassWire):
     """Read-only system UI facts; unknown never satisfies a visual gate."""
 
     immersive_or_fullscreen: bool | str = SYSTEM_UI_UNKNOWN
@@ -59,11 +57,6 @@ class SystemUIFacts:
             if isinstance(value, bool) or value == SYSTEM_UI_UNKNOWN:
                 continue
             raise UISceneError(f'system_ui.{field_name} 必须是布尔值或明确的 unknown。')
-
-    def to_dict(self) -> dict[str, bool | str]:
-        self.validate()
-        return {'immersive_or_fullscreen': self.immersive_or_fullscreen,
-            'navigation_bar_visible': self.navigation_bar_visible}
 
     @classmethod
     def from_dict(cls, value: Any) -> 'SystemUIFacts':
@@ -110,9 +103,9 @@ class CameraAlignmentFacts:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {'camera_layout_orientation': self.camera_layout_orientation,
-            'phone_content_rotation': self.phone_content_rotation, 'confidence': float(self.confidence),
-            'evidence': list(self.evidence)}
+        value = dataclass_wire(self)
+        value['confidence'] = float(self.confidence)
+        return value
 
     @classmethod
     def from_dict(cls, value: Any) -> 'CameraAlignmentFacts':
@@ -132,13 +125,13 @@ class CameraAlignmentFacts:
 
 
 @dataclass(frozen=True)
-class UIElement:
+class UIElement(ValidatedDataclassWire):
     """A perceived semantic element. It contains evidence, never an action."""
 
     element_id: str
     role: str
     meaning: str
-    bounds: tuple[float, float, float, float]
+    bounds: NormalizedBounds
     confidence: float
     label: str = ""
     states: dict[str, Any] = field(default_factory=dict)
@@ -250,16 +243,9 @@ class UIElement:
         _reject_action_data(self.states, "states")
 
     @property
-    def center(self) -> tuple[float, float]:
+    def center(self) -> NormalizedPoint:
         left, top, right, bottom = self.bounds
         return ((left + right) / 2.0, (top + bottom) / 2.0)
-
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        value = asdict(self)
-        value["bounds"] = list(self.bounds)
-        value["evidence"] = list(self.evidence)
-        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any], *, coordinate_scale: float=1.0) -> 'UIElement':
@@ -294,14 +280,7 @@ class UIElement:
 
 
 def compact_drag_source_container_error(scene: Any, source: UIElement) -> str:
-    """Return why a container cannot safely represent one draggable object.
-
-    Vision role names are descriptive, not hardware authority. A compact card
-    or block may be reported as either ``image`` or ``container``. This shared
-    gate lets only one labelled, fully visible, goal-bound object proceed to
-    confirmation-time geometry auditing; broad grouping containers remain
-    denied in every policy/controller phase.
-    """
+    """Return why a container cannot represent one draggable object."""
 
     if source.role != 'container':
         return ""
@@ -407,12 +386,7 @@ class UIScene:
         raise UISceneError(f"当前场景不存在元素：{expected}")
 
     def unique_trusted_goal_element(self, *, min_confidence: float=MIN_TARGET_CONFIDENCE) -> UIElement | None:
-        """Return the sole strong goal element without trusting the whole scene.
-
-        This is deliberately narrower than ``resolve_unique``: it only supports
-        exact element-bound actions.  Screen actions still require trustworthy
-        scene-level confidence in the controller policy.
-        """
+        """Return the sole strong goal element without trusting the whole scene."""
 
         self.validate()
         matches = tuple((element for element in self.elements if element.role in TARGET_LOCAL_ACTION_ROLES
@@ -451,21 +425,10 @@ class UIScene:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "protocol_version": self.protocol_version,
-            "foreground_app_id": self.foreground_app_id,
-            # Temporary compatibility alias for existing reports and UI.
-            "app_id": self.foreground_app_id,
-            "screen_id": self.screen_id,
-            "summary": self.summary,
-            "system_ui": self.system_ui.to_dict(),
-            "camera_alignment": self.camera_alignment.to_dict(),
-            "elements": [element.to_dict() for element in self.elements],
-            "overlays": list(self.overlays),
-            "stable": self.stable,
-            "confidence": float(self.confidence),
-            "fingerprint": self.fingerprint,
-        }
+        value = dataclass_wire(self)
+        value.update(foreground_app_id=self.foreground_app_id, app_id=self.foreground_app_id,
+            confidence=float(self.confidence))
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any], *, coordinate_scale: float=1.0, stable_override: bool | None=None,
@@ -505,17 +468,8 @@ class UIScene:
         return scene
 
 
-
 def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
-    """Bind a typed App surface to one structured foreground identity.
-
-    Android package IDs, product IDs, and user-facing App names are not always
-    lexical aliases (for example ``com.vendor.runtime`` versus a product
-    name).  ``screen_id`` is already a typed fact about the current foreground
-    surface, so its bounded identity terms may bridge that gap.  Child labels,
-    summaries, and ordinary body text remain ineligible and therefore cannot
-    turn a launcher icon into foreground-App proof.
-    """
+    """Bind a typed App surface to structured foreground identity facts."""
 
     def identity_terms(*values: Any) -> frozenset[str]:
         generic = {'android', 'app', 'application', 'com', 'current', 'foreground', 'home', 'interface', 'list', 'main',
@@ -559,7 +513,6 @@ def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> boo
     return len(title_matches) == 1
 
 
-
 def scene_surface_kind(scene: UIScene) -> str:
     """Return the one typed surface class used by catalog and receipt checks."""
 
@@ -593,8 +546,7 @@ def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:
     return normalized_app or "unknown"
 
 
-def _bounds_iou(left_bounds: tuple[float, float, float, float], right_bounds: tuple[float, float, float,
-    float]) -> float:
+def _bounds_iou(left_bounds: NormalizedBounds, right_bounds: NormalizedBounds) -> float:
     left = max(left_bounds[0], right_bounds[0])
     top = max(left_bounds[1], right_bounds[1])
     right = min(left_bounds[2], right_bounds[2])

@@ -799,6 +799,22 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             )
         self.assertEqual(0, provider.calls)
 
+    def test_post_action_context_normalizes_explicit_null_for_non_value_operator(self) -> None:
+        context = PostActionVisualContext.from_dict({
+            "protocol_version": POST_ACTION_VISUAL_CONTEXT_VERSION,
+            "execution_state": "physical_action_executed",
+            "outcome": "pending_visual_verification",
+            "canonical_action_kind": "back",
+            "expected_postconditions": [{
+                "subject_ref": "surface_current",
+                "predicate": "surface.navigation_depth",
+                "operator": "changed",
+                "value": None,
+            }],
+        })
+
+        self.assertNotIn("value", context.to_dict()["expected_postconditions"][0])
+
     def test_target_only_clear_binds_visible_preedit_to_unique_focused_field(
         self,
     ) -> None:

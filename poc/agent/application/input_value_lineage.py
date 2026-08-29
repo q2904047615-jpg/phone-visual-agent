@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
+from agent.domain.validation import NormalizedBounds, reject_if
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from PIL import Image, ImageOps
 
 from agent.domain.input_value_lineage import (
-    DEFAULT_LINEAGE_TTL_SECONDS,
     SURFACE_DESCRIPTOR_HEIGHT,
     SURFACE_DESCRIPTOR_WIDTH,
     InputValueLineageError,
@@ -19,6 +18,7 @@ from agent.domain.input_value_lineage import (
 
 
 SURFACE_DESCRIPTOR_MAX_MEAN_DISTANCE = 18.0
+VerifiedInputActionType = Literal['literal', 'text', 'newline']
 
 
 class TypedInputLineageStorePort(Protocol):
@@ -33,43 +33,13 @@ class TypedInputLineageStorePort(Protocol):
 
     def load(self, device_id: str) -> TypedInputLineage | None: ...
 
-    def record_verified_literal_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        hardware_receipt: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_literal_action",
-    ) -> TypedInputLineage: ...
-
-    def record_verified_text_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_text_action",
-    ) -> TypedInputLineage: ...
-
-    def record_verified_newline_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        hardware_receipt: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_newline_action",
-    ) -> TypedInputLineage: ...
+    def record_verified_action(self, *, action_type: VerifiedInputActionType, device_id: str,
+        resolved_action: dict[str, Any], before_scene: dict[str, Any], after_scene: dict[str, Any],
+        after_frames: tuple[Image.Image, ...], hardware_receipt: dict[str, Any] | None=None,
+        source: str | None=None) -> TypedInputLineage: ...
 
 
-def describe_input_surface(frame: Image.Image, bounds: tuple[float, float, float, float]) -> str:
+def describe_input_surface(frame: Image.Image, bounds: NormalizedBounds) -> str:
     reject_if(not isinstance(frame, Image.Image), InputValueLineageError("输入表面描述缺少真实图像帧。"))
     valid = _valid_bounds(bounds)
     reject_if(valid is None or frame.width < 2 or frame.height < 2, InputValueLineageError("输入表面描述的图像或 bounds 无效。"))
@@ -87,15 +57,15 @@ def describe_input_surface(frame: Image.Image, bounds: tuple[float, float, float
     return normalized.tobytes().hex()
 
 
-def build_surface_descriptors(frames: Any, bounds: tuple[float, float, float, float]) -> tuple[str, ...]:
+def build_surface_descriptors(frames: Any, bounds: NormalizedBounds) -> tuple[str, ...]:
     reject_if(not isinstance(frames, (list, tuple)) or len(frames) != 4, InputValueLineageError("输入表面连续性必须绑定动作后四帧。"))
     descriptors = tuple(describe_input_surface(frame, bounds) for frame in frames)
     reject_if(not descriptors, InputValueLineageError("输入表面连续性没有可用的局部描述。"))
     return descriptors
 
 
-def surface_descriptors_match(descriptors: tuple[str, ...], *, frame: Image.Image | None, bounds: tuple[float, float,
-    float, float]) -> bool:
+def surface_descriptors_match(descriptors: tuple[str, ...], *, frame: Image.Image | None,
+    bounds: NormalizedBounds) -> bool:
     if frame is None or not descriptors:
         return False
     try:
@@ -121,15 +91,15 @@ def lineage_matches_visual(record: TypedInputLineage, *, current_frame: Image.Im
         frame=current_frame, bounds=record.input_bounds))
 
 
-def lineage_matches_persisted_surface_cue(record: TypedInputLineage, *, input_bounds: tuple[float, float, float,
-    float] | None, current_frame: Image.Image | None, **context: Any) -> bool:
+def lineage_matches_persisted_surface_cue(record: TypedInputLineage, *, input_bounds: NormalizedBounds | None,
+    current_frame: Image.Image | None, **context: Any) -> bool:
     surface_matches = bool(input_bounds is not None and surface_descriptors_match(record.surface_descriptors,
         frame=current_frame, bounds=input_bounds))
     return record.matches_persisted_surface_cue(**context, input_bounds=input_bounds, surface_matches=surface_matches)
 
 
-def lineage_matches_trailing_newline_cue(record: TypedInputLineage, *, input_bounds: tuple[float, float, float,
-    float] | None, current_frame: Image.Image | None=None, **context: Any) -> bool:
+def lineage_matches_trailing_newline_cue(record: TypedInputLineage, *, input_bounds: NormalizedBounds | None,
+    current_frame: Image.Image | None=None, **context: Any) -> bool:
     surface_matches = bool(input_bounds is not None and surface_descriptors_match(record.surface_descriptors,
         frame=current_frame, bounds=input_bounds))
     return record.matches_trailing_newline_cue(**context, input_bounds=input_bounds, surface_matches=surface_matches)

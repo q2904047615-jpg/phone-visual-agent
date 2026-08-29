@@ -773,11 +773,9 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
             1) and (sum((result == expected_results[0] for result in goal_completion_results)) == 1)
         exact_unique_source_result = len(source_results) == 1 and (not DIRECT_PROHIBITION_CLAUSE_PATTERN.search(
             source_results[0])) and (not NON_EFFECT_RESULT_PATTERN.search(source_results[0]))
-        if exact_unique_goal_result:
-            pass
-        elif exact_unique_source_result:
+        if not exact_unique_goal_result and exact_unique_source_result:
             expected_results = source_results
-        else:
+        elif not exact_unique_goal_result:
             raise TaskGraphError('effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。')
     return RiskAction(risk_id=effect_id, subgoal_ids=source_subgoal_ids, confirmation_required=False,
         effect_kind=kind, target_roles=target_roles, payload_roles=payload_roles,

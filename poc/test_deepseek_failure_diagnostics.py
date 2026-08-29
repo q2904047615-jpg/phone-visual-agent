@@ -8,9 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent.infrastructure.deepseek_failure_diagnostics import (
-    MAX_REDACTED_DEEPSEEK_RESPONSE_CHARS,
     persist_deepseek_failure_diagnostic,
 )
+from agent.infrastructure.model_failure_diagnostics import MAX_REDACTED_MODEL_RESPONSE_CHARS
 
 
 class DeepSeekFailureDiagnosticTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
         self.assertTrue(artifact["redacted_response_truncated"])
         self.assertLessEqual(
             len(artifact["redacted_raw_response"]),
-            MAX_REDACTED_DEEPSEEK_RESPONSE_CHARS,
+            MAX_REDACTED_MODEL_RESPONSE_CHARS,
         )
         serialized = json.dumps(artifact, ensure_ascii=False)
         self.assertNotIn("live-secret", serialized)

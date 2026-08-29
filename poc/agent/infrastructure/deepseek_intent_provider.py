@@ -28,10 +28,6 @@ def _read_windows_user_environment(name: str) -> str:
     return str(value or "").strip()
 
 
-def _default_deepseek_api_key() -> str:
-    return os.getenv('DEEPSEEK_API_KEY', '').strip() or _read_windows_user_environment('DEEPSEEK_API_KEY')
-
-
 class IntentProviderError(RuntimeError):
     """Raised when the text-intent provider cannot return a safe result."""
 
@@ -43,7 +39,8 @@ class DeepSeekIntentProvider:
 
     def __init__(self, *, api_key: str | None=None, model: str | None=None, base_url: str | None=None,
         timeout: float=30.0, max_attempts: int=3, retry_base_delay: float=0.8) -> None:
-        self.api_key = api_key if api_key is not None else _default_deepseek_api_key()
+        self.api_key = api_key if api_key is not None else (os.getenv('DEEPSEEK_API_KEY', '').strip()
+            or _read_windows_user_environment('DEEPSEEK_API_KEY'))
         self.model = model or os.getenv('DEEPSEEK_INTENT_MODEL', DEFAULT_DEEPSEEK_MODEL)
         self.base_url = (base_url or os.getenv('DEEPSEEK_BASE_URL', DEFAULT_DEEPSEEK_BASE_URL)).rstrip('/')
         self.timeout = max(1.0, float(timeout))

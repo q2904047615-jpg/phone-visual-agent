@@ -27,7 +27,7 @@ echo [3/3] Starting robot web console...
 if defined DASHSCOPE_API_KEY (
   echo Qwen vision agent: %VISION_MODEL% ready, thinking disabled
 ) else (
-  echo Qwen vision agent: API key not configured; fixed workflows remain available
+  echo Qwen vision agent: API key not configured; visual planning is unavailable
 )
 echo Starting local service first. The browser will open after it is ready...
 start "Robot Web Console Server" /D "%CD%" ".venv\Scripts\python.exe" -m uvicorn web_app:app --host 127.0.0.1 --port 8765

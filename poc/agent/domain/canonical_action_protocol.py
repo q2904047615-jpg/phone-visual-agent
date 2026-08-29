@@ -685,7 +685,7 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
                     expected_value),))
 
         if 'input_verified_text' in supported_by_element.get(element.element_id, set()):
-            payload_entities = [entity_by_id[entity_id] for effect_id, entity_id,
+            payload_entities = [entity_by_id[entity_id] for _, entity_id,
                 relation_kind in relation_effects_by_element.get(element.element_id,
                 ()) if relation_kind == 'binds_effect_payload' and entity_id in active_input_payload_refs
                 and (entity_id in entity_by_id) and (entity_by_id[entity_id].role == 'input_text')]
@@ -731,13 +731,13 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
     destination_roles = {"drag_destination", "destination", "target"}
     unique_entity_elements = {entity_id: matches[0] for entity_id,
         matches in exact_elements_by_entity.items() if len(matches) == 1}
-    source_bindings = [(entity, unique_entity_elements[entity.entity_id]) for entity
+    source_elements = [unique_entity_elements[entity.entity_id] for entity
         in semantic_ir.entities if entity.role in source_roles and entity.entity_id in unique_entity_elements]
-    destination_bindings = [(entity, unique_entity_elements[entity.entity_id]) for entity
+    destination_elements = [unique_entity_elements[entity.entity_id] for entity
         in semantic_ir.entities if entity.role in destination_roles and entity.entity_id in unique_entity_elements]
-    if len(source_bindings) == 1 and len(destination_bindings) == 1:
-        source_entity, source_element = source_bindings[0]
-        destination_entity, destination_element = destination_bindings[0]
+    if len(source_elements) == 1 and len(destination_elements) == 1:
+        source_element = source_elements[0]
+        destination_element = destination_elements[0]
         if source_element.element_id != destination_element.element_id:
             source_ref = _element_ref(source_element.element_id)
             destination_ref = _element_ref(destination_element.element_id)

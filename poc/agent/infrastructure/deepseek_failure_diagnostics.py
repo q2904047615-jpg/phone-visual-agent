@@ -7,14 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from agent.infrastructure.model_failure_diagnostics import (
-    MAX_REDACTED_MODEL_RESPONSE_CHARS,
     model_failure_payload,
     persist_model_failure_payload,
     redact_model_failure_response,
 )
 
 DEEPSEEK_FAILURE_DIAGNOSTIC_VERSION = '2026-08-17-deepseek-failure-diagnostic-v1'
-MAX_REDACTED_DEEPSEEK_RESPONSE_CHARS = MAX_REDACTED_MODEL_RESPONSE_CHARS
 
 
 def _redact_deepseek_failure_response(raw: str) -> str:

@@ -62,10 +62,6 @@ class FileSystemTypedInputLineageStore:
             return None
         return record
 
-    @staticmethod
-    def _descriptor_factory(after_frames: tuple[Image.Image, ...]) -> Any:
-        return lambda bounds: build_surface_descriptors(after_frames, bounds)
-
     def record_verified_action(self, *, action_type: VerifiedInputActionType, device_id: str,
         resolved_action: dict[str, Any], before_scene: dict[str, Any], after_scene: dict[str, Any],
         after_frames: tuple[Image.Image, ...], hardware_receipt: dict[str, Any] | None=None,
@@ -78,7 +74,7 @@ class FileSystemTypedInputLineageStore:
         values = {'device_id': device_id, 'resolved': resolved_action, 'before_scene': before_scene,
             'after_scene': after_scene, 'recorded_at_epoch': float(self.clock()), 'source': source or default_source,
             'surface_fallback': self.load(device_id),
-            'surface_descriptor_factory': self._descriptor_factory(after_frames)}
+            'surface_descriptor_factory': lambda bounds: build_surface_descriptors(after_frames, bounds)}
         if needs_receipt:
             values['hardware_receipt'] = hardware_receipt
         record = builder(**values)

@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 
 final class CanonicalJson {
@@ -21,7 +22,11 @@ final class CanonicalJson {
 
     private static void appendObject(StringBuilder result, JSONObject object)
             throws ProtocolException {
-        List<String> keys = new ArrayList<>(object.keySet());
+        List<String> keys = new ArrayList<>();
+        Iterator<String> iterator = object.keys();
+        while (iterator.hasNext()) {
+            keys.add(iterator.next());
+        }
         Collections.sort(keys);
         result.append('{');
         boolean first = true;

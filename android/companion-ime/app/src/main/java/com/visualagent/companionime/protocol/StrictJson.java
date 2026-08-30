@@ -4,6 +4,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -18,7 +19,11 @@ public final class StrictJson {
 
     public static void requireExactKeys(JSONObject object, Set<String> expected)
             throws ProtocolException {
-        Set<String> actual = new HashSet<>(object.keySet());
+        Set<String> actual = new HashSet<>();
+        Iterator<String> iterator = object.keys();
+        while (iterator.hasNext()) {
+            actual.add(iterator.next());
+        }
         if (!actual.equals(expected)) {
             throw new ProtocolException("JSON keys do not match the protocol contract");
         }

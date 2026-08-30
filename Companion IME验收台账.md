@@ -1,7 +1,7 @@
 # Companion IME 验收台账
 
 更新时间：2026-08-30
-状态：内部实现与完整自动回归完成；Android 构建和真机验收受环境阻塞
+状态：内部实现、完整 Python 回归与 Android 构建完成；真机安装、配对和正式验收未完成
 正式边界：`用户决策与协议边界.md` 第 54 节
 
 ## 1. 本轮唯一能力缺口
@@ -74,9 +74,19 @@
 - **相关测试通过**：当前 Companion IME 相关 Python 测试运行 `449` 项，结果 `OK (skipped=1)`；
   `compileall` 退出码为 `0`；本机 Windows 当前用户 DPAPI 加密/解密 roundtrip 已实际通过。这些证据只证明
   内部合同、适配器、配对存储和组合根的自动验证，不等于 Android APK 或真机能力已验收。
-- **未完成**：Android 源码中已有 `38` 个 JUnit 测试方法，但本机未发现 JDK、Gradle、Android SDK
-  platform/build-tools/cmdline-tools 或 Android Studio，因此这些 JUnit 尚未运行，Android lint 与 debug APK
-  构建也未进行；尚未生成 APK、安装、启用、配对或执行真机输入验收。
+- **Android 构建通过**：本机已在 `D:\Android` 安装并校验 Android Studio 2026.1.3、Microsoft
+  OpenJDK 17.0.20.1、Gradle 8.9、Android SDK Platform 35、Build Tools 35.0.0 与命令行工具；AGP
+  构建按自身依赖补装 Build Tools 34.0.0 和 Platform Tools。仓库已生成并固定 Gradle 8.9 wrapper，
+  wrapper JAR 和 distribution 的 SHA-256 均与官方值一致。
+- **Android 自动测试通过**：实际 Android 编译发现并删除了桌面版 `org.json.JSONObject.keySet()`
+  依赖，生产代码与测试统一改用 Android 支持的 `keys()` 迭代器，canonical 排序与 exact-key 拒绝语义
+  不变。因仓库根目录含中文，Windows AGP 测试 worker 必须从临时 ASCII 盘符别名运行；该别名已在
+  构建后解除。最终 `38/38` JUnit 通过，`lintDebug` 为 `0 errors / 13 warnings`，
+  `assembleDebug` 通过。
+- **APK 已生成**：`android/companion-ime/app/build/outputs/apk/debug/app-debug.apk`，大小
+  `48,149` bytes，SHA-256
+  `b7a2576d28c0582128f5a09ff09e012dd3352e07fe24b722a6dc2cba2e8897ef`；`apksigner` 验证通过，
+  使用 Android Debug 证书的 v2 签名。尚未安装、启用、选择、配对或执行真机输入验收。
 - 本批没有启动、停止或重载项目 API，没有启动、停止、重启或操作卖家 `main.exe`，也没有执行任何真机
   动作。
 
@@ -85,9 +95,10 @@
 核心 Companion IME 链路、Android pending/active 双槽与 `pair_confirm -> promote -> pair_commit` 配对确认、
 PC 仅在 commit 后落盘/启用、已有配对 repair 不隐式旋转 key，以及完整 envelope 发送前 frame 上限和
 canonical 显式分段均已实现并通过相关 Python 测试；repair 还必须匹配原 `installation_id`，不同安装
-实例不得共享同一 key。当前唯一缺口是运行 Android JUnit/lint/APK 构建（受本机工具链缺失阻塞），
-随后安装、启用、配对并完成正式真机输入验收。内部实现、文档、相关回归与完整 Python 回归由本批同一
-本地提交固化；Android 与真机证据未完成前，阶段状态不得写成真机验收完成。
+实例不得共享同一 key。Android JUnit、lint 和 APK 构建缺口已经关闭；当前唯一缺口是由用户在目标
+Android 手机上手动安装 APK、启用并选择 Companion IME、完成一次性配对，随后按本台账完成正式真机
+输入验收。内部实现、文档、相关回归与完整 Python 回归由本批本地提交固化；真机证据完成前，阶段状态
+不得写成真机验收完成。
 
 ## 5. 实施设计
 
@@ -112,7 +123,8 @@ canonical 显式分段均已实现并通过相关 Python 测试；repair 还必�
 - 若实现需要新增 App/截图/固定坐标特例，立即停止并撤回该方向。
 - 若需要让 Companion 读取 Accessibility、屏幕内容或自行寻找字段，立即停止；这会形成第二权威。
 - 若一个已尝试的输入命令失败或结果未知，立即停止该动作，不重发、不切换 transport。
-- 若本机工具链仍缺失，Android 源码与合同测试可以完成，但必须把 APK 构建和真机安装验收标为环境阻塞，禁止宣称完成。
+- Windows CLI 构建若仓库路径含非 ASCII 字符，必须按 README 使用构建期间的临时 ASCII 盘符别名；
+  不得保留只能绕过前置检查、但仍导致测试类路径损坏的 `android.overridePathCheck` 假修复。
 - 真机验收前必须重新核对设备、相机、控制器、busy、活动会话和当前 observation；不得操作卖家 `main.exe`。
 
 ## 7. 当前结论
@@ -122,7 +134,7 @@ canonical 显式分段均已实现并通过相关 Python 测试；repair 还必�
 自动测试：**完整回归通过**，相关 Python `449 tests OK (skipped=1)`；最终全目录 Python
 `981/981`（`116.544s`，`skipped=1`）；`compileall=0`、四份 Android XML 可解析、Windows DPAPI
 roundtrip 通过。
-Android：**未完成**，`38` 个 JUnit 方法尚未运行，未 lint、未构建 APK；本机缺少 JDK/Gradle/Android
-SDK。
-真机与交付：**未完成**，未生成或安装 APK，未配对、未执行真机输入验收；本批只创建本地提交、不推送，且未操作
-项目 API、`main.exe` 或真机。
+Android：**自动测试与构建通过**，`38/38` JUnit、`lintDebug`（`0 errors / 13 warnings`）和
+`assembleDebug` 均通过；debug APK 已生成并通过 v2 签名验证。
+真机与交付：**未完成**，APK 尚未安装、启用、选择或配对，未执行正式真机输入验收；本批只创建本地
+提交、不推送，且未操作项目 API、`main.exe` 或真机。

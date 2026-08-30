@@ -148,19 +148,41 @@ visual verifier before declaring the canonical action matched.
 ## Build and test
 
 Required toolchain: JDK 17, Android SDK Platform 35, Android Build Tools 35, and
-Gradle 8.9. Configure `ANDROID_HOME` (or an SDK path in `local.properties`),
-then from this directory:
+Gradle 8.9. Configure `ANDROID_HOME` (or an SDK path in `local.properties`). The
+repository includes a Gradle 8.9 wrapper with its distribution SHA-256 pinned.
+From this directory run:
 
 ```powershell
-gradle wrapper --gradle-version 8.9
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
+
+On Windows, AGP's unit-test worker cannot reliably load classes when the
+checkout path contains non-ASCII characters. Do not suppress that limitation
+with `android.overridePathCheck`; use a temporary unused ASCII drive alias for
+the build and remove it afterwards:
+
+```powershell
+$companionRepo = (Resolve-Path '..\..').Path
+subst R: $companionRepo
+try {
+    Push-Location 'R:\android\companion-ime'
+    try {
+        .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+    } finally {
+        Pop-Location
+    }
+} finally {
+    subst R: /D
+}
+```
+
+Use another unused ASCII drive letter if `R:` already exists.
 
 The expected APK is
 `app/build/outputs/apk/debug/app-debug.apk`.
 
-On 2026-08-30, `Get-Command gradle,sdkmanager,java,javac` returned no tool on this
-environment's `PATH`, and this task was explicitly scoped not to install a
-toolchain or attempt a build. Consequently the Android build and JVM unit tests
-must be run later in an Android-capable environment; their source is included
-under `app/src/test/java`.
+On 2026-08-30 this module was built on Windows with JDK 17.0.20.1, Gradle 8.9,
+Platform 35 and Build Tools 35.0.0. All 38 JVM tests passed, `lintDebug` completed
+with zero errors (13 warnings), and `assembleDebug` produced the expected APK.
+This build evidence does not replace installation, input-method selection,
+pairing, or real-device input acceptance.

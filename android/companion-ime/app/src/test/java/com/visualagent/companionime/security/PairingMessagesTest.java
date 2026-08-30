@@ -10,6 +10,8 @@ import org.junit.Test;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -26,7 +28,7 @@ public final class PairingMessagesTest {
         assertEquals(new HashSet<>(Arrays.asList(
                         "protocol_version", "type", "installation_id", "client_nonce",
                         "one_time_token")),
-                request.keySet());
+                keys(request));
         assertEquals(ProtocolConstants.VERSION, request.getString("protocol_version"));
         assertEquals("pair_request", request.getString("type"));
         assertEquals("one-time-token", request.getString("one_time_token"));
@@ -87,7 +89,7 @@ public final class PairingMessagesTest {
                 response(key), "controller.local", 9443, repeat("aa", 32), INSTALLATION, NONCE);
         try {
             JSONObject envelope = PairingMessages.pairConfirm(record, NONCE);
-            assertEquals(new HashSet<>(Arrays.asList("confirm", "signature")), envelope.keySet());
+            assertEquals(new HashSet<>(Arrays.asList("confirm", "signature")), keys(envelope));
             JSONObject confirm = envelope.getJSONObject("confirm");
             assertEquals("pair_confirm", confirm.getString("type"));
             HmacAuthenticator.verify(confirm, envelope.getString("signature"), key);
@@ -139,5 +141,14 @@ public final class PairingMessagesTest {
             output.append(value);
         }
         return output.toString();
+    }
+
+    private static Set<String> keys(JSONObject object) {
+        Set<String> keys = new HashSet<>();
+        Iterator<String> iterator = object.keys();
+        while (iterator.hasNext()) {
+            keys.add(iterator.next());
+        }
+        return keys;
     }
 }

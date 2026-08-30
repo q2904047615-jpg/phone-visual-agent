@@ -25,6 +25,7 @@ from agent.domain import (
     VerifiedAppSurfaceLineage,
 )
 from agent.infrastructure import InMemoryAgentSessionRepository
+from agent.domain.validation import bounds_overlap
 
 
 @dataclass
@@ -246,6 +247,33 @@ class AgentSessionApplicationTests(unittest.TestCase):
 
 
 class AgentDependencyBoundaryTests(unittest.TestCase):
+    def test_rectangle_overlap_has_one_domain_authority(self) -> None:
+        partial = bounds_overlap((0.0, 0.0, 1.0, 1.0), (0.5, 0.0, 1.5, 1.0))
+        contained = bounds_overlap((0, 0, 10, 10), (2, 2, 8, 8))
+        disjoint = bounds_overlap((0.0, 0.0, 0.2, 0.2), (0.8, 0.8, 1.0, 1.0))
+
+        self.assertAlmostEqual(1 / 3, partial["iou"])
+        self.assertAlmostEqual(0.5, partial["intersection_over_smaller"])
+        self.assertAlmostEqual(0.36, contained["iou"])
+        self.assertEqual(1.0, contained["intersection_over_smaller"])
+        self.assertEqual({"iou": 0.0, "intersection_over_smaller": 0.0}, disjoint)
+
+        root = Path(__file__).resolve().parent / "agent"
+        owners: list[str] = []
+        legacy_iou_owners: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                relative = path.relative_to(root).as_posix()
+                if node.name == "bounds_overlap":
+                    owners.append(relative)
+                elif node.name == "_bounds_iou":
+                    legacy_iou_owners.append(relative)
+        self.assertEqual(["domain/validation.py"], owners)
+        self.assertEqual([], legacy_iou_owners)
+
     def test_runtime_session_aggregate_is_owned_by_application(self) -> None:
         class SnapshotAdapter:
             @staticmethod

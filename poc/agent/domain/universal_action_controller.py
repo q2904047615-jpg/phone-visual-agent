@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .validation import DataclassWire, NormalizedBounds, NormalizedPoint, dataclass_wire, reject_if
+from .validation import DataclassWire, NormalizedBounds, NormalizedPoint, bounds_overlap, dataclass_wire, reject_if
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 import math
@@ -613,15 +613,7 @@ class UniversalActionController:
 
     @staticmethod
     def _regions_stably_overlap(before_bounds: NormalizedBounds, after_bounds: NormalizedBounds) -> bool:
-        left = max(before_bounds[0], after_bounds[0])
-        top = max(before_bounds[1], after_bounds[1])
-        right = min(before_bounds[2], after_bounds[2])
-        bottom = min(before_bounds[3], after_bounds[3])
-        intersection = max(0.0, right - left) * max(0.0, bottom - top)
-        before_area = max(0.0, before_bounds[2] - before_bounds[0]) * max(0.0, before_bounds[3] - before_bounds[1])
-        after_area = max(0.0, after_bounds[2] - after_bounds[0]) * max(0.0, after_bounds[3] - after_bounds[1])
-        smaller = min(before_area, after_area)
-        return intersection > 0 and smaller > 0 and intersection / smaller >= 0.60
+        return bounds_overlap(before_bounds, after_bounds)['intersection_over_smaller'] >= 0.60
 
     @classmethod
     def _is_same_absence_target(cls, before_target: UIElement, after_element: UIElement, *,

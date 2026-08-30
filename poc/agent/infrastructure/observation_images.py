@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent.domain.validation import reject_if
+from agent.domain.validation import bounds_overlap, reject_if
 import hashlib
 import os
 from typing import Iterable
@@ -112,19 +112,6 @@ def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction,
     return tuple(results)
 
 
-def _bounds_iou(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
-    left = max(first[0], second[0])
-    top = max(first[1], second[1])
-    right = min(first[2], second[2])
-    bottom = min(first[3], second[3])
-    if right <= left or bottom <= top:
-        return 0.0
-    intersection = (right - left) * (bottom - top)
-    first_area = (first[2] - first[0]) * (first[3] - first[1])
-    second_area = (second[2] - second[0]) * (second[3] - second[1])
-    return intersection / max(1, first_area + second_area - intersection)
-
-
 def consensus_top_edge_obstructions(frames: Iterable[Image.Image]) -> tuple[VisualObstruction, ...]:
     """Return only top-edge obstructions repeated across the stable frame tail."""
 
@@ -135,12 +122,13 @@ def consensus_top_edge_obstructions(frames: Iterable[Image.Image]) -> tuple[Visu
     required = max(2, (len(frame_list) + 1) // 2) if len(frame_list) > 1 else 1
     accepted: list[VisualObstruction] = []
     for candidate in (item for frame in detections for item in frame):
-        if any((_bounds_iou(candidate.bounds, item.bounds) >= 0.6 for item in accepted)):
+        if any((bounds_overlap(candidate.bounds, item.bounds)['iou'] >= 0.6 for item in accepted)):
             continue
         matches: list[VisualObstruction] = []
         for frame_detections in detections:
-            match = max(frame_detections, key=lambda item: _bounds_iou(candidate.bounds, item.bounds), default=None)
-            if match is not None and _bounds_iou(candidate.bounds, match.bounds) >= 0.6:
+            match = max(frame_detections,
+                key=lambda item: bounds_overlap(candidate.bounds, item.bounds)['iou'], default=None)
+            if match is not None and bounds_overlap(candidate.bounds, match.bounds)['iou'] >= 0.6:
                 matches.append(match)
         if len(matches) < required:
             continue

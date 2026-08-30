@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedBounds, NormalizedPoint, dataclass_wire, reject_if
+from agent.domain.validation import NormalizedBounds, NormalizedPoint, bounds_overlap, dataclass_wire, reject_if
 import math
 import statistics
 import time
@@ -36,7 +36,6 @@ from agent.domain.input_value_lineage import (
     input_app_identity_compatible,
     input_screen_identity_compatible,
 )
-from agent.domain.trusted_observation import bounds_overlap
 from agent.infrastructure.windows_ocr_runtime import find_text, recognize as recognize_ocr
 from agent.infrastructure.observation_images import (
     measure_frame_sharpness,

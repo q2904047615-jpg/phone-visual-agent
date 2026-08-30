@@ -33,6 +33,20 @@ def reject_if(condition: object, error: Exception) -> None:
         raise error
 
 
+def bounds_overlap(left: NormalizedBounds, right: NormalizedBounds) -> dict[str, float]:
+    """Return the shared deterministic overlap measures for two rectangles."""
+
+    intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    intersection = intersection_width * intersection_height
+    left_area = (left[2] - left[0]) * (left[3] - left[1])
+    right_area = (right[2] - right[0]) * (right[3] - right[1])
+    union = left_area + right_area - intersection
+    smaller = min(left_area, right_area)
+    return {'iou': intersection / union if union > 0 else 0.0,
+        'intersection_over_smaller': intersection / smaller if smaller > 0 else 0.0}
+
+
 def wire_value(value: Any) -> Any:
     serializer = getattr(value, 'to_dict', None)
     if callable(serializer):

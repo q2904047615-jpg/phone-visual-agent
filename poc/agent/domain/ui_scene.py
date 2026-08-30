@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .validation import NormalizedBounds, NormalizedPoint, ValidatedDataclassWire, dataclass_wire, reject_if
+from .validation import NormalizedBounds, NormalizedPoint, ValidatedDataclassWire, bounds_overlap, dataclass_wire, reject_if
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -401,7 +401,7 @@ class UIScene:
             if other.states.get('goal_relevant') is True and float(other.confidence) >= min_confidence:
                 return None
             if (other.role in TARGET_LOCAL_ACTION_ROLES and float(other.confidence) >= min_confidence
-                and (_bounds_iou(candidate.bounds, other.bounds) >= 0.5)):
+                and (bounds_overlap(candidate.bounds, other.bounds)['iou'] >= 0.5)):
                 return None
         return candidate
 
@@ -544,18 +544,6 @@ def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:
         return "launcher"
     normalized_app = app_id.strip().lower()
     return normalized_app or "unknown"
-
-
-def _bounds_iou(left_bounds: NormalizedBounds, right_bounds: NormalizedBounds) -> float:
-    left = max(left_bounds[0], right_bounds[0])
-    top = max(left_bounds[1], right_bounds[1])
-    right = min(left_bounds[2], right_bounds[2])
-    bottom = min(left_bounds[3], right_bounds[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    left_area = (left_bounds[2] - left_bounds[0]) * (left_bounds[3] - left_bounds[1])
-    right_area = (right_bounds[2] - right_bounds[0]) * (right_bounds[3] - right_bounds[1])
-    union = left_area + right_area - intersection
-    return intersection / union if union > 0.0 else 0.0
 
 
 def _reject_action_data(value: Any, path: str) -> None:

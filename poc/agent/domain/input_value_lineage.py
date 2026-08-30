@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .validation import NormalizedBounds, ValidatedDataclassWire, canonical_digest, reject_if
+from .validation import NormalizedBounds, ValidatedDataclassWire, bounds_overlap, canonical_digest, reject_if
 import re
 import time
 from dataclasses import dataclass
@@ -38,14 +38,7 @@ def _valid_bounds(value: Any) -> NormalizedBounds | None:
 
 
 def _bounds_compatible(first: NormalizedBounds, second: NormalizedBounds) -> bool:
-    left = max(first[0], second[0])
-    top = max(first[1], second[1])
-    right = min(first[2], second[2])
-    bottom = min(first[3], second[3])
-    intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    first_area = (first[2] - first[0]) * (first[3] - first[1])
-    second_area = (second[2] - second[0]) * (second[3] - second[1])
-    coverage = intersection / min(first_area, second_area)
+    coverage = bounds_overlap(first, second)['intersection_over_smaller']
     first_center = ((first[0] + first[2]) / 2, (first[1] + first[3]) / 2)
     second_center = ((second[0] + second[2]) / 2, (second[1] + second[3]) / 2)
     return bool(coverage >= 0.25 and abs(first_center[0] - second_center[0]) <= 0.1

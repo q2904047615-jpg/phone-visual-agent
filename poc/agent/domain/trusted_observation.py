@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .ui_scene import UIElement, UIScene
-from .validation import NormalizedBounds, dataclass_wire
+from .validation import bounds_overlap, dataclass_wire
 from .visual_evidence import LocalFrameStability
 
 
@@ -146,15 +146,3 @@ def elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:
     if left_texts and right_texts and left_texts.intersection(right_texts):
         return True
     return left.meaning.strip().casefold() == right.meaning.strip().casefold()
-
-
-def bounds_overlap(left: NormalizedBounds, right: NormalizedBounds) -> dict[str, float]:
-    intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
-    intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
-    intersection = intersection_width * intersection_height
-    left_area = (left[2] - left[0]) * (left[3] - left[1])
-    right_area = (right[2] - right[0]) * (right[3] - right[1])
-    union = left_area + right_area - intersection
-    smaller = min(left_area, right_area)
-    return {'iou': intersection / union if union > 0 else 0.0,
-        'intersection_over_smaller': intersection / smaller if smaller > 0 else 0.0}

@@ -104,6 +104,15 @@ class GenericStepProposal:
             system_ui = scene.system_ui
             reject_if(system_ui.immersive_or_fullscreen is not True or system_ui.navigation_bar_visible is not False, CanonicalActionProtocolError("系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"))
             reject_if(params.get('expected_effect') != {'system_ui': {'navigation_bar_visible': True}}, CanonicalActionProtocolError("系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。"))
+        elif kind == 'launch_app':
+            allowed = {'target_surface_id', 'target_app_id', 'target_app_name', 'launch_ref', 'expected_app_id',
+                'expected_effect', *_FORMAL_AUTHORITY_PARAMS}
+            reject_if(set(params) != allowed, CanonicalActionProtocolError("App 直启动作字段不完整或包含协议外参数。"))
+            for key in ('target_surface_id', 'target_app_id', 'target_app_name', 'launch_ref', 'expected_app_id'):
+                reject_if(not isinstance(params.get(key), str) or not params[key].strip(),
+                    CanonicalActionProtocolError(f"App 直启动作缺少 {key}。"))
+            reject_if(params['expected_effect'] != {'app_id': params['target_app_id']},
+                CanonicalActionProtocolError("App 直启必须绑定 typed 目标 App 的视觉后置条件。"))
 
     def to_dict(self) -> dict[str, Any]:
         return _record_wire(self, "proposal")
@@ -415,7 +424,8 @@ def _candidate(*, action_kind: str, expectations: tuple[StateExpectation, ...], 
 
 
 def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR,
-    available_action_kinds: Iterable[str]) -> CanonicalActionCatalog:
+    available_action_kinds: Iterable[str], *, launch_target: Mapping[str, str] | None=None
+    ) -> CanonicalActionCatalog:
     """Compile the sole deterministic action catalog for the active subgoal."""
 
     scene.validate()
@@ -461,6 +471,11 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
     available = frozenset(str(value) for value in available_action_kinds)
     unknown = available - CANONICAL_ACTION_KINDS
     reject_if(unknown, CanonicalActionProtocolError('available_action_kinds 含未知动作：' + ', '.join(sorted(unknown))))
+    if launch_target is not None:
+        reject_if(not isinstance(launch_target, Mapping) or set(launch_target) != {'launch_ref', 'expected_app_id'}
+            or any(not isinstance(launch_target.get(key), str) or not launch_target[key].strip()
+            for key in ('launch_ref', 'expected_app_id')),
+            CanonicalActionProtocolError("App 直启能力映射格式无效。"))
 
     surface_ref = "surface_current"
     sorted_elements = tuple(sorted(scene.elements, key=lambda item: item.element_id))
@@ -773,10 +788,10 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
         candidates.append(_candidate(action_kind=action_kind, expectations=expectations, exploratory=exploratory,
             parameters=parameters))
 
-    action_priority = {'tap_semantic': 0, 'input_verified_text': 1, 'press_enter': 2, 'clear_verified_text': 3,
-        'dismiss_overlay': 4, 'double_tap': 5, 'long_press': 6, 'drag': 7, 'open_recent_apps': 8, 'home': 9,
-        'reveal_system_navigation': 10, 'back': 11, 'swipe': 12, 'wait_for_change': 13}
-    unique_candidates = {item.candidate_id: item for item in candidates}
+    action_priority = {'launch_app': 0, 'tap_semantic': 1, 'input_verified_text': 2, 'press_enter': 3,
+        'clear_verified_text': 4, 'dismiss_overlay': 5, 'double_tap': 6, 'long_press': 7, 'drag': 8,
+        'open_recent_apps': 9, 'home': 10, 'reveal_system_navigation': 11, 'back': 12, 'swipe': 13,
+        'wait_for_change': 14}
     element_by_id = {item.element_id: item for item in sorted_elements}
     surfaces_by_id = {item.surface_id: item for item in semantic_ir.surfaces}
     target_surface = surfaces_by_id.get(active_subgoal.surface_ref)
@@ -784,6 +799,15 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
     target_is_app = target_surface is not None and target_surface.kind == "app"
     wrong_app_surface = bool(target_is_app and current_surface_kind != 'launcher'
         and (not scene_matches_target_app_surface(scene, target_surface)))
+    if ('launch_app' in available and target_is_app and launch_target is not None
+        and not scene_matches_target_app_surface(scene, target_surface)):
+        assert target_surface is not None
+        candidates = [_candidate(action_kind='launch_app', expectations=(StateExpectation(surface_ref,
+            'surface.active_ref', 'equals', target_surface.surface_id),), parameters={
+            'target_surface_id': target_surface.surface_id, 'target_app_id': target_surface.app_id,
+            'target_app_name': target_surface.app_name, 'launch_ref': launch_target['launch_ref'],
+            'expected_app_id': launch_target['expected_app_id']})]
+    unique_candidates = {item.candidate_id: item for item in candidates}
     required_system_action = {'launcher': 'home', 'recent_tasks': 'open_recent_apps'}.get(
         target_surface.kind if target_surface is not None else '')
     input_auxiliary_meanings = {'ime_exact_candidate', 'input_exact_literal_key', 'input_exact_enter_key',
@@ -821,6 +845,9 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
 
     def matches_required_action(candidate: CanonicalActionCandidate) -> bool:
         action_kind = candidate.action_kind
+        if action_kind == 'launch_app':
+            return target_is_app and active_subgoal.external_impact == 'navigation_only' and not (
+                active_required_actions - {'tap_semantic', 'launch_app'})
         must_clear, useful_preedit = clear_input_disposition(candidate)
         if (useful_preedit and (not ('clear_verified_text' in active_required_actions and 'input_verified_text' not
             in active_required_actions))):
@@ -882,6 +909,8 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
             return bool(active_input_payload_refs)
         if action_kind == 'tap_semantic':
             return tap_belongs(candidate)
+        if action_kind == 'launch_app':
+            return bool(target_is_app and candidate.parameters.get('target_surface_id') == active_subgoal.surface_ref)
         if action_kind == 'dismiss_overlay':
             return active_subgoal.external_impact == "navigation_only"
         if action_kind in {'double_tap', 'long_press', 'drag'}:
@@ -924,6 +953,10 @@ def canonical_candidate_expected_result(candidate: CanonicalActionCandidate, sce
     """Project one canonical transition into the controller's visual result shape."""
 
     candidate.validate()
+    if candidate.action_kind == 'launch_app':
+        target_app_id = str(candidate.parameters.get('target_app_id') or '').strip()
+        reject_if(not target_app_id, CanonicalActionProtocolError("App 直启候选缺少 typed 目标 App。"))
+        return {'app_id': target_app_id}
     if candidate.action_kind == 'reveal_system_navigation':
         return {"system_ui": {"navigation_bar_visible": True}}
     if candidate.action_kind == 'swipe':

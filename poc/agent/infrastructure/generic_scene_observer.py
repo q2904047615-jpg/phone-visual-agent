@@ -1521,7 +1521,10 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
         reject_if(not keyboard_visible or keyboard_layout != 'qwerty' or keyboard_bounds is None, UISceneError("QWERTY anchors 必须绑定完整可见的 QWERTY 键盘。"))
         qwerty_geometry = _validated_qwerty_keyboard_geometry(snapped_anchors or raw_anchors,
             keyboard_bounds=keyboard_bounds, locally_snapped=snapped_anchors is not None)
-    backspace = _validated_keyboard_backspace_key(keyboard.get('backspace_key'), keyboard_bounds=keyboard_bounds)
+    keyboard_controls = _validated_keyboard_controls(keyboard, keyboard_bounds=keyboard_bounds,
+        keyboard_layout=keyboard_layout, keyboard_input_mode=keyboard_input_mode,
+        keyboard_case_mode=keyboard_case_mode, snapped_anchors=snapped_anchors)
+    backspace = keyboard_controls['backspace']
     clearable_preedit = ""
     if (trusted_input is not None and active_field_id and (goal.transaction_text or active_clear_goal)
         and keyboard_visible and (keyboard_bounds is not None) and (qwerty_geometry is not None or backspace
@@ -1530,9 +1533,7 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
             trusted_preedits) or _unique_inline_ime_preedit_cue(trusted_input, trusted_preedits,
             keyboard_input_mode=keyboard_input_mode)
 
-    enter_key = _locally_snapped_keyboard_enter_key(keyboard.get('enter_key'), anchors=snapped_anchors,
-        keyboard_bounds=keyboard_bounds) if snapped_anchors is not None else _validated_keyboard_enter_key(keyboard.get(
-        'enter_key'), keyboard_bounds=keyboard_bounds)
+    enter_key = keyboard_controls['enter']
     next_field_key = enter_key if predecessor_input is not None and enter_key is not None and (enter_key[
         'key_action'] == 'next') else None
     required_mode = required_keyboard_input_mode_for_step(step) if step is not None else None
@@ -1540,23 +1541,18 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
         and (step is not None) and (required_mode is not None) and keyboard_visible and (keyboard_layout == 'qwerty')
         and (keyboard_input_mode in {'direct_latin', 'chinese_pinyin'}) and (keyboard_input_mode != required_mode))
     switch_is_goal = switch_is_goal or needs_mode_switch
-    mode_switch = _validated_keyboard_mode_switch(keyboard.get('mode_switch'), keyboard_bounds=keyboard_bounds)
-    if (mode_switch is not None and keyboard_input_mode != 'unknown'
-        and (mode_switch['current_mode'] != keyboard_input_mode)):
-        mode_switch = None
+    mode_switch = keyboard_controls['mode']
     reject_if(needs_mode_switch and (mode_switch is None or mode_switch['target_mode'] != required_mode), UISceneError("模式切换键未绑定下一确定性文字分段所需方向。"))
 
-    literal_keys = _validated_keyboard_literal_keys(keyboard.get('literal_keys', []), keyboard_bounds=keyboard_bounds)
+    literal_keys = keyboard_controls['literal_keys']
     targets = set(_input_audit_literal_key_targets(goal.observation_context,
         current_input_text=trusted_input['text'] if trusted_input is not None else None))
     literal_keys = [item for item in literal_keys if item["value"] in targets]
     if keyboard_layout == 'qwerty' and qwerty_geometry is not None:
         literal_keys = [item for item in literal_keys
             if not _literal_key_conflicts_with_qwerty(item, qwerty_geometry=qwerty_geometry)]
-    layout_switches = _validated_keyboard_layout_switches(keyboard.get('layout_switches', []),
-        keyboard_bounds=keyboard_bounds, current_layout=keyboard_layout)
-    case_switch = _validated_keyboard_case_switch(keyboard.get('case_switch'), keyboard_bounds=keyboard_bounds,
-        keyboard_layout=keyboard_layout, keyboard_input_mode=keyboard_input_mode, case_mode=keyboard_case_mode)
+    layout_switches = keyboard_controls['layout_switches']
+    case_switch = keyboard_controls['case']
     exact_literal = exact_enter = exact_layout = exact_case = None
     if step is not None:
         if required_mode is not None and keyboard_input_mode != required_mode:
@@ -1754,37 +1750,16 @@ def _audit_confidence(value: Any, field_name: str) -> float:
     return confidence
 
 
-def _keyboard_control(value: Any, *, keyboard_bounds: NormalizedBounds | None, field_name: str,
-    fields: set[str], require_visible: bool=False, tolerance: float=12) -> tuple[str, NormalizedBounds, float] | None:
-    if (keyboard_bounds is None or not isinstance(value,
-        dict) or set(value) != fields or (require_visible and value.get('fully_visible') is not True)
-        or (not _valid_1000_bounds(value.get('bounds')))):
-        return None
-    try:
-        confidence = _audit_confidence(value.get("confidence"), field_name)
-    except UISceneError:
-        return None
-    label = str(value.get("label") or "").strip()
-    bounds = tuple(float(part) for part in value["bounds"])
-    if not label or confidence < 0.9 or (not _bounds_inside(bounds, keyboard_bounds, tolerance=tolerance)):
-        return None
-    return label, bounds, confidence
-
-
 _QWERTY_ANCHOR_KEYS = frozenset({'q', 'p', 'a', 'l', 'z', 'm', 'backspace'})
 
 
 def _qwerty_anchor_points(value: Any) -> dict[str, list[float]] | None:
     if not isinstance(value, dict) or set(value) != _QWERTY_ANCHOR_KEYS:
         return None
-    points: dict[str, list[float]] = {}
-    for key in _QWERTY_ANCHOR_KEYS:
-        point = value[key]
-        if (not isinstance(point, (list, tuple)) or len(point) != 2
-            or any(isinstance(part, bool) or not isinstance(part, (int, float)) for part in point)):
-            return None
-        points[key] = [float(point[0]), float(point[1])]
-    return points
+    if any(not isinstance(point, (list, tuple)) or len(point) != 2 or any(isinstance(part,
+        bool) or not isinstance(part, (int, float)) for part in point) for point in value.values()):
+        return None
+    return {key: [float(value[key][0]), float(value[key][1])] for key in _QWERTY_ANCHOR_KEYS}
 
 
 def _keyboard_bounds_from_locally_snapped_qwerty_anchors(value: Any) -> NormalizedBounds | None:
@@ -1796,17 +1771,20 @@ def _keyboard_bounds_from_locally_snapped_qwerty_anchors(value: Any) -> Normaliz
     try:
         normalized = {key: [round(point[0]), round(point[1])] for key, point in anchors.items()}
         qwerty_keyboard_config_from_anchors(normalized)
-        horizontal_pitch = min((anchors['p'][0] - anchors['q'][0]) / 9.0, (anchors['l'][0] - anchors['a'][0]) / 8.0,
-            (anchors['m'][0] - anchors['z'][0]) / 6.0)
-        top_y = (anchors["q"][1] + anchors["p"][1]) / 2.0
-        middle_y = (anchors["a"][1] + anchors["l"][1]) / 2.0
-        bottom_y = (anchors["z"][1] + anchors["m"][1] + anchors["backspace"][1]) / 3.0
-        vertical_pitch = min(middle_y - top_y, bottom_y - middle_y)
+        horizontal_pitch = min((anchors[right][0] - anchors[left][0]) / gaps for left, right, gaps
+            in (('q', 'p', 9.0), ('a', 'l', 8.0), ('z', 'm', 6.0)))
+        row_y = ((anchors['q'][1] + anchors['p'][1]) / 2.0,
+            (anchors['a'][1] + anchors['l'][1]) / 2.0,
+            (anchors['z'][1] + anchors['m'][1] + anchors['backspace'][1]) / 3.0)
+        vertical_pitch = min(row_y[1] - row_y[0], row_y[2] - row_y[1])
         if horizontal_pitch <= 0 or vertical_pitch <= 0:
             return None
-        bounds = (max(0.0, min((anchors[key][0] for key in ('q', 'a', 'z'))) - 0.75 * horizontal_pitch), max(0.0,
-            top_y - 0.75 * vertical_pitch), min(1000.0, max((anchors[key][0] for key in ('p', 'l', 'm',
-            'backspace'))) + 0.75 * horizontal_pitch), min(1000.0, bottom_y + 2.0 * vertical_pitch))
+        bounds = (
+            max(0.0, min(anchors[key][0] for key in ('q', 'a', 'z')) - 0.75 * horizontal_pitch),
+            max(0.0, row_y[0] - 0.75 * vertical_pitch),
+            min(1000.0, max(anchors[key][0] for key in ('p', 'l', 'm', 'backspace')) + 0.75 * horizontal_pitch),
+            min(1000.0, row_y[2] + 2.0 * vertical_pitch),
+        )
         if bounds[2] - bounds[0] < 300 or bounds[3] - bounds[1] < 180:
             return None
         return bounds
@@ -1820,72 +1798,17 @@ def _validated_qwerty_keyboard_geometry(value: Any, *, keyboard_bounds: Normaliz
 
     points = _qwerty_anchor_points(value)
     reject_if(points is None, UISceneError("QWERTY anchors 必须精确包含七个数值点。"))
-    normalized = {}
-    for key, (x, y) in sorted(points.items()):
-        within_horizontal_bounds = keyboard_bounds[0] - 20 <= x <= keyboard_bounds[2] + 20
-        within_vertical_bounds = keyboard_bounds[1] - 20 <= y <= keyboard_bounds[3] + 20
-        reject_if(not within_horizontal_bounds or (not locally_snapped and (not within_vertical_bounds)), UISceneError(f"QWERTY anchor {key} 不在已审计键盘区域内。"))
-        normalized[key] = [round(x), round(y)]
+    normalized = {key: [round(x), round(y)] for key, (x, y) in sorted(points.items())}
+    for key, (x, y) in points.items():
+        inside_x = keyboard_bounds[0] - 20 <= x <= keyboard_bounds[2] + 20
+        inside_y = keyboard_bounds[1] - 20 <= y <= keyboard_bounds[3] + 20
+        reject_if(not inside_x or (not locally_snapped and not inside_y),
+            UISceneError(f"QWERTY anchor {key} 不在已审计键盘区域内。"))
     try:
         qwerty_keyboard_config_from_anchors(normalized)
     except WorkflowNotReady as exc:
         raise UISceneError(f"QWERTY anchors 未通过本地布局校验：{exc}") from exc
     return {'type': 'qwerty', 'anchors': normalized, 'source': 'input_structure_audit'}
-
-
-def _validated_directional_switch(value: Any, *, keyboard_bounds: NormalizedBounds | None,
-    field_name: str, modes: frozenset[str], label_matches: Callable[[str], bool], tolerance: float=12,
-    current_mode: str | None=None, current_key: str='current_mode',
-    target_key: str='target_mode') -> tuple[str, NormalizedBounds, float, str, str] | None:
-    control = _keyboard_control(value, keyboard_bounds=keyboard_bounds, field_name=field_name,
-        fields={'label', 'bounds', 'confidence', current_key, target_key}, tolerance=tolerance)
-    if control is None:
-        return None
-    current, target = value[current_key], value[target_key]
-    if (current not in modes or target not in modes or current == target
-        or (current_mode is not None and current != current_mode) or not label_matches(control[0])):
-        return None
-    return (*control, current, target)
-
-
-def _validated_keyboard_mode_switch(value: Any, *, keyboard_bounds: tuple[float, float, float,
-    float] | None) -> dict[str, Any] | None:
-    control = _validated_directional_switch(value, keyboard_bounds=keyboard_bounds, field_name='mode_switch',
-        modes=frozenset({'direct_latin', 'chinese_pinyin'}), label_matches=_is_explicit_keyboard_mode_label,
-        tolerance=20)
-    if control is None:
-        return None
-    label, bounds, confidence, current_mode, target_mode = control
-    width = keyboard_bounds[2] - keyboard_bounds[0]
-    height = keyboard_bounds[3] - keyboard_bounds[1]
-    if ((bounds[2] - bounds[0] > 0.35 * width)
-        or (bounds[3] - bounds[1] > 0.3 * height)):
-        return None
-    return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence,
-        'current_mode': current_mode, 'target_mode': target_mode}
-
-
-def _validated_keyboard_backspace_key(value: Any, *, keyboard_bounds: tuple[float, float, float,
-    float] | None) -> dict[str, Any] | None:
-    control = _keyboard_control(value, keyboard_bounds=keyboard_bounds, field_name='backspace_key', fields={'label',
-        'bounds', 'confidence', 'fully_visible'}, require_visible=True)
-    if control is None:
-        return None
-    label, bounds, confidence = control
-    if not re.search('(?:⌫|⌦|退格|删除|backspace|delete)', label, re.IGNORECASE):
-        return None
-    return {'label': label, 'center': [round((bounds[0] + bounds[2]) / 2), round((bounds[1] + bounds[3]) / 2)],
-        'confidence': confidence}
-
-
-def _validated_keyboard_enter_key(value: Any, *, keyboard_bounds: NormalizedBounds | None) -> dict[str, Any] | None:
-    control = _keyboard_control(value, keyboard_bounds=keyboard_bounds, field_name='enter_key', fields={'label',
-        'bounds', 'confidence', 'fully_visible', 'key_action'}, require_visible=True)
-    if control is None or value['key_action'] not in {'newline', 'send', 'search', 'done', 'next', 'unknown'}:
-        return None
-    label, bounds, confidence = control
-    return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence,
-        'key_action': value['key_action']}
 
 
 def _locally_snapped_keyboard_enter_key(value: Any, *, anchors: dict[str, list[int]], keyboard_bounds: tuple[float,
@@ -1895,12 +1818,12 @@ def _locally_snapped_keyboard_enter_key(value: Any, *, anchors: dict[str, list[i
         dict) or set(value) != fields or (value.get('fully_visible') is not True) or (value.get('key_action') not
         in {'newline', 'next'})):
         return None
-    action = value["key_action"]
-    label = str(value.get("label") or "").strip()
+    action, label = value['key_action'], str(value.get('label') or '').strip()
     normalized = re.sub(r"\s+", "", label).casefold()
-    newline_label = any((glyph in label for glyph in ('↵', '⏎', '⤶', '⮐'))) or normalized in {'enter', 'return', '回车',
-        '换行'}
-    next_label = any((glyph in label for glyph in ('→', '↦', '➡', '⏭'))) or normalized in {'next', '下一步', '下一个', '下一项'}
+    newline_label = any(glyph in label for glyph in ('↵', '⏎', '⤶', '⮐')) or normalized in {
+        'enter', 'return', '回车', '换行'}
+    next_label = any(glyph in label for glyph in ('→', '↦', '➡', '⏭')) or normalized in {
+        'next', '下一步', '下一个', '下一项'}
     if not (action == 'newline' and (newline_label or not normalized) or (action == 'next' and next_label)):
         return None
     confidence = _audit_confidence(value.get("confidence"), "enter_key")
@@ -1913,11 +1836,11 @@ def _locally_snapped_keyboard_enter_key(value: Any, *, anchors: dict[str, list[i
         return None
     try:
         profile = qwerty_keyboard_config_from_anchors(anchors)
-        rows = profile["rows"]
-        horizontal_pitch = float(rows[0]["x_step"]) * 1000
+        rows = profile['rows']
+        horizontal_pitch = float(rows[0]['x_step']) * 1000
         row_y = [float(row["y"]) * 1000 for row in rows]
-        vertical_pitch = statistics.mean((row_y[1] - row_y[0], row_y[2] - row_y[1]))
-        backspace_x = float(profile["backspace_x_ratio"]) * 1000
+        vertical_pitch = statistics.mean((second - first for first, second in zip(row_y, row_y[1:])))
+        backspace_x = float(profile['backspace_x_ratio']) * 1000
     except (KeyError, TypeError, ValueError, WorkflowNotReady):
         return None
     if (not 45 <= horizontal_pitch <= 130 or not 35 <= vertical_pitch <= 140
@@ -1944,7 +1867,8 @@ def _select_keyboard_layout_switch_for_target(layout_switches: list[dict[str, An
     target_layout: str) -> dict[str, Any] | None:
     """Select the unique visible edge that moves toward the requested layout."""
 
-    if next_keyboard_layout_towards(current_layout, target_layout) is None:
+    next_layout = next_keyboard_layout_towards(current_layout, target_layout)
+    if next_layout is None:
         return None
     direct = [item for item in layout_switches if item.get('current_layout') == current_layout
         and item.get('target_layout') == target_layout]
@@ -1952,50 +1876,9 @@ def _select_keyboard_layout_switch_for_target(layout_switches: list[dict[str, An
         return direct[0]
     if direct:
         return None
-    next_layout = next_keyboard_layout_towards(current_layout, target_layout)
     next_hop = [item for item in layout_switches if item.get('current_layout') == current_layout
         and item.get('target_layout') == next_layout]
     return next_hop[0] if len(next_hop) == 1 else None
-
-
-def _validated_keyboard_literal_keys(value: Any, *, keyboard_bounds: tuple[float, float, float,
-    float] | None) -> list[dict[str, Any]]:
-    reject_if(not isinstance(value, list) or len(value) > 8, UISceneError("literal_keys 必须是最多8项的数组。"))
-    reject_if(value and keyboard_bounds is None, UISceneError("literal_keys 必须绑定完整可见键盘。"))
-    result: list[dict[str, Any]] = []
-    for item in value:
-        reject_if(
-            not isinstance(item, dict) or set(item) != {'value', 'label', 'key_kind', 'bounds', 'confidence',
-            'fully_visible'},
-            UISceneError("literal_key 字段不符合协议。"),
-        )
-        key_value = item.get("value")
-        label = item.get("label")
-        key_kind = item.get("key_kind")
-        reject_if(
-            not isinstance(key_value, str) or len(key_value) != 1 or (not isinstance(label,
-            str)) or (key_kind not in {'character', 'space'}) or (not _valid_1000_bounds(item.get('bounds')))
-            or (not isinstance(item.get('fully_visible'), bool)),
-            UISceneError("literal_key 内容无效。"),
-        )
-        if key_kind == "character" and (key_value == " " or label != key_value):
-            # Revoke a mismatched optional glyph without vetoing independent input or layout evidence.
-            continue
-        if key_kind == 'space' and (key_value != ' ' or label.strip().casefold() not in {'', 'space', '空格'}):
-            continue
-        bounds = tuple(float(part) for part in item["bounds"])
-        confidence = _audit_confidence(item.get("confidence"), "literal_key")
-        if (item['fully_visible'] is not True or confidence < 0.9 or keyboard_bounds is None
-            or (not _bounds_inside(bounds, keyboard_bounds, tolerance=12))):
-            continue
-        if key_kind == 'space':
-            keyboard_width = keyboard_bounds[2] - keyboard_bounds[0]
-            keyboard_height = keyboard_bounds[3] - keyboard_bounds[1]
-            if bounds[2] - bounds[0] < 0.18 * keyboard_width or bounds[1] < keyboard_bounds[1] + 0.55 * keyboard_height:
-                continue
-        result.append({'value': key_value, 'label': label, 'key_kind': key_kind,
-            'bounds': [round(part) for part in bounds], 'confidence': confidence})
-    return result
 
 
 def _literal_key_conflicts_with_qwerty(item: dict[str, Any], *, qwerty_geometry: dict[str, Any]) -> bool:
@@ -2004,85 +1887,152 @@ def _literal_key_conflicts_with_qwerty(item: dict[str, Any], *, qwerty_geometry:
     anchors = qwerty_geometry.get("anchors")
     if not isinstance(bounds, list) or len(bounds) != 4 or (not isinstance(anchors, dict)):
         return True
-    backspace = anchors.get("backspace")
+    backspace = anchors.get('backspace')
     if not isinstance(backspace, (list, tuple)) or len(backspace) != 2:
         return True
     try:
         profile = qwerty_keyboard_config_from_anchors(anchors)
         left, top, right, bottom = (float(part) for part in bounds)
         backspace_x, backspace_y = (float(part) for part in backspace)
+        rows = profile['rows']
+        row_y = [float(row['y']) for row in rows]
     except (TypeError, ValueError, WorkflowNotReady):
         return True
     if left <= backspace_x <= right and top <= backspace_y <= bottom:
         return True
-    rows = profile.get("rows")
     if not isinstance(rows, list) or len(rows) != 3:
         return True
-    row_y = [float(row["y"]) for row in rows]
     vertical_pitch = min(row_y[1] - row_y[0], row_y[2] - row_y[1])
     if vertical_pitch <= 0:
         return True
     center_x = (left + right) / 2000.0
     center_y = (top + bottom) / 2000.0
-    for row in rows:
-        keys = str(row.get("keys") or "")
-        x_start = float(row["x_start"])
-        x_step = float(row["x_step"])
-        y = float(row["y"])
-        if abs(center_y - y) > 0.45 * vertical_pitch:
-            continue
-        if any((abs(center_x - (x_start + index * x_step)) <= 0.48 * x_step for index in range(len(keys)))):
-            return True
-    return False
+    return any(abs(center_y - float(row['y'])) <= 0.45 * vertical_pitch and any(abs(center_x -
+        (float(row['x_start']) + index * float(row['x_step']))) <= 0.48 * float(row['x_step'])
+        for index in range(len(str(row.get('keys') or '')))) for row in rows)
 
 
-def _layout_switch_label_matches(label: str, target_layout: str) -> bool:
-    normalized = label.strip().casefold()
-    if target_layout == 'numeric':
-        return bool(re.search(r"(?:123|数字|num)", normalized))
-    if target_layout == 'qwerty':
-        return bool(re.search(r"(?:abc|字母|英文|letters?)", normalized))
-    if target_layout == 'symbol':
-        return bool(re.search(r"(?:符|sym|[#?+]=?|[.?]123)", normalized))
-    return False
+def _validated_keyboard_controls(keyboard: dict[str, Any], *, keyboard_bounds: NormalizedBounds | None,
+    keyboard_layout: str, keyboard_input_mode: str, keyboard_case_mode: str,
+    snapped_anchors: dict[str, list[int]] | None) -> dict[str, Any]:
+    """Validate all optional keyboard controls through one shared schema and geometry gate."""
 
+    def control(value: Any, *, field_name: str, fields: set[str], require_visible: bool=False,
+        tolerance: float=12) -> dict[str, Any] | None:
+        if (keyboard_bounds is None or not isinstance(value, dict) or set(value) != fields
+            or (require_visible and value.get('fully_visible') is not True)
+            or not _valid_1000_bounds(value.get('bounds'))):
+            return None
+        try:
+            confidence = _audit_confidence(value.get('confidence'), field_name)
+        except UISceneError:
+            return None
+        label = str(value.get('label') or '').strip()
+        bounds = tuple(float(part) for part in value['bounds'])
+        if not label or confidence < 0.9 or not _bounds_inside(bounds, keyboard_bounds, tolerance=tolerance):
+            return None
+        return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence}
 
-def _validated_keyboard_layout_switches(value: Any, *, keyboard_bounds: NormalizedBounds | None,
-    current_layout: str) -> list[dict[str, Any]]:
-    reject_if(not isinstance(value, list) or len(value) > 4, UISceneError("layout_switches 必须是最多4项的数组。"))
-    reject_if(value and keyboard_bounds is None, UISceneError("layout_switches 必须绑定完整可见键盘。"))
-    result: list[dict[str, Any]] = []
-    layouts = frozenset({"qwerty", "numeric", "symbol"})
-    for item in value:
-        reject_if(
-            not isinstance(item, dict) or set(item) != {'label', 'bounds', 'confidence', 'current_layout',
-            'target_layout'},
-            UISceneError("layout_switch 字段不符合协议。"),
-        )
-        target = item.get("target_layout")
-        _audit_confidence(item.get('confidence'), 'layout_switch')
-        control = _validated_directional_switch(item, keyboard_bounds=keyboard_bounds,
-            field_name='layout_switch', modes=layouts, current_mode=current_layout,
-            current_key='current_layout', target_key='target_layout',
-            label_matches=lambda label: _layout_switch_label_matches(label, str(target or '')))
-        if control is None:
-            continue
-        label, bounds, confidence, source, target = control
-        result.append({'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence,
-            'current_layout': source, 'target_layout': target})
-    return result
+    def directional(value: Any, *, field_name: str, modes: frozenset[str],
+        label_matches: Callable[[str], bool], current_mode: str | None=None, current_key: str='current_mode',
+        target_key: str='target_mode', tolerance: float=12) -> dict[str, Any] | None:
+        base = control(value, field_name=field_name,
+            fields={'label', 'bounds', 'confidence', current_key, target_key}, tolerance=tolerance)
+        if base is None:
+            return None
+        current, target = value[current_key], value[target_key]
+        if (current not in modes or target not in modes or current == target
+            or (current_mode is not None and current != current_mode) or not label_matches(base['label'])):
+            return None
+        return {**base, current_key: current, target_key: target}
 
+    def items(value: Any, *, field_name: str, maximum: int, fields: set[str], item_error: str
+        ) -> list[dict[str, Any]]:
+        reject_if(not isinstance(value, list) or len(value) > maximum,
+            UISceneError(f"{field_name} 必须是最多{maximum}项的数组。"))
+        reject_if(value and keyboard_bounds is None, UISceneError(f"{field_name} 必须绑定完整可见键盘。"))
+        for item in value:
+            reject_if(not isinstance(item, dict) or set(item) != fields, UISceneError(item_error))
+        return value
 
-def _validated_keyboard_case_switch(value: Any, *, keyboard_bounds: NormalizedBounds | None,
-    keyboard_layout: str, keyboard_input_mode: str, case_mode: str) -> dict[str, Any] | None:
-    control = _validated_directional_switch(value, keyboard_bounds=keyboard_bounds, field_name='case_switch',
-        modes=frozenset({'lower', 'upper'}), current_mode=case_mode,
+    mode = directional(keyboard.get('mode_switch'), field_name='mode_switch',
+        modes=frozenset({'direct_latin', 'chinese_pinyin'}), label_matches=_is_explicit_keyboard_mode_label,
+        tolerance=20)
+    if mode is not None:
+        bounds = tuple(float(part) for part in keyboard['mode_switch']['bounds'])
+        width, height = keyboard_bounds[2] - keyboard_bounds[0], keyboard_bounds[3] - keyboard_bounds[1]
+        if ((bounds[2] - bounds[0] > 0.35 * width) or (bounds[3] - bounds[1] > 0.3 * height)
+            or (keyboard_input_mode != 'unknown' and mode['current_mode'] != keyboard_input_mode)):
+            mode = None
+
+    base = control(keyboard.get('backspace_key'), field_name='backspace_key',
+        fields={'label', 'bounds', 'confidence', 'fully_visible'}, require_visible=True)
+    backspace = None
+    if base is not None and re.search('(?:⌫|⌦|退格|删除|backspace|delete)', base['label'], re.IGNORECASE):
+        left, top, right, bottom = (float(part) for part in keyboard['backspace_key']['bounds'])
+        backspace = {'label': base['label'], 'center': [round((left + right) / 2), round((top + bottom) / 2)],
+            'confidence': base['confidence']}
+
+    if snapped_anchors is not None:
+        enter = _locally_snapped_keyboard_enter_key(keyboard.get('enter_key'), anchors=snapped_anchors,
+            keyboard_bounds=keyboard_bounds)
+    else:
+        enter = control(keyboard.get('enter_key'), field_name='enter_key',
+            fields={'label', 'bounds', 'confidence', 'fully_visible', 'key_action'}, require_visible=True)
+        if enter is None or keyboard['enter_key']['key_action'] not in {
+            'newline', 'send', 'search', 'done', 'next', 'unknown'}:
+            enter = None
+        else:
+            enter['key_action'] = keyboard['enter_key']['key_action']
+
+    case = directional(keyboard.get('case_switch'), field_name='case_switch',
+        modes=frozenset({'lower', 'upper'}), current_mode=keyboard_case_mode,
         label_matches=lambda label: bool(re.search('(?:shift|大小写|大写|小写|⇧|↑|⬆)', label, re.IGNORECASE)))
-    if control is None or keyboard_layout != 'qwerty' or keyboard_input_mode != 'direct_latin':
-        return None
-    label, bounds, confidence, current, target = control
-    return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence,
-        'current_mode': current, 'target_mode': target}
+    if keyboard_layout != 'qwerty' or keyboard_input_mode != 'direct_latin':
+        case = None
+
+    literal_keys: list[dict[str, Any]] = []
+    literal_items = items(keyboard.get('literal_keys', []), field_name='literal_keys', maximum=8,
+        fields={'value', 'label', 'key_kind', 'bounds', 'confidence', 'fully_visible'},
+        item_error='literal_key 字段不符合协议。')
+    for item in literal_items:
+        key_value, label, key_kind = item.get('value'), item.get('label'), item.get('key_kind')
+        reject_if(not isinstance(key_value, str) or len(key_value) != 1 or not isinstance(label, str)
+            or key_kind not in {'character', 'space'} or not _valid_1000_bounds(item.get('bounds'))
+            or not isinstance(item.get('fully_visible'), bool), UISceneError("literal_key 内容无效。"))
+        if (key_kind == 'character' and (key_value == ' ' or label != key_value)
+            or key_kind == 'space' and (key_value != ' ' or label.strip().casefold() not in {'', 'space', '空格'})):
+            # Revoke a mismatched optional glyph without vetoing independent input or layout evidence.
+            continue
+        bounds = tuple(float(part) for part in item['bounds'])
+        confidence = _audit_confidence(item.get('confidence'), 'literal_key')
+        if (item['fully_visible'] is not True or confidence < 0.9 or keyboard_bounds is None
+            or not _bounds_inside(bounds, keyboard_bounds, tolerance=12)):
+            continue
+        if key_kind == 'space':
+            width, height = keyboard_bounds[2] - keyboard_bounds[0], keyboard_bounds[3] - keyboard_bounds[1]
+            if bounds[2] - bounds[0] < 0.18 * width or bounds[1] < keyboard_bounds[1] + 0.55 * height:
+                continue
+        literal_keys.append({'value': key_value, 'label': label, 'key_kind': key_kind,
+            'bounds': [round(part) for part in bounds], 'confidence': confidence})
+
+    layout_switches: list[dict[str, Any]] = []
+    layout_items = items(keyboard.get('layout_switches', []), field_name='layout_switches', maximum=4,
+        fields={'label', 'bounds', 'confidence', 'current_layout', 'target_layout'},
+        item_error='layout_switch 字段不符合协议。')
+    patterns = {'numeric': r'(?:123|数字|num)', 'qwerty': r'(?:abc|字母|英文|letters?)',
+        'symbol': r'(?:符|sym|[#?+]=?|[.?]123)'}
+    for item in layout_items:
+        target = item.get('target_layout')
+        _audit_confidence(item.get('confidence'), 'layout_switch')
+        parsed = directional(item, field_name='layout_switch', modes=frozenset(patterns),
+            current_mode=keyboard_layout, current_key='current_layout', target_key='target_layout',
+            label_matches=lambda label, pattern=patterns.get(target): bool(pattern and re.search(pattern,
+                label.strip().casefold())))
+        if parsed is not None:
+            layout_switches.append(parsed)
+    return {'mode': mode, 'backspace': backspace, 'enter': enter, 'case': case,
+        'literal_keys': literal_keys, 'layout_switches': layout_switches}
 
 
 def _is_explicit_keyboard_mode_label(label: str) -> bool:

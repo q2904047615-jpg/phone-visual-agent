@@ -65,6 +65,7 @@ from agent.infrastructure.generic_action_adapter import (
     stable_qwerty_ocr_anchors,
     stable_text_ocr_grounding,
 )
+from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.infrastructure.file_system_input_lineage_store import (
@@ -98,6 +99,7 @@ from agent.domain.task_semantic_ir import (
     RISK_POLICY_PROTOCOL,
     TASK_SEMANTIC_IR_PROTOCOL,
 )
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
 
@@ -121,6 +123,8 @@ DEVICE_REGISTRY_PATH = Path(
         Path(__file__).with_name("device_registry.json"),
     )
 )
+APP_PACKAGE_REGISTRY_PATH = Path(os.environ.get("ROBOT_APP_PACKAGE_REGISTRY",
+    Path(__file__).with_name("app_package_registry.json")))
 def current_code_revision() -> str:
     """Return a reproducible revision; dirty worktrees are never promotable."""
 
@@ -281,6 +285,7 @@ class Runtime:
         self.controller: RobotController = self.device_controllers.controller(
             self.device_controllers.default_device_id
         )
+        self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
         self.input_lineage_store = FileSystemTypedInputLineageStore(
@@ -308,6 +313,7 @@ class Runtime:
                 capture=lambda: self.capture_agent_frame(device_id),
                 observer=self.generic_scene_observer,
                 robot=self.controller_for_device(device_id),
+                app_launcher=self.app_launcher_for_device(device_id),
                 controller=UniversalActionController(),
                 qwerty_row_snapper=stable_qwerty_ocr_anchors,
                 text_point_grounder=(
@@ -370,6 +376,11 @@ class Runtime:
             # production registry remains strict.
             return self.controller
         return self.device_controllers.controller(device_id)
+
+    def app_launcher_for_device(self, device_id: str) -> AdbPackageLauncher | None:
+        if device_id not in self._app_launchers:
+            self._app_launchers[device_id] = AdbPackageLauncher(APP_PACKAGE_REGISTRY_PATH, device_id)
+        return self._app_launchers[device_id]
 
     def capability_code_revision(self) -> str:
         current = current_code_revision()
@@ -572,7 +583,18 @@ def device() -> dict[str, Any]:
         for action, spec in profile_actions.items()
         if isinstance(action, str) and isinstance(spec, dict)
     }
-    status["default_device_id"] = runtime.device_controllers.default_device_id
+    default_device_id = runtime.device_controllers.default_device_id
+    enabled_physical_actions = {
+        action
+        for action, enabled in (
+            effective_hardware_capabilities or hardware_capabilities
+        ).items()
+        if enabled and action != "wait_for_change"
+    }
+    default_app_launcher = runtime.app_launcher_for_device(default_device_id)
+    if bool(getattr(default_app_launcher, "enabled", False)):
+        enabled_physical_actions.add("launch_app")
+    status["default_device_id"] = default_device_id
     devices = []
     for descriptor in runtime.device_controllers.descriptors():
         public_status = dict(
@@ -600,28 +622,10 @@ def device() -> dict[str, Any]:
             "automatic_loop_max_physical_actions": 12,
             "automatic_loop_max_iterations": 24,
             "supervised_single_step_enabled": False,
-            "enabled_physical_actions": sorted(
-                action
-                for action, enabled in (
-                    effective_hardware_capabilities or hardware_capabilities
-                ).items()
-                if enabled and action != "wait_for_change"
+            "enabled_physical_actions": sorted(enabled_physical_actions),
+            "protocol_physical_actions": sorted(
+                CANONICAL_ACTION_KINDS - {"wait_for_change"}
             ),
-            "protocol_physical_actions": [
-                "tap_semantic",
-                "dismiss_overlay",
-                "swipe",
-                "back",
-                "home",
-                "open_recent_apps",
-                "reveal_system_navigation",
-                "input_verified_text",
-                "press_enter",
-                "clear_verified_text",
-                "double_tap",
-                "long_press",
-                "drag",
-            ],
             "hardware_capabilities": hardware_capabilities,
             "hardware_capability_profile": hardware_capability_profile,
             "supported_app_scope": "dynamic",

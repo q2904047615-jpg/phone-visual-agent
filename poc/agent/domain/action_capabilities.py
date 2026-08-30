@@ -17,7 +17,7 @@ CALIBRATION_BOUND_ACTIONS = frozenset({'double_tap', 'long_press', 'drag', 'reve
 
 KNOWN_ACTION_CAPABILITIES = frozenset({'tap_semantic', 'dismiss_overlay', 'swipe', 'reveal_system_navigation', 'back',
     'home', 'open_recent_apps', 'wait_for_change', 'input_verified_text', 'clear_verified_text', 'long_press', 'drag',
-    'double_tap', 'press_enter', 'pinch', 'hardware_key'})
+    'double_tap', 'press_enter', 'launch_app', 'pinch', 'hardware_key'})
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -96,7 +96,7 @@ def build_device_capability_snapshot(*, device_id: str, supported_actions: Itera
         raw_actions = {}
     default_gap = {'double_tap': 'requires_double_tap_live_acceptance',
         'press_enter': 'requires_fresh_visible_enter_key', 'pinch': 'multi_touch_not_supported_by_single_contact_robot',
-        'hardware_key': 'hardware_key_transport_not_verified'}
+        'launch_app': 'trusted_package_launch_not_configured', 'hardware_key': 'hardware_key_transport_not_verified'}
     actions: dict[str, dict[str, Any]] = {}
     for action in sorted(KNOWN_ACTION_CAPABILITIES):
         supplied = raw_actions.get(action)

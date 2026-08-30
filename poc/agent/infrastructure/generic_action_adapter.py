@@ -68,7 +68,8 @@ from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keybo
 
 QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"
 
-_POST_NAVIGATION_RESULT_KINDS = frozenset({'tap_semantic', 'double_tap', 'swipe', 'back', 'home', 'open_recent_apps'})
+_POST_NAVIGATION_RESULT_KINDS = frozenset({'tap_semantic', 'double_tap', 'swipe', 'back', 'home', 'open_recent_apps',
+    'launch_app'})
 _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset({'scene_changed', 'content_changed', 'current_video_changed',
     'description', 'app_id', 'screen_id'})
 _VISUAL_FOCUS_KEYS = frozenset({'subgoal_id', 'objective', 'constraints', 'completion_conditions', 'execution_class',
@@ -439,6 +440,7 @@ class GenericActionExecutionResult:
     verification_errors: tuple[str, ...] = ()
     robot_result: Any = None
     hardware_receipt: dict[str, Any] | None = None
+    execution_metadata: dict[str, Any] = field(default_factory=dict)
     evidence: tuple[str, ...] = ()
     after_frames: tuple[Image.Image, ...] = field(default_factory=tuple, repr=False, compare=False)
     after_frame_paths: tuple[str, ...] = ()
@@ -453,6 +455,7 @@ class GenericActionExecutionResult:
         object.__setattr__(self, "after_frames", tuple(self.after_frames))
         object.__setattr__(self, "before_frames", tuple(self.before_frames))
         object.__setattr__(self, 'controller_transition_evidence', tuple(self.controller_transition_evidence))
+        object.__setattr__(self, 'execution_metadata', dict(self.execution_metadata))
 
     def to_dict(self) -> dict[str, Any]:
         value = dataclass_wire(self, omit=('after_frames', 'before_frames'))
@@ -467,6 +470,7 @@ class GenericSingleActionAdapter:
     PHYSICAL_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'swipe', 'reveal_system_navigation',
         'back', 'home', 'open_recent_apps', 'input_verified_text', 'press_enter', 'clear_verified_text', 'long_press',
         'drag'})
+    DEVICE_ACTION_KINDS = PHYSICAL_KINDS | {'launch_app'}
     GEOMETRY_BOUND_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'input_verified_text',
         'press_enter', 'clear_verified_text', 'long_press', 'drag'})
     INDEPENDENT_GEOMETRY_AUDIT_KINDS = GEOMETRY_BOUND_KINDS
@@ -569,7 +573,13 @@ class GenericSingleActionAdapter:
             supported.add("press_enter")
         if bool(declared.get('input_verified_text', True)) and callable(getattr(self.robot, 'vision_clear_text', None)):
             supported.add("clear_verified_text")
+        if self.app_launcher is not None and bool(getattr(self.app_launcher, 'enabled', False)):
+            supported.add('launch_app')
         return frozenset(supported)
+
+    def resolve_app_launch_target(self, app_id: str, app_name: str) -> Any | None:
+        resolver = getattr(self.app_launcher, 'resolve', None)
+        return resolver(app_id, app_name) if callable(resolver) else None
 
     def capability_snapshot(self) -> Any:
         provider = getattr(self.robot, "hardware_capability_profile", None)
@@ -581,7 +591,8 @@ class GenericSingleActionAdapter:
         return self.capability_snapshot().gap(requested_action, required_parameters=required_parameters)
 
     def __init__(self, *, capture: Callable[[], Image.Image], observer: SingleStepGenericSceneObserver, robot: Any,
-        device_executor: DeviceExecutor | None=None, controller: UniversalActionController | None=None,
+        device_executor: DeviceExecutor | None=None, app_launcher: Any=None,
+        controller: UniversalActionController | None=None,
         frame_interval: float=0.37, post_action_settle: float=1.5, post_action_timeout: float | None=None,
         post_action_continuous_timeout: float | None=None, post_action_max_observations: int=2,
         post_action_min_relative_sharpness: float=0.8, post_action_min_reference_sharpness: float=2.0,
@@ -593,7 +604,8 @@ class GenericSingleActionAdapter:
         self.capture = capture
         self.observer = observer
         self.robot = robot
-        self.device_executor = device_executor or RobotDeviceExecutor(robot)
+        self.app_launcher = app_launcher
+        self.device_executor = device_executor or RobotDeviceExecutor(robot, app_launcher=app_launcher)
         self.controller = controller or UniversalActionController()
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
@@ -1076,7 +1088,7 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'确认前控制器拒绝动作：{exc}', evidence=before_paths) from exc
 
         reject_if(
-            resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != 'wait_for_change',
+            resolved.kind not in self.DEVICE_ACTION_KINDS and resolved.kind != 'wait_for_change',
             GenericActionAdapterError(f'当前通用硬件适配器尚未开放：{resolved.kind}', evidence=before_paths),
         )
 
@@ -1087,6 +1099,7 @@ class GenericSingleActionAdapter:
         physical_actions = 0
         robot_result: Any = None
         hardware_receipt: dict[str, Any] | None = None
+        execution_metadata: dict[str, Any] = {}
 
         def executor_point(point: NormalizedPoint | None) -> tuple[int, int] | None:
             if point is None:
@@ -1098,15 +1111,16 @@ class GenericSingleActionAdapter:
             hold_seconds=resolved.hold_seconds, input_fragment=resolved.input_fragment,
             input_method=resolved.input_method, input_pinyin=resolved.input_pinyin,
             keyboard_geometry=prepared_keyboard_geometry, delete_count=resolved.delete_count, wait_seconds=max(0.5,
-            self.post_action_settle) if resolved.kind == 'wait_for_change' else None)
+            self.post_action_settle) if resolved.kind == 'wait_for_change' else None, launch_ref=resolved.launch_ref)
         try:
             execution_result = self.device_executor.execute(execution_request)
             physical_actions = execution_result.physical_actions
             robot_result = execution_result.transport_result
             hardware_receipt = execution_result.hardware_receipt
+            execution_metadata = dict(execution_result.metadata)
         except DeviceExecutionError as exc:
             raise GenericActionAdapterError(f'设备执行器拒绝动作：{exc}', physical_actions=exc.physical_actions,
-                evidence=before_paths) from exc
+                evidence=before_paths, execution_metadata=getattr(exc, 'metadata', {})) from exc
         except OrientationSafetyError as exc:
             gate_evidence = before_paths
             if isinstance(exc, OrientationFrameMismatchError):
@@ -1115,7 +1129,7 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'共享物理执行门在控制端原语前拒绝动作：{exc}', physical_actions=0,
                 evidence=gate_evidence) from exc
         except Exception as exc:
-            raise GenericActionAdapterError(f'机械臂单步动作调用失败：{exc}', physical_actions=physical_actions,
+            raise GenericActionAdapterError(f'设备单步动作调用失败：{exc}', physical_actions=physical_actions,
                 evidence=before_paths) from exc
         finally:
             if callable(clear_authorization):
@@ -1145,7 +1159,7 @@ class GenericSingleActionAdapter:
             evidence = before_paths + tuple(getattr(exc, "evidence", ()))
             raise GenericActionAdapterError(f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
                 observation_errors=tuple(getattr(exc, 'observation_errors', ())), verification_errors=tuple(getattr(exc,
-                'verification_errors', ()))) from exc
+                'verification_errors', ())), execution_metadata=execution_metadata) from exc
 
         if not verification_errors:
             self._record_verified_input_lineage(resolved, before, after, after_frames, hardware_receipt)
@@ -1157,7 +1171,8 @@ class GenericSingleActionAdapter:
             confirmation_frame_delta=confirmation_frame_delta, physical_actions=physical_actions,
             primary_input_confirmation_reused=primary_input_confirmation_reused,
             action_outcome='mismatched' if verification_errors else 'matched', verification_errors=verification_errors,
-            robot_result=robot_result, hardware_receipt=hardware_receipt, evidence=before_paths + all_after_paths,
+            robot_result=robot_result, hardware_receipt=hardware_receipt, execution_metadata=execution_metadata,
+            evidence=before_paths + all_after_paths,
             after_frames=after_frames, after_frame_paths=after_frame_paths, observation_errors=observation_errors,
             controller_transition_evidence=controller_transition_evidence, before_frames=before_frames,
             before_frame_paths=before_paths, orientation_credential=orientation_credential)

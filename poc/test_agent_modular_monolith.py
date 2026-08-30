@@ -1476,6 +1476,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "home",
             "input_verified_text",
             "long_press",
+            "launch_app",
             "open_recent_apps",
             "press_enter",
             "reveal_system_navigation",

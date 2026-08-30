@@ -1607,7 +1607,12 @@ class ApiEndToEndTests(unittest.TestCase):
 
     def test_home_and_device_are_available(self) -> None:
         self.assertEqual(self.client.get("/").status_code, 200)
-        device = self.client.get("/api/device").json()
+        with patch.object(
+            web_app.runtime,
+            "app_launcher_for_device",
+            return_value=SimpleNamespace(enabled=False),
+        ):
+            device = self.client.get("/api/device").json()
         self.assertTrue(device["controller_online"])
         self.assertTrue(device["camera_online"])
         self.assertEqual(device["default_device_id"], "device-local-01")
@@ -1642,6 +1647,11 @@ class ApiEndToEndTests(unittest.TestCase):
             universal["controller_protocol"],
             web_app.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
         )
+        self.assertEqual(
+            universal["protocol_physical_actions"],
+            sorted(web_app.CANONICAL_ACTION_KINDS - {"wait_for_change"}),
+        )
+        self.assertNotIn("launch_app", universal["enabled_physical_actions"])
         semantic_authority = universal["typed_effect_authority"]
         self.assertEqual(
             semantic_authority["authority_scope"],
@@ -1662,6 +1672,24 @@ class ApiEndToEndTests(unittest.TestCase):
             universal["hardware_capability_profile"]["actions"]["tap_semantic"]
             ["fresh_visual_postcondition_required"]
         )
+
+    def test_device_status_exposes_enabled_trusted_package_launch(self) -> None:
+        default_device_id = web_app.runtime.device_controllers.default_device_id
+        with patch.object(
+            web_app.runtime,
+            "app_launcher_for_device",
+            return_value=SimpleNamespace(enabled=True),
+        ) as launcher_for_device:
+            device = self.client.get("/api/device").json()
+
+        universal = device["execution_architecture"]["universal_agent"]
+        self.assertIn("launch_app", universal["enabled_physical_actions"])
+        self.assertEqual(
+            universal["protocol_physical_actions"],
+            sorted(web_app.CANONICAL_ACTION_KINDS - {"wait_for_change"}),
+        )
+        launcher_for_device.assert_called_once_with(default_device_id)
+
     def test_home_uses_generic_supervised_single_step_endpoints(self) -> None:
         home = self.client.get("/")
         script = self.client.get("/assets/app.js")

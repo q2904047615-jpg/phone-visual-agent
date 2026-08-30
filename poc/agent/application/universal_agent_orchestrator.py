@@ -611,6 +611,20 @@ class UniversalAgentOrchestrator:
         assert semantic_ir is not None
         active_id = str(context.current_subgoal.get("subgoal_id") or "")
         typed_subgoal = next((item for item in semantic_ir.subgoals if item.subgoal_id == active_id), None)
+        launch_parameters: dict[str, str] | None = None
+        target_surface = next((surface for surface in semantic_ir.surfaces if typed_subgoal is not None
+            and surface.surface_id == typed_subgoal.surface_ref and surface.kind == 'app'), None)
+        launch_resolver = getattr(session.adapter, 'resolve_app_launch_target', None)
+        launch_target = (launch_resolver(target_surface.app_id, target_surface.app_name)
+            if target_surface is not None and callable(launch_resolver) else None)
+        if launch_target is None:
+            available_actions = available_actions - {'launch_app'}
+        else:
+            reject_if(not str(getattr(launch_target, 'launch_ref', '') or '').strip()
+                or not str(getattr(launch_target, 'expected_app_id', '') or '').strip(),
+                UniversalAgentOrchestratorError('App 直启能力缺少受信任引用或前台包。'))
+            launch_parameters = {'launch_ref': launch_target.launch_ref,
+                'expected_app_id': launch_target.expected_app_id}
         constraints = {item.constraint_id: item for item in semantic_ir.constraints}
         required_actions = tuple(dict.fromkeys((str(constraints[ref].value) for ref
             in (typed_subgoal.constraint_refs if typed_subgoal
@@ -634,8 +648,11 @@ class UniversalAgentOrchestrator:
                 'fingerprint': decision.fingerprint, 'status': 'blocked', 'next_action': None, 'reason': reason,
                 'capability_gap': dict(session.capability_gap)}
             return decision
-        return self.qwen_observer.decide(frames=frames, task_context=context, trusted_observation=trusted_observation,
-            decision_number=session.step_number, available_action_kinds=available_actions)
+        decision_args = {'frames': frames, 'task_context': context, 'trusted_observation': trusted_observation,
+            'decision_number': session.step_number, 'available_action_kinds': available_actions}
+        if launch_parameters:
+            decision_args['launch_target'] = launch_parameters
+        return self.qwen_observer.decide(**decision_args)
 
     def _build_and_record_current_observation(self, session: UniversalAgentSessionState, *, scene: Any,
         frames: list[Any], observation_id: str | None=None) -> Any:
@@ -1339,6 +1356,7 @@ class UniversalAgentOrchestrator:
             'execution_before_fingerprint': result.before_scene.fingerprint,
             'after_fingerprint': result.after_scene.fingerprint, 'visible_evidence': [result.after_scene.summary],
             'blocked_reasons': list(verification_errors), 'after_frame_paths': list(result.after_frame_paths),
+            'execution_metadata': dict(getattr(result, 'execution_metadata', {}) or {}),
             'controller_transition_evidence': list(controller_evidence), 'verified_action_transition': receipt_payload,
             'transition_kind': transition_kind}
         self._remember(session, session.evidence_store.write_verification(max(1, session.step_number - 1),
@@ -1799,54 +1817,42 @@ class UniversalAgentOrchestrator:
         if not recoverable_reobservation:
             session.status = "failed"
         session.failed_reason = reason
-        if request_actions == 0:
-            requested_kind = str(getattr(getattr(getattr(session.qwen_decision, 'proposal', None), 'action', None),
-                'action', '') or '')
-            if failed_stage == 'validating_confirmation':
-                transition_kind = "confirmation_failure"
-            elif requested_kind == 'wait_for_change':
-                transition_kind = "wait_observation_failure"
-            else:
-                transition_kind = "pre_action_failure"
-            transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
-                'transition_kind': transition_kind,
-                'disposition': 'needs_reobservation' if recoverable_reobservation else 'failed',
-                'failed_stage': failed_stage, 'error_type': error.__class__.__name__, 'error': reason,
+
+        def failure_transition(transition_kind: str, disposition: str) -> dict[str, Any]:
+            transition: dict[str, Any] = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+                'transition_kind': transition_kind, 'disposition': disposition, 'failed_stage': failed_stage,
+                'error_type': error.__class__.__name__, 'error': reason,
                 'authority_consumed': authority_consumed, 'physical_actions_before': int(before_actions),
-                'physical_actions': int(session.physical_actions), 'request_physical_actions': 0,
+                'physical_actions': int(session.physical_actions), 'request_physical_actions': request_actions,
                 'evidence': list(dict.fromkeys(session.evidence_paths))}
             if authority is not None and callable(getattr(authority, 'scope', None)):
                 try:
                     transition["authority_scope"] = authority.scope()
                 except Exception:
                     pass
-            session.last_confirmation_failure = transition
-            failure_step = max(1, session.step_number)
-            try:
-                self._remember(session, session.evidence_store.write_confirmation_failure(failure_step, transition))
-            except Exception:
-                pass
-            self._best_effort_terminal_snapshot(session)
-            return
+            execution_metadata = dict(getattr(error, 'execution_metadata', {}) or {})
+            if execution_metadata:
+                transition['execution_metadata'] = execution_metadata
+            return transition
 
-        transition: dict[str, Any] = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
-            'transition_kind': 'post_action_failure', 'disposition': 'failed', 'failed_stage': failed_stage,
-            'error_type': error.__class__.__name__, 'error': reason, 'authority_consumed': authority_consumed,
-            'physical_actions_before': int(before_actions), 'physical_actions': int(session.physical_actions),
-            'request_physical_actions': request_actions, 'evidence': list(dict.fromkeys(session.evidence_paths))}
-        if authority is not None and callable(getattr(authority, 'scope', None)):
-            try:
-                transition["authority_scope"] = authority.scope()
-            except Exception:
-                pass
-        session.last_post_action_transition = transition
+        pre_action_failure = request_actions == 0
+        requested_kind = str(getattr(getattr(getattr(session.qwen_decision, 'proposal', None), 'action', None),
+            'action', '') or '') if pre_action_failure else ''
+        transition_kind = ('post_action_failure' if not pre_action_failure else 'confirmation_failure'
+            if failed_stage == 'validating_confirmation' else 'wait_observation_failure'
+            if requested_kind == 'wait_for_change' else 'pre_action_failure')
+        transition = failure_transition(transition_kind,
+            'needs_reobservation' if recoverable_reobservation else 'failed')
+        transition_field, writer = (('last_confirmation_failure', session.evidence_store.write_confirmation_failure)
+            if pre_action_failure else ('last_post_action_transition',
+            session.evidence_store.write_post_action_transition))
+        setattr(session, transition_field, transition)
         failure_step = max(1, session.step_number)
-        if session.history and authority is not None:
-            latest = session.history[-1]
-            if latest.get('task_revision') == getattr(authority, 'revision', None):
-                failure_step = max(1, int(latest.get("step_number") or failure_step))
+        if (not pre_action_failure and session.history and authority is not None and (latest := session.history[-1]
+            ).get('task_revision') == getattr(authority, 'revision', None)):
+            failure_step = max(1, int(latest.get("step_number") or failure_step))
         try:
-            self._remember(session, session.evidence_store.write_post_action_transition(failure_step, transition))
+            self._remember(session, writer(failure_step, transition))
         except Exception:
             pass
         self._best_effort_terminal_snapshot(session)

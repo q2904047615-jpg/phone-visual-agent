@@ -122,7 +122,8 @@ class QwenVisualDecisionObserver:
 
     def decide(self, *, frames: list[Image.Image], task_context: qwen_task_context_domain.QwenTaskContext | dict[str,
         Any], trusted_observation: trusted_observation_domain.TrustedObservation, decision_number: int=1,
-        available_action_kinds: Iterable[str] | None=None) -> QwenVisualDecision:
+        available_action_kinds: Iterable[str] | None=None,
+        launch_target: Mapping[str, str] | None=None) -> QwenVisualDecision:
         started = time.perf_counter()
         self.last_raw_response = ""
         self.last_diagnostics = {}
@@ -138,7 +139,8 @@ class QwenVisualDecisionObserver:
         self.trusted_observation_frame_validator(trusted_observation, frames, allow_leading_outlier=True)
         reject_if(context.device_id != trusted_observation.device_id, VisionAgentError("任务 device_id 与可信观察不一致。"))
         self._metrics["decision_count"] += 1
-        canonical_choices = _selection_choices(context, trusted_observation, available_actions)
+        canonical_choices = _selection_choices(context, trusted_observation, available_actions,
+            launch_target=launch_target)
         canonical_action_kinds = sorted({str(item['action']) for item in canonical_choices})
 
         model_identity = public_model_identity(self.provider.status())
@@ -190,7 +192,8 @@ class QwenVisualDecisionObserver:
 
 def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
     observation: trusted_observation_domain.TrustedObservation,
-    available_action_kinds: frozenset[str]) -> tuple[dict[str, Any], ...]:
+    available_action_kinds: frozenset[str], *, launch_target: Mapping[str, str] | None=None
+    ) -> tuple[dict[str, Any], ...]:
     """Build generic action choices from the trusted scene, never app steps."""
 
     choices: list[dict[str, Any]] = []
@@ -201,7 +204,8 @@ def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
             compile_canonical_action_catalog,
         )
 
-        formal_report = compile_canonical_action_catalog(observation.scene, context.semantic_ir, available_action_kinds)
+        formal_report = compile_canonical_action_catalog(observation.scene, context.semantic_ir, available_action_kinds,
+            launch_target=launch_target)
     except Exception as exc:
         raise VisionAgentError(f'canonical action catalog 构建失败：{exc}') from exc
 
@@ -257,7 +261,7 @@ def _deterministic_exact_selection_payload(context: qwen_task_context_domain.Qwe
         if len(same_target) == 1:
             return _selection_payload(same_target[0], '单次Qwen画面的唯一目标与canonical目录唯一候选一致。')
 
-    if (len(choices) == 1 and str(choices[0].get('action') or '') in {'back', 'home', 'open_recent_apps',
+    if (len(choices) == 1 and str(choices[0].get('action') or '') in {'back', 'home', 'open_recent_apps', 'launch_app',
         'reveal_system_navigation', 'swipe', 'wait_for_change'}):
         return _selection_payload(choices[0], 'canonical目录只有一个坐标无关或容器级合法动作。')
     return None
@@ -347,7 +351,7 @@ def _canonical_target_region(action: SemanticAction,
             ),
         )
     system_descriptions = {'back': '系统返回区域', 'home': 'Android系统Home键', 'open_recent_apps': 'Android系统最近任务键',
-        'reveal_system_navigation': 'Android系统导航栏'}
+        'launch_app': '受信任的 App 启动通道', 'reveal_system_navigation': 'Android系统导航栏'}
     return VisualTargetRegion(kind='system_navigation' if action.action in system_descriptions else 'screen',
         bounds=(0.0, 0.0, 1.0, 1.0), description=system_descriptions.get(action.action, '当前屏幕'))
 

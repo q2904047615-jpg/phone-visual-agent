@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "device_id": "device-local-01",
+      "enabled": false,
+      "adb_executable": "adb.exe",
+      "adb_serial": "",
+      "apps": [
+        {
+          "launch_ref": "app.wechat",
+          "aliases": [
+            "wechat",
+            "微信"
+          ],
+          "package": "com.tencent.mm"
+        }
+      ]
+    }
+  ]
+}

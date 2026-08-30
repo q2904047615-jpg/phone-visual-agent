@@ -522,6 +522,7 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
         constraints.append(ConstraintIntent(constraint_id, "planner_context", value=text, source_text=text))
         context_ids.setdefault(owner, []).append(constraint_id)
     action_ids: dict[str, list[str]] = {}
+    action_values: dict[str, set[str]] = {}
     has_input_payload = bool(by_role.get("input_text"))
     for subgoal in subgoals:
         subgoal_id = str(getattr(subgoal, "subgoal_id", ""))
@@ -546,6 +547,7 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
             constraints.append(ConstraintIntent(constraint_id, 'required_action', value=action, source_text=source_text,
                 authoritative=True))
             action_ids.setdefault(subgoal_id, []).append(constraint_id)
+            action_values.setdefault(subgoal_id, set()).add(action)
 
     effect_refs: dict[str, list[str]] = {}
     for effect in effect_tuple:
@@ -554,6 +556,7 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
     surfaces_tuple = tuple(surfaces)
     desired: list[DesiredState] = []
     desired_refs: dict[str, list[str]] = {}
+    verified_input_subjects: dict[str, set[str]] = {}
 
     def add_state(description: str, owner: str, surface: str) -> None:
         description = description.strip()
@@ -571,6 +574,8 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
             state_id = f"state_{len(desired) + 1}"
             desired.append(DesiredState(state_id, subject, predicate, value, owner))
             desired_refs.setdefault(owner, []).append(state_id)
+            if predicate == 'input.value_equals':
+                verified_input_subjects.setdefault(owner, set()).add(subject)
 
     semantic_subgoals: list[SemanticSubgoal] = []
     for subgoal in subgoals:
@@ -594,35 +599,30 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
         if description:
             add_state(description, "", default_surface)
 
-    constraint_map = {item.constraint_id: item for item in constraints}
-    desired_map = {item.state_id: item for item in desired}
     recipient_refs = tuple(item.entity_id for item in by_role.get("recipient", ()))
     input_entities = tuple(by_role.get("input_text", ()))
+    input_contexts = tuple(' '.join((str(getattr(subgoal, 'objective', '')),
+        *map(str, getattr(subgoal, 'constraints', ()) or ()), *map(str, getattr(subgoal, 'completion_conditions',
+        ()) or ()))).casefold() for subgoal in subgoals)
     typed_fields: list[InputFieldIntent] = []
     for (index, entity) in enumerate(input_entities, 1):
         sources = []
         field_id, label = field_meta.get(entity.entity_id, (f"input_field_{index}", ""))
-        for (subgoal, semantic) in zip(subgoals, semantic_subgoals):
-            actions = {constraint_map[ref].value for ref in semantic.constraint_refs if ref in constraint_map
-                and constraint_map[ref].kind == 'required_action'}
-            context = ' '.join((str(getattr(subgoal, 'objective', '')), *map(str, getattr(subgoal, 'constraints',
-                ()) or ()), *map(str, getattr(subgoal, 'completion_conditions', ()) or ()))).casefold()
+        for semantic, context in zip(semantic_subgoals, input_contexts):
+            actions = action_values.get(semantic.subgoal_id, set())
             owns_typed_action = bool(actions & {"input_verified_text", "clear_verified_text"})
             literal_matches = [item for item in input_entities if isinstance(item.value,
                 str) and item.value and (item.value.casefold() in context)]
             owns_exact_literal = len(literal_matches) == 1 and literal_matches[0].entity_id == entity.entity_id
             owns = owns_typed_action and (len(input_entities) == 1 or bool(label and label.casefold()
                 in context)) or owns_exact_literal
-            verifies_exact_value = any((desired_map[ref].subject_ref == entity.entity_id
-                and desired_map[ref].predicate == 'input.value_equals' for ref in semantic.desired_state_refs if ref
-                in desired_map))
+            verifies_exact_value = entity.entity_id in verified_input_subjects.get(semantic.subgoal_id, set())
             if verifies_exact_value or (owns and semantic.external_impact != 'read_only'):
                 sources.append(semantic.subgoal_id)
         typed_fields.append(InputFieldIntent(field_id, entity.entity_id, label, recipient_refs,
             tuple(dict.fromkeys(sources)), isinstance(entity.value, str) and '\n' in entity.value))
     for semantic in semantic_subgoals:
-        actions = {constraint_map[ref].value for ref in semantic.constraint_refs if ref in constraint_map
-            and constraint_map[ref].kind == 'required_action'}
+        actions = action_values.get(semantic.subgoal_id, set())
         if 'input_verified_text' not in actions:
             continue
         owners = [item for item in typed_fields if semantic.subgoal_id in item.source_subgoal_ids]
@@ -631,15 +631,12 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
         if not typed.multiline or len(typed.source_subgoal_ids) != 1:
             continue
         owner = typed.source_subgoal_ids[0]
-        semantic = next(item for item in semantic_subgoals if item.subgoal_id == owner)
-        if (any((constraint_map[ref].kind == 'required_action' and constraint_map[ref].value == 'press_enter' for ref
-            in semantic.constraint_refs))):
+        if 'press_enter' in action_values.get(owner, set()):
             continue
         constraint_id = f"constraint_action_{1 + sum(map(len, action_ids.values()))}"
         new_constraint = ConstraintIntent(constraint_id, 'required_action', value='press_enter',
             source_text='multiline typed input field', authoritative=True)
         constraints.append(new_constraint)
-        constraint_map[constraint_id] = new_constraint
         semantic_subgoals = [replace(item, constraint_refs=(*item.constraint_refs,
             constraint_id)) if item.subgoal_id == owner else item for item in semantic_subgoals]
 

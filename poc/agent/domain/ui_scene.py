@@ -468,8 +468,8 @@ class UIScene:
         return scene
 
 
-def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
-    """Bind a typed App surface to structured foreground identity facts."""
+def scene_matches_app_identity(scene: UIScene, app_id: str, app_name: str='') -> bool:
+    """Bind one typed App identity to structured facts from the current screenshot."""
 
     def identity_terms(*values: Any) -> frozenset[str]:
         generic = {'android', 'app', 'application', 'com', 'current', 'foreground', 'home', 'interface', 'list', 'main',
@@ -482,7 +482,7 @@ def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> boo
         return frozenset(term for term in terms if term not in generic)
 
     foreground = str(scene.foreground_app_id or "").strip().casefold()
-    target_app_id = str(getattr(target_surface, "app_id", "") or "").strip().casefold()
+    target_app_id = str(app_id or "").strip().casefold()
     if not foreground or foreground == 'unknown' or (not target_app_id):
         return False
     if foreground == target_app_id:
@@ -497,7 +497,7 @@ def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> boo
         or (len(target_parts) == 1 and target_parts[0] == foreground_parts[-1]))):
         return True
 
-    app_name = str(getattr(target_surface, "app_name", "") or "").strip().casefold()
+    app_name = str(app_name or "").strip().casefold()
     target_terms = identity_terms(target_app_id, app_name)
     screen_terms = identity_terms(scene.screen_id)
     if target_terms and screen_terms.intersection(target_terms):
@@ -511,6 +511,13 @@ def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> boo
         'title', 'heading', 'app_header'))) and (str(element.label or '').strip().casefold() == app_name)
         and (float(element.confidence) >= MIN_TARGET_CONFIDENCE) and (element.states.get('fully_visible') is True)))
     return len(title_matches) == 1
+
+
+def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
+    """Bind a typed App surface to structured foreground identity facts."""
+
+    return scene_matches_app_identity(scene, getattr(target_surface, 'app_id', ''),
+        getattr(target_surface, 'app_name', ''))
 
 
 def scene_surface_kind(scene: UIScene) -> str:

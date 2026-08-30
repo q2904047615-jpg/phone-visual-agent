@@ -16,9 +16,11 @@ EXECUTABLE_ACTION_KINDS = CANONICAL_ACTION_KINDS
 
 
 class DeviceExecutionError(RuntimeError):
-    def __init__(self, message: str, *, physical_actions: int=0) -> None:
+    def __init__(self, message: str, *, physical_actions: int=0,
+        metadata: Mapping[str, Any] | None=None) -> None:
         super().__init__(message)
         self.physical_actions = int(physical_actions)
+        self.metadata = dict(metadata or {})
 
 
 class DeviceTaskRegistryError(RuntimeError):
@@ -54,6 +56,7 @@ class DeviceActionRequest(DataclassWire):
     input_pinyin: str | None = None
     keyboard_geometry: Mapping[str, Any] | None = None
     delete_count: int | None = None
+    launch_ref: str | None = None
     wait_seconds: float | None = None
 
     def validate(self) -> None:
@@ -90,6 +93,12 @@ class DeviceActionRequest(DataclassWire):
         if self.kind == 'clear_verified_text':
             reject_if(not isinstance(self.keyboard_geometry, Mapping), DeviceExecutionError("清空动作缺少已审计键盘几何。"))
             reject_if(isinstance(self.delete_count, bool) or not isinstance(self.delete_count, int) or (not 1 <= self.delete_count <= 100), DeviceExecutionError("清空动作退格次数无效。"))
+        if self.kind == 'launch_app':
+            reject_if(not isinstance(self.launch_ref, str) or not self.launch_ref or len(self.launch_ref) > 128
+                or any((not (character.isalnum() or character in '._:-') for character in self.launch_ref)),
+                DeviceExecutionError("App 直启请求缺少有效 launch_ref。"))
+        else:
+            reject_if(self.launch_ref is not None, DeviceExecutionError("非 App 直启动作不得携带 launch_ref。"))
         reject_if(self.kind == 'wait_for_change' and (isinstance(self.wait_seconds, bool) or not isinstance(self.wait_seconds, (int, float)) or float(self.wait_seconds) < 0), DeviceExecutionError("等待时长无效。"))
 
     @staticmethod

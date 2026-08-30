@@ -27,14 +27,16 @@ class RobotDeviceExecutor:
         'drag': ('vision_drag_relative', lambda request: (*request.point, *request.end_point)),
     }
 
-    def __init__(self, robot: Any, *, sleep: Callable[[float], None]=time.sleep) -> None:
+    def __init__(self, robot: Any, *, app_launcher: Any=None, sleep: Callable[[float], None]=time.sleep) -> None:
         self.robot = robot
+        self.app_launcher = app_launcher
         self.sleep = sleep
         self._handlers: dict[str, Callable[[DeviceActionRequest], DeviceExecutionResult]] = {
             'swipe': self._swipe,
             'input_verified_text': self._input_text,
             'long_press': self._long_press,
             'wait_for_change': self._wait,
+            'launch_app': self._launch_app,
         }
 
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
@@ -118,6 +120,24 @@ class RobotDeviceExecutor:
     def _wait(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         self.sleep(float(request.wait_seconds or 0.0))
         return DeviceExecutionResult(physical_actions=0)
+
+    def _launch_app(self, request: DeviceActionRequest) -> DeviceExecutionResult:
+        launcher = self.app_launcher
+        metadata = {'transport': 'adb_package_launch', 'mechanical_contact_ack': False}
+        reject_if(launcher is None or not callable(getattr(launcher, 'launch', None)),
+            DeviceExecutionError("App 直启 transport 未配置。", metadata=metadata))
+        try:
+            launcher.launch(request.launch_ref)
+        except DeviceExecutionError:
+            raise
+        except Exception as exc:
+            error_metadata = {**metadata, 'transport_status': 'error', 'transport_error': str(exc)}
+            if bool(getattr(exc, 'attempted', True)):
+                return DeviceExecutionResult(physical_actions=1,
+                    transport_result={'status': 'error', 'error': str(exc)}, metadata=error_metadata)
+            raise DeviceExecutionError(f'App 直启 transport 调用失败：{exc}', metadata=error_metadata) from exc
+        return DeviceExecutionResult(physical_actions=1, transport_result={'status': 'accepted'},
+            metadata={**metadata, 'transport_status': 'accepted'})
 
 
 class ReplayDeviceExecutor:

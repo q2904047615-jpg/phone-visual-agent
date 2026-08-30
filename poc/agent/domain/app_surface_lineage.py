@@ -10,7 +10,7 @@ from typing import Any
 from .generic_goal import VisibleGoalEvidence
 from .task_graph import ControllerTransitionEvidenceRef, DynamicTaskGraph, TaskGraphError, VerifiedActionTransition
 from .task_semantic_ir import compile_formal_semantic_authority
-from .ui_scene import MIN_TARGET_CONFIDENCE
+from .ui_scene import MIN_TARGET_CONFIDENCE, scene_matches_app_identity
 
 
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
@@ -91,9 +91,10 @@ class AppSurfaceLineageAuthority:
         after_scene = getattr(trusted_observation, "scene", None)
         proposal = getattr(previous_decision, "proposal", None)
         action = getattr(proposal, "action", None)
+        action_kind = str(getattr(action, 'action', ''))
         if (any((value is None for value in (receipt, before_scene, after_scene, action,
             execution_result))) or not session_id or str(getattr(completed_subgoal, 'external_impact',
-            '')) != 'navigation_only' or (str(getattr(action, 'action', '')) != 'tap_semantic')):
+            '')) != 'navigation_only' or action_kind not in {'tap_semantic', 'launch_app'}):
             return False
         try:
             receipt.validate()
@@ -110,36 +111,47 @@ class AppSurfaceLineageAuthority:
             receipt.before_observation_id, receipt.before_fingerprint, receipt.after_observation_id,
             receipt.after_fingerprint)
         expected_scope = (session_id, previous.task_id, previous.device_id, previous.revision,
-            completed_subgoal.subgoal_id, str(getattr(action, 'node_id', '')), 'tap_semantic', _action_digest(action),
+            completed_subgoal.subgoal_id, str(getattr(action, 'node_id', '')), action_kind, _action_digest(action),
             _action_digest(getattr(execution_result, 'rebound_action', None)), _action_digest(getattr(execution_result,
             'resolved_action', None)), 'matched', 1, str(getattr(before_observation, 'observation_id', '')),
             str(getattr(before_observation, 'fingerprint', '')), str(getattr(trusted_observation, 'observation_id',
             '')), str(getattr(trusted_observation, 'fingerprint', '')))
         if (actual_scope != expected_scope or receipt.errors or receipt.before_fingerprint == receipt.after_fingerprint
-            or (str(getattr(before_scene, 'foreground_app_id',
-            '')).casefold() != 'launcher') or (str(getattr(after_scene, 'foreground_app_id',
-            '')).casefold() == 'launcher')):
+            or str(getattr(after_scene, 'foreground_app_id', '')).casefold() == 'launcher'):
             return False
 
         params = getattr(action, "params", None)
         if not isinstance(params, Mapping):
             return False
-        element_id = str(params.get("element_id") or "").strip()
-        matches = tuple((element for element in tuple(getattr(before_scene, 'elements',
-            ()) or ()) if str(getattr(element, 'element_id', '')) == element_id))
-        if len(matches) != 1:
-            return False
-        element = matches[0]
-        action_identity = tuple((str(value or '').strip() for value in (params.get('label'), params.get('role'),
-            params.get('target') or params.get('meaning'))))
-        element_identity = tuple((str(value or '').strip() for value in (getattr(element, 'label', ''), getattr(element,
-            'role', ''), getattr(element, 'meaning', ''))))
-        if action_identity != element_identity:
-            return False
-        action_terms = VisibleGoalEvidence.binding_terms(params.get('label'), params.get('target'),
-            params.get('meaning'), getattr(element, 'label', ''), getattr(element, 'meaning', ''))
-        bound_targets = tuple((app for app in target_apps if VisibleGoalEvidence.target_app_terms(app.app_id,
-            app.app_name).intersection(action_terms)))
+        if action_kind == 'launch_app':
+            expected_app_id = str(params.get('expected_app_id') or '').strip().casefold()
+            observed_app_id = str(getattr(after_scene, 'foreground_app_id', '') or '').strip().casefold()
+            if (not expected_app_id or not str(params.get('launch_ref') or '').strip()
+                or (observed_app_id != expected_app_id and not scene_matches_app_identity(after_scene,
+                str(params.get('target_app_id') or ''), str(params.get('target_app_name') or '')))):
+                return False
+            bound_targets = tuple((app for app in target_apps if str(app.app_id).casefold() == str(params.get(
+                'target_app_id') or '').casefold() and str(app.app_name).casefold() == str(params.get(
+                'target_app_name') or '').casefold()))
+        else:
+            if str(getattr(before_scene, 'foreground_app_id', '')).casefold() != 'launcher':
+                return False
+            element_id = str(params.get("element_id") or "").strip()
+            matches = tuple((element for element in tuple(getattr(before_scene, 'elements',
+                ()) or ()) if str(getattr(element, 'element_id', '')) == element_id))
+            if len(matches) != 1:
+                return False
+            element = matches[0]
+            action_identity = tuple((str(value or '').strip() for value in (params.get('label'), params.get('role'),
+                params.get('target') or params.get('meaning'))))
+            element_identity = tuple((str(value or '').strip() for value in (getattr(element, 'label', ''), getattr(
+                element, 'role', ''), getattr(element, 'meaning', ''))))
+            if action_identity != element_identity:
+                return False
+            action_terms = VisibleGoalEvidence.binding_terms(params.get('label'), params.get('target'),
+                params.get('meaning'), getattr(element, 'label', ''), getattr(element, 'meaning', ''))
+            bound_targets = tuple((app for app in target_apps if VisibleGoalEvidence.target_app_terms(app.app_id,
+                app.app_name).intersection(action_terms)))
         if len(bound_targets) != 1:
             return False
         try:
@@ -150,6 +162,8 @@ class AppSurfaceLineageAuthority:
         surface_ids = {surface.surface_id for surface in semantic_ir.surfaces if surface.kind == 'app'
             and (surface.app_id.casefold() == str(target.app_id).casefold()
             or surface.app_name.casefold() == str(target.app_name).casefold())}
+        if action_kind == 'launch_app' and params.get('target_surface_id') not in surface_ids:
+            return False
         formal_transition = params.get("formal_transition")
         expectations = formal_transition.get("expectations") if isinstance(formal_transition, Mapping) else None
         if not isinstance(expectations, list) or formal_transition.get('exploratory') is not False:
@@ -207,9 +221,14 @@ class AppSurfaceLineageAuthority:
                 execution_result=execution_result)):
                 continue
             action = previous_decision.proposal.action
-            terms = VisibleGoalEvidence.binding_terms(action.params.get("label"), action.params.get("target"))
-            bound = [app for app in target_apps if VisibleGoalEvidence.target_app_terms(app.app_id,
-                app.app_name).intersection(terms)]
+            if action.action == 'launch_app':
+                bound = [app for app in target_apps if str(app.app_id).casefold() == str(action.params.get(
+                    'target_app_id') or '').casefold() and str(app.app_name).casefold() == str(action.params.get(
+                    'target_app_name') or '').casefold()]
+            else:
+                terms = VisibleGoalEvidence.binding_terms(action.params.get("label"), action.params.get("target"))
+                bound = [app for app in target_apps if VisibleGoalEvidence.target_app_terms(app.app_id,
+                    app.app_name).intersection(terms)]
             expectations = action.params["formal_transition"]["expectations"]
             surface_id = next((str(expectation['value']) for expectation
                 in expectations if expectation.get('predicate') == 'surface.active_ref'

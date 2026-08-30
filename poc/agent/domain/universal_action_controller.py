@@ -27,6 +27,7 @@ from agent.domain.ui_scene import (
     UIScene,
     UISceneError,
     compact_drag_source_container_error,
+    scene_matches_app_identity,
     scene_surface_kind,
 )
 
@@ -127,6 +128,10 @@ class ResolvedSemanticAction:
     prior_input_value: str | None = None
     expected_input_value: str | None = None
     delete_count: int | None = None
+    launch_ref: str | None = None
+    expected_package_id: str | None = None
+    target_app_id: str | None = None
+    target_app_name: str | None = None
     direction: str | None = None
     hold_seconds: float | None = None
     path_distance: float | None = None
@@ -317,6 +322,22 @@ class UniversalActionController:
             self._require_hidden_immersive_navigation(scene)
             reject_if(expected_effect != REVEAL_SYSTEM_NAVIGATION_EFFECT, UniversalActionError('系统导航栏唤出动作必须精确声明导航栏可见后置条件。'))
             return resolved("reveal_system_navigation")
+        if action.action == 'launch_app':
+            allowed = {'target_surface_id', 'target_app_id', 'target_app_name', 'launch_ref', 'expected_app_id',
+                'expected_effect', 'formal_candidate_id', 'formal_transition'}
+            reject_if(set(action.params) != allowed, UniversalActionError("App 直启动作包含协议外字段。"))
+            launch_ref = str(action.params.get('launch_ref') or '').strip()
+            expected_app_id = str(action.params.get('expected_app_id') or '').strip()
+            target_app_id = str(action.params.get('target_app_id') or '').strip()
+            target_app_name = str(action.params.get('target_app_name') or '').strip()
+            reject_if(not launch_ref or not expected_app_id or not target_app_id or not target_app_name
+                or expected_effect != {'app_id': target_app_id},
+                UniversalActionError("App 直启没有绑定受信任引用、目标包和 typed App 视觉身份。"))
+            reject_if(not str(action.params.get('target_surface_id') or '').strip(),
+                UniversalActionError("App 直启缺少 target_surface_id。"))
+            return resolved('launch_app', launch_ref=launch_ref, expected_package_id=expected_app_id,
+                target_app_id=target_app_id,
+                target_app_name=target_app_name)
         if action.action == 'swipe':
             direction = str(action.params.get("direction") or "").strip().lower()
             reject_if(direction not in {'up', 'down', 'left', 'right'}, UniversalActionError(f"不支持的滑动方向：{direction}"))
@@ -339,9 +360,8 @@ class UniversalActionController:
         required_states: Mapping[str, Any] | None=None, require_empty_preedit: bool=False,
         require_text: bool=False, error: str) -> None:
         required_states = required_states or {}
-        candidates = tuple(element for element in scene.elements if element.role == 'input'
-            and float(element.confidence) >= self.min_confidence and element.states.get('visible') is not False
-            and (element.element_id == target.element_id if formal else element.states.get('goal_relevant') is True)
+        candidates = tuple(element for element in self._visible_elements(scene, role='input') if
+            (element.element_id == target.element_id if formal else element.states.get('goal_relevant') is True)
             and element.states.get('focused') is True
             and all(element.states.get(key) == value for key, value in required_states.items())
             and (not require_empty_preedit or not element.states.get('ime_preedit_text'))
@@ -402,10 +422,7 @@ class UniversalActionController:
             UniversalActionError("输入辅助键缺少本轮完整、高置信本地审计。"),
         )
         input_id = str(states.get("input_element_id") or "").strip()
-        try:
-            input_element = scene.get_element(input_id, min_confidence=self.min_confidence)
-        except UISceneError as exc:
-            raise UniversalActionError(f"输入辅助键没有绑定唯一输入框：{exc}") from exc
+        input_element = self._required_element(scene, input_id, error='输入辅助键没有绑定唯一输入框')
         prior_value = states.get("prior_input_value")
         reject_if(
             input_element.role != 'input' or input_element.states.get('focused') is not True
@@ -473,7 +490,14 @@ class UniversalActionController:
         )
         expected = resolved.expected_effect
         expected_app = str(expected.get("app_id") or "").strip()
-        reject_if(expected_app and after.foreground_app_id != expected_app, UniversalActionError(f'动作后前台 App 不符合预期：{after.foreground_app_id} != {expected_app}'))
+        if resolved.kind == 'launch_app':
+            observed_app = str(after.foreground_app_id or '').strip().casefold()
+            package_match = bool(resolved.expected_package_id and observed_app == resolved.expected_package_id.strip(
+                ).casefold())
+            reject_if(not package_match and not scene_matches_app_identity(after, resolved.target_app_id or '',
+                resolved.target_app_name or ''), UniversalActionError(f'动作后画面不能证明目标 App 已在前台：{after.foreground_app_id}。'))
+        else:
+            reject_if(expected_app and after.foreground_app_id != expected_app, UniversalActionError(f'动作后前台 App 不符合预期：{after.foreground_app_id} != {expected_app}'))
         expected_screen = str(expected.get("screen_id") or "").strip()
         reject_if(expected_screen and after.screen_id != expected_screen, UniversalActionError(f'动作后页面不符合预期：{after.screen_id} != {expected_screen}'))
         input_preedit_pending = False
@@ -615,6 +639,31 @@ class UniversalActionController:
     def _regions_stably_overlap(before_bounds: NormalizedBounds, after_bounds: NormalizedBounds) -> bool:
         return bounds_overlap(before_bounds, after_bounds)['intersection_over_smaller'] >= 0.60
 
+    def _visible_elements(self, scene: UIScene, *, role: str | None=None,
+        element_id: str | None=None) -> tuple[UIElement, ...]:
+        return tuple(element for element in scene.elements if (role is None or element.role == role)
+            and (element_id is None or element.element_id == element_id)
+            and float(element.confidence) >= self.min_confidence and element.states.get('visible') is not False)
+
+    def _matching_after_elements(self, before_element: UIElement, after: UIScene, *,
+        overlap_fallback: bool=False) -> tuple[UIElement, ...]:
+        visible = self._visible_elements(after, role=before_element.role)
+        matches = tuple(element for element in visible if element.element_id == before_element.element_id)
+        if matches:
+            return matches
+        matches = tuple(element for element in visible if element.meaning.casefold() ==
+            before_element.meaning.casefold() and element.label.casefold() == before_element.label.casefold())
+        if overlap_fallback and len(matches) != 1:
+            matches = tuple(element for element in visible if self._regions_stably_overlap(
+                before_element.bounds, element.bounds))
+        return matches
+
+    def _required_element(self, scene: UIScene, element_id: str, *, error: str) -> UIElement:
+        try:
+            return scene.get_element(element_id, min_confidence=self.min_confidence)
+        except UISceneError as exc:
+            raise UniversalActionError(f'{error}：{exc}') from exc
+
     @classmethod
     def _is_same_absence_target(cls, before_target: UIElement, after_element: UIElement, *,
         surface_is_continuous: bool) -> bool:
@@ -639,26 +688,17 @@ class UniversalActionController:
         absence = resolved.expected_effect.get("element_absent")
         target_id = str(resolved.target_element_id or "").strip()
         reject_if(resolved.kind != 'swipe' or not target_id, UniversalActionError('element_absent 结果没有绑定元素滑动动作。'))
-        try:
-            before_target = before.get_element(target_id, min_confidence=self.min_confidence)
-        except UISceneError as exc:
-            raise UniversalActionError(f'元素滑动前目标证据无效：{exc}') from exc
+        before_target = self._required_element(before, target_id, error='元素滑动前目标证据无效')
         self._validate_targeted_swipe_absence_contract(before_target, absence)
         surface_is_continuous = self._element_identity_surface_is_continuous(before, after)
-        still_visible = tuple((element for element in after.elements if float(element.confidence) >=
-            self.min_confidence and element.states.get('visible') is not False
-            and self._is_same_absence_target(before_target, element, surface_is_continuous=surface_is_continuous)))
+        still_visible = tuple((element for element in self._visible_elements(after) if
+            self._is_same_absence_target(before_target, element, surface_is_continuous=surface_is_continuous)))
         reject_if(still_visible, UniversalActionError('元素滑动后同一目标仍然可见，不能判定已划掉。'))
 
     @staticmethod
     def _has_structured_postcondition(expected: dict[str, Any], before: UIScene) -> bool:
-        if any((expected.get(key) is True for key in ('scene_changed', 'content_changed', 'current_video_changed'))):
-            return True
-        expected_app = str(expected.get("app_id") or "").strip()
-        if expected_app and expected_app != before.foreground_app_id:
-            return True
-        expected_screen = str(expected.get("screen_id") or "").strip()
-        if expected_screen and expected_screen != before.screen_id:
+        if (any((expected.get(key) is True for key in ('scene_changed', 'content_changed',
+            'current_video_changed'))) or UniversalActionController._expects_surface_change(expected, before)):
             return True
         element_state = expected.get("element_state")
         element_absent = expected.get("element_absent")
@@ -666,6 +706,14 @@ class UniversalActionController:
             return bool(str(element_absent.get("element_id") or "").strip())
         return bool(isinstance(element_state, dict) and str(element_state.get('meaning') or '').strip()
             and isinstance(element_state.get('states'), dict) and element_state['states'])
+
+    @staticmethod
+    def _expects_surface_change(expected: dict[str, Any], before: UIScene) -> bool:
+        expected_app = str(expected.get("app_id") or "").strip()
+        if expected_app and expected_app != before.foreground_app_id:
+            return True
+        expected_screen = str(expected.get("screen_id") or "").strip()
+        return bool(expected_screen and expected_screen != before.screen_id)
 
     @classmethod
     def _require_visual_postcondition(cls, kind: str, expected: dict[str, Any], before: UIScene) -> None:
@@ -676,11 +724,8 @@ class UniversalActionController:
         source_id = str(resolved.target_element_id or "").strip()
         destination_id = str(resolved.destination_element_id or "").strip()
         reject_if(not source_id or not destination_id, UniversalActionError("拖动结果缺少起点或终点元素身份。"))
-        try:
-            source = before.get_element(source_id, min_confidence=self.min_confidence)
-            destination = before.get_element(destination_id, min_confidence=self.min_confidence)
-        except UISceneError as exc:
-            raise UniversalActionError(f"拖动前端点证据无效：{exc}") from exc
+        source = self._required_element(before, source_id, error='拖动前端点证据无效')
+        destination = self._required_element(before, destination_id, error='拖动前端点证据无效')
 
         source_container_error = compact_drag_source_container_error(before, source)
         reject_if(source_container_error, UniversalActionError(source_container_error))
@@ -692,16 +737,7 @@ class UniversalActionController:
         reject_if(resolved.path_distance is None or abs(float(resolved.path_distance) - distance) > 1e-06, UniversalActionError("拖动路径距离与动作前端点不一致。"))
         reject_if(resolved.hold_seconds != DRAG_DURATION_SECONDS, UniversalActionError("拖动执行时长不是控制器固定的0.8秒。"))
 
-        exact_id = tuple((element for element in after.elements if element.element_id == source_id
-            and element.role == source.role and (float(element.confidence) >= self.min_confidence)
-            and (element.states.get('visible') is not False)))
-        if exact_id:
-            candidates = exact_id
-        else:
-            candidates = tuple((element for element in after.elements if element.role == source.role
-                and float(element.confidence) >= self.min_confidence and (element.states.get('visible') is not False)
-                and (element.meaning.casefold() == source.meaning.casefold())
-                and (element.label.casefold() == source.label.casefold())))
+        candidates = self._matching_after_elements(source, after)
         if len(candidates) == 1:
             moved = math.dist(source.center, candidates[0].center)
             remaining = math.dist(candidates[0].center, destination.center)
@@ -710,23 +746,16 @@ class UniversalActionController:
                 return
 
         expected = resolved.expected_effect
-        has_alternative_proof = bool(self._element_state_transition_expected(expected,
-            before) or (str(expected.get('app_id') or '').strip() and str(expected.get('app_id')
-            or '').strip() != before.foreground_app_id) or (str(expected.get('screen_id') or '').strip()
-            and str(expected.get('screen_id') or '').strip() != before.screen_id))
+        has_alternative_proof = bool(self._element_state_transition_expected(expected, before)
+            or self._expects_surface_change(expected, before))
         reject_if(not has_alternative_proof, UniversalActionError('拖动后缺少源元素向终点显著移动或等价结构化状态证据。'))
 
     def _verify_long_press_result(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene) -> None:
         if set(after.overlays) - set(before.overlays):
             return
         target_id = str(resolved.target_element_id or "").strip()
-        try:
-            before_target = before.get_element(target_id, min_confidence=self.min_confidence)
-        except UISceneError as exc:
-            raise UniversalActionError(f"长按前目标证据无效：{exc}") from exc
-        after_targets = tuple((element for element in after.elements if element.element_id == target_id
-            and element.role == before_target.role and (float(element.confidence) >= self.min_confidence)
-            and (element.states.get('visible') is not False)))
+        before_target = self._required_element(before, target_id, error='长按前目标证据无效')
+        after_targets = self._visible_elements(after, role=before_target.role, element_id=target_id)
         if len(after_targets) == 1 and after_targets[0].states != before_target.states:
             return
         result_markers = ('verification', 'status', 'result', 'outcome', 'feedback', '验证', '状态', '结果', '反馈')
@@ -739,11 +768,8 @@ class UniversalActionController:
         if len(new_structured_results) == 1:
             return
         expected = resolved.expected_effect
-        if self._element_state_transition_expected(expected, before):
-            return
-        if (str(expected.get('app_id') or '').strip() and str(expected.get('app_id')
-            or '').strip() != before.foreground_app_id or (str(expected.get('screen_id') or '').strip()
-            and str(expected.get('screen_id') or '').strip() != before.screen_id)):
+        if (self._element_state_transition_expected(expected, before)
+            or self._expects_surface_change(expected, before)):
             return
         raise UniversalActionError('长按后缺少新增弹层、目标状态变化或等价结构化结果证据。')
 
@@ -861,8 +887,7 @@ class UniversalActionController:
         states = element_state.get("states")
         if not meaning or not isinstance(states, dict) or (not states):
             return False
-        matches = tuple((element for element in before.elements if element.meaning == meaning
-            and float(element.confidence) >= self.min_confidence and (element.states.get('visible') is not False)
+        matches = tuple((element for element in self._visible_elements(before) if element.meaning == meaning
             and all((element.states.get(key) == value for key, value in states.items()))))
         return not matches
 
@@ -870,10 +895,7 @@ class UniversalActionController:
         target_id = str(resolved.target_element_id or "").strip()
         reject_if(not target_id or resolved.normalized_point is None, UniversalActionError("长按结果缺少目标元素身份或落点。"))
         reject_if(resolved.hold_seconds is None or not 0.5 <= float(resolved.hold_seconds) <= 2.0, UniversalActionError("长按执行时长必须在0.5～2.0秒之间。"))
-        try:
-            target = before.get_element(target_id, min_confidence=self.min_confidence)
-        except UISceneError as exc:
-            raise UniversalActionError(f"长按前目标证据无效：{exc}") from exc
+        target = self._required_element(before, target_id, error='长按前目标证据无效')
         reject_if(target.role == 'container', UniversalActionError("页面容器不是可长按控件。"))
         self._validate_gesture_point(target.center, label="长按落点")
         reject_if(math.dist(resolved.normalized_point, target.center) > 1e-06, UniversalActionError("长按落点与动作前目标中心不一致。"))
@@ -895,35 +917,16 @@ class UniversalActionController:
         )
         if resolved.kind == 'clear_verified_text':
             reject_if(expected != '' or resolved.delete_count is None, UniversalActionError("清空动作缺少空值或精确退格次数。"))
-        try:
-            before_input = before.get_element(target_id, min_confidence=self.min_confidence)
-        except UISceneError as exc:
-            raise UniversalActionError(f"输入前目标证据无效：{exc}") from exc
+        before_input = self._required_element(before, target_id, error='输入前目标证据无效')
         reject_if(before_input.role != 'input', UniversalActionError("输入前目标不是 input 元素。"))
         reject_if(not resolved.formal_candidate_id and before_input.states.get('goal_relevant') is not True, UniversalActionError("输入前目标与当前目标缺少可信关联。"))
         typed_field_id = str(before_input.states.get('input_field_id') or '').strip()
         if typed_field_id and typed_field_id != 'unknown':
-            candidates = tuple((element for element in after.elements if element.role == 'input'
-                and float(element.confidence) >= self.min_confidence and (element.states.get('visible') is not False)
-                and (element.meaning == before_input.meaning == 'application_text_input')
+            candidates = tuple((element for element in self._visible_elements(after, role='input') if
+                (element.meaning == before_input.meaning == 'application_text_input')
                 and (str(element.states.get('input_field_id') or '').strip() == typed_field_id)))
         else:
-            exact_id = tuple((element for element in after.elements if element.element_id == target_id
-                and element.role == 'input' and (float(element.confidence) >= self.min_confidence)
-                and (element.states.get('visible') is not False)))
-            if exact_id:
-                candidates = exact_id
-            else:
-                semantic_candidates = tuple((element for element in after.elements if element.role == 'input'
-                    and float(element.confidence) >= self.min_confidence and (element.states.get('visible')
-                    is not False) and (element.meaning.casefold() == before_input.meaning.casefold())
-                    and (element.label.casefold() == before_input.label.casefold())))
-                if len(semantic_candidates) == 1:
-                    candidates = semantic_candidates
-                else:
-                    candidates = tuple((element for element in after.elements if element.role == 'input'
-                        and float(element.confidence) >= self.min_confidence and (element.states.get('visible')
-                        is not False) and self._regions_stably_overlap(before_input.bounds, element.bounds)))
+            candidates = self._matching_after_elements(before_input, after, overlap_fallback=True)
         reject_if(len(candidates) != 1, UniversalActionError("动作后无法唯一绑定原目标输入框。"))
         states = candidates[0].states
         reject_if('value' not in states or not isinstance(states['value'], str), UniversalActionError("动作后缺少输入框 states.value 精确文字证据。"))

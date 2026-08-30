@@ -10,7 +10,7 @@
 
 ## 1. 用户目标
 
-用户可以直接说“点击、滑动、输入、长按、拖动、返回、Home、发送、关注、评论”等自然动作。自然动作词不会被当成非法低层指令。协议只拒绝直接驱动设备的坐标、ADB、Shell、keycode、卖家控制命令和跳过观察闭环的自由动作脚本。
+用户可以直接说“打开 App、点击、滑动、输入、长按、拖动、返回、Home、发送、关注、评论”等自然动作。自然动作词不会被当成非法低层指令。协议拒绝用户或模型直接提供坐标、ADB、Shell、keycode、卖家控制命令和跳过观察闭环的自由动作脚本。唯一例外是本地可信注册表可为当前 typed App 目标签发 opaque `launch_ref`；用户、DeepSeek 和 Qwen 都不能传入包名或命令。
 
 新 App 只要能由现有通用动作组合完成，就应当无需修改代码。App 名称、页面截图和固定步骤不能承担任务编排。
 
@@ -56,7 +56,9 @@ Qwen 每轮只能从该目录返回一个 `choice_id`，或返回完成/阻塞�
 
 ## 5. 动作与执行闭环
 
-正式动作包括 `tap_semantic`、`dismiss_overlay`、`swipe`、`back`、`home`、`reveal_system_navigation`、`input_verified_text`、`clear_verified_text`、`long_press`、`drag`、`wait_for_change`，以及设备已正式认证的扩展动作。
+正式动作包括 `tap_semantic`、`dismiss_overlay`、`swipe`、`back`、`home`、`open_recent_apps`、`reveal_system_navigation`、`input_verified_text`、`press_enter`、`clear_verified_text`、`long_press`、`drag`、`launch_app`、`wait_for_change`，以及设备已正式认证的扩展动作。`launch_app` 只有当前设备的可信注册表、ADB 文件、serial 和目标映射同时可用时才进入 canonical 目录；否则视觉图标路径保持不变。
+
+`launch_app` 的包名只属于本地可信 transport。执行后必须重新截图；新截图可以用真实运行包、typed App ID、App 名称或结构化页面身份唯一证明目标 App，但不能被目标值投影，也不能因为像素中没有 Android 包名而被要求伪造包名。transport 已尝试后即使超时或返回非零也不自动重发，而是先用新截图判定实际结果。
 
 每次循环固定为：
 
@@ -64,7 +66,7 @@ Qwen 每轮只能从该目录返回一个 `choice_id`，或返回完成/阻塞�
 2. DeepSeek 选定唯一活动子目标；
 3. Qwen 选择唯一视觉动作；
 4. Policy 从同一 canonical catalog 复核 choice；控制器只验证设备能力、fresh scope、目标唯一性和几何；
-5. 最多执行一个物理动作；
+5. 最多执行一个设备动作；
 6. 重新观察并验证；
 7. 写 typed receipt；
 8. DeepSeek revision 精确加一并重规划。

@@ -4,6 +4,13 @@ from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
 )
+from agent.domain.text_transport import (
+    EMPTY_TEXT_DIGEST,
+    TEXT_TRANSPORT_PROTOCOL,
+    TextTransportActionScope,
+    TextTransportResult,
+    text_digest,
+)
 from agent.infrastructure import (
     ReplayDeviceExecutor,
     RobotDeviceExecutor,
@@ -57,6 +64,41 @@ class FakeRobot:
         receipt = self._long_press_receipt
         self._long_press_receipt = None
         return receipt
+
+
+def companion_scope(*, fragment: str, expected: str) -> TextTransportActionScope:
+    return TextTransportActionScope(protocol_version=TEXT_TRANSPORT_PROTOCOL, device_id="device-1",
+        session_id="session-1", task_id="task-1", revision=1, action_id="action-1",
+        input_field_id="field-1", editor_session_id="editor-session-0001",
+        observation_fingerprint="observation-1", prior_text_digest=text_digest(""),
+        fragment_text_digest=text_digest(fragment), expected_text_digest=text_digest(expected),
+        issued_at_epoch=100.0, expires_at_epoch=110.0, nonce="nonce-0000000000001")
+
+
+class FakeCompanionTransport:
+    def __init__(self, *, status: str = "accepted") -> None:
+        self.status = status
+        self.calls = []
+
+    def _result(self, scope, operation):
+        attempted = self.status != "unavailable"
+        accepted = self.status == "accepted"
+        result = TextTransportResult(protocol_version=TEXT_TRANSPORT_PROTOCOL, device_id=scope.device_id,
+            action_id=scope.action_id, nonce=scope.nonce, operation=operation, status=self.status,
+            attempted=attempted, accepted=accepted,
+            reason_code=None if accepted else "transport_unavailable" if not attempted else "transport_unknown",
+            command_digest=None if not attempted else "a" * 64,
+            receipt_digest="b" * 64 if self.status in {"accepted", "rejected"} else None)
+        result.validate()
+        return result
+
+    def append_text(self, scope, text):
+        self.calls.append(("append_text", scope, text))
+        return self._result(scope, "append_text")
+
+    def clear_text(self, scope):
+        self.calls.append(("clear_text", scope))
+        return self._result(scope, "clear_text")
 
 
 class DeviceExecutorTests(unittest.TestCase):
@@ -123,6 +165,39 @@ class DeviceExecutorTests(unittest.TestCase):
 
         self.assertEqual(robot.calls[0][:2], ("type", "abc"))
         self.assertEqual(robot.calls[1][:3], ("pinyin", "你好", "nihao"))
+
+    def test_companion_append_and_clear_never_call_mechanical_keyboard(self):
+        robot = FakeRobot()
+        companion = FakeCompanionTransport()
+        executor = RobotDeviceExecutor(robot, text_transport=companion)
+        append_scope = companion_scope(fragment="你好🙂\nsecond", expected="你好🙂\nsecond")
+        clear_scope = companion_scope(fragment="", expected="")
+        self.assertEqual(EMPTY_TEXT_DIGEST, clear_scope.fragment_text_digest)
+
+        append = executor.execute(DeviceActionRequest(kind="input_verified_text",
+            input_fragment="你好🙂\nsecond", input_method="unicode_commit", text_transport="companion_ime",
+            text_scope=append_scope))
+        clear = executor.execute(DeviceActionRequest(kind="clear_verified_text", text_transport="companion_ime",
+            text_scope=clear_scope))
+
+        self.assertEqual([], robot.calls)
+        self.assertEqual(["append_text", "clear_text"], [item[0] for item in companion.calls])
+        self.assertEqual((1, 1), (append.physical_actions, clear.physical_actions))
+        self.assertEqual("accepted", append.metadata["transport_status"])
+
+    def test_companion_pre_send_unavailable_is_zero_action_and_never_falls_back(self):
+        robot = FakeRobot()
+        companion = FakeCompanionTransport(status="unavailable")
+        executor = RobotDeviceExecutor(robot, text_transport=companion)
+
+        with self.assertRaises(DeviceExecutionError) as context:
+            executor.execute(DeviceActionRequest(kind="input_verified_text", input_fragment="🙂",
+                input_method="unicode_commit", text_transport="companion_ime",
+                text_scope=companion_scope(fragment="🙂", expected="🙂")))
+
+        self.assertEqual(0, context.exception.physical_actions)
+        self.assertEqual([], robot.calls)
+        self.assertEqual(1, len(companion.calls))
 
     def test_wait_is_zero_action(self):
         slept = []

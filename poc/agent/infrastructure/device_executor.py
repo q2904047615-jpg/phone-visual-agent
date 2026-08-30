@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutionResult
+from agent.application.text_transport import TrustedTextTransportPort
 from agent.infrastructure.orientation_safety import OrientationSafetyError
 
 
@@ -22,18 +23,20 @@ class RobotDeviceExecutor:
     }
     _SIMPLE_TRANSPORTS = {
         'reveal_system_navigation': ('vision_reveal_system_navigation', lambda request: ()),
-        'clear_verified_text': ('vision_clear_text', lambda request: (dict(request.keyboard_geometry or {}),
-            request.delete_count)),
         'drag': ('vision_drag_relative', lambda request: (*request.point, *request.end_point)),
     }
 
-    def __init__(self, robot: Any, *, app_launcher: Any=None, sleep: Callable[[float], None]=time.sleep) -> None:
+    def __init__(self, robot: Any, *, app_launcher: Any=None,
+        text_transport: TrustedTextTransportPort | None=None,
+        sleep: Callable[[float], None]=time.sleep) -> None:
         self.robot = robot
         self.app_launcher = app_launcher
+        self.text_transport = text_transport
         self.sleep = sleep
         self._handlers: dict[str, Callable[[DeviceActionRequest], DeviceExecutionResult]] = {
             'swipe': self._swipe,
             'input_verified_text': self._input_text,
+            'clear_verified_text': self._clear_text,
             'long_press': self._long_press,
             'wait_for_change': self._wait,
             'launch_app': self._launch_app,
@@ -104,12 +107,39 @@ class RobotDeviceExecutor:
             request.direction}'))
 
     def _input_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
+        if request.text_transport == 'companion_ime':
+            assert request.text_scope is not None and request.input_fragment is not None
+            transport = self.text_transport
+            reject_if(transport is None, DeviceExecutionError("Companion IME transport 未配置。",
+                metadata={'transport': 'companion_ime', 'transport_status': 'unavailable'}))
+            result = transport.append_text(request.text_scope, request.input_fragment)
+            metadata = {'transport': 'companion_ime', 'mechanical_contact_ack': False,
+                'transport_status': result.status, 'transport_receipt': result.to_dict()}
+            reject_if(not result.attempted, DeviceExecutionError("Companion IME 输入在发送前不可用。",
+                physical_actions=0, metadata=metadata))
+            return DeviceExecutionResult(physical_actions=1, transport_result=result.to_dict(), metadata=metadata)
         geometry = dict(request.keyboard_geometry or {})
         if request.input_method == 'chinese_pinyin':
             result = self._hardware_call('vision_type_pinyin', request.input_fragment, request.input_pinyin, geometry)
         else:
             result = self._hardware_call('vision_type_text_with_layout', request.input_fragment, geometry)
         return DeviceExecutionResult(physical_actions=1, transport_result=result)
+
+    def _clear_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
+        if request.text_transport == 'companion_ime':
+            assert request.text_scope is not None
+            transport = self.text_transport
+            reject_if(transport is None, DeviceExecutionError("Companion IME transport 未配置。",
+                metadata={'transport': 'companion_ime', 'transport_status': 'unavailable'}))
+            result = transport.clear_text(request.text_scope)
+            metadata = {'transport': 'companion_ime', 'mechanical_contact_ack': False,
+                'transport_status': result.status, 'transport_receipt': result.to_dict()}
+            reject_if(not result.attempted, DeviceExecutionError("Companion IME 清空在发送前不可用。",
+                physical_actions=0, metadata=metadata))
+            return DeviceExecutionResult(physical_actions=1, transport_result=result.to_dict(), metadata=metadata)
+        return DeviceExecutionResult(physical_actions=1,
+            transport_result=self._hardware_call('vision_clear_text', dict(request.keyboard_geometry or {}),
+            request.delete_count))
 
     def _long_press(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call('vision_long_press_relative', *self._point(request), request.hold_seconds)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedBounds, NormalizedPoint, bounds_overlap, dataclass_wire, reject_if
+from agent.domain.validation import NormalizedBounds, NormalizedPoint, bounds_overlap, canonical_digest, dataclass_wire, reject_if
 import math
 import statistics
 import time
@@ -16,6 +16,9 @@ from PIL import Image, ImageChops, ImageStat
 
 from agent.domain.canonical_action_protocol import CanonicalActionProtocolError
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutor
+from agent.domain.confirmation_authority import ConfirmationAuthority
+from agent.domain.text_transport import text_digest
+from agent.application.text_transport import TrustedTextTransportPort
 from agent.infrastructure import RobotDeviceExecutor
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
@@ -511,7 +514,8 @@ class GenericSingleActionAdapter:
 
     def _local_qwerty_orientation_credential(self, *, requested: SemanticAction, scene: UIScene,
         frames: list[Image.Image]) -> OrientationCredential | None:
-        if (requested.action not in {'tap_semantic', 'press_enter', 'input_verified_text',
+        if (requested.params.get('text_transport') == 'companion_ime'
+            or requested.action not in {'tap_semantic', 'press_enter', 'input_verified_text',
             'clear_verified_text'} or not callable(self.qwerty_row_snapper)):
             return None
         element_id = str(requested.params.get("element_id") or "").strip()
@@ -573,9 +577,23 @@ class GenericSingleActionAdapter:
             supported.add("press_enter")
         if bool(declared.get('input_verified_text', True)) and callable(getattr(self.robot, 'vision_clear_text', None)):
             supported.add("clear_verified_text")
+        if self.text_transport is not None:
+            profile = self.text_transport.profile
+            profile.validate()
+            if profile.enabled and 'append_text' in profile.capabilities:
+                supported.add('input_verified_text')
+            else:
+                supported.discard('input_verified_text')
+            if profile.enabled and 'clear_text' in profile.capabilities:
+                supported.add('clear_verified_text')
+            else:
+                supported.discard('clear_verified_text')
         if self.app_launcher is not None and bool(getattr(self.app_launcher, 'enabled', False)):
             supported.add('launch_app')
         return frozenset(supported)
+
+    def text_transport_profile(self) -> Any | None:
+        return self.text_transport.profile if self.text_transport is not None else None
 
     def resolve_app_launch_target(self, app_id: str, app_name: str) -> Any | None:
         resolver = getattr(self.app_launcher, 'resolve', None)
@@ -592,6 +610,7 @@ class GenericSingleActionAdapter:
 
     def __init__(self, *, capture: Callable[[], Image.Image], observer: SingleStepGenericSceneObserver, robot: Any,
         device_executor: DeviceExecutor | None=None, app_launcher: Any=None,
+        text_transport: TrustedTextTransportPort | None=None,
         controller: UniversalActionController | None=None,
         frame_interval: float=0.37, post_action_settle: float=1.5, post_action_timeout: float | None=None,
         post_action_continuous_timeout: float | None=None, post_action_max_observations: int=2,
@@ -605,7 +624,13 @@ class GenericSingleActionAdapter:
         self.observer = observer
         self.robot = robot
         self.app_launcher = app_launcher
-        self.device_executor = device_executor or RobotDeviceExecutor(robot, app_launcher=app_launcher)
+        self.text_transport = text_transport
+        if text_transport is not None:
+            text_transport.profile.validate()
+            reject_if(text_transport.profile.device_id != device_id,
+                ValueError('Companion IME profile 与 adapter device_id 不一致。'))
+        self.device_executor = device_executor or RobotDeviceExecutor(robot, app_launcher=app_launcher,
+            text_transport=text_transport)
         self.controller = controller or UniversalActionController()
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
@@ -929,6 +954,12 @@ class GenericSingleActionAdapter:
                 min_confidence=self.controller.min_confidence)
         except UISceneError as exc:
             raise GenericActionAdapterError(f"当前文字输入缺少可信输入框：{exc}") from exc
+        if resolved.text_transport == 'companion_ime':
+            typed_field_id = str(input_element.states.get('input_field_id') or '').strip()
+            reject_if(typed_field_id in {'', 'unknown'} or typed_field_id != resolved.input_field_id
+                or input_element.states.get('focused') is not True,
+                GenericActionAdapterError("Companion IME 动作缺少当前聚焦 typed input_field_id。"))
+            return None
         geometry = input_element.states.get("keyboard_geometry")
         allowed_types = {"input_verified_text": {"qwerty"}, "clear_verified_text": {"qwerty", "generic"}}
         reject_if(
@@ -967,6 +998,9 @@ class GenericSingleActionAdapter:
     def _arm_physical_execution(self, requested: SemanticAction, resolved: ResolvedSemanticAction, scene: UIScene,
         frames: tuple[Image.Image, ...] | list[Image.Image], paths: tuple[str,
         ...]) -> tuple[OrientationCredential | None, Callable[[], Any] | None]:
+        if resolved.text_transport == 'companion_ime' and resolved.kind in {'input_verified_text',
+            'clear_verified_text'}:
+            return None, None
         clear = getattr(self.robot, "clear_physical_execution_authorization", None)
         if resolved.kind not in self.PHYSICAL_KINDS:
             return None, clear if callable(clear) else None
@@ -1030,7 +1064,8 @@ class GenericSingleActionAdapter:
 
     def execute(self, *, requested_action: SemanticAction, planned_scene: UIScene, goal: GenericIntentDraft,
         confirmed: bool, evidence_dir: Path | None=None, planned_frames: tuple[Image.Image,
-        ...] | list[Image.Image]=()) -> GenericActionExecutionResult:
+        ...] | list[Image.Image]=(), action_authority: ConfirmationAuthority | None=None
+        ) -> GenericActionExecutionResult:
         reject_if(confirmed is not True, GenericActionAdapterError("必须明确确认当前这一个语义动作。"))
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
@@ -1106,10 +1141,40 @@ class GenericSingleActionAdapter:
                 return None
             return (max(0, min(1000, round(point[0] * 1000))), max(0, min(1000, round(point[1] * 1000))))
 
+        text_scope = None
+        if resolved.text_transport == 'companion_ime':
+            transport = self.text_transport
+            reject_if(transport is None or action_authority is None,
+                GenericActionAdapterError("Companion IME 动作缺少 transport 或已消费的一次性 authority。",
+                evidence=before_paths))
+            assert transport is not None and action_authority is not None
+            reject_if(action_authority.device_id != self.device_id
+                or action_authority.fingerprint != before.fingerprint
+                or action_authority.decision_node_id != requested_action.node_id
+                or action_authority.action_digest != canonical_digest(requested_action.to_dict()),
+                GenericActionAdapterError("Companion IME 动作 authority 与当前设备、画面或 canonical 动作不一致。",
+                evidence=before_paths))
+            prior = resolved.prior_input_value
+            fragment = resolved.input_fragment if resolved.kind == 'input_verified_text' else ''
+            expected = resolved.expected_input_value
+            reject_if(not isinstance(prior, str) or not isinstance(fragment, str)
+                or not isinstance(expected, str) or not resolved.input_field_id,
+                GenericActionAdapterError("Companion IME 动作缺少精确 typed 文字事务。", evidence=before_paths))
+            try:
+                text_scope = transport.mint_action_scope(session_id=action_authority.session_id,
+                    task_id=action_authority.task_id, revision=action_authority.revision,
+                    action_id=action_authority.decision_node_id, input_field_id=resolved.input_field_id,
+                    observation_fingerprint=before.fingerprint, prior_text_digest=text_digest(prior),
+                    fragment_text_digest=text_digest(fragment), expected_text_digest=text_digest(expected))
+            except (RuntimeError, ValueError) as exc:
+                raise GenericActionAdapterError(f"Companion IME 单动作 scope 签发失败：{exc}",
+                    evidence=before_paths) from exc
+
         execution_request = DeviceActionRequest(kind=resolved.kind, point=executor_point(resolved.normalized_point),
             end_point=executor_point(resolved.normalized_end_point), direction=resolved.direction,
             hold_seconds=resolved.hold_seconds, input_fragment=resolved.input_fragment,
             input_method=resolved.input_method, input_pinyin=resolved.input_pinyin,
+            text_transport=resolved.text_transport, text_scope=text_scope,
             keyboard_geometry=prepared_keyboard_geometry, delete_count=resolved.delete_count, wait_seconds=max(0.5,
             self.post_action_settle) if resolved.kind == 'wait_for_change' else None, launch_ref=resolved.launch_ref)
         try:

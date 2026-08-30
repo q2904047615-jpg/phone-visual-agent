@@ -18,6 +18,14 @@ from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
 )
+from agent.domain.confirmation_authority import ConfirmationAuthority
+from agent.domain.text_transport import (
+    TEXT_TRANSPORT_PROTOCOL,
+    TextTransportActionScope,
+    TextTransportProfile,
+    TextTransportResult,
+)
+from agent.domain.validation import canonical_digest
 from agent.infrastructure import RobotDeviceExecutor
 from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
@@ -315,6 +323,37 @@ class ClickReceiptRobot(FakeRobot):
 class GenericSingleActionAdapter(_GenericSingleActionAdapter):
     def __init__(self, *args, device_id="test-device", **kwargs):
         super().__init__(*args, device_id=device_id, **kwargs)
+
+
+class FakeCompanionTextTransport:
+    def __init__(self) -> None:
+        self.profile = TextTransportProfile(protocol_version=TEXT_TRANSPORT_PROTOCOL,
+            profile_id="profile-test-device", device_id="test-device", pairing_id="pairing-test-device",
+            enabled=True, capabilities=("append_text", "clear_text"), ack_timeout_seconds=5.0)
+        self.minted = []
+        self.calls = []
+
+    def mint_action_scope(self, **values):
+        self.minted.append(dict(values))
+        return TextTransportActionScope(protocol_version=TEXT_TRANSPORT_PROTOCOL,
+            device_id=self.profile.device_id, editor_session_id="editor-session-0001",
+            issued_at_epoch=100.0, expires_at_epoch=110.0,
+            nonce="nonce-0000000000001", **values)
+
+    @staticmethod
+    def _result(scope, operation):
+        return TextTransportResult(protocol_version=TEXT_TRANSPORT_PROTOCOL, device_id=scope.device_id,
+            action_id=scope.action_id, nonce=scope.nonce, operation=operation, status="accepted",
+            attempted=True, accepted=True, reason_code=None, command_digest="a" * 64,
+            receipt_digest="b" * 64)
+
+    def append_text(self, scope, text):
+        self.calls.append(("append_text", scope, text))
+        return self._result(scope, "append_text")
+
+    def clear_text(self, scope):
+        self.calls.append(("clear_text", scope))
+        return self._result(scope, "clear_text")
 
 
 class SequenceCapture:
@@ -1079,6 +1118,34 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(UniversalActionError, "文字不匹配"):
             controller.verify_after_action(resolved, before, wrong)
+
+    def test_companion_clear_binds_typed_field_without_keyboard_geometry(self):
+        controller = UniversalActionController()
+        before = UIScene(app_id="generic_app", screen_id="editor", summary="唯一聚焦输入框",
+            elements=(UIElement(element_id="field", role="input", meaning="application_text_input",
+                label="草稿", bounds=(0.1, 0.1, 0.9, 0.2), confidence=0.98, states={
+                    "focused": True, "goal_relevant": True, "fully_visible": True,
+                    "value": "草稿🙂", "input_field_id": "field_primary", "ime_preedit_text": "",
+                }),), stable=True, confidence=0.98, fingerprint="before-companion-clear")
+        action = SemanticAction(node_id="companion-clear", action="clear_verified_text", params={
+            "element_id": "field", "target": "application_text_input", "role": "input", "label": "草稿",
+            "states": before.elements[0].states, "text_transport": "companion_ime",
+            "input_field_id": "field_primary", "prior_input_value": "草稿🙂", "expected_input_value": "",
+            "expected_effect": {"element_state": {"meaning": "application_text_input", "states": {"value": ""}}},
+        })
+
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        self.assertEqual("companion_ime", resolved.text_transport)
+        self.assertIsNone(resolved.normalized_point)
+        self.assertIsNone(resolved.delete_count)
+        after = replace(before, fingerprint="after-companion-clear", elements=(replace(before.elements[0],
+            label="", states={**before.elements[0].states, "value": ""}),))
+        controller.verify_after_action(resolved, before, after)
+
+        stale_preedit = replace(after, fingerprint="after-companion-stale", elements=(replace(after.elements[0],
+            states={**after.elements[0].states, "ime_preedit_text": "stale"}),))
+        with self.assertRaisesRegex(UniversalActionError, "预编辑"):
+            controller.verify_after_action(resolved, before, stale_preedit)
 
     def test_focus_only_input_tap_requires_fresh_dedicated_input_audit(self):
         controller = UniversalActionController()
@@ -4420,6 +4487,55 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([("input", "agent")], robot.actions)
         self.assertEqual("matched", result.action_outcome)
+
+    def test_companion_unicode_input_uses_authorized_transport_once_then_visual_verifies(self):
+        before = UIScene(
+            app_id="sample.app",
+            screen_id="editor",
+            summary="唯一 typed 输入框已聚焦",
+            elements=(UIElement(element_id="field", role="input", meaning="application_text_input",
+                label="前缀", bounds=(0.1, 0.2, 0.9, 0.3), confidence=0.99, states={
+                    "focused": True, "goal_relevant": True, "fully_visible": True,
+                    "value": "前缀", "input_field_id": "field_primary", "ime_preedit_text": "",
+                }, evidence=("应用输入框当前文字：前缀",)),),
+            stable=True,
+            confidence=0.99,
+            fingerprint="before-companion",
+            camera_alignment=aligned_camera_facts(),
+        )
+        expected = "前缀🙂\nsecond@例"
+        after = replace(before, fingerprint="after-companion", elements=(replace(before.elements[0],
+            label=expected, states={**before.elements[0].states, "value": expected},
+            evidence=(f"应用输入框当前文字：{expected}",)),))
+        action = SemanticAction(node_id="companion-unicode", action="input_verified_text", params={
+            "element_id": "field", "target": "application_text_input", "role": "input", "label": "前缀",
+            "states": before.elements[0].states, "text": expected, "text_transport": "companion_ime",
+            "input_field_id": "field_primary", "prior_input_value": "前缀",
+            "input_fragment": "🙂\nsecond@例", "expected_input_value": expected,
+            "expected_effect": {"element_state": {"meaning": "application_text_input",
+                "states": {"value": expected}}},
+        })
+        authority = ConfirmationAuthority(session_id="session-1", task_id="task-1", device_id="test-device",
+            revision=3, subgoal_id="subgoal-1", effect_ids=(), observation_id="observation-1",
+            fingerprint=before.fingerprint, decision_node_id=action.node_id,
+            action_digest=canonical_digest(action.to_dict()), consumed=True)
+        transport = FakeCompanionTextTransport()
+        robot = FakeRobot()
+
+        result = self._adapter(FakeSceneObserver([before, after, after]), robot,
+            text_transport=transport).execute(requested_action=action, planned_scene=before, goal=goal(),
+            confirmed=True, action_authority=authority)
+
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([], robot.actions)
+        self.assertEqual(1, len(transport.calls))
+        self.assertEqual(("append_text", "🙂\nsecond@例"), (transport.calls[0][0], transport.calls[0][2]))
+        minted = transport.minted[0]
+        self.assertEqual("field_primary", minted["input_field_id"])
+        self.assertEqual(before.fingerprint, minted["observation_fingerprint"])
+        self.assertNotIn(expected, json.dumps(result.execution_metadata, ensure_ascii=False))
+        self.assertEqual("accepted", result.execution_metadata["transport_status"])
 
     def test_confirmed_input_rejects_different_concrete_page_identity(self):
         before = UIScene(

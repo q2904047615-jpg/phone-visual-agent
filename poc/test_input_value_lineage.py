@@ -23,6 +23,7 @@ from agent.domain.input_value_lineage import (
     TYPED_INPUT_LINEAGE_VERSION,
     TypedInputLineage,
     build_pending_input_lineage,
+    build_verified_text_lineage,
 )
 from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore as TypedInputLineageStore,
@@ -429,6 +430,17 @@ def resolved_chinese_preedit(
             },
         }
     )
+    return action
+
+
+def resolved_companion_text(*, prior: str = "", fragment: str = "你好🙂\nsecond") -> dict:
+    action = resolved_text(prior=prior, fragment=fragment)
+    action.update({
+        "normalized_point": None,
+        "input_method": "unicode_commit",
+        "text_transport": "companion_ime",
+        "input_field_id": "input_field_1",
+    })
     return action
 
 
@@ -2018,6 +2030,61 @@ class TypedInputLineageTests(unittest.TestCase):
                 resolved_action=action,
                 before_scene=unknown_untyped,
             )
+
+    def test_companion_unicode_commit_keeps_typed_field_lineage_until_visual_verification(self) -> None:
+        before = scene("前缀", "before-fp")
+        before["elements"][0]["states"].update({
+            "input_field_id": "input_field_1",
+            "ime_preedit_text": "",
+        })
+        action = resolved_companion_text(prior="前缀")
+        pending = build_pending_input_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            recorded_at_epoch=1000.0,
+        )
+        self.assertEqual("pending_companion_ime_action", pending.source)
+        self.assertEqual(action["expected_input_value"], pending.exact_value)
+        self.assertEqual("input_field_1", pending.input_field_id)
+
+        after = scene(action["expected_input_value"], "after-fp")
+        after["elements"][0]["states"].update({
+            "input_field_id": "input_field_1",
+            "ime_preedit_text": "",
+        })
+        verified = build_verified_text_lineage(
+            device_id=DEVICE,
+            resolved=action,
+            before_scene=before,
+            after_scene=after,
+            recorded_at_epoch=1001.0,
+            source="verified_companion_ime_action",
+            surface_fallback=pending,
+            surface_descriptor_factory=lambda bounds: tuple(
+                describe_input_surface(surface_frame(variation=index % 2), bounds)
+                for index in range(4)
+            ),
+        )
+        self.assertEqual(action["expected_input_value"], verified.exact_value)
+        self.assertEqual("input_field_1", verified.input_field_id)
+        self.assertEqual("verified_companion_ime_action", verified.source)
+
+    def test_companion_unicode_commit_rejects_field_or_preedit_drift(self) -> None:
+        action = resolved_companion_text()
+        for field_id, preedit in (("other_field", ""), ("input_field_1", "stale")):
+            with self.subTest(field_id=field_id, preedit=preedit):
+                before = scene("", "before-fp")
+                before["elements"][0]["states"].update({
+                    "input_field_id": field_id,
+                    "ime_preedit_text": preedit,
+                })
+                with self.assertRaises(InputValueLineageError):
+                    build_pending_input_lineage(
+                        device_id=DEVICE,
+                        resolved_action=action,
+                        before_scene=before,
+                    )
 
     def test_pending_chinese_preedit_lineage_keeps_typed_prefix_across_newline(
         self,

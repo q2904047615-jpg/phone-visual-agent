@@ -1275,6 +1275,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         expected = {
             "agent_api_cli.py",
             "capture_click_burst.py",
+            "companion_ime_setup.py",
             "eval_qwen_visual_decision.py",
             "eval_task_sequences.py",
             "local_agent_api_client.py",

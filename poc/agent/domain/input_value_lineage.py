@@ -15,10 +15,11 @@ SURFACE_DESCRIPTOR_WIDTH = 32
 SURFACE_DESCRIPTOR_HEIGHT = 16
 PENDING_INPUT_LINEAGE_SOURCES = frozenset({'pending_verified_literal_action', 'pending_verified_text_action',
     'pending_verified_chinese_preedit_action', 'pending_verified_input_state_action',
-    'pending_verified_ime_candidate_action', 'pending_verified_newline_action'})
+    'pending_verified_ime_candidate_action', 'pending_verified_newline_action', 'pending_companion_ime_action'})
 NEWLINE_INPUT_LINEAGE_SOURCES = frozenset({'pending_verified_newline_action', 'pending_verified_text_action',
     'pending_verified_chinese_preedit_action', 'pending_verified_ime_candidate_action', 'verified_live_newline_action',
-    'verified_live_text_action', 'verified_persisted_newline_execution', 'verified_persisted_text_execution'})
+    'verified_live_text_action', 'verified_persisted_newline_execution', 'verified_persisted_text_execution',
+    'pending_companion_ime_action', 'verified_companion_ime_action'})
 
 
 class InputValueLineageError(ValueError):
@@ -542,6 +543,35 @@ def _validated_text_action_chain(resolved: Any, before_scene: Any) -> tuple[dict
     return _single_input(before_scene, expected_value=prior), prior, expected, fragment
 
 
+def _validated_companion_text_action_chain(resolved: Any, before_scene: Any) -> tuple[dict[str, Any], str, str,
+    str]:
+    reject_if(
+        not isinstance(resolved, dict) or resolved.get('input_method') != 'unicode_commit'
+        or resolved.get('text_transport') != 'companion_ime' or (not isinstance(before_scene, dict)),
+        InputValueLineageError("Companion IME 连续性只接受已解析的单次 Unicode 提交。"),
+    )
+    prior, expected, target_id, expected_states = _expected_input_state(resolved, kind='input_verified_text',
+        message='Companion IME 输入的 prior/fragment/expected 链无效。')
+    fragment = resolved.get('input_fragment')
+    input_field_id = resolved.get('input_field_id')
+    reject_if(
+        not isinstance(fragment, str) or not fragment or '\r' in prior or '\r' in expected or '\r' in fragment
+        or expected != prior + fragment or expected_states != {'value': expected}
+        or not isinstance(target_id, str) or not target_id
+        or not isinstance(input_field_id, str) or not input_field_id or input_field_id == 'unknown',
+        InputValueLineageError("Companion IME 输入的 prior/fragment/expected 链无效。"),
+    )
+    before_input = _single_input(before_scene, expected_value=prior)
+    states = before_input.get('states')
+    reject_if(
+        before_input.get('element_id') != target_id or not isinstance(states, dict)
+        or _typed_input_field_id(before_input) != input_field_id or states.get('focused') is not True
+        or states.get('ime_preedit_text') not in (None, ''),
+        InputValueLineageError("Companion IME 输入没有绑定同一 typed 聚焦输入框。"),
+    )
+    return before_input, prior, expected, fragment
+
+
 def _validated_chinese_preedit_action_chain(resolved: Any, before_scene: Any) -> tuple[dict[str, Any], str, str, str,
     str]:
     reject_if(
@@ -600,6 +630,12 @@ def build_pending_input_lineage(*, device_id: str, resolved_action: dict[str, An
                 resolved_action, before_scene)
             protocol = '2026-08-24-verified-chinese-preedit-v1'
             source, message, extra = 'pending_verified_chinese_preedit_action', '临时中文预编辑连续性缺少明确输入表面。', {'input_pinyin': pinyin}
+        elif method == 'unicode_commit':
+            before_input, _prior, expected, _fragment = _validated_companion_text_action_chain(
+                resolved_action, before_scene)
+            protocol = '2026-08-30-companion-ime-v1'
+            source, message, extra = ('pending_companion_ime_action',
+                '临时 Companion IME 连续性缺少明确输入表面。', {})
         else:
             raise InputValueLineageError('临时文字连续性的输入方法无效。')
         action_digest = canonical_digest(resolved_action)
@@ -707,7 +743,10 @@ def build_verified_text_lineage(*, device_id: str, resolved: Any, before_scene: 
     recorded_at_epoch: float, source: str, surface_fallback: TypedInputLineage | None=None,
     surface_descriptor_factory: Callable[[NormalizedBounds], tuple[str, ...]]) -> TypedInputLineage:
     reject_if(not isinstance(after_scene, dict), InputValueLineageError("文字连续性缺少动作后场景。"))
-    before_input, prior, expected, _fragment = _validated_text_action_chain(resolved, before_scene)
+    if isinstance(resolved, dict) and resolved.get('input_method') == 'unicode_commit':
+        before_input, prior, expected, _fragment = _validated_companion_text_action_chain(resolved, before_scene)
+    else:
+        before_input, prior, expected, _fragment = _validated_text_action_chain(resolved, before_scene)
     return _verified_value_lineage(device_id=device_id, resolved=resolved, before_scene=before_scene,
         after_scene=after_scene, before_input=before_input, prior=prior, expected=expected, receipt=None, source=source,
         recorded_at_epoch=recorded_at_epoch, surface_fallback=surface_fallback,

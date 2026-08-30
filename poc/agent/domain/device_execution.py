@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .canonical_action_kinds import CANONICAL_ACTION_KINDS
+from .text_transport import EMPTY_TEXT_DIGEST, TextTransportActionScope, text_digest
 
 
 DEVICE_EXECUTOR_PROTOCOL = "2026-08-25-device-executor-v1"
@@ -54,6 +55,8 @@ class DeviceActionRequest(DataclassWire):
     input_fragment: str | None = None
     input_method: str | None = None
     input_pinyin: str | None = None
+    text_transport: str | None = None
+    text_scope: TextTransportActionScope | None = None
     keyboard_geometry: Mapping[str, Any] | None = None
     delete_count: int | None = None
     launch_ref: str | None = None
@@ -87,12 +90,43 @@ class DeviceActionRequest(DataclassWire):
         reject_if(self.kind == 'long_press' and (isinstance(self.hold_seconds, bool) or not isinstance(self.hold_seconds, (int, float)) or (not 0.5 <= float(self.hold_seconds) <= 2.0)), DeviceExecutionError("长按时长必须在0.5～2.0秒之间。"))
         if self.kind == 'input_verified_text':
             reject_if(not isinstance(self.input_fragment, str) or not self.input_fragment, DeviceExecutionError("输入动作缺少确定性文字分段。"))
-            reject_if(self.input_method not in {'direct_latin', 'chinese_pinyin'}, DeviceExecutionError("输入动作 transport 类型无效。"))
-            reject_if(not isinstance(self.keyboard_geometry, Mapping), DeviceExecutionError("输入动作缺少已审计键盘几何。"))
-            reject_if(self.input_method == 'chinese_pinyin' and (not self.input_pinyin), DeviceExecutionError("中文输入动作缺少拼音分段。"))
+            if self.text_transport == 'companion_ime':
+                reject_if(self.input_method != 'unicode_commit' or self.input_pinyin is not None
+                    or self.keyboard_geometry is not None or self.text_scope is None,
+                    DeviceExecutionError("Companion IME 输入请求包含机械键盘字段或缺少授权 scope。"))
+                assert self.text_scope is not None
+                try:
+                    self.text_scope.validate()
+                except ValueError as exc:
+                    raise DeviceExecutionError(f"Companion IME 输入 scope 无效：{exc}") from exc
+                reject_if(text_digest(self.input_fragment) != self.text_scope.fragment_text_digest,
+                    DeviceExecutionError("Companion IME 输入正文与授权摘要不一致。"))
+            else:
+                reject_if(self.text_transport not in {None, 'mechanical_keyboard'}, DeviceExecutionError("输入动作 transport 类型无效。"))
+                reject_if(self.input_method not in {'direct_latin', 'chinese_pinyin'}, DeviceExecutionError("输入动作 transport 类型无效。"))
+                reject_if(not isinstance(self.keyboard_geometry, Mapping), DeviceExecutionError("输入动作缺少已审计键盘几何。"))
+                reject_if(self.input_method == 'chinese_pinyin' and (not self.input_pinyin), DeviceExecutionError("中文输入动作缺少拼音分段。"))
+                reject_if(self.text_scope is not None, DeviceExecutionError("机械键盘输入不得携带 Companion scope。"))
         if self.kind == 'clear_verified_text':
-            reject_if(not isinstance(self.keyboard_geometry, Mapping), DeviceExecutionError("清空动作缺少已审计键盘几何。"))
-            reject_if(isinstance(self.delete_count, bool) or not isinstance(self.delete_count, int) or (not 1 <= self.delete_count <= 100), DeviceExecutionError("清空动作退格次数无效。"))
+            if self.text_transport == 'companion_ime':
+                reject_if(self.keyboard_geometry is not None or self.delete_count is not None
+                    or self.text_scope is None, DeviceExecutionError("Companion IME 清空请求包含机械键盘字段或缺少授权 scope。"))
+                assert self.text_scope is not None
+                try:
+                    self.text_scope.validate()
+                except ValueError as exc:
+                    raise DeviceExecutionError(f"Companion IME 清空 scope 无效：{exc}") from exc
+                reject_if(self.text_scope.fragment_text_digest != EMPTY_TEXT_DIGEST
+                    or self.text_scope.expected_text_digest != EMPTY_TEXT_DIGEST,
+                    DeviceExecutionError("Companion IME 清空 scope 没有绑定空 fragment/expected。"))
+            else:
+                reject_if(self.text_transport not in {None, 'mechanical_keyboard'}, DeviceExecutionError("清空动作 transport 类型无效。"))
+                reject_if(not isinstance(self.keyboard_geometry, Mapping), DeviceExecutionError("清空动作缺少已审计键盘几何。"))
+                reject_if(isinstance(self.delete_count, bool) or not isinstance(self.delete_count, int) or (not 1 <= self.delete_count <= 100), DeviceExecutionError("清空动作退格次数无效。"))
+                reject_if(self.text_scope is not None, DeviceExecutionError("机械键盘清空不得携带 Companion scope。"))
+        if self.kind not in {'input_verified_text', 'clear_verified_text'}:
+            reject_if(self.text_transport is not None or self.text_scope is not None,
+                DeviceExecutionError("非文字动作不得携带 text transport 或授权 scope。"))
         if self.kind == 'launch_app':
             reject_if(not isinstance(self.launch_ref, str) or not self.launch_ref or len(self.launch_ref) > 128
                 or any((not (character.isalnum() or character in '._:-') for character in self.launch_ref)),

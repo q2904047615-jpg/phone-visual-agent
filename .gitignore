@@ -24,6 +24,7 @@ venv/
 poc/output/
 poc/data/
 poc/*.promotion.lease
+poc/companion_ime_registry.json
 *.db
 *.sqlite
 *.sqlite3

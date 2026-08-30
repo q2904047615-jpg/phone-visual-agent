@@ -9,6 +9,8 @@ from typing import Any, Iterable, Mapping
 from .task_semantic_ir import ConstraintIntent, EffectIntent, SemanticEntity, TaskSemanticIR
 from .semantic_action import SemanticAction
 from .canonical_action_kinds import CANONICAL_ACTION_KINDS, expected_idempotent_system_surface_kind
+from .text_input_utils import normalize_user_text
+from .text_transport import TEXT_TRANSPORT_MAX_FRAGMENT_UTF8_BYTES, TextTransportProfile
 from .ui_scene import UIElement, UIScene, scene_matches_target_app_surface, scene_surface_kind
 from .verified_text_transaction import VerifiedTextTransactionError, plan_from_input_states
 
@@ -82,11 +84,28 @@ class GenericStepProposal:
             text = params.get("text")
             reject_if(not isinstance(text, str) or not text or len(text) > 4000 or ('\r' in text), CanonicalActionProtocolError("输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。"))
             reject_if(element.role != 'input', CanonicalActionProtocolError("输入动作必须绑定 input 元素。"))
+            if params.get('text_transport') == 'companion_ime':
+                required = {'input_field_id', 'prior_input_value', 'input_fragment', 'expected_input_value'}
+                reject_if(any(name not in params for name in required), CanonicalActionProtocolError("Companion IME 输入动作缺少 typed 文字事务字段。"))
+                prior = params['prior_input_value']
+                fragment = params['input_fragment']
+                expected = params['expected_input_value']
+                reject_if(not isinstance(prior, str) or not isinstance(fragment, str) or not fragment
+                    or not isinstance(expected, str) or expected != prior + fragment or expected != text,
+                    CanonicalActionProtocolError("Companion IME 输入动作的 prior/fragment/expected 不一致。"))
+                reject_if(str(params['input_field_id'] or '').strip() in {'', 'unknown'},
+                    CanonicalActionProtocolError("Companion IME 输入动作缺少 typed input_field_id。"))
         elif kind == 'clear_verified_text':
-            allowed = {'element_id', 'target', 'role', 'label', 'states', 'expected_effect', *_FORMAL_AUTHORITY_PARAMS}
+            allowed = {'element_id', 'target', 'role', 'label', 'states', 'expected_effect', 'text_transport',
+                'input_field_id', 'prior_input_value', 'expected_input_value', *_FORMAL_AUTHORITY_PARAMS}
             unexpected = set(params) - allowed
             reject_if(unexpected, CanonicalActionProtocolError("清空动作包含协议外参数：" + ", ".join(sorted(unexpected))))
             reject_if(element.role != 'input', CanonicalActionProtocolError("清空动作必须绑定 input 元素。"))
+            if params.get('text_transport') == 'companion_ime':
+                reject_if(str(params.get('input_field_id') or '').strip() in {'', 'unknown'}
+                    or not isinstance(params.get('prior_input_value'), str)
+                    or params.get('expected_input_value') != '',
+                    CanonicalActionProtocolError("Companion IME 清空动作缺少精确 typed 文字事务。"))
         elif kind == 'long_press':
             duration_ms = params.get("duration_ms", 800)
             reject_if(isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)) or (not 500 <= float(duration_ms) <= 2000), CanonicalActionProtocolError("长按 duration_ms 必须在500～2000之间。"))
@@ -300,6 +319,36 @@ def _verified_text_affordance_ready(element: UIElement, target_text: str) -> boo
         and (not element.states.get('ime_preedit_text')))
 
 
+def _companion_text_step(element: UIElement, target_text: str) -> tuple[str, str, str] | None:
+    """Return the sole Unicode append authorized by one focused typed field."""
+
+    if element.role != 'input' or element.states.get('focused') is not True:
+        return None
+    input_field_id = str(element.states.get('input_field_id') or '').strip()
+    current = element.states.get('value')
+    if input_field_id in {'', 'unknown'} or not isinstance(current, str) or element.states.get('ime_preedit_text'):
+        return None
+    try:
+        target = normalize_user_text(target_text, field_name='输入文字')
+    except ValueError:
+        return None
+    if current == target or not target.startswith(current):
+        return None
+    remainder = target[len(current):]
+    used = 0
+    end = 0
+    for char in remainder:
+        size = len(char.encode('utf-8'))
+        if used + size > TEXT_TRANSPORT_MAX_FRAGMENT_UTF8_BYTES:
+            break
+        used += size
+        end += 1
+    fragment = remainder[:end]
+    if not fragment:
+        return None
+    return current, fragment, current + fragment
+
+
 def _element_proves_scrollable_viewport(element: UIElement) -> bool:
     """Grant swipe affordance only from a typed, evidenced viewport fact."""
 
@@ -424,7 +473,8 @@ def _candidate(*, action_kind: str, expectations: tuple[StateExpectation, ...], 
 
 
 def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR,
-    available_action_kinds: Iterable[str], *, launch_target: Mapping[str, str] | None=None
+    available_action_kinds: Iterable[str], *, launch_target: Mapping[str, str] | None=None,
+    text_transport_profile: TextTransportProfile | None=None
     ) -> CanonicalActionCatalog:
     """Compile the sole deterministic action catalog for the active subgoal."""
 
@@ -476,6 +526,19 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
             or any(not isinstance(launch_target.get(key), str) or not launch_target[key].strip()
             for key in ('launch_ref', 'expected_app_id')),
             CanonicalActionProtocolError("App 直启能力映射格式无效。"))
+    companion_text = text_transport_profile is not None
+    companion_append = False
+    companion_clear = False
+    if text_transport_profile is not None:
+        try:
+            text_transport_profile.validate()
+        except ValueError as exc:
+            raise CanonicalActionProtocolError(f"Companion IME profile 无效：{exc}") from exc
+        reject_if(text_transport_profile.device_id != semantic_ir.device_id,
+            CanonicalActionProtocolError("Companion IME profile 与当前 device_id 不一致。"))
+        companion_text = bool(text_transport_profile.enabled)
+        companion_append = companion_text and 'append_text' in text_transport_profile.capabilities
+        companion_clear = companion_text and 'clear_text' in text_transport_profile.capabilities
 
     surface_ref = "surface_current"
     sorted_elements = tuple(sorted(scene.elements, key=lambda item: item.element_id))
@@ -589,15 +652,22 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
             continue
         focus_only_input_surface = bool(element.role == 'input' and element.states.get('focus_only_input_surface')
             is True)
-        supported = set(available & {"tap_semantic"})
+        input_auxiliary = element.meaning in {'ime_exact_candidate', 'input_exact_literal_key',
+            'input_exact_enter_key', 'switch_keyboard_layout', 'switch_keyboard_case',
+            'switch_keyboard_input_mode'}
+        supported = set() if companion_text and input_auxiliary else set(available & {"tap_semantic"})
         if normally_actionable and (not focus_only_input_surface):
             supported.update(available & {"double_tap", "long_press", "drag"})
         if element.role == 'input' and element.states.get('focused') is True:
+            companion_step = (_companion_text_step(element, active_input_payload_entities[0].value)
+                if companion_append and len(active_input_payload_entities) == 1 else None)
+            input_ready = companion_step is not None if companion_text else bool(len(active_input_payload_entities) == 1
+                and _verified_text_affordance_ready(element, active_input_payload_entities[0].value))
             if ('input_verified_text' in available and len(active_input_payload_entities) == 1
-                and matches_active_input_field(element) and _verified_text_affordance_ready(element,
-                active_input_payload_entities[0].value)):
+                and matches_active_input_field(element) and input_ready):
                 supported.add("input_verified_text")
-            if ('clear_verified_text' in available and (bool(element.states.get('value'))
+            if ('clear_verified_text' in available and (not companion_text or companion_clear)
+                and (bool(element.states.get('value'))
                 or bool(element.states.get('ime_preedit_text')))):
                 supported.add("clear_verified_text")
         if ('press_enter' in available and element.meaning == 'input_exact_enter_key'
@@ -710,6 +780,18 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
                 payload_entities = list(active_input_payload_entities)
             if len(payload_entities) == 1:
                 payload = payload_entities[0]
+                if companion_text:
+                    companion_step = _companion_text_step(element, payload.value)
+                    if companion_step is None:
+                        continue
+                    prior, fragment, expected = companion_step
+                    candidates.append(_candidate(action_kind='input_verified_text', expectations=(StateExpectation(
+                        element_ref, 'element.state.value', 'equals', expected),), parameters={
+                        'element_id': element.element_id, 'text_transport': 'companion_ime',
+                        'input_field_id': str(element.states.get('input_field_id') or ''),
+                        'prior_input_value': prior, 'input_fragment': fragment,
+                        'expected_input_value': expected}))
+                    continue
                 try:
                     deterministic_input_step = plan_from_input_states(payload.value, element.states)
                 except (ValueError, VerifiedTextTransactionError):
@@ -734,7 +816,14 @@ def compile_canonical_action_catalog(scene: UIScene, semantic_ir: TaskSemanticIR
             clear_expectations = [StateExpectation(element_ref, 'element.state.value', 'equals', '')]
             if element.states.get('ime_preedit_text'):
                 clear_expectations.append(StateExpectation(element_ref, 'element.state.ime_preedit_text', 'absent'))
-            append_element_candidate(element, 'clear_verified_text', clear_expectations)
+            if companion_text:
+                candidates.append(_candidate(action_kind='clear_verified_text', expectations=tuple(
+                    clear_expectations), parameters={'element_id': element.element_id,
+                    'text_transport': 'companion_ime',
+                    'input_field_id': str(element.states.get('input_field_id') or ''),
+                    'prior_input_value': str(element.states.get('value') or ''), 'expected_input_value': ''}))
+            else:
+                append_element_candidate(element, 'clear_verified_text', clear_expectations)
 
         append_element_candidate(element, 'dismiss_overlay', (StateExpectation(surface_ref,
             'surface.overlay_present', 'equals', False),))

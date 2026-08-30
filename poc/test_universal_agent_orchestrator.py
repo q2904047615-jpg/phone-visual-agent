@@ -40,6 +40,7 @@ from agent.domain.universal_action_controller import (
     CONTROLLER_INPUT_PREEDIT_PENDING,
     ResolvedSemanticAction,
 )
+from agent.domain.text_transport import TEXT_TRANSPORT_PROTOCOL, TextTransportProfile
 from agent.domain.vision_model import VisionAgentError
 from agent.application.vision_usage import VisionSessionUsageLedger
 from agent.infrastructure.deepseek_failure_diagnostics import (
@@ -684,6 +685,7 @@ class FakeExecutingAdapter(FakeAdapter):
         self.action_outcome = action_outcome
         self.verification_errors = verification_errors
         self.controller_transition_evidence = controller_transition_evidence
+        self.action_authorities = []
 
     def execute(
         self,
@@ -694,7 +696,9 @@ class FakeExecutingAdapter(FakeAdapter):
         goal,
         confirmed,
         evidence_dir,
+        action_authority=None,
     ):
+        self.action_authorities.append(action_authority)
         self.execute_calls += 1
         if self.execute_error is not None:
             raise self.execute_error
@@ -749,6 +753,7 @@ class FakeQwenObserver:
         self.mutate_identity = mutate_identity
         self.action_kind = action_kind
         self.calls = []
+        self.text_transport_profiles = []
 
     def decide(
         self,
@@ -758,8 +763,10 @@ class FakeQwenObserver:
         trusted_observation,
         decision_number=1,
         available_action_kinds=None,
+        text_transport_profile=None,
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
+        self.text_transport_profiles.append(text_transport_profile)
         if self.status == "action":
             decision = _decision(
                 trusted_observation.scene,
@@ -8234,6 +8241,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
     def test_exact_confirmation_executes_one_action_then_pauses(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+            authority = session.confirmation_authority
 
             result = orchestrator.confirm_one(session, _confirmation(session))
 
@@ -8243,6 +8251,22 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual("awaiting_confirmation", session.status)
         self.assertEqual(2, session.step_number)
         self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual([authority], adapter.action_authorities)
+
+    def test_device_text_transport_profile_is_forwarded_only_as_catalog_context(self) -> None:
+        profile = TextTransportProfile(protocol_version=TEXT_TRANSPORT_PROTOCOL,
+            profile_id="profile-device-1", device_id="device-1", pairing_id="pairing-device-1",
+            enabled=True, capabilities=("append_text", "clear_text"), ack_timeout_seconds=5.0)
+        adapter = FakeExecutingAdapter(_scene(), _scene(fingerprint="frame-b", meaning="open_more",
+            label="查看更多"))
+        adapter.text_transport_profile = lambda: profile
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            _orchestrator, session, _planner, _qwen, _adapter = self._started(temp, qwen=qwen,
+                adapter=adapter)
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual([profile], qwen.text_transport_profiles)
 
     def test_confirmation_accepts_fresh_execution_scene_with_new_fingerprint(self) -> None:
         class FreshConfirmationAdapter(FakeExecutingAdapter):

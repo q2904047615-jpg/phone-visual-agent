@@ -13,6 +13,10 @@ class VerifiedTextTransactionError(ValueError):
 
 
 _CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+\Z")
+_MECHANICAL_SUPPORTED_TEXT_RE = re.compile(
+    r"^[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9 \n"
+    r"，。！？、；：,.!?;:'\"（）()《》【】\[\]<>“”‘’…—\-+_@#%&/\\=]+$"
+)
 MAX_DIRECT_LATIN_SEGMENT_CHARS = 20
 DIRECT_LATIN_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
 # The real keyboard exposes numeric and symbol layouts from the alphabetic
@@ -110,6 +114,8 @@ def required_keyboard_input_mode_for_step(step: VerifiedInputStep) -> str | None
 
 def plan_next_verified_input(target_text: Any, current_text: Any) -> VerifiedInputStep | None:
     target = normalize_user_text(target_text, field_name="输入文字")
+    reject_if(not _MECHANICAL_SUPPORTED_TEXT_RE.fullmatch(target),
+        ValueError("输入文字含机械键盘暂不支持的表情、生僻符号或控制字符。"))
     reject_if(not isinstance(current_text, str), VerifiedTextTransactionError("当前输入框缺少精确文字值。"))
     reject_if(not target.startswith(current_text), VerifiedTextTransactionError("当前输入值不是目标文字的精确前缀。"))
     if current_text == target:

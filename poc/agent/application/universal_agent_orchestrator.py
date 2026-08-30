@@ -652,6 +652,16 @@ class UniversalAgentOrchestrator:
             'decision_number': session.step_number, 'available_action_kinds': available_actions}
         if launch_parameters:
             decision_args['launch_target'] = launch_parameters
+        text_profile_provider = getattr(session.adapter, 'text_transport_profile', None)
+        text_profile = text_profile_provider() if callable(text_profile_provider) else None
+        if text_profile is not None:
+            try:
+                text_profile.validate()
+            except ValueError as exc:
+                raise UniversalAgentOrchestratorError(f'当前设备 Companion IME profile 无效：{exc}') from exc
+            reject_if(text_profile.device_id != context.device_id,
+                UniversalAgentOrchestratorError('Companion IME profile 与当前任务 device_id 不一致。'))
+            decision_args['text_transport_profile'] = text_profile
         return self.qwen_observer.decide(**decision_args)
 
     def _build_and_record_current_observation(self, session: UniversalAgentSessionState, *, scene: Any,
@@ -1896,7 +1906,7 @@ class UniversalAgentOrchestrator:
         try:
             result = session.adapter.execute(requested_action=decision.proposal.action, planned_scene=observation.scene,
                 goal=session.goal_draft, confirmed=True, evidence_dir=session.run_dir,
-                planned_frames=session.trusted_frames)
+                planned_frames=session.trusted_frames, action_authority=authority)
         except GenericActionAdapterError as exc:
             failed_physical_actions = max(0, int(exc.physical_actions))
             if failed_physical_actions == 0:

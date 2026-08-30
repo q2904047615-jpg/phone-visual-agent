@@ -17,6 +17,60 @@ worker、旧任务队列或旧语义执行接口。
 DeepSeek 使用项目当前配置读取凭据。密钥不写入报告、不输出到终端，也不通过临时
 HTTP 命令传递。
 
+### 可选 Companion IME 配置与首次配对
+
+`ROBOT_COMPANION_IME_REGISTRY` 可指向本机 Companion IME JSON 注册表；未设置时读取
+`companion_ime_registry.json`。注册表只保存设备 profile、监听 host/port 和 TLS 证书/私钥路径，
+不得包含一次性 token、共享 key 或其明文副本。每个启用设备只能有一个 profile、pairing_id 和
+TLS bridge。最小结构为：
+
+```json
+{
+  "version": "2026-08-30-companion-ime-runtime-v1",
+  "devices": [{
+    "profile": {
+      "protocol_version": "2026-08-30-companion-ime-v1",
+      "profile_id": "companion-device-local-01",
+      "device_id": "device-local-01",
+      "pairing_id": "pairing-device-local-01",
+      "enabled": true,
+      "capabilities": ["append_text", "clear_text"],
+      "ack_timeout_seconds": 5.0
+    },
+    "bind_host": "0.0.0.0",
+    "bind_port": 18766,
+    "tls_certificate_path": "tls/server.crt",
+    "tls_private_key_path": "tls/server.key"
+  }]
+}
+```
+
+可从 [`companion_ime_registry.example.json`](companion_ime_registry.example.json) 复制一份本机注册表；
+同时要在所填路径准备 PEM 格式的 TLS 证书和私钥。私钥、实际注册表、配对记录及 APK 均属于本机
+运行产物，不应提交到 Git。若实际注册表不放在 `poc/companion_ime_registry.json`，启动项目 API 和
+执行配对 CLI 时必须使用同一个 `ROBOT_COMPANION_IME_REGISTRY` 环境变量。
+
+首次配对时先确认项目 API 未运行，再从 `poc` 目录执行：
+
+```powershell
+python companion_ime_setup.py --device-id device-local-01 --advertise-host 192.168.1.20
+```
+
+`--advertise-host` 是手机能访问的电脑地址；注册表 `bind_host` 为 `0.0.0.0` 或 `::` 时必须提供。
+命令只为指定 device 启动注册表中的同一 TLS bridge，并以第一行 JSON 显示一次 host、port、证书
+SHA-256 指纹和一次性 token。把这四项填入 Android Companion IME 后，命令会继续等待，只有新的
+共享 key 已先由手机加密保存到不覆盖旧配对的 pending 槽、手机发回新 key 签名的 `pair_confirm`，收到
+PC 签名确认后才提升为 active，再发出签名 `pair_commit`；PC 收到这份“手机已提升”证明后才切换 active
+key，并且配对记录成功写入
+`output/web/state/companion_ime_pairings/` 的 Windows 当前用户 DPAPI 存储后，才输出
+`pairing_succeeded` 并退出；`pair_response` 和 `pair_confirm` 本身都不算成功，超时退出码为 1。token 只在内存中存在并
+只显示一次。配对 CLI 与项目
+API 不能同时占用同一 TLS 端口。Android 侧安装与输入法启用步骤见
+[`android/companion-ime/README.md`](../android/companion-ime/README.md)。本项目不提供 raw text 或
+pairing HTTP 路由。已有有效配对时，此流程只同步同一 active key，不在普通修复中隐式旋转；如需换 key，
+且只接受原 `installation_id`。重装 App、换手机或需要换 key 时，必须先由用户显式撤销两端旧配对再重新
+配对，不能让两个安装实例共享同一设备 key。
+
 可选 App 包名直启配置：
 
 - `ROBOT_APP_PACKAGE_REGISTRY`：指向本机可信的 JSON 注册表；未设置时读取
@@ -51,6 +105,8 @@ scope 和一次性执行权；动作后重新观察并验证。活动子目标�
 受信任包名直启只是可选的单次设备 transport，不绕过同一 canonical、scope、执行回执和动作后新观察；
 App 内部操作继续完全使用当前视觉闭环和机械臂。
 文字输入时，`input_structure.application_inputs[*].text` 是当前应用输入内容的唯一视觉权威；scene 输入元素只提供同帧表面存在与几何重合证明，不重复也不否决正文。
+配置 Companion IME 的设备只使用该设备唯一的文字 transport；IME ACK 只证明 transport 接受命令，
+仍须通过动作后的新截图验证输入结果。输入失败不得自动改用机械键盘重输。
 只有登录/身份认证和付款/资金交易要求用户确认，其余合法动作按任务授权自动执行。
 
 输出证据默认位于 `output/web/`。报告必须区分代码测试、Mock/离线结果和真机结果。

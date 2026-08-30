@@ -9,7 +9,7 @@ import math
 from typing import Any
 
 from agent.domain.semantic_action import SemanticAction
-from agent.domain.text_input_utils import editable_character_count
+from agent.domain.text_input_utils import editable_character_count, normalize_user_text
 from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     is_direct_latin_segment,
@@ -125,6 +125,8 @@ class ResolvedSemanticAction:
     input_fragment: str | None = None
     input_method: str | None = None
     input_pinyin: str | None = None
+    text_transport: str | None = None
+    input_field_id: str | None = None
     prior_input_value: str | None = None
     expected_input_value: str | None = None
     delete_count: int | None = None
@@ -224,11 +226,39 @@ class UniversalActionController:
             return self._point_action(action, element, expected_effect, scene.fingerprint, scene=scene,
                 local_point_grounding=local_point_grounding)
         if action.action == 'input_verified_text':
-            text = str(action.params.get("text") or "")
+            try:
+                text = normalize_user_text(action.params.get("text"), field_name="输入文字")
+            except ValueError as exc:
+                raise UniversalActionError(str(exc)) from exc
             element = self._resolve_target(action, scene, required_role="input")
+            text_transport = str(action.params.get('text_transport') or 'mechanical_keyboard')
+            reject_if(text_transport not in {'mechanical_keyboard', 'companion_ime'},
+                UniversalActionError("文字输入 transport 无效。"))
+            input_field_id = str(element.states.get('input_field_id') or '').strip()
             reject_if(element.states.get('focused') is not True, UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。"))
-            reject_if(element.states.get('keyboard_layout') != 'qwerty', UniversalActionError("精确文字输入要求当前画面确认 QWERTY 键盘。"))
             reject_if(not formal_candidate_id and element.states.get('goal_relevant') is not True, UniversalActionError("文字输入目标必须由当前画面证明与当前目标相关。"))
+            if text_transport == 'companion_ime':
+                prior = element.states.get('value')
+                fragment = action.params.get('input_fragment')
+                expected = action.params.get('expected_input_value')
+                reject_if(input_field_id in {'', 'unknown'} or action.params.get('input_field_id') != input_field_id,
+                    UniversalActionError("Companion IME 输入没有绑定当前 typed input_field_id。"))
+                reject_if(not isinstance(prior, str) or not isinstance(fragment, str) or not fragment
+                    or not isinstance(expected, str) or expected != prior + fragment or expected != text
+                    or action.params.get('prior_input_value') != prior,
+                    UniversalActionError("Companion IME 输入的 prior/fragment/expected 与当前画面不一致。"))
+                reject_if(element.states.get('ime_preedit_text'),
+                    UniversalActionError("Companion IME 输入前仍有未完成的输入法组合。"))
+                expected_states = {'value': expected}
+                reject_if(expected_effect.get('element_state') != {'meaning': element.meaning,
+                    'states': expected_states}, UniversalActionError("Companion IME 输入后置条件没有绑定完整期望值。"))
+                self._require_unique_input(scene, element, formal=bool(formal_candidate_id),
+                    require_empty_preedit=True, error='Companion IME 输入要求当前画面只有一个同 typed 字段。')
+                return resolved('input_verified_text', text=text, input_fragment=fragment,
+                    input_method='unicode_commit', text_transport=text_transport,
+                    prior_input_value=prior, expected_input_value=expected,
+                    input_field_id=input_field_id, target_element_id=element.element_id)
+            reject_if(element.states.get('keyboard_layout') != 'qwerty', UniversalActionError("精确文字输入要求当前画面确认 QWERTY 键盘。"))
             try:
                 input_step = plan_from_input_states(text, element.states)
             except (ValueError, VerifiedTextTransactionError) as exc:
@@ -255,12 +285,17 @@ class UniversalActionController:
             }, require_empty_preedit=True, error='精确文字输入要求当前画面只有一个符合安全条件的目标输入框。')
             return resolved('input_verified_text', normalized_point=element.center, text=text,
                 input_fragment=input_step.segment, input_method=input_step.kind, input_pinyin=input_step.pinyin or None,
+                text_transport=text_transport,
                 prior_input_value=input_step.current_text, expected_input_value=input_step.expected_value,
-                target_element_id=element.element_id)
+                input_field_id=input_field_id or None, target_element_id=element.element_id)
         if action.action == 'clear_verified_text':
             element = self._resolve_target(action, scene, required_role="input")
             observed_value = element.states.get("value")
             observed_preedit = element.states.get("ime_preedit_text", "")
+            text_transport = str(action.params.get('text_transport') or 'mechanical_keyboard')
+            input_field_id = str(element.states.get('input_field_id') or '').strip()
+            reject_if(text_transport not in {'mechanical_keyboard', 'companion_ime'},
+                UniversalActionError("清空文字 transport 无效。"))
             reject_if(element.states.get('focused') is not True, UniversalActionError("清空文字前必须有当前画面证明输入框已聚焦。"))
             reject_if(not isinstance(observed_value, str), UniversalActionError("清空文字要求当前画面提供精确 states.value。"))
             reject_if(not isinstance(observed_preedit, str), UniversalActionError("清空文字的输入法预编辑状态格式无效。"))
@@ -271,9 +306,10 @@ class UniversalActionController:
                 UniversalActionError("清空文字的额外视觉行退格单位无效。"),
             )
             reject_if(not observed_value and (not observed_preedit), UniversalActionError("清空文字要求应用值或输入法预编辑至少一项非空。"))
-            delete_count = editable_character_count(observed_value) + editable_character_count(
-                observed_preedit) + extra_delete_units
-            reject_if(not 1 <= delete_count <= 100, UniversalActionError("清空文字的已验证字符数必须在1～100之间。"))
+            delete_count = None if text_transport == 'companion_ime' else editable_character_count(
+                observed_value) + editable_character_count(observed_preedit) + extra_delete_units
+            reject_if(text_transport == 'mechanical_keyboard' and (delete_count is None
+                or not 1 <= delete_count <= 100), UniversalActionError("清空文字的已验证字符数必须在1～100之间。"))
             reject_if(not formal_candidate_id and element.states.get('goal_relevant') is not True, UniversalActionError("清空文字目标必须由当前画面证明与当前目标相关。"))
             self._require_unique_input(scene, element, formal=bool(formal_candidate_id), require_text=True,
                 error='清空文字要求当前画面只有一个符合安全条件的非空目标输入框。')
@@ -284,8 +320,15 @@ class UniversalActionController:
                 or expected_state.get('states') != {'value': ''},
                 UniversalActionError("清空文字的后置条件必须精确绑定原输入框空值。"),
             )
-            return resolved('clear_verified_text', normalized_point=element.center, text='', delete_count=delete_count,
-                target_element_id=element.element_id)
+            if text_transport == 'companion_ime':
+                reject_if(input_field_id in {'', 'unknown'} or action.params.get('input_field_id') != input_field_id
+                    or action.params.get('prior_input_value') != observed_value
+                    or action.params.get('expected_input_value') != '',
+                    UniversalActionError("Companion IME 清空没有绑定当前 typed 文字事务。"))
+            return resolved('clear_verified_text', normalized_point=None if text_transport == 'companion_ime'
+                else element.center, text='', delete_count=delete_count, text_transport=text_transport,
+                input_field_id=input_field_id or None, prior_input_value=observed_value,
+                expected_input_value='', target_element_id=element.element_id)
         if action.action == 'double_tap':
             element = self._resolve_target(action, scene)
             self._validate_gesture_point(element.center, label="双击落点")
@@ -916,7 +959,8 @@ class UniversalActionController:
             UniversalActionError("换行动作缺少精确前缀或 newline 后置值。"),
         )
         if resolved.kind == 'clear_verified_text':
-            reject_if(expected != '' or resolved.delete_count is None, UniversalActionError("清空动作缺少空值或精确退格次数。"))
+            reject_if(expected != '' or ((resolved.text_transport or 'mechanical_keyboard') == 'mechanical_keyboard'
+                and resolved.delete_count is None), UniversalActionError("清空动作缺少空值或精确退格次数。"))
         before_input = self._required_element(before, target_id, error='输入前目标证据无效')
         reject_if(before_input.role != 'input', UniversalActionError("输入前目标不是 input 元素。"))
         reject_if(not resolved.formal_candidate_id and before_input.states.get('goal_relevant') is not True, UniversalActionError("输入前目标与当前目标缺少可信关联。"))
@@ -947,11 +991,16 @@ class UniversalActionController:
             preedit_pending = True
         elif actual != expected:
             raise UniversalActionError(f'动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。')
+        if resolved.text_transport == 'companion_ime':
+            reject_if(states.get('ime_preedit_text') not in (None, ''),
+                UniversalActionError("Companion IME 动作后仍残留输入法预编辑文字。"))
         if resolved.kind == 'clear_verified_text' and before_input.states.get('ime_preedit_text'):
             reject_if(states.get('ime_preedit_text') not in (None, ''), UniversalActionError("清空动作后输入法预编辑文字仍未清除。"))
             reject_if(states.get('focused') is not True, UniversalActionError("清空动作后原typed输入框不再聚焦。"))
         after_input = candidates[0]
-        reject_if(not self._input_scene_identity_is_stable(before, after, before_input, after_input), UniversalActionError("输入动作后 App 或页面身份发生变化。"))
+        reject_if(not self._input_scene_identity_is_stable(before, after, before_input, after_input,
+            require_keyboard_identity=(resolved.text_transport or 'mechanical_keyboard') != 'companion_ime'),
+            UniversalActionError("输入动作后 App 或页面身份发生变化，或 typed 字段身份发生变化。"))
         return preedit_pending
 
     def _is_exact_direct_latin_preedit_transition(self, resolved: ResolvedSemanticAction, after: UIScene,
@@ -976,7 +1025,7 @@ class UniversalActionController:
 
     @classmethod
     def _input_scene_identity_is_stable(cls, before: UIScene, after: UIScene, before_input: UIElement,
-        after_input: UIElement) -> bool:
+        after_input: UIElement, *, require_keyboard_identity: bool=True) -> bool:
         if before.foreground_app_id == after.foreground_app_id and before.screen_id == after.screen_id:
             return True
 
@@ -1008,6 +1057,11 @@ class UniversalActionController:
             return False
         if before_states.get('focused') is not True or after_states.get('focused') is not True:
             return False
+        if not require_keyboard_identity:
+            return (before.camera_alignment.camera_layout_orientation
+                == after.camera_alignment.camera_layout_orientation
+                and before.camera_alignment.phone_content_rotation
+                == after.camera_alignment.phone_content_rotation)
         before_layout = before_states.get("keyboard_layout")
         after_layout = after_states.get("keyboard_layout")
         if before_layout in {None, 'unknown'} or after_layout in {None, 'unknown'} or before_layout != after_layout:

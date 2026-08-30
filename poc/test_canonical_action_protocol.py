@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from agent.domain.task_semantic_ir import (
     ConstraintIntent,
@@ -12,6 +13,10 @@ from agent.domain.task_semantic_ir import (
 )
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.verified_text_transaction import plan_from_input_states
+from agent.domain.text_transport import (
+    TEXT_TRANSPORT_PROTOCOL,
+    TextTransportProfile,
+)
 from agent.domain.canonical_action_protocol import (
     CANONICAL_ACTION_PROTOCOL,
     CanonicalActionProtocolError,
@@ -39,6 +44,13 @@ ALL_ACTIONS = frozenset(
         "wait_for_change",
     }
 )
+
+
+def companion_profile(*, capabilities: tuple[str, ...] = ("append_text", "clear_text"),
+    device_id: str = "device-1") -> TextTransportProfile:
+    return TextTransportProfile(protocol_version=TEXT_TRANSPORT_PROTOCOL, profile_id="profile-device-1",
+        device_id=device_id, pairing_id="pairing-device-1", enabled=True, capabilities=capabilities,
+        ack_timeout_seconds=5.0)
 
 
 def element(
@@ -1195,6 +1207,74 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             ["input_verified_text"],
             [candidate.action_kind for candidate in report.candidates],
         )
+
+    def test_companion_profile_exposes_one_full_unicode_append_without_keyboard_candidates(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        payload = next(item for item in semantic_ir.entities if item.role == "input_text")
+        semantic_ir = replace(semantic_ir, entities=tuple(
+            replace(item, value="前缀🙂\nsecond@例") if item is payload else item
+            for item in semantic_ir.entities))
+        current_scene = scene(
+            element("input", label="前缀", meaning="application_text_input", role="input", states={
+                "focused": True, "value": "前缀", "input_field_id": "field_primary",
+                "ime_preedit_text": "",
+            }),
+            element("legacy-key", label="a", meaning="input_exact_literal_key", states={
+                "goal_relevant": True, "input_literal_key": True, "key_value": "a",
+                "prior_input_value": "前缀", "expected_input_value": "前缀a",
+                "input_element_id": "input",
+            }),
+        )
+
+        report = compile_canonical_action_catalog(current_scene, semantic_ir,
+            {"tap_semantic", "input_verified_text", "clear_verified_text"},
+            text_transport_profile=companion_profile())
+
+        self.assertEqual(["input_verified_text"], [item.action_kind for item in report.candidates])
+        candidate = report.candidates[0]
+        self.assertEqual({
+            "element_id": "input",
+            "text_transport": "companion_ime",
+            "input_field_id": "field_primary",
+            "prior_input_value": "前缀",
+            "input_fragment": "🙂\nsecond@例",
+            "expected_input_value": "前缀🙂\nsecond@例",
+        }, candidate.parameters)
+        self.assertEqual("前缀🙂\nsecond@例", candidate.transition.expectations[0].value)
+
+    def test_companion_capabilities_and_device_binding_fail_closed(self) -> None:
+        current_scene = scene(element("input", label="", meaning="application_text_input", role="input", states={
+            "focused": True, "value": "", "input_field_id": "field_primary", "ime_preedit_text": "",
+        }))
+        report = compile_canonical_action_catalog(current_scene, input_ir(active="type_last_char"),
+            {"tap_semantic", "input_verified_text", "clear_verified_text"},
+            text_transport_profile=companion_profile(capabilities=("clear_text",)))
+        self.assertFalse(report.candidates)
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "device_id"):
+            compile_canonical_action_catalog(current_scene, input_ir(active="type_last_char"),
+                {"input_verified_text"}, text_transport_profile=companion_profile(device_id="other-device"))
+
+    def test_companion_long_text_is_explicitly_segmented_before_the_wire_limit(self) -> None:
+        target = "你" * 20
+        semantic_ir = input_ir(active="type_last_char")
+        payload = next(item for item in semantic_ir.entities if item.role == "input_text")
+        semantic_ir = replace(semantic_ir, entities=tuple(
+            replace(item, value=target) if item is payload else item for item in semantic_ir.entities))
+        current_scene = scene(element("input", label="", meaning="application_text_input", role="input",
+            states={"focused": True, "value": "", "input_field_id": "field_primary",
+                "ime_preedit_text": ""}))
+
+        with patch("agent.domain.canonical_action_protocol.TEXT_TRANSPORT_MAX_FRAGMENT_UTF8_BYTES", 12):
+            report = compile_canonical_action_catalog(current_scene, semantic_ir,
+                {"input_verified_text"}, text_transport_profile=companion_profile())
+
+        self.assertEqual(1, len(report.candidates))
+        candidate = report.candidates[0]
+        fragment = candidate.parameters["input_fragment"]
+        self.assertLessEqual(len(fragment.encode("utf-8")), 12)
+        self.assertLess(len(fragment), len(target))
+        self.assertEqual(fragment, candidate.parameters["expected_input_value"])
+        self.assertTrue(target.startswith(fragment))
 
     def test_chinese_input_first_commits_preedit_then_unique_candidate(self) -> None:
         semantic_ir = input_ir(active="type_last_char")

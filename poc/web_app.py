@@ -102,6 +102,9 @@ from agent.domain.task_semantic_ir import (
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
+from agent.infrastructure.companion_ime_runtime import (
+    CompanionImeRuntimeRegistry,
+)
 
 from agent.infrastructure.robot_controller import (
     MockRobotController,
@@ -125,6 +128,10 @@ DEVICE_REGISTRY_PATH = Path(
 )
 APP_PACKAGE_REGISTRY_PATH = Path(os.environ.get("ROBOT_APP_PACKAGE_REGISTRY",
     Path(__file__).with_name("app_package_registry.json")))
+COMPANION_IME_REGISTRY_PATH = Path(os.environ.get(
+    "ROBOT_COMPANION_IME_REGISTRY",
+    Path(__file__).with_name("companion_ime_registry.json"),
+))
 def current_code_revision() -> str:
     """Return a reproducible revision; dirty worktrees are never promotable."""
 
@@ -291,6 +298,12 @@ class Runtime:
         self.input_lineage_store = FileSystemTypedInputLineageStore(
             WEB_OUTPUT_DIR / "state"
         )
+        self.companion_ime_runtime = CompanionImeRuntimeRegistry(
+            COMPANION_IME_REGISTRY_PATH,
+            pairing_state_directory=(
+                WEB_OUTPUT_DIR / "state" / "companion_ime_pairings"
+            ),
+        )
         self.generic_scene_observer = SingleStepGenericSceneObserver(
             self.vision_provider,
             input_lineage_store=self.input_lineage_store,
@@ -330,6 +343,7 @@ class Runtime:
                 ),
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
+                text_transport=self.text_transport_for_device(device_id),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
@@ -382,6 +396,9 @@ class Runtime:
             self._app_launchers[device_id] = AdbPackageLauncher(APP_PACKAGE_REGISTRY_PATH, device_id)
         return self._app_launchers[device_id]
 
+    def text_transport_for_device(self, device_id: str):
+        return self.companion_ime_runtime.transport_for_device(device_id)
+
     def capability_code_revision(self) -> str:
         current = current_code_revision()
         if current != self.loaded_code_revision:
@@ -422,6 +439,7 @@ class Runtime:
                 ),
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
+                text_transport=self.text_transport_for_device(device_id),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
@@ -468,10 +486,13 @@ class Runtime:
             yield
 
     def start(self) -> None:
-        return None
+        self.companion_ime_runtime.start()
 
     def shutdown(self) -> None:
-        self.controller.request_stop()
+        try:
+            self.companion_ime_runtime.stop()
+        finally:
+            self.controller.request_stop()
 
 
 

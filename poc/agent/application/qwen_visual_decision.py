@@ -19,6 +19,7 @@ from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 import agent.domain.qwen_task_context as qwen_task_context_domain
 import agent.domain.trusted_observation as trusted_observation_domain
 from agent.domain.semantic_action import SemanticAction
+from agent.domain.text_transport import TextTransportProfile
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
@@ -123,7 +124,8 @@ class QwenVisualDecisionObserver:
     def decide(self, *, frames: list[Image.Image], task_context: qwen_task_context_domain.QwenTaskContext | dict[str,
         Any], trusted_observation: trusted_observation_domain.TrustedObservation, decision_number: int=1,
         available_action_kinds: Iterable[str] | None=None,
-        launch_target: Mapping[str, str] | None=None) -> QwenVisualDecision:
+        launch_target: Mapping[str, str] | None=None,
+        text_transport_profile: TextTransportProfile | None=None) -> QwenVisualDecision:
         started = time.perf_counter()
         self.last_raw_response = ""
         self.last_diagnostics = {}
@@ -140,7 +142,7 @@ class QwenVisualDecisionObserver:
         reject_if(context.device_id != trusted_observation.device_id, VisionAgentError("任务 device_id 与可信观察不一致。"))
         self._metrics["decision_count"] += 1
         canonical_choices = _selection_choices(context, trusted_observation, available_actions,
-            launch_target=launch_target)
+            launch_target=launch_target, text_transport_profile=text_transport_profile)
         canonical_action_kinds = sorted({str(item['action']) for item in canonical_choices})
 
         model_identity = public_model_identity(self.provider.status())
@@ -192,7 +194,8 @@ class QwenVisualDecisionObserver:
 
 def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
     observation: trusted_observation_domain.TrustedObservation,
-    available_action_kinds: frozenset[str], *, launch_target: Mapping[str, str] | None=None
+    available_action_kinds: frozenset[str], *, launch_target: Mapping[str, str] | None=None,
+    text_transport_profile: TextTransportProfile | None=None
     ) -> tuple[dict[str, Any], ...]:
     """Build generic action choices from the trusted scene, never app steps."""
 
@@ -205,7 +208,7 @@ def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
         )
 
         formal_report = compile_canonical_action_catalog(observation.scene, context.semantic_ir, available_action_kinds,
-            launch_target=launch_target)
+            launch_target=launch_target, text_transport_profile=text_transport_profile)
     except Exception as exc:
         raise VisionAgentError(f'canonical action catalog 构建失败：{exc}') from exc
 

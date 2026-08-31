@@ -77,7 +77,7 @@ def system_action_payload(*, action: str) -> dict:
     }
 
 
-def blocked_payload() -> dict:
+def legacy_blocked_payload(*, reason: str = "当前画面没有目标应用入口") -> dict:
     return {
         "status": "blocked",
         "action": None,
@@ -87,7 +87,7 @@ def blocked_payload() -> dict:
         "direction": None,
         "evidence_refs": [],
         "confidence": 0.88,
-        "reason": "当前画面没有目标应用入口",
+        "reason": reason,
     }
 
 
@@ -267,14 +267,10 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
 
     def test_local_code_does_not_fallback_when_model_reference_is_wrong(self) -> None:
-        _source, observer, decision = self.decide(
-            action_payload(element_id="missing-button")
-        )
-
-        self.assertEqual("blocked", decision.proposal.status)
-        self.assertIsNone(decision.proposal.action)
-        self.assertIn("本地没有改选其它动作", decision.reason)
-        self.assertEqual(1, observer.status()["canonical_mapping_failure_count"])
+        with self.assertRaisesRegex(
+            VisionAgentError, "未精确映射唯一canonical candidate"
+        ):
+            self.decide(action_payload(element_id="missing-button"))
 
     def test_low_confidence_is_reported_but_does_not_create_a_second_veto(self) -> None:
         _source, _observer, decision = self.decide(
@@ -328,23 +324,22 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
             [item["action"] for item in observer.last_diagnostics["canonical_choices"]],
         )
 
-    def test_local_code_does_not_override_model_blocked_with_home(self) -> None:
+    def test_obsolete_model_blocked_responses_are_rejected(self) -> None:
         context, observation = self.wrong_app_target_case()
-
-        _source, observer, decision = self.decide(
-            blocked_payload(),
-            task_context=context,
-            trusted_observation=observation,
-            available_action_kinds={"home"},
+        historical_reasons = (
+            "当前画面没有目标应用入口，无法继续。",
+            "home只能返回主屏幕，不能直接进入设置。",
         )
-
-        self.assertEqual("blocked", decision.proposal.status)
-        self.assertIsNone(decision.proposal.action)
-        self.assertEqual(
-            ["home"],
-            [item["action"] for item in observer.last_diagnostics["canonical_choices"]],
-        )
-        self.assertEqual(1, observer.status()["model_blocked_count"])
+        for reason in historical_reasons:
+            with self.subTest(reason=reason), self.assertRaisesRegex(
+                VisionAgentError, "只允许action或finish"
+            ):
+                self.decide(
+                    legacy_blocked_payload(reason=reason),
+                    task_context=context,
+                    trusted_observation=observation,
+                    available_action_kinds={"home"},
+                )
 
 
 if __name__ == "__main__":

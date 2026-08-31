@@ -57,8 +57,8 @@ from agent.application.input_value_lineage import (
 from agent.domain.input_value_lineage import TypedInputLineage
 import agent.domain.generic_goal as generic_goal_domain
 
-SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-01-single-step-scene-decision-v4"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-08-31-single-step-qwen-decision-v3"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-01-single-step-scene-action-finish-v5"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-01-single-step-qwen-action-finish-v4"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
@@ -607,7 +607,7 @@ def _parse_model_step_decision(value: Any) -> dict[str, Any]:
     reject_if(not isinstance(value, dict) or set(value) != _MODEL_DECISION_FIELDS,
         UISceneError("decision字段不完整或包含协议外字段。"))
     status = value.get('status')
-    reject_if(status not in {'action', 'finish', 'blocked'}, UISceneError("decision.status无效。"))
+    reject_if(status not in {'action', 'finish'}, UISceneError("decision.status只允许action或finish。"))
     confidence = value.get('confidence')
     reject_if(isinstance(confidence, bool) or not isinstance(confidence, (int, float))
         or not 0.0 <= float(confidence) <= 1.0, UISceneError("decision.confidence无效。"))
@@ -629,11 +629,10 @@ def _parse_model_step_decision(value: Any) -> dict[str, Any]:
     source_id = value.get('source_element_id')
     destination_id = value.get('destination_element_id')
     direction = value.get('direction')
-    if status != 'action':
+    if status == 'finish':
         reject_if(any(item is not None for item in (action, element_id, source_id, destination_id, direction)),
-            UISceneError("finish/blocked不得携带动作引用。"))
-        reject_if(status == 'finish' and not refs, UISceneError("finish必须引用同一scene中的可见证据。"))
-        reject_if(status == 'blocked' and refs, UISceneError("blocked不得伪造完成证据。"))
+            UISceneError("finish不得携带动作引用。"))
+        reject_if(not refs, UISceneError("finish必须引用同一scene中的可见证据。"))
     else:
         reject_if(action not in CANONICAL_ACTION_KINDS, UISceneError("decision.action不在canonical动作集合。"))
         reject_if(refs, UISceneError("action决策不得携带完成证据。"))

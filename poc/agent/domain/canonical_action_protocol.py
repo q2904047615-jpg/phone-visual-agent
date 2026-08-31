@@ -55,7 +55,7 @@ _FORMAL_AUTHORITY_PARAMS = frozenset({'formal_candidate_id', 'formal_transition'
 
 @dataclass(frozen=True)
 class GenericStepProposal:
-    """Transport one model-selected action, current-scene finish, or blocked state."""
+    """Transport one model-selected action or a current-scene finish."""
 
     status: str
     action: SemanticAction | None = None
@@ -63,10 +63,10 @@ class GenericStepProposal:
 
     def validate(self, scene: UIScene) -> None:
         scene.validate()
-        reject_if(self.status not in {'action', 'finish', 'blocked'}, CanonicalActionProtocolError(f"不支持的单步状态：{self.status}"))
-        if self.status in {'finish', 'blocked'}:
-            reject_if(self.action is not None, CanonicalActionProtocolError(f"{self.status} 状态不能携带动作。"))
-            reject_if(not self.reason.strip(), CanonicalActionProtocolError(f"{self.status} 报告必须说明原因。"))
+        reject_if(self.status not in {'action', 'finish'}, CanonicalActionProtocolError(f"不支持的单步状态：{self.status}"))
+        if self.status == 'finish':
+            reject_if(self.action is not None, CanonicalActionProtocolError("finish 状态不能携带动作。"))
+            reject_if(not self.reason.strip(), CanonicalActionProtocolError("finish 报告必须说明原因。"))
             return
         reject_if(self.action is None, CanonicalActionProtocolError("action 状态缺少唯一动作。"))
 

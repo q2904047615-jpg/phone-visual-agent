@@ -84,15 +84,15 @@ def default_model_decision() -> dict:
     """Give legacy scene fixtures a neutral decision under the current wire contract."""
 
     return {
-        "status": "blocked",
+        "status": "finish",
         "action": None,
         "element_id": None,
         "source_element_id": None,
         "destination_element_id": None,
         "direction": None,
-        "evidence_refs": [],
+        "evidence_refs": ["scene.summary"],
         "confidence": 0.95,
-        "reason": "test fixture only: no next action requested",
+        "reason": "test fixture only: current scene is the requested observation",
     }
 
 
@@ -685,6 +685,38 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertNotIn("action_like =", source)
         self.assertNotIn("def contains_action_like_key", source)
 
+    def test_obsolete_blocked_decision_is_rejected_by_wire_contract(self) -> None:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {
+                "status": "blocked",
+                "action": None,
+                "element_id": None,
+                "source_element_id": None,
+                "destination_element_id": None,
+                "direction": None,
+                "evidence_refs": [],
+                "confidence": 0.9,
+                "reason": "legacy model veto",
+            },
+        }
+        provider = SequenceProvider([payload])
+
+        with self.assertRaisesRegex(VisionAgentError, "只允许action或finish"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "返回手机主屏幕"},
+                device_id="device-local-01",
+                available_action_kinds={"home"},
+            )
+
     def test_explicit_system_home_observation_sends_unmasked_phone_frame(
         self,
     ) -> None:
@@ -752,9 +784,11 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     prompt,
                 )
                 self.assertIn(
-                    "不在当前App画面而blocked",
+                    "不在当前App画面而停止",
                     prompt,
                 )
+                self.assertIn("单个动作只需推进路径", prompt)
+                self.assertNotIn('"status":"blocked"', prompt)
                 self.assertIn(
                     "back：只返回当前App或当前系统页面的上一层",
                     prompt,
@@ -768,15 +802,15 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     prompt,
                 )
                 self.assertIn(
-                    "若判断必须退出",
+                    "若必须退出当前",
                     prompt,
                 )
                 self.assertIn(
-                    "当前App或返回Launcher/主屏幕才能继续",
+                    "App或返回Launcher/主屏幕才能继续",
                     prompt,
                 )
                 self.assertIn(
-                    "必须写\n   status=action、action=home",
+                    "必须选择\n   status=action、action=home",
                     prompt,
                 )
 

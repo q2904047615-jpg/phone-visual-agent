@@ -1,5 +1,5 @@
 {
-  "protocol_version": "2026-08-11-qwen-visual-decision-offline-eval-v3",
+  "protocol_version": "2026-09-01-qwen-action-finish-offline-eval-v4",
   "cases": [
     {
       "id": "launcher_text_icon_single_action",
@@ -66,7 +66,7 @@
         "effect_intents": [],
         "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_close_overlay", "device_id": "offline_phone_01", "revision": 3, "subgoal_id": "close_top_overlay"}, "effect_action_allowed": false}
       },
-      "accepted_statuses": ["action", "blocked"],
+      "accepted_statuses": ["action"],
       "accepted_actions": ["dismiss_overlay", "tap_semantic"]
     },
     {
@@ -87,67 +87,7 @@
         "effect_intents": [],
         "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_input_complete", "device_id": "offline_phone_01", "revision": 4, "subgoal_id": "verify_input_text"}, "effect_action_allowed": false}
       },
-      "accepted_statuses": ["finished"]
-    },
-    {
-      "id": "text_submit_without_confirmation_blocked",
-      "page_type": "input_overlay",
-      "image": "images/numeric_input_dotcom_failure.jpg",
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_submit_blocked",
-        "device_id": "offline_phone_01",
-        "revision": 5,
-        "task_status": "awaiting_confirmation",
-        "goal": {"objective": "提交当前输入内容", "target_apps": [], "entities": {}},
-        "global_constraints": ["未经确认不得改变外部状态", "每轮只允许一个动作"],
-        "goal_completion_conditions": [{"condition_id": "content_submitted", "description": "内容已提交", "evidence_required": ["下一帧画面"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "submit_visible_content", "objective": "提交当前输入内容", "status": "active", "depends_on": [], "constraints": ["必须先获得确认"], "completion_conditions": ["提交结果可见"], "completion_evidence": [], "effect_ids": ["effect_submit"], "execution_class": "effect"},
-        "current_execution_class": "effect",
-        "effect_intents": [{"effect_id": "effect_submit", "kind": "data_mutation", "target_entity_roles": [], "payload_entity_roles": [], "source_subgoal_ids": ["submit_visible_content"], "expected_results": ["提交结果可见"], "local_policy": {"effect_id": "effect_submit", "confirmation_required": true, "policy_level": "high"}}],
-        "effect_gate": {"required": true, "state": "awaiting_confirmation", "effect_ids": ["effect_submit"], "scope": {"task_id": "task_submit_blocked", "device_id": "offline_phone_01", "revision": 5, "subgoal_id": "submit_visible_content"}, "effect_action_allowed": false}
-      },
-      "accepted_statuses": ["blocked"]
-    },
-    {
-      "id": "exact_candidate_missing_blocked",
-      "page_type": "keyboard_candidate_bar",
-      "image": "images/partial_pinyin_exact_candidate.jpg",
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_exact_candidate",
-        "device_id": "offline_phone_01",
-        "revision": 6,
-        "task_status": "running",
-        "goal": {"objective": "选择逐字完全一致的目标候选词", "target_apps": [], "entities": {"expected_text": "火星入口"}},
-        "global_constraints": ["文字不完全一致或目标不唯一时停止", "不得用近似词替代"],
-        "goal_completion_conditions": [{"condition_id": "exact_candidate_selected", "description": "逐字一致候选词已选中", "evidence_required": ["当前与下一帧画面"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "select_exact_candidate", "objective": "只选择画面中逐字完全一致的火星入口候选词；不存在则阻塞", "status": "active", "depends_on": [], "constraints": ["不得猜测"], "completion_conditions": ["目标词逐字一致"], "completion_evidence": [], "effect_ids": [], "execution_class": "navigate"},
-        "current_execution_class": "navigate",
-        "effect_intents": [],
-        "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_exact_candidate", "device_id": "offline_phone_01", "revision": 6, "subgoal_id": "select_exact_candidate"}, "effect_action_allowed": false}
-      },
-      "accepted_statuses": ["blocked"]
-    },
-    {
-      "id": "blurred_target_local_block",
-      "page_type": "blurred_input",
-      "image": "images/motion_blur_after_pinyin.jpg",
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_blurred_target",
-        "device_id": "offline_phone_01",
-        "revision": 7,
-        "task_status": "running",
-        "goal": {"objective": "确认当前输入内容", "target_apps": [], "entities": {}},
-        "global_constraints": ["画面模糊时停止", "不得猜测"],
-        "goal_completion_conditions": [{"condition_id": "input_readable", "description": "输入内容清晰可读", "evidence_required": ["当前画面文字"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "read_current_input", "objective": "确认当前输入框内容；模糊时阻塞", "status": "active", "depends_on": [], "constraints": ["不得猜测"], "completion_conditions": ["内容清晰可读"], "completion_evidence": [], "effect_ids": [], "execution_class": "observe"},
-        "current_execution_class": "observe",
-        "effect_intents": [],
-        "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_blurred_target", "device_id": "offline_phone_01", "revision": 7, "subgoal_id": "read_current_input"}, "effect_action_allowed": false}
-      },
-      "accepted_statuses": ["blocked"]
+      "accepted_statuses": ["finish"]
     }
   ]
 }

@@ -1,6 +1,5 @@
 import json
 import unittest
-from pathlib import Path
 
 from agent.application.deepseek_task_graph import DeepSeekTaskGraphPlanner
 from agent.domain.task_graph import (
@@ -111,15 +110,24 @@ def matched_observation(graph, *, outcome="matched", scene_id="obs-after"):
 
 
 class SimplePlannerTransportTests(unittest.TestCase):
-    def test_latest_all_pending_failure_replays_as_one_local_frontier(self):
-        artifact = Path("output/web/generic_supervised_20260831_140234_e497d7d7/") / (
-            "deepseek_initial_task_graph_step_1_deepseek_failure.json"
+    def test_retired_all_pending_runtime_fields_derive_one_local_frontier(self):
+        raw = initial_plan(
+            subgoals=[
+                subgoal("open_wechat", "打开目标应用"),
+                subgoal("open_transfer", "进入目标页面", depends_on=("open_wechat",)),
+                subgoal("focus_input", "聚焦目标输入框", depends_on=("open_transfer",)),
+            ],
+            objective="依次完成三个普通导航步骤",
         )
-        diagnostic = json.loads(artifact.read_text(encoding="utf-8"))
+        raw["task_status"] = "ready"
+        raw["active_subgoal_id"] = None
+        for item in raw["subgoals"]:
+            item["status"] = "pending"
+            item["completion_evidence"] = []
 
-        graph = DeepSeekTaskGraphPlanner(RawProvider(diagnostic["redacted_raw_response"])).plan(
-            "打开微信，给文件传输助手输入aaazjie？你好，然后发送", device_id="phone-1"
-        )
+        graph = DeepSeekTaskGraphPlanner(
+            RawProvider(json.dumps(raw, ensure_ascii=False))
+        ).plan("依次完成三个普通导航步骤", device_id="phone-1")
 
         self.assertEqual("open_wechat", graph.active_subgoal_id)
         self.assertEqual(1, sum(item.status == "active" for item in graph.subgoals))

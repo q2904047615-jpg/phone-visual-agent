@@ -7,7 +7,6 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 import re
-from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
 
@@ -426,11 +425,12 @@ class UniversalAgentOrchestrator:
         if decision.proposal.status == 'finish':
             self._complete_from_finish(session, decision)
             return decision
-        if decision.proposal.status == 'blocked' or not allow_action:
-            reason = decision.proposal.reason if decision.proposal.status == 'blocked' else action_block_reason
-            session.controller_decision = CanonicalSelectionReceipt(allowed=False, reason=reason)
+        reject_if(decision.proposal.status != 'action',
+            UniversalAgentOrchestratorError('Qwen单步决策只允许action或finish。'))
+        if not allow_action:
+            session.controller_decision = CanonicalSelectionReceipt(allowed=False, reason=action_block_reason)
             session.confirmation_authority = None
-            self._set_status(session, 'blocked', reason)
+            self._set_status(session, 'blocked', action_block_reason)
             return decision
         receipt = self._selection_receipt(session, decision)
         session.controller_decision = receipt
@@ -452,8 +452,7 @@ class UniversalAgentOrchestrator:
             self._set_status(session, 'awaiting_effect_confirmation')
             self._bind_effect_confirmation(session)
             self._write_snapshot(session)
-            return SimpleNamespace(proposal=SimpleNamespace(status='blocked',
-                reason='登录或付款目标等待用户确认。'))
+            return None
         self._clear_action(session)
         session.goal_draft = self.bridge.goal_draft(graph)
         self._set_status(session, 'observing')

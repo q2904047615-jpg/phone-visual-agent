@@ -60,7 +60,7 @@ def case(case_id: str = "case_1") -> dict:
     return {
         "id": case_id,
         "page_type": "generic_page",
-        "accepted_statuses": ["blocked"],
+        "accepted_statuses": ["action"],
         "task_context": {"task_id": f"task_{case_id}"},
     }
 
@@ -85,41 +85,19 @@ class QwenRuntimeErrorTests(unittest.TestCase):
 
 
 class QwenOfflineReportTests(unittest.TestCase):
-    def test_unconfirmed_risk_blocks_before_observation_or_decision_model(self) -> None:
+    def test_manifest_contains_only_action_or_finish_expectations(self) -> None:
         manifest_path = ROOT / "evals" / "qwen_visual_decision" / "cases.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        risk_case = next(
-            item
+        accepted = {
+            status
             for item in manifest["cases"]
-            if item["id"] == "text_submit_without_confirmation_blocked"
-        )
-        success = _evaluate_case(
-            risk_case,
-            str(manifest_path),
-            1,
-            "run_test",
-            provider_factory=EvalProvider,
-        )
-        self.assertEqual(success["status"], "blocked")
-        self.assertTrue(success["score"]["passed"])
-        self.assertEqual(success["observation_diagnostics"]["model_calls"], 0)
-        self.assertEqual(success["decision_diagnostics"]["model_calls"], 0)
-        self.assertEqual(success["failure"]["stage"], "pre_observation_risk_gate")
+            for status in item.get("accepted_statuses", [])
+        }
+        ids = {item["id"] for item in manifest["cases"]}
 
-        still_blocked = _evaluate_case(
-            risk_case,
-            str(manifest_path),
-            1,
-            "run_test",
-            provider_factory=lambda: EvalProvider(
-                failure=VisionAgentError(
-                    "千问视觉连接连续1次中断：Server disconnected"
-                )
-            ),
-        )
-        self.assertTrue(still_blocked["score"]["passed"])
-        self.assertEqual(still_blocked["observation_diagnostics"]["model_calls"], 0)
-        self.assertEqual(still_blocked["decision_diagnostics"]["model_calls"], 0)
+        self.assertLessEqual(accepted, {"action", "finish"})
+        self.assertNotIn("text_submit_without_confirmation_blocked", ids)
+        self.assertNotIn("exact_candidate_missing_blocked", ids)
 
     def test_case_evaluation_exception_path_always_sets_score(self) -> None:
         manifest_path = ROOT / "evals" / "qwen_visual_decision" / "cases.json"
@@ -181,7 +159,7 @@ class QwenOfflineReportTests(unittest.TestCase):
             {item["error_type"] for item in report["failures"]},
             {"case_timeout", "suite_timeout"},
         )
-        self.assertEqual(report["case_outcome_rates"]["final_blocked_rate"], 1.0)
+        self.assertEqual(report["case_outcome_rates"]["failure_rate"], 1.0)
 
     def test_resume_reference_is_explicit_and_excluded_from_current_metrics(self) -> None:
         old = _timeout_result(

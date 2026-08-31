@@ -37,7 +37,7 @@ DEFAULT_MANIFEST = ROOT / "evals" / "qwen_visual_decision" / "cases.json"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "offline_qwen_visual_decision"
 DEFAULT_CASE_TIMEOUT_SECONDS = 150.0
 DEFAULT_SUITE_TIMEOUT_SECONDS = 720.0
-EVAL_PROTOCOL_VERSION = "2026-08-11-qwen-visual-decision-offline-eval-v3"
+EVAL_PROTOCOL_VERSION = "2026-09-01-qwen-action-finish-offline-eval-v4"
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -140,44 +140,6 @@ def _evaluate_case(
     try:
         frames, frame_paths = _load_frames(case, path)
         context = QwenTaskContext.from_dict(dict(case["task_context"]))
-        pre_observation_block = ('本地效果确认门未满足，本轮禁止调用观察或决策模型。'
-            if context.current_execution_class == 'effect' and not context.effect_action_allowed else None)
-        if pre_observation_block:
-            status = "blocked"
-            score = _score(case, status=status, decision=None)
-            return {
-                "case_id": case["id"],
-                "page_type": case.get("page_type"),
-                "result_origin": "current_run",
-                "run_id": run_id,
-                "frame_paths": frame_paths,
-                "task_context": context.to_dict(),
-                "observation": None,
-                "observation_diagnostics": {
-                    "model_calls": 0,
-                    "hardware_actions_enabled": False,
-                    "local_safety_block": "effect_gate",
-                    "safe_stop_reason": pre_observation_block,
-                },
-                "decision": None,
-                "decision_diagnostics": {
-                    "model_calls": 0,
-                    "hardware_actions_enabled": False,
-                    "local_safety_block": "effect_gate",
-                    "safe_stop_reason": pre_observation_block,
-                },
-                "status": status,
-                "failure": {
-                    "stage": "pre_observation_risk_gate",
-                    "error_type": "local_safety_block",
-                    "error": "effect_gate",
-                    "safe_stop_reason": pre_observation_block,
-                },
-                "elapsed_seconds": round(time.perf_counter() - started, 3),
-                "hardware_actions_enabled": False,
-                "model_usage": _provider_model_usage(provider),
-                "score": score,
-            }
         scene = scene_observer.observe(
             frames=frames,
             goal_context={'device_id': context.device_id,
@@ -274,12 +236,10 @@ def _evaluate_case(
                 elapsed_seconds=time.perf_counter() - started,
                 safe_stop_reason=safe_stop,
             )
-        score = _score(case, status="blocked", decision=None)
-        if error_type != "local_safety_block":
-            score = {
-                "passed": False,
-                "reasons": [f"运行时失败：{error_type}；{exc}"],
-            }
+        score = {
+            "passed": False,
+            "reasons": [f"运行时失败：{error_type}；{exc}"],
+        }
         return {
             "case_id": case["id"],
             "page_type": case.get("page_type"),
@@ -291,7 +251,7 @@ def _evaluate_case(
             "observation_diagnostics": observation_diagnostics,
             "decision": None,
             "decision_diagnostics": decision_diagnostics,
-            "status": "blocked",
+            "status": "failed",
             "failure": {
                 "stage": stage,
                 "error_type": error_type,
@@ -338,7 +298,7 @@ def _worker_crash_result(
         "observation_diagnostics": {},
         "decision": None,
         "decision_diagnostics": {},
-        "status": "blocked",
+        "status": "failed",
         "failure": {
             "stage": "case_worker",
             "error_type": "worker_crash",
@@ -373,7 +333,7 @@ def _timeout_result(
         "observation_diagnostics": {},
         "decision": None,
         "decision_diagnostics": {},
-        "status": "blocked",
+        "status": "failed",
         "failure": {
             "stage": "case_process",
             "error_type": error_type,
@@ -407,7 +367,7 @@ def _configuration_result(case: dict[str, Any], run_id: str) -> dict[str, Any]:
         "page_type": case.get("page_type"),
         "result_origin": "current_run",
         "run_id": run_id,
-        "status": "blocked",
+        "status": "failed",
         "failure": {
             "stage": "configuration",
             "error_type": "configuration_error",
@@ -615,7 +575,8 @@ def _build_report(
         "failed": sum(not bool((item.get("score") or {}).get("passed")) for item in results),
         "case_outcome_rates": {
             "action_rate": _rate(statuses.count("action"), len(statuses)),
-            "final_blocked_rate": _rate(statuses.count("blocked"), len(statuses)),
+            "finish_rate": _rate(statuses.count("finish"), len(statuses)),
+            "failure_rate": _rate(statuses.count("failed"), len(statuses)),
         },
         "format_metrics": _format_metrics(results),
         "model_usage": _format_model_usage(results),
@@ -781,7 +742,7 @@ def main() -> int:
                 "passed": report["passed"],
                 "failed": report["failed"],
                 "format_metrics": report["format_metrics"],
-                "final_blocked_rate": report["case_outcome_rates"]["final_blocked_rate"],
+                "failure_rate": report["case_outcome_rates"]["failure_rate"],
                 "hardware_actions_enabled": False,
             },
             ensure_ascii=False,

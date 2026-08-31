@@ -297,11 +297,9 @@ class FakeQwenObserver:
                 if item.action_kind == self.action_kind
             ]
             if len(matches) != 1:
-                proposal = GenericStepProposal(
-                    status="blocked",
-                    reason=f"没有唯一 {self.action_kind} canonical candidate",
+                raise AssertionError(
+                    f"没有唯一 {self.action_kind} canonical candidate"
                 )
-                current_status = "blocked"
             else:
                 candidate = matches[0]
                 expected = canonical_candidate_expected_result(
@@ -329,9 +327,11 @@ class FakeQwenObserver:
             )
             completion_evidence = (trusted_observation.scene.summary,)
         else:
-            proposal = GenericStepProposal(
-                status="blocked",
-                reason="模型根据当前截图无法选择合法动作。",
+            proposal = SimpleNamespace(
+                status=current_status,
+                action=None,
+                reason="旧模型返回了协议外第三种状态。",
+                validate=lambda _scene: None,
             )
 
         decision = SimpleNamespace(
@@ -466,21 +466,21 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(1, len(qwen.calls))
         self.assertEqual([], planner.replan_calls)
 
-    def test_model_blocked_stops_without_local_fallback(self) -> None:
+    def test_obsolete_model_blocked_status_is_rejected(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
         qwen = FakeQwenObserver(status="blocked")
         adapter = FakeAdapter(_scene())
         with tempfile.TemporaryDirectory() as temp:
-            session = self.orchestrator(planner, qwen, adapter).start(
-                session_id="session-blocked",
-                raw_goal="查看详情",
-                device_id="device-1",
-                run_dir=Path(temp),
-            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError, "只允许action或finish"
+            ):
+                self.orchestrator(planner, qwen, adapter).start(
+                    session_id="session-obsolete-blocked",
+                    raw_goal="查看详情",
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
 
-        self.assertEqual("blocked", session.status)
-        self.assertEqual(0, session.physical_actions)
-        self.assertIsNone(session.confirmation_authority)
         self.assertEqual(0, adapter.execute_calls)
 
     def test_stale_action_scope_cannot_execute(self) -> None:

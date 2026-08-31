@@ -13,9 +13,7 @@ from PIL import Image
 
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
-from agent.domain.app_surface_lineage import AppSurfaceLineageAuthority
 from agent.domain.canonical_action_protocol import (
-    GenericStepProposal,
     canonical_candidate_expected_result,
     compile_canonical_action_catalog,
 )
@@ -27,14 +25,12 @@ from agent.domain.task_graph import (
     GraphGoal,
     Subgoal,
     TargetApp,
-    VerifiedActionTransition,
 )
 from agent.domain.task_semantic_ir import (
     ConstraintIntent,
     SemanticSubgoal,
     SurfaceRef,
     TaskSemanticIR,
-    compile_formal_semantic_authority,
 )
 from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.trusted_observation import TrustedObservation
@@ -44,7 +40,6 @@ from agent.domain.universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from agent.domain.validation import canonical_digest
 from agent.domain.visual_evidence import LocalFrameStability
 from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
 from agent.infrastructure.device_executor import RobotDeviceExecutor
@@ -280,7 +275,7 @@ class LaunchAppCanonicalTests(unittest.TestCase):
                     )
                 )
 
-    def test_qwen_selector_chooses_launch_locally_without_model_call(self) -> None:
+    def test_qwen_same_response_selects_launch_and_local_code_only_maps_it(self) -> None:
         semantic_ir, _surface = _app_ir(app_id="sample_app", app_name="示例应用")
         subgoal_id = semantic_ir.subgoals[0].subgoal_id
         context = QwenTaskContext(
@@ -349,7 +344,23 @@ class LaunchAppCanonicalTests(unittest.TestCase):
 
             def _chat(self, *_args, **_kwargs) -> str:
                 self.calls += 1
-                raise AssertionError("launch_app 的唯一 canonical 选择不应调用远程模型")
+                raise AssertionError("同一观察响应已含决策，不应发起第二次模型调用")
+
+            @staticmethod
+            def decision_for(fingerprint: str) -> dict:
+                if fingerprint != "launch-selector-frame":
+                    raise AssertionError("decision 必须绑定当前截图 fingerprint")
+                return {
+                    "status": "action",
+                    "action": "launch_app",
+                    "element_id": None,
+                    "source_element_id": None,
+                    "destination_element_id": None,
+                    "direction": None,
+                    "evidence_refs": [],
+                    "confidence": 0.96,
+                    "reason": "当前目标是启动已登记应用",
+                }
 
         provider = Provider()
         selector = QwenVisualDecisionObserver(
@@ -751,132 +762,6 @@ class LaunchAppVerificationTests(unittest.TestCase):
             with self.subTest(after_app=after.foreground_app_id, fingerprint=after.fingerprint):
                 with self.assertRaises(UniversalActionError):
                     controller.verify_after_action(resolved, before, after)
-
-    def test_launch_transition_mints_lineage_only_for_typed_app_visual_identity(self) -> None:
-        app_id = "sample_app"
-        app_name = "示例应用"
-        expected_app_id = "com.example.sample"
-        launch_ref = "launch_ref.sample_app"
-        previous = _launch_graph(app_id=app_id, app_name=app_name)
-        completed_subgoal = replace(
-            previous.subgoals[0],
-            status="completed",
-            completion_evidence=(previous.subgoals[0].completion_conditions[0],),
-        )
-        semantic_ir = compile_formal_semantic_authority(previous).semantic_ir
-        target_surface = next(
-            surface for surface in semantic_ir.surfaces if surface.kind == "app"
-        )
-        before_scene = _scene(app_id="launcher", fingerprint="before-lineage")
-        after_scene = _scene(app_id=expected_app_id, fingerprint="after-lineage")
-        action = SemanticAction(
-            node_id="launch-target-app",
-            action="launch_app",
-            params={
-                "target_surface_id": target_surface.surface_id,
-                "target_app_id": app_id,
-                "target_app_name": app_name,
-                "launch_ref": launch_ref,
-                "expected_app_id": expected_app_id,
-                "formal_candidate_id": "candidate.launch_app.target",
-                "formal_transition": {
-                    "transition_id": "transition.launch_app.target",
-                    "precondition_claim_ids": ["claim.current-surface"],
-                    "expectations": [
-                        {
-                            "subject_ref": "surface_current",
-                            "predicate": "surface.active_ref",
-                            "operator": "equals",
-                            "value": target_surface.surface_id,
-                        },
-                    ],
-                    "exploratory": False,
-                },
-                "expected_effect": {"app_id": app_id},
-            },
-        )
-        resolved = ResolvedSemanticAction(
-            node_id=action.node_id,
-            kind="launch_app",
-            launch_ref=launch_ref,
-            expected_package_id=expected_app_id,
-            target_app_id=app_id,
-            target_app_name=app_name,
-            before_fingerprint=before_scene.fingerprint,
-            expected_effect={"app_id": app_id},
-            formal_candidate_id="candidate.launch_app.target",
-            formal_transition=dict(action.params["formal_transition"]),
-        )
-        receipt = VerifiedActionTransition(
-            receipt_id="receipt-launch-app",
-            session_id="session-launch-app",
-            task_id=previous.task_id,
-            device_id=previous.device_id,
-            prior_revision=previous.revision,
-            subgoal_id=previous.active_subgoal_id,
-            decision_node_id=action.node_id,
-            action_digest=canonical_digest(action.to_dict()),
-            rebound_action_digest=canonical_digest(action.to_dict()),
-            resolved_action_digest=canonical_digest(resolved.to_dict()),
-            action_kind="launch_app",
-            before_observation_id="obs-before-launch",
-            before_fingerprint=before_scene.fingerprint,
-            after_observation_id="obs-after-launch",
-            after_fingerprint=after_scene.fingerprint,
-            physical_actions=1,
-            outcome="matched",
-        )
-        before = SimpleNamespace(
-            scene=before_scene,
-            observation_id="obs-before-launch",
-            fingerprint=before_scene.fingerprint,
-        )
-        after = SimpleNamespace(
-            scene=after_scene,
-            observation_id="obs-after-launch",
-            fingerprint=after_scene.fingerprint,
-        )
-        execution_result = SimpleNamespace(
-            rebound_action=action,
-            resolved_action=resolved,
-        )
-        previous_decision = SimpleNamespace(
-            proposal=GenericStepProposal(status="action", action=action),
-            trusted_observation=before,
-        )
-        common = {
-            "previous": previous,
-            "completed_subgoal": completed_subgoal,
-            "target_apps": previous.goal.target_apps,
-            "session_id": receipt.session_id,
-            "verified_transition": receipt,
-            "controller_transition_evidence_refs": (),
-            "before_observation": before,
-            "previous_decision": previous_decision,
-            "execution_result": execution_result,
-        }
-
-        self.assertTrue(
-            AppSurfaceLineageAuthority.transition_proves(
-                trusted_observation=after,
-                **common,
-            )
-        )
-        wrong_after_scene = _scene(
-            app_id="com.example.other",
-            fingerprint=after_scene.fingerprint,
-        )
-        self.assertFalse(
-            AppSurfaceLineageAuthority.transition_proves(
-                trusted_observation=SimpleNamespace(
-                    scene=wrong_after_scene,
-                    observation_id=after.observation_id,
-                    fingerprint=wrong_after_scene.fingerprint,
-                ),
-                **common,
-            )
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

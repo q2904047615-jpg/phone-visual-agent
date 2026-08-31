@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 
 from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from agent.domain.task_graph import (
@@ -13,10 +12,6 @@ from agent.infrastructure import RobotDeviceExecutor
 from agent.infrastructure.generic_action_adapter import _post_action_visual_context
 from agent.domain.post_action_observation import (
     POST_ACTION_VISUAL_CONTEXT_VERSION,
-)
-from agent.application.qwen_visual_decision import (
-    _deterministic_exact_selection_payload,
-    _selection_choices,
 )
 from agent.infrastructure.robot_controller import (
     DEFAULT_CONTROLLER_CONFIG,
@@ -184,33 +179,6 @@ class RecentAppsActionTests(unittest.TestCase):
             ["open_recent_apps"],
             [item.action_kind for item in report.candidates],
         )
-        observation = SimpleNamespace(
-            scene=launcher,
-            target_local_candidate=launcher.unique_trusted_goal_element,
-        )
-        context = SimpleNamespace(
-            semantic_ir=authority.semantic_ir,
-            current_subgoal={"subgoal_id": "clear_card"},
-            current_execution_class="navigate",
-            effect_action_allowed=False,
-        )
-        choices = _selection_choices(
-            context,
-            observation,
-            frozenset(
-                {"tap_semantic", "swipe", "back", "home", "open_recent_apps"}
-            ),
-        )
-        selected = _deterministic_exact_selection_payload(
-            context,
-            choices,
-            observation=observation,
-        )
-        selected_choice = next(
-            item for item in choices if item["choice_id"] == selected["choice_id"]
-        )
-        self.assertEqual("open_recent_apps", selected_choice["action"])
-
     def test_new_recent_tasks_frame_only_allows_bound_card_swipe(self) -> None:
         recent_tasks = UIScene(
             app_id="system",
@@ -296,7 +264,7 @@ class RecentAppsActionTests(unittest.TestCase):
             required_actions_for_objective("打开浏览器多任务页面"),
         )
 
-    def test_exact_graph_catalog_and_qwen_select_same_canonical_action(self) -> None:
+    def test_exact_graph_catalog_exposes_one_canonical_action(self) -> None:
         graph = build_exact_action_task_graph(
             "打开系统最近任务页面",
             action_kind="open_recent_apps",
@@ -329,20 +297,6 @@ class RecentAppsActionTests(unittest.TestCase):
             ],
             [item.to_dict() for item in candidates[0].transition.expectations],
         )
-
-        choice = {
-            "choice_id": "choice_recent_apps",
-            "action": "open_recent_apps",
-        }
-        selected = _deterministic_exact_selection_payload(
-            SimpleNamespace(
-                current_subgoal={"subgoal_id": "exact_open_recent_apps"},
-                current_execution_class="navigate",
-            ),
-            (choice,),
-        )
-        self.assertEqual("choice_recent_apps", selected["choice_id"])
-
     def test_recent_tasks_surface_is_exact_and_not_an_app_page_alias(self) -> None:
         recent = scene(
             app_id="system",

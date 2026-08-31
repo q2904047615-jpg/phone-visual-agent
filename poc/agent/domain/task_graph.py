@@ -940,6 +940,27 @@ def _finalize_runtime_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
     return replace(graph, status='completed', completion_conditions=conditions, active_subgoal_id=None)
 
 
+def complete_active_subgoal(graph: DynamicTaskGraph, *, evidence: tuple[str, ...]) -> DynamicTaskGraph:
+    """Advance the sole local plan frontier from Qwen's current-scene finish."""
+
+    graph.validate()
+    current = graph.active_subgoal()
+    normalized_evidence = tuple(dict.fromkeys(str(item).strip() for item in evidence if str(item).strip()))[:3]
+    reject_if(current is None or not normalized_evidence,
+        TaskGraphError("当前scene finish缺少活动子目标或可见证据。"))
+    subgoals = tuple(replace(item, status='completed', completion_evidence=normalized_evidence)
+        if item.subgoal_id == current.subgoal_id else item for item in graph.subgoals)
+    advanced = _activate_runtime_frontier(replace(graph, revision=graph.revision + 1,
+        status='running', subgoals=subgoals, active_subgoal_id=None), initial=False)
+    if advanced.status != 'completed':
+        active = next(item for item in advanced.subgoals if item.subgoal_id == advanced.active_subgoal_id)
+        confirmation_ids = {risk.risk_id for risk in advanced.risk_actions if risk.confirmation_required}
+        if confirmation_ids.intersection(active.risk_action_ids):
+            advanced = replace(advanced, status='awaiting_confirmation')
+    advanced.validate()
+    return advanced
+
+
 _VISUAL_IDENTITY_CONTAINER_PATTERN = re.compile(
     r"主页面|主页|首页|页面|界面|屏幕|视图|面板|卡片|"
     r"(?:^|\b)(?:page|screen|view|panel|card)(?:\b|$)",

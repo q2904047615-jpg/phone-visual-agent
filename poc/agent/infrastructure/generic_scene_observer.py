@@ -26,6 +26,7 @@ from agent.infrastructure.observation_images import (
     measure_local_stability,
 )
 from agent.domain.visual_evidence import VisualObstruction
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
 from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from agent.domain.ui_scene import (
@@ -56,8 +57,8 @@ from agent.application.input_value_lineage import (
 from agent.domain.input_value_lineage import TypedInputLineage
 import agent.domain.generic_goal as generic_goal_domain
 
-SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-08-25-single-step-qwen-observation-v2"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-31-single-step-scene-decision-v3"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-08-31-single-step-qwen-decision-v3"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
@@ -79,6 +80,10 @@ _PASSIVE_SCENE_ELEMENT_FIELDS = frozenset({'element_id', 'role', 'meaning', 'lab
     'evidence'})
 _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'step', 'steps', 'tap', 'swipe', 'command',
     'coordinates'})
+_MODEL_DECISION_FIELDS = frozenset({'status', 'action', 'element_id', 'source_element_id',
+    'destination_element_id', 'direction', 'evidence_refs', 'confidence', 'reason'})
+_MODEL_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
+    'clear_verified_text', 'double_tap', 'long_press'})
 
 _KEYBOARD_REQUIRED_FIELDS = frozenset({"visible", "bounds", "layout", "input_mode", "mode_switch"})
 _KEYBOARD_OPTIONAL_FIELDS = frozenset({'qwerty_anchors', 'backspace_key', 'enter_key', 'case_mode', 'case_switch',
@@ -151,13 +156,24 @@ class _SingleStepObserverBase:
         self.qwerty_row_snapper = qwerty_row_snapper
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
+        self.last_model_decision: dict[str, Any] | None = None
+        self.last_model_decision_fingerprint = ""
         self._stage_lock = threading.RLock()
         self._current_stage = "idle"
         self._last_stage = "idle"
         self.supports_post_action_visual_context = True
         self._observation_cache_lock = threading.RLock()
-        self._observation_cache: OrderedDict[str, UIScene] = OrderedDict()
+        self._observation_cache: OrderedDict[str, tuple[UIScene, dict[str, Any]]] = OrderedDict()
         self._observation_cache_limit = 32
+
+    def decision_for(self, fingerprint: str) -> dict[str, Any]:
+        """Return the action/finish decision emitted with this exact scene response."""
+
+        expected = str(fingerprint or "").strip()
+        reject_if(not expected or expected != self.last_model_decision_fingerprint
+            or self.last_model_decision is None,
+            VisionAgentError("当前可信画面没有同一Qwen响应绑定的action/finish决策。"))
+        return dict(self.last_model_decision)
 
     def _set_stage(self, stage: str) -> None:
         with self._stage_lock:
@@ -200,6 +216,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         elif post_action_context is not None:
             post_action_context.validate()
         self.last_raw_response = ""
+        self.last_model_decision = None
+        self.last_model_decision_fingerprint = ""
         model_identity = public_model_identity(self.provider.status())
         self.last_diagnostics = {"vision_model": model_identity}
         self._set_stage("checking_stability")
@@ -225,10 +243,13 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 input_lineage=input_lineage_override, post_action_context=post_action_context)
             if cache_key is not None:
                 with self._observation_cache_lock:
-                    cached = self._observation_cache.get(cache_key)
-                    if cached is not None:
+                    cached_entry = self._observation_cache.get(cache_key)
+                    if cached_entry is not None:
                         self._observation_cache.move_to_end(cache_key)
-                if cached is not None:
+                if cached_entry is not None:
+                    cached, cached_decision = cached_entry
+                    self.last_model_decision = dict(cached_decision)
+                    self.last_model_decision_fingerprint = cached.fingerprint
                     recorder = getattr(self.provider, 'record_observation_cache_hit', None)
                     if callable(recorder):
                         recorder(stage='same_fingerprint_single_step_observation', fingerprint=fingerprint)
@@ -274,6 +295,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             self._set_stage("parsing_single_step_observation")
             envelope = _parse_single_step_observation_envelope(raw, input_structure_required=input_structure_required,
                 request_image_size=request_image_size)
+            model_decision = dict(envelope["decision"])
             scene_payload = dict(envelope["scene"])
             single_step_input_surface = _single_step_input_surface_attestation(scene_payload,
                 goal_context=context) if input_structure_required else None
@@ -323,6 +345,9 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。"),
             )
 
+            self.last_model_decision = model_decision
+            self.last_model_decision_fingerprint = scene.fingerprint
+
             self.last_diagnostics = {'observer_version': SINGLE_STEP_SCENE_OBSERVER_VERSION,
                 'vision_model': public_model_identity(self.provider.status()),
                 'strategy': 'single_step_current_scene_observation',
@@ -335,12 +360,13 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 'frame_sharpness_scores': [round(value, 3) for value in sharpness_scores],
                 'frame_size': list(frame.size), 'request_image_size': list(request_image_size),
                 'coordinate_normalization': envelope.get('coordinate_normalization'), 'fingerprint': fingerprint,
-                'element_count': len(scene.elements), 'model_call_elapsed_seconds': [call_elapsed],
+                'element_count': len(scene.elements), 'decision_status': model_decision['status'],
+                'model_call_elapsed_seconds': [call_elapsed],
                 'model_call_token_budgets': [SINGLE_STEP_OUTPUT_TOKENS],
                 'elapsed_seconds': round(time.perf_counter() - started, 3)}
             if cache_key is not None:
                 with self._observation_cache_lock:
-                    self._observation_cache[cache_key] = scene
+                    self._observation_cache[cache_key] = (scene, model_decision)
                     self._observation_cache.move_to_end(cache_key)
                     while len(self._observation_cache) > self._observation_cache_limit:
                         self._observation_cache.popitem(last=False)
@@ -531,7 +557,7 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
 
     try:
         payload = _extract_json_object(raw, reject_duplicate_keys=True)
-        required = {'protocol_version', 'coordinate_space', 'scene', 'input_structure'}
+        required = {'protocol_version', 'coordinate_space', 'scene', 'input_structure', 'decision'}
         if set(payload) != required:
             missing = sorted(required - set(payload))
             extra = sorted(set(payload) - required)
@@ -548,10 +574,63 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
         input_payload = payload["input_structure"]
         reject_if(input_structure_required and (not isinstance(input_payload, dict)), UISceneError("输入子目标必须在同一响应返回input_structure对象。"))
         reject_if(not input_structure_required and input_payload is not None, UISceneError("非输入子目标的input_structure必须为null。"))
+        decision = _parse_model_step_decision(payload['decision'])
         return {'scene': payload['scene'], 'input_structure': payload['input_structure'],
-            'coordinate_normalization': coordinate_normalization}
+            'decision': decision, 'coordinate_normalization': coordinate_normalization}
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
+
+
+def _parse_model_step_decision(value: Any) -> dict[str, Any]:
+    """Validate the one action/finish choice emitted with the current scene."""
+
+    reject_if(not isinstance(value, dict) or set(value) != _MODEL_DECISION_FIELDS,
+        UISceneError("decision字段不完整或包含协议外字段。"))
+    status = value.get('status')
+    reject_if(status not in {'action', 'finish', 'blocked'}, UISceneError("decision.status无效。"))
+    confidence = value.get('confidence')
+    reject_if(isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0, UISceneError("decision.confidence无效。"))
+    reason = value.get('reason')
+    reject_if(not isinstance(reason, str) or not reason.strip(), UISceneError("decision.reason不能为空。"))
+    refs = value.get('evidence_refs')
+    reject_if(not isinstance(refs, list) or len(refs) > 8
+        or any(not isinstance(item, str) or not item.strip() for item in refs)
+        or len(refs) != len(set(refs)), UISceneError("decision.evidence_refs无效。"))
+
+    text_fields = ('action', 'element_id', 'source_element_id', 'destination_element_id', 'direction')
+    for name in text_fields:
+        part = value.get(name)
+        reject_if(part is not None and (not isinstance(part, str) or not part.strip()),
+            UISceneError(f"decision.{name}必须为非空字符串或null。"))
+
+    action = value.get('action')
+    element_id = value.get('element_id')
+    source_id = value.get('source_element_id')
+    destination_id = value.get('destination_element_id')
+    direction = value.get('direction')
+    if status != 'action':
+        reject_if(any(item is not None for item in (action, element_id, source_id, destination_id, direction)),
+            UISceneError("finish/blocked不得携带动作引用。"))
+        reject_if(status == 'finish' and not refs, UISceneError("finish必须引用同一scene中的可见证据。"))
+        reject_if(status == 'blocked' and refs, UISceneError("blocked不得伪造完成证据。"))
+    else:
+        reject_if(action not in CANONICAL_ACTION_KINDS, UISceneError("decision.action不在canonical动作集合。"))
+        reject_if(refs, UISceneError("action决策不得携带完成证据。"))
+        if action in _MODEL_ELEMENT_ACTIONS:
+            reject_if(element_id is None or any(item is not None for item in (source_id, destination_id, direction)),
+                UISceneError("元素动作必须且只能引用一个element_id。"))
+        elif action == 'drag':
+            reject_if(element_id is not None or direction is not None or source_id is None or destination_id is None
+                or source_id == destination_id, UISceneError("drag必须且只能引用不同的起点和终点元素。"))
+        elif action == 'swipe':
+            reject_if(source_id is not None or destination_id is not None
+                or direction not in {'up', 'down', 'left', 'right'}, UISceneError("swipe必须声明唯一方向。"))
+        else:
+            reject_if(any(item is not None for item in (element_id, source_id, destination_id, direction)),
+                UISceneError("系统或容器动作不得携带元素或方向字段。"))
+    return {**value, 'reason': reason.strip()[:500], 'confidence': float(confidence),
+        'evidence_refs': list(refs)}
 
 
 def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,

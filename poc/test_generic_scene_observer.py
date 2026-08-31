@@ -46,6 +46,12 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
         "height": 1000,
     }
     if not (flat_scene or normalized_fixture):
+        if (
+            payload.get("protocol_version")
+            == SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+            and "decision" not in payload
+        ):
+            payload["decision"] = default_model_decision()
         return payload
     if normalized_fixture:
         payload["coordinate_space"] = {
@@ -70,7 +76,24 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
 
     scale(payload.get("scene"))
     scale(payload.get("input_structure"))
+    payload.setdefault("decision", default_model_decision())
     return payload
+
+
+def default_model_decision() -> dict:
+    """Give legacy scene fixtures a neutral decision under the current wire contract."""
+
+    return {
+        "status": "blocked",
+        "action": None,
+        "element_id": None,
+        "source_element_id": None,
+        "destination_element_id": None,
+        "direction": None,
+        "evidence_refs": [],
+        "confidence": 0.95,
+        "reason": "test fixture only: no next action requested",
+    }
 
 
 def request_axis_height(messages: list[dict]) -> int:
@@ -157,6 +180,19 @@ class SequenceProvider(FakeProvider):
                 value,
                 request_height=request_axis_height(messages),
             )
+        elif isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                decoded = None
+            if (
+                isinstance(decoded, dict)
+                and decoded.get("protocol_version")
+                == SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+                and "decision" not in decoded
+            ):
+                decoded["decision"] = default_model_decision()
+                value = json.dumps(decoded, ensure_ascii=False)
         # Existing scene fixtures describe the intended refined facts. Adapt
         # only the second model response to the production targeted-delta wire
         # contract so the large historical suite does not duplicate fixtures.
@@ -2018,6 +2054,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 },
                 "scene": scene_payload(),
                 "input_structure": None,
+                "decision": default_model_decision(),
             }
 
         provider = PlainSequenceProvider([current_scene_envelope(), current_scene_envelope()])

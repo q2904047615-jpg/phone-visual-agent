@@ -1,6 +1,5 @@
 """Domain contracts shared by the modular monolith."""
 
-from .app_surface_lineage import AppSurfaceLineageAuthority, AppSurfaceLineageError, VerifiedAppSurfaceLineage
 from .canonical_selection import CANONICAL_SELECTION_RECEIPT_VERSION, CanonicalSelectionReceipt
 from .confirmation_authority import ConfirmationAuthority, EffectConfirmationAuthority
 from .device_execution import (
@@ -26,8 +25,8 @@ from .session_evidence import AgentEvidenceStoreFactory, AgentEvidenceStorePort,
 
 __all__ = ['ACTIVE_SESSION_STATUSES', 'CANONICAL_SELECTION_RECEIPT_VERSION', 'DEVICE_EXECUTOR_PROTOCOL',
     'EXECUTABLE_ACTION_KINDS', 'AgentSession', 'AgentSessionConflictError', 'AgentSessionDeviceMismatchError',
-    'AgentSessionNotFoundError', 'AgentSessionRepository', 'AppSurfaceLineageAuthority', 'AppSurfaceLineageError',
+    'AgentSessionNotFoundError', 'AgentSessionRepository',
     'AgentEvidenceStoreFactory', 'AgentEvidenceStorePort', 'CanonicalSelectionReceipt', 'ConfirmationAuthority',
     'DeviceActionRequest', 'DeviceExecutionError', 'DeviceExecutionResult', 'DeviceExecutor', 'DeviceTaskRegistryError',
-    'DeviceTaskRegistryPort', 'EvidenceStoreError', 'EffectConfirmationAuthority', 'VerifiedAppSurfaceLineage',
+    'DeviceTaskRegistryPort', 'EvidenceStoreError', 'EffectConfirmationAuthority',
     'require_session_device']

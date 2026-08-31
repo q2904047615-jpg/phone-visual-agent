@@ -1,43 +1,39 @@
-"""Single-step Qwen visual decision application service."""
+"""Bind the action or finish emitted by the sole Qwen scene response."""
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedBounds, dataclass_wire, reject_if
-import json
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+import json
+import time
 from typing import Any, Callable, Iterable
 
 from PIL import Image
 
+from agent.domain.validation import NormalizedBounds, dataclass_wire, reject_if
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError as GenericStepPlanningError,
     GenericStepProposal,
 )
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 import agent.domain.qwen_task_context as qwen_task_context_domain
 import agent.domain.trusted_observation as trusted_observation_domain
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.text_transport import TextTransportProfile
-from agent.domain.ui_scene import UIElement, UIScene
+from agent.domain.ui_scene import UIElement
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
-QWEN_VISUAL_DECISION_MODEL_ROLE = "trusted_observation_single_step_selector"
-MIN_DECISION_CONFIDENCE = 0.72
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-31-qwen-same-response-decision-v6"
+QWEN_VISUAL_DECISION_MODEL_ROLE = "single_response_scene_action_or_finish"
 SINGLE_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
     'clear_verified_text', 'double_tap', 'long_press'})
+QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
 
 def _targets_single_element(kind: str, params: Mapping[str, Any]) -> bool:
-    """Return whether this canonical action binds one observed element, including an anchored swipe."""
-
     return kind in SINGLE_ELEMENT_ACTIONS or (kind == 'swipe' and bool(str(params.get('element_id') or '').strip()))
 
-
-QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
 @dataclass(frozen=True)
 class VisualTargetRegion:
@@ -49,8 +45,8 @@ class VisualTargetRegion:
     destination_bounds: NormalizedBounds | None = None
 
     def validate(self, observation: trusted_observation_domain.TrustedObservation, action: SemanticAction) -> None:
-        expected = _canonical_target_region(action, observation)
-        reject_if(self != expected, GenericStepPlanningError("目标区域没有逐项复用 canonical 候选。"))
+        reject_if(self != _canonical_target_region(action, observation),
+            GenericStepPlanningError("目标区域没有逐项复用 canonical 候选。"))
 
     def to_dict(self) -> dict[str, Any]:
         return {'kind': self.kind, 'element_id': self.element_id or None, 'bounds': list(self.bounds),
@@ -73,264 +69,252 @@ class QwenVisualDecision:
     expected_result: dict[str, Any]
     confidence: float
     reason: str
+    completion_evidence: tuple[str, ...] = ()
     protocol_version: str = QWEN_VISUAL_DECISION_PROTOCOL_VERSION
 
     def validate(self, context: qwen_task_context_domain.QwenTaskContext) -> None:
-        reject_if((self.task_id, self.device_id, self.revision, self.observation_id, self.fingerprint) != (context.task_id, context.device_id, context.revision, self.trusted_observation.observation_id, self.trusted_observation.fingerprint), GenericStepPlanningError('task/device/revision/observation/fingerprint 已过期或不匹配。'))
+        expected_scope = (context.task_id, context.device_id, context.revision,
+            self.trusted_observation.observation_id, self.trusted_observation.fingerprint)
+        reject_if((self.task_id, self.device_id, self.revision, self.observation_id,
+            self.fingerprint) != expected_scope,
+            GenericStepPlanningError('task/device/revision/observation/fingerprint 已过期或不匹配。'))
         self.proposal.validate(self.trusted_observation.scene)
-        reject_if(self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION, GenericStepPlanningError("Qwen视觉决策协议版本无效。"))
-        reject_if(not 0.0 <= float(self.confidence) <= 1.0, GenericStepPlanningError("Qwen视觉决策置信度必须在0到1之间。"))
+        reject_if(self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+            GenericStepPlanningError("Qwen视觉决策协议版本无效。"))
+        reject_if(not 0.0 <= float(self.confidence) <= 1.0,
+            GenericStepPlanningError("Qwen视觉决策置信度必须在0到1之间。"))
         reject_if(not isinstance(self.expected_result, dict), GenericStepPlanningError("expected_result 必须是JSON对象。"))
 
         action = self.proposal.action
         if self.proposal.status == 'action':
-            reject_if(action is None or self.target_region is None, GenericStepPlanningError("唯一下一动作缺少可信目标区域。"))
-            reject_if(not self.expected_result, GenericStepPlanningError("唯一下一动作缺少可验证预期结果。"))
-            reject_if(not context.effect_action_allowed and context.current_execution_class == 'effect', GenericStepPlanningError("风险确认门未满足，禁止产生外部状态动作。"))
+            reject_if(action is None or self.target_region is None,
+                GenericStepPlanningError("唯一下一动作缺少可信目标区域。"))
+            reject_if(not self.expected_result or self.completion_evidence,
+                GenericStepPlanningError("动作决策的后置条件或完成证据无效。"))
+            reject_if(not context.effect_action_allowed and context.current_execution_class == 'effect',
+                GenericStepPlanningError("登录或付款确认门未满足，禁止产生效果动作。"))
             self.target_region.validate(self.trusted_observation, action)
-            reject_if(dict(action.params.get('expected_effect') or {}) != self.expected_result, GenericStepPlanningError("动作 expected_effect 与顶层预期不一致。"))
-            reject_if(float(self.confidence) < MIN_DECISION_CONFIDENCE, GenericStepPlanningError("动作置信度不足，必须 blocked。"))
-        elif self.target_region is not None or self.expected_result:
-            raise GenericStepPlanningError("blocked 不能携带动作目标区域。")
+            reject_if(dict(action.params.get('expected_effect') or {}) != self.expected_result,
+                GenericStepPlanningError("动作 expected_effect 与顶层预期不一致。"))
+        elif self.proposal.status == 'finish':
+            reject_if(self.target_region is not None or self.expected_result or not self.completion_evidence,
+                GenericStepPlanningError("finish 必须只携带同一scene的完成证据。"))
+        elif self.target_region is not None or self.expected_result or self.completion_evidence:
+            raise GenericStepPlanningError("blocked 不能携带动作目标或完成证据。")
 
     def to_dict(self) -> dict[str, Any]:
         value = dataclass_wire(self, omit=('proposal',))
-        value.update(status=self.proposal.status, next_action=self.proposal.action.to_dict(
-            ) if self.proposal.action else None, confidence=float(self.confidence))
+        value.update(status=self.proposal.status,
+            next_action=self.proposal.action.to_dict() if self.proposal.action else None,
+            confidence=float(self.confidence), completion_evidence=list(self.completion_evidence))
         return value
 
 
 class QwenVisualDecisionObserver:
-    """Select one canonical action locally from one trusted observation."""
+    """Validate Qwen's same-response choice against the canonical catalog; never choose for it."""
 
-    def __init__(self, provider: Any, *, trusted_observation_frame_validator: Callable[..., None]) -> None:
+    def __init__(self, provider: Any, *, trusted_observation_frame_validator: Callable[..., None],
+        decision_source: Any | None=None) -> None:
         self.provider = provider
+        self.decision_source = decision_source
         self.trusted_observation_frame_validator = trusted_observation_frame_validator
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
-        self._metrics = {'decision_count': 0, 'deterministic_action_count': 0, 'final_blocked_count': 0}
+        self._metrics = {'decision_count': 0, 'model_action_count': 0, 'model_finish_count': 0,
+            'model_blocked_count': 0, 'canonical_mapping_failure_count': 0}
 
     def status(self) -> dict[str, Any]:
         value = dict(self.provider.status())
-        decisions = self._metrics["decision_count"]
         value.update({'visual_decision_protocol': QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
             'task_context_protocol': qwen_task_context_domain.SUPPORTED_TASK_CONTEXT_PROTOCOL,
             'model_role': QWEN_VISUAL_DECISION_MODEL_ROLE, 'hardware_actions_enabled': False,
-            'selection_authority': 'canonical_action_catalog_local', **self._metrics,
-            'deterministic_action_rate': _ratio(self._metrics['deterministic_action_count'], decisions),
-            'final_blocked_rate': _ratio(self._metrics['final_blocked_count'], decisions)})
+            'selection_authority': 'qwen_same_response_decision', **self._metrics})
         return value
 
     def decide(self, *, frames: list[Image.Image], task_context: qwen_task_context_domain.QwenTaskContext | dict[str,
         Any], trusted_observation: trusted_observation_domain.TrustedObservation, decision_number: int=1,
-        available_action_kinds: Iterable[str] | None=None,
-        launch_target: Mapping[str, str] | None=None,
+        available_action_kinds: Iterable[str] | None=None, launch_target: Mapping[str, str] | None=None,
         text_transport_profile: TextTransportProfile | None=None) -> QwenVisualDecision:
+        del decision_number
         started = time.perf_counter()
-        self.last_raw_response = ""
-        self.last_diagnostics = {}
         context = task_context if isinstance(task_context,
             qwen_task_context_domain.QwenTaskContext) else qwen_task_context_domain.QwenTaskContext.from_dict(
             task_context)
         context.validate()
         available_actions = _normalize_available_action_kinds(available_action_kinds)
-        # These are the same read-only frames that established the trusted
-        # observation, so apply the observer's one-leading-frame tolerance.
-        # Confirmation-time recapture and post-action verification use their
-        # own stricter full-window stability checks.
         self.trusted_observation_frame_validator(trusted_observation, frames, allow_leading_outlier=True)
-        reject_if(context.device_id != trusted_observation.device_id, VisionAgentError("任务 device_id 与可信观察不一致。"))
-        self._metrics["decision_count"] += 1
-        canonical_choices = _selection_choices(context, trusted_observation, available_actions,
-            launch_target=launch_target, text_transport_profile=text_transport_profile)
-        canonical_action_kinds = sorted({str(item['action']) for item in canonical_choices})
+        reject_if(context.device_id != trusted_observation.device_id,
+            VisionAgentError("任务 device_id 与可信观察不一致。"))
+        self._metrics['decision_count'] += 1
 
-        model_identity = public_model_identity(self.provider.status())
-        base_diagnostics = {'visual_decision_protocol': QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
-            'vision_model': model_identity, 'task_id': context.task_id, 'device_id': context.device_id,
-            'revision': context.revision, 'observation_id': trusted_observation.observation_id,
-            'fingerprint': trusted_observation.fingerprint, 'model_calls': 0, 'hardware_actions_enabled': False,
-            'available_action_kinds': canonical_action_kinds, 'canonical_choice_count': len(canonical_choices),
+        choices = _selection_choices(context, trusted_observation, available_actions,
+            launch_target=launch_target, text_transport_profile=text_transport_profile)
+        source = self.decision_source if self.decision_source is not None else self.provider
+        getter = getattr(source, 'decision_for', None)
+        reject_if(not callable(getter), VisionAgentError("Qwen观察器没有提供同响应action/finish决策。"))
+        payload = _normalize_model_decision_payload(getter(trusted_observation.fingerprint))
+        self.last_raw_response = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+        self.last_diagnostics = {'visual_decision_protocol': QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+            'vision_model': public_model_identity(self.provider.status()), 'task_id': context.task_id,
+            'device_id': context.device_id, 'revision': context.revision,
+            'observation_id': trusted_observation.observation_id, 'fingerprint': trusted_observation.fingerprint,
+            'model_calls': 0, 'decision_from_same_observation_response': True,
+            'model_decision_status': payload['status'], 'canonical_choice_count': len(choices),
             'canonical_choices': [{'action': str(item.get('action') or ''),
-            'direction': str(item.get('direction') or ''), 'element_id': str(item.get('element_id') or '')} for item
-            in canonical_choices], 'device_action_kinds': sorted(available_actions)}
-        self.last_diagnostics = dict(base_diagnostics)
+            'direction': str(item.get('direction') or ''), 'element_id': str(item.get('element_id') or '')}
+            for item in choices], 'device_action_kinds': sorted(available_actions)}
 
         if context.current_execution_class == 'effect' and not context.effect_action_allowed:
-            reason = '风险确认门未满足，本轮禁止提出外部状态动作。'
-            decision = _local_blocked_decision(context, trusted_observation, reason=reason)
-            self._metrics["final_blocked_count"] += 1
-            self.last_diagnostics.update({'local_safety_block': 'effect_gate', 'decision_status': 'blocked',
-                'elapsed_seconds': round(time.perf_counter() - started, 3)})
-            return decision
-
-        deterministic_selection = _deterministic_exact_selection_payload(context, canonical_choices,
-            observation=trusted_observation)
-        if deterministic_selection is not None:
-            raw = json.dumps(deterministic_selection, ensure_ascii=False, separators=(',', ':'))
-            decision = _hydrate_canonical_selection(deterministic_selection, context=context,
-                observation=trusted_observation, choices=canonical_choices)
-            self.last_raw_response = raw
-            self._metrics["deterministic_action_count"] += 1
-            self.last_diagnostics.update({'local_deterministic_selection': True,
-                'decision_status': decision.proposal.status, 'elapsed_seconds': round(time.perf_counter() - started,
-                3)})
-            return decision
-
-        decision = _local_blocked_decision(
-            context,
-            trusted_observation,
-            reason=(
-            "当前canonical目录未能依据本步当前截图中的唯一视觉目标确定单一动作；"
-            "本地选择器停止，不沿用历史页面动作，也不发起重复模型请求。"
-            ),
-        )
-        self._metrics["final_blocked_count"] += 1
-        self.last_diagnostics.update({'local_safety_block': 'single_step_candidate_not_unique',
-            'local_deterministic_selection': False, 'model_calls': 0, 'decision_status': 'blocked',
+            decision = _blocked_decision(context, trusted_observation,
+                reason='登录或付款确认尚未完成，本轮没有执行动作。')
+        elif payload['status'] == 'finish':
+            decision = _finish_decision(payload, context=context, observation=trusted_observation)
+            self._metrics['model_finish_count'] += 1
+        elif payload['status'] == 'blocked':
+            decision = _blocked_decision(context, trusted_observation, reason=payload['reason'],
+                confidence=payload['confidence'])
+            self._metrics['model_blocked_count'] += 1
+        else:
+            matches = tuple(item for item in choices if _choice_matches_model_decision(item, payload))
+            if len(matches) != 1:
+                reason = (f"Qwen选择未精确映射唯一canonical candidate：action={payload['action']}，"
+                    f"matches={len(matches)}。本地没有改选其它动作。")
+                decision = _blocked_decision(context, trusted_observation, reason=reason,
+                    confidence=payload['confidence'])
+                self._metrics['canonical_mapping_failure_count'] += 1
+                self.last_diagnostics['canonical_mapping_error'] = reason
+            else:
+                decision = _hydrate_canonical_selection(payload, context=context,
+                    observation=trusted_observation, choice=matches[0])
+                self._metrics['model_action_count'] += 1
+        decision.validate(context)
+        self.last_diagnostics.update({'decision_status': decision.proposal.status,
             'elapsed_seconds': round(time.perf_counter() - started, 3)})
         return decision
 
 
 def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation,
-    available_action_kinds: frozenset[str], *, launch_target: Mapping[str, str] | None=None,
-    text_transport_profile: TextTransportProfile | None=None
-    ) -> tuple[dict[str, Any], ...]:
-    """Build generic action choices from the trusted scene, never app steps."""
-
-    choices: list[dict[str, Any]] = []
-    reject_if(context.semantic_ir is None, VisionAgentError("typed v4 视觉选择缺少 canonical TaskSemanticIR。"))
+    observation: trusted_observation_domain.TrustedObservation, available_action_kinds: frozenset[str], *,
+    launch_target: Mapping[str, str] | None=None,
+    text_transport_profile: TextTransportProfile | None=None) -> tuple[dict[str, Any], ...]:
+    reject_if(context.semantic_ir is None, VisionAgentError("视觉选择缺少 canonical TaskSemanticIR。"))
     try:
         from agent.domain.canonical_action_protocol import (
             canonical_candidate_expected_result,
             compile_canonical_action_catalog,
         )
-
-        formal_report = compile_canonical_action_catalog(observation.scene, context.semantic_ir, available_action_kinds,
+        report = compile_canonical_action_catalog(observation.scene, context.semantic_ir, available_action_kinds,
             launch_target=launch_target, text_transport_profile=text_transport_profile)
     except Exception as exc:
         raise VisionAgentError(f'canonical action catalog 构建失败：{exc}') from exc
-
-    # Qwen receives a presentation of the canonical catalog, not a separately
-    # rebuilt action list.  Every action parameter and postcondition below is a
-    # deterministic projection of the same immutable candidate that Policy
-    # later selects by ID.
-    for candidate in formal_report.candidates:
-        choices.append({'choice_id': f'choice_{len(choices) + 1}', 'action': candidate.action_kind,
-            **dict(candidate.parameters), 'expected_result': canonical_candidate_expected_result(candidate,
-            observation.scene), 'formal_candidate_id': candidate.candidate_id,
-            'formal_transition': candidate.transition.to_dict()})
-    return tuple(choices)
+    return tuple({'action': candidate.action_kind, **dict(candidate.parameters),
+        'expected_result': canonical_candidate_expected_result(candidate, observation.scene),
+        'formal_candidate_id': candidate.candidate_id, 'formal_transition': candidate.transition.to_dict()}
+        for candidate in report.candidates)
 
 
-def _deterministic_exact_selection_payload(context: qwen_task_context_domain.QwenTaskContext, choices: tuple[dict[str,
-    Any], ...] | list[dict[str, Any]], *, observation: trusted_observation_domain.TrustedObservation |
-    None=None) -> dict[str, Any] | None:
-    """Choose only a unique candidate proved by the current observation."""
-
-    target = observation.target_local_candidate() if observation is not None else None
-    active_id = str(context.current_subgoal.get("subgoal_id") or "").strip()
-    if active_id == 'input_exact_text':
-        if target is None:
-            return None
-        current_value = getattr(target, "states", {}).get("value")
-        authorized_text = getattr(context, "requested_input_text", None)
-        allowed = {'clear_verified_text'} if isinstance(current_value, str) and isinstance(authorized_text,
-            str) and (not authorized_text.startswith(current_value)) else {'tap_semantic', 'input_verified_text',
-            'press_enter', 'clear_verified_text'}
-        matching_choices = tuple((item for item in choices if str(item.get('element_id') or '') == target.element_id
-            and str(item.get('action') or '') in allowed))
-    else:
-        expected_action = {'exact_back': 'back', 'exact_home': 'home', 'exact_open_recent_apps': 'open_recent_apps',
-            'exact_tap_semantic': 'tap_semantic'}.get(active_id)
-        matching_choices = tuple((item for item in choices if item.get('action') ==
-            expected_action)) if expected_action is not None else ()
-        if active_id == 'exact_tap_semantic' and target is not None:
-            matching_choices = tuple((item for item in matching_choices if item.get('element_id') == target.element_id))
-    if len(matching_choices) == 1:
-        return _selection_payload(matching_choices[0], '结构化直推目录只有一个合法 canonical candidate。')
-
-    if (getattr(context, 'current_execution_class', '') == 'effect' and bool(getattr(context, 'effect_action_allowed',
-        False))):
-        effect_choices = tuple((item for item in choices if _choice_applies_effect(item)))
-        if len(effect_choices) == 1:
-            return _selection_payload(effect_choices[0], 'canonical目录只有一个绑定当前EffectIntent的动作。')
-        if effect_choices:
-            return None
-
-    if target is not None:
-        same_target = tuple((item for item in choices if item.get('element_id') == target.element_id))
-        if len(same_target) == 1:
-            return _selection_payload(same_target[0], '单次Qwen画面的唯一目标与canonical目录唯一候选一致。')
-
-    if (len(choices) == 1 and str(choices[0].get('action') or '') in {'back', 'home', 'open_recent_apps', 'launch_app',
-        'reveal_system_navigation', 'swipe', 'wait_for_change'}):
-        return _selection_payload(choices[0], 'canonical目录只有一个坐标无关或容器级合法动作。')
-    return None
+def _normalize_model_decision_payload(value: Any) -> dict[str, Any]:
+    required = {'status', 'action', 'element_id', 'source_element_id', 'destination_element_id', 'direction',
+        'evidence_refs', 'confidence', 'reason'}
+    reject_if(not isinstance(value, Mapping) or set(value) != required,
+        VisionAgentError("同响应decision字段不完整或包含协议外字段。"))
+    return dict(value)
 
 
-def _selection_payload(choice: Mapping[str, Any], reason: str) -> dict[str, Any] | None:
-    choice_id = str(choice.get("choice_id") or "").strip()
-    return {'status': 'action', 'choice_id': choice_id, 'confidence': 1.0, 'reason': reason} if choice_id else None
-
-
-def _choice_applies_effect(choice: Mapping[str, Any]) -> bool:
-    transition = choice.get("formal_transition")
-    if not isinstance(transition, Mapping):
+def _choice_matches_model_decision(choice: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    kind = str(payload.get('action') or '')
+    if choice.get('action') != kind:
         return False
-    expectations = transition.get("expectations")
-    if not isinstance(expectations, list):
-        return False
-    return any((isinstance(item, Mapping) and item.get('predicate') == 'effect.applied'
-        and (item.get('operator') == 'equals') and (item.get('value') is True) for item in expectations))
+    if kind in SINGLE_ELEMENT_ACTIONS:
+        return choice.get('element_id') == payload.get('element_id')
+    if kind == 'drag':
+        return (choice.get('source_element_id') == payload.get('source_element_id')
+            and choice.get('destination_element_id') == payload.get('destination_element_id'))
+    if kind == 'swipe':
+        if choice.get('direction') != payload.get('direction'):
+            return False
+        selected_element = payload.get('element_id')
+        return selected_element is None or choice.get('element_id') == selected_element
+    return True
 
 
-def _hydrate_canonical_selection(payload: Mapping[str, Any], *, context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation, choices: tuple[dict[str, Any],
-    ...]) -> QwenVisualDecision:
-    """Hydrate the already-selected immutable canonical candidate."""
+def _hydrate_canonical_selection(payload: Mapping[str, Any], *,
+    context: qwen_task_context_domain.QwenTaskContext,
+    observation: trusted_observation_domain.TrustedObservation,
+    choice: Mapping[str, Any] | None=None, choices: tuple[dict[str, Any], ...] | None=None) -> QwenVisualDecision:
+    """Hydrate exactly the canonical candidate named by Qwen's same-response decision."""
 
-    reject_if(set(payload) != {'status', 'choice_id', 'confidence', 'reason'}, VisionAgentError("本地 canonical 选择结构字段无效。"))
-    reject_if(payload.get('status') != 'action', VisionAgentError("本地 canonical 选择结果必须是 action。"))
-    matches = [item for item in choices if item.get('choice_id') == payload.get('choice_id')]
-    reject_if(len(matches) != 1, VisionAgentError("本地选择引用了不存在或不唯一的 choice_id。"))
-    choice = matches[0]
-    kind = str(choice.get("action") or "").strip()
-    reject_if(kind not in CANONICAL_ACTION_KINDS, VisionAgentError("canonical candidate 包含未知动作。"))
-    reject_if(not isinstance(choice.get('expected_result'), Mapping) or not choice['expected_result'], VisionAgentError("canonical candidate 缺少可验证 expected_result。"))
-    expected_result = dict(choice["expected_result"])
-    params = {key: value for key, value in choice.items() if key not in {'choice_id', 'action', 'expected_result',
-        'selection_context'}}
+    if choice is None:
+        matches = tuple(item for item in choices or () if _choice_matches_model_decision(item, payload))
+        reject_if(len(matches) != 1, VisionAgentError("Qwen选择没有唯一canonical candidate。"))
+        choice = matches[0]
+    kind = str(choice.get('action') or '').strip()
+    expected_result = dict(choice.get('expected_result') or {})
+    reject_if(kind not in CANONICAL_ACTION_KINDS or not expected_result,
+        VisionAgentError("canonical candidate动作或expected_result无效。"))
+    params = {key: value for key, value in choice.items()
+        if key not in {'action', 'expected_result', 'selection_context'}}
     bound_ids: list[str] = []
     if _targets_single_element(kind, params):
-        element = observation.get_candidate(str(params.get("element_id") or ""))
+        element = observation.get_candidate(str(params.get('element_id') or ''))
         _bind_element_params(params, element)
         bound_ids.append(element.element_id)
         if kind == 'input_verified_text':
-            params["text"] = context.requested_input_text
+            params['text'] = context.requested_input_text
         elif kind == 'long_press':
-            params["duration_ms"] = 800
+            params['duration_ms'] = 800
     elif kind == 'drag':
         for prefix in ('source_', 'destination_'):
-            element = observation.get_candidate(str(params.get(f"{prefix}element_id") or ""))
+            element = observation.get_candidate(str(params.get(f'{prefix}element_id') or ''))
             _bind_element_params(params, element, prefix=prefix)
             bound_ids.append(element.element_id)
-    params["expected_effect"] = expected_result
+    params['expected_effect'] = expected_result
     action = SemanticAction(node_id=f'qwen_visual_revision_{context.revision}', action=kind, params=params)
-    raw_confidence = payload.get("confidence")
-    reject_if(isinstance(raw_confidence, bool) or not isinstance(raw_confidence, (int, float)), VisionAgentError("本地 canonical 选择 confidence 无效。"))
-    confidence = min(float(raw_confidence), float(observation.scene.confidence),
+    confidence = min(float(payload.get('confidence', 0.0)), float(observation.scene.confidence),
         *(float(observation.get_candidate(item).confidence) for item in bound_ids))
-    reason = str(payload.get("reason") or "").strip()[:500]
-    decision = QwenVisualDecision(task_id=context.task_id, device_id=context.device_id, revision=context.revision,
-        observation_id=observation.observation_id, fingerprint=observation.fingerprint,
-        page_state=_page_state(observation.scene), trusted_observation=observation,
-        proposal=GenericStepProposal(status='action', action=action, reason=reason),
+    reason = str(payload.get('reason') or '').strip()[:500]
+    decision = QwenVisualDecision(task_id=context.task_id, device_id=context.device_id,
+        revision=context.revision, observation_id=observation.observation_id,
+        fingerprint=observation.fingerprint, page_state=_page_state(observation.scene),
+        trusted_observation=observation, proposal=GenericStepProposal(status='action', action=action, reason=reason),
         target_region=_canonical_target_region(action, observation), expected_result=expected_result,
         confidence=confidence, reason=reason)
     decision.validate(context)
     return decision
+
+
+def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_domain.QwenTaskContext,
+    observation: trusted_observation_domain.TrustedObservation) -> QwenVisualDecision:
+    evidence: list[str] = []
+    for ref in payload.get('evidence_refs') or ():
+        if ref == 'scene.summary':
+            reject_if(not observation.scene.summary.strip(), VisionAgentError("finish引用了空scene.summary。"))
+            evidence.append(observation.scene.summary.strip())
+            continue
+        reject_if(not str(ref).startswith('element:'), VisionAgentError("finish包含未知scene证据引用。"))
+        element_id = str(ref).split(':', 1)[1]
+        element = observation.get_candidate(element_id)
+        visible = next((str(item).strip() for item in element.evidence if str(item).strip()), '')
+        evidence.append(visible or element.label or element.meaning)
+    reject_if(not evidence, VisionAgentError("finish没有绑定当前scene证据。"))
+    reason = str(payload.get('reason') or '').strip()[:500]
+    return QwenVisualDecision(task_id=context.task_id, device_id=context.device_id,
+        revision=context.revision, observation_id=observation.observation_id,
+        fingerprint=observation.fingerprint, page_state=_page_state(observation.scene),
+        trusted_observation=observation, proposal=GenericStepProposal(status='finish', reason=reason),
+        target_region=None, expected_result={}, confidence=float(payload['confidence']), reason=reason,
+        completion_evidence=tuple(dict.fromkeys(evidence)))
+
+
+def _blocked_decision(context: qwen_task_context_domain.QwenTaskContext,
+    observation: trusted_observation_domain.TrustedObservation, *, reason: str,
+    confidence: float | None=None) -> QwenVisualDecision:
+    return QwenVisualDecision(task_id=context.task_id, device_id=context.device_id,
+        revision=context.revision, observation_id=observation.observation_id,
+        fingerprint=observation.fingerprint, page_state=_page_state(observation.scene),
+        trusted_observation=observation, proposal=GenericStepProposal(status='blocked', reason=reason),
+        target_region=None, expected_result={}, confidence=min(float(observation.scene.confidence),
+        1.0 if confidence is None else float(confidence)), reason=reason)
 
 
 def _canonical_target_region(action: SemanticAction,
@@ -342,57 +326,36 @@ def _canonical_target_region(action: SemanticAction,
     if action.action == 'drag':
         source = observation.get_candidate(str(action.params.get('source_element_id') or '').strip())
         destination = observation.get_candidate(str(action.params.get('destination_element_id') or '').strip())
-        return VisualTargetRegion(
-            kind="element_path",
-            element_id=source.element_id,
-            bounds=source.bounds,
-            destination_element_id=destination.element_id,
-            destination_bounds=destination.bounds,
-            description=(
-                f"{source.label or source.meaning} 到 "
-                f"{destination.label or destination.meaning}"
-            ),
-        )
-    system_descriptions = {'back': '系统返回区域', 'home': 'Android系统Home键', 'open_recent_apps': 'Android系统最近任务键',
-        'launch_app': '受信任的 App 启动通道', 'reveal_system_navigation': 'Android系统导航栏'}
-    return VisualTargetRegion(kind='system_navigation' if action.action in system_descriptions else 'screen',
-        bounds=(0.0, 0.0, 1.0, 1.0), description=system_descriptions.get(action.action, '当前屏幕'))
+        return VisualTargetRegion(kind='element_path', element_id=source.element_id, bounds=source.bounds,
+            destination_element_id=destination.element_id, destination_bounds=destination.bounds,
+            description=f'{source.label or source.meaning} 到 {destination.label or destination.meaning}')
+    descriptions = {'back': '系统返回区域', 'home': 'Android系统Home键',
+        'open_recent_apps': 'Android系统最近任务键', 'launch_app': '受信任的 App 启动通道',
+        'reveal_system_navigation': 'Android系统导航栏'}
+    return VisualTargetRegion(kind='system_navigation' if action.action in descriptions else 'screen',
+        bounds=(0.0, 0.0, 1.0, 1.0), description=descriptions.get(action.action, '当前屏幕'))
 
 
 def _normalize_available_action_kinds(value: Iterable[str] | None) -> frozenset[str]:
     if value is None:
         return QWEN_PROTOCOL_ACTIONS
     try:
-        normalized = frozenset(str(item or "").strip() for item in value)
+        normalized = frozenset(str(item or '').strip() for item in value)
     except TypeError as exc:
         raise VisionAgentError("设备动作能力必须是可迭代字符串集合。") from exc
     reject_if('' in normalized, VisionAgentError("设备动作能力不能包含空值。"))
-    unexpected = normalized - QWEN_PROTOCOL_ACTIONS
-    reject_if(unexpected, VisionAgentError('设备动作能力包含协议外动作：' + ', '.join(sorted(unexpected))))
-    reject_if(not normalized, VisionAgentError("设备没有任何可供本地选择的 canonical 动作。"))
+    reject_if(normalized - QWEN_PROTOCOL_ACTIONS,
+        VisionAgentError('设备动作能力包含协议外动作：' + ', '.join(sorted(normalized - QWEN_PROTOCOL_ACTIONS))))
+    reject_if(not normalized, VisionAgentError("设备没有任何可执行canonical动作。"))
     return normalized
 
 
-def _local_blocked_decision(context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation, *, reason: str) -> QwenVisualDecision:
-    decision = QwenVisualDecision(task_id=context.task_id, device_id=context.device_id, revision=context.revision,
-        observation_id=observation.observation_id, fingerprint=observation.fingerprint,
-        page_state=_page_state(observation.scene), trusted_observation=observation,
-        proposal=GenericStepProposal(status='blocked', reason=reason), target_region=None, expected_result={},
-        confidence=min(float(observation.scene.confidence), 1.0), reason=reason)
-    decision.validate(context)
-    return decision
-
-
 def _bind_element_params(params: dict[str, Any], element: UIElement, *, prefix: str='') -> None:
-    params.update({f'{prefix}element_id': element.element_id, f'{prefix}target': element.meaning, f'{
-        prefix}role': element.role, f'{prefix}label': element.label, f'{prefix}states': dict(element.states)})
+    params.update({f'{prefix}element_id': element.element_id, f'{prefix}target': element.meaning,
+        f'{prefix}role': element.role, f'{prefix}label': element.label,
+        f'{prefix}states': dict(element.states)})
 
 
-def _page_state(scene: UIScene) -> dict[str, Any]:
-    return {'foreground_app_id': scene.foreground_app_id, 'screen_id': scene.screen_id, 'summary': scene.summary,
-        'overlays': list(scene.overlays)}
-
-
-def _ratio(numerator: int, denominator: int) -> float:
-    return round(numerator / denominator, 4) if denominator else 0.0
+def _page_state(scene: Any) -> dict[str, Any]:
+    return {'foreground_app_id': scene.foreground_app_id, 'screen_id': scene.screen_id,
+        'summary': scene.summary, 'overlays': list(scene.overlays)}

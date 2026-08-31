@@ -22,7 +22,6 @@ from agent.domain import (
     CanonicalSelectionReceipt,
     ConfirmationAuthority,
     EffectConfirmationAuthority,
-    VerifiedAppSurfaceLineage,
 )
 from agent.infrastructure import InMemoryAgentSessionRepository
 from agent.domain.validation import bounds_overlap
@@ -351,50 +350,14 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             orchestrator_source,
         )
 
-    def test_verified_app_surface_lineage_is_one_immutable_domain_record(self) -> None:
-        lineage = VerifiedAppSurfaceLineage(
-            session_id="session-1",
-            task_id="task-1",
-            device_id="phone-1",
-            app_id="messaging-product",
-            app_name="Messaging",
-            surface_id="conversation",
-            source_receipt_id="receipt-1",
-            source_subgoal_id="open-conversation",
-            functional_foreground_app_id="com.example.messaging",
-            physical_actions=2,
-        )
-
-        self.assertEqual(
-            {
-                "session_id": "session-1",
-                "task_id": "task-1",
-                "device_id": "phone-1",
-                "app_id": "messaging-product",
-                "app_name": "Messaging",
-                "surface_id": "conversation",
-                "source_receipt_id": "receipt-1",
-                "source_subgoal_id": "open-conversation",
-                "functional_foreground_app_id": "com.example.messaging",
-                "physical_actions": 2,
-            },
-            lineage.to_dict(),
-        )
-        with self.assertRaises(AttributeError):
-            lineage.physical_actions = 3  # type: ignore[misc]
-
+    def test_app_surface_lineage_authority_is_removed_but_snapshot_shape_is_stable(self) -> None:
         root = Path(__file__).resolve().parent
-        orchestrator_source = (
-            root / "agent" / "application" / "universal_agent_orchestrator.py"
-        ).read_text(encoding="utf-8")
         session_source = (
             root / "agent" / "application" / "runtime_session.py"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("class VerifiedAppSurfaceLineage", orchestrator_source)
-        self.assertIn(
-            "verified_app_surface_lineage: VerifiedAppSurfaceLineage | None",
-            session_source,
-        )
+        self.assertFalse((root / "agent" / "domain" / "app_surface_lineage.py").exists())
+        self.assertNotIn("VerifiedAppSurfaceLineage", session_source)
+        self.assertIn("'verified_app_surface_lineage': None", session_source)
 
     def test_confirmation_authorities_are_domain_scoped_and_stably_sorted(self) -> None:
         action = ConfirmationAuthority(
@@ -475,7 +438,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             '"2026-08-26-canonical-selection-receipt-v1"',
             orchestrator_source,
         )
-        self.assertIn("decision.to_dict()", orchestrator_source)
+        self.assertIn("CanonicalSelectionReceipt(", orchestrator_source)
+        self.assertNotIn("_deterministic_exact_selection_payload", orchestrator_source)
 
     def test_domain_and_application_dependencies_point_inward(self) -> None:
         root = Path(__file__).resolve().parent / "agent"
@@ -538,7 +502,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
 
         owners: dict[str, list[str]] = {
-            "_decide_next_action": [],
+            "_decide": [],
             "write_qwen_decision": [],
             "_selection_receipt": [],
             "trusted_observation_factory": [],
@@ -560,22 +524,19 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     owners[name].append(method.name)
 
         self.assertEqual(
-            ["_stage_current_observation_decision"],
-            owners["_decide_next_action"],
+            ["_observe_and_decide", "_confirm_one_locked"],
+            owners["_decide"],
         )
         self.assertEqual(
-            ["_stage_current_observation_decision"],
+            ["_stage_decision"],
             owners["write_qwen_decision"],
         )
         self.assertEqual(
-            ["_stage_current_observation_decision"],
+            ["_stage_decision"],
             owners["_selection_receipt"],
         )
         self.assertEqual(
-            [
-                "_build_and_record_current_observation",
-                "_confirm_one_locked",
-            ],
+            ["_build_observation"],
             owners["trusted_observation_factory"],
         )
 
@@ -1761,7 +1722,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         source = application_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class QwenVisualDecisionObserver:"))
         self.assertEqual(
-            "2026-08-14-qwen-visual-decision-v5",
+            "2026-08-31-qwen-same-response-decision-v6",
             qwen_visual_decision.QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
         )
         for forbidden in (
@@ -1890,7 +1851,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(observer_module, "PostActionVisualContext"))
         self.assertEqual(
-            "2026-08-25-single-step-scene-observer-v2",
+            "2026-08-31-single-step-scene-decision-v3",
             observer_module.SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
 

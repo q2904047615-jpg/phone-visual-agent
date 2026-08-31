@@ -100,8 +100,13 @@ pairing HTTP 路由。已有有效配对时，此流程只同步同一 active ke
 
 ## 执行合同
 
-每次物理动作前必须按当前实际活动子目标取得新观察并核对设备身份、fingerprint、canonical candidate、
-scope 和一次性执行权；动作后重新观察并验证。活动子目标不变时，动作后观察可以选择同一子目标的下一微动作；活动子目标一旦变化，必须进入 `needs_reobservation`，按新子目标重新截图并发起一次新的单步 Qwen 观察，禁止预取或复用后继子目标上下文。普通只读/导航动作无预期变化时，必须用新观察、新 candidate、新几何和新 scope 自动纠正一次，禁止直接复用旧坐标；纠正仍失败以及输入、外部效果、登录、付款动作失败时立即停止。
+每次 Qwen 调用只处理当前新截图，并在同一响应中发布 scene 与一个 `action`、`finish` 或 `blocked`。
+`action` 必须精确映射同 scene 的一个 canonical candidate；本地不得替模型改选。执行一次后必须取得下一张
+新截图再调用 Qwen；`matched` 只证明刚才动作符合预期，只有当前截图上的 `finish` 才推进高层目标。
+目标变化后必须按新目标重新截图，禁止预取或复用后继目标上下文。普通只读/导航动作无预期变化时，
+最多依据新截图、新 candidate、新几何和新 scope 自动纠正一次，禁止直接复用旧坐标；纠正仍失败以及
+输入、外部效果、登录、付款动作失败时立即停止。DeepSeek 只在会话开始时生成轻量计划，不参加动作后的
+正常循环。
 受信任包名直启只是可选的单次设备 transport，不绕过同一 canonical、scope、执行回执和动作后新观察；
 App 内部操作继续完全使用当前视觉闭环和机械臂。
 文字输入时，`input_structure.application_inputs[*].text` 是当前应用输入内容的唯一视觉权威；scene 输入元素只提供同帧表面存在与几何重合证明，不重复也不否决正文。
@@ -115,7 +120,7 @@ App 内部操作继续完全使用当前视觉闭环和机械臂。
 
 项目采用轻量、渐进式 DDD 模块化单体，不拆微服务。正式业务切片已经迁入 `agent/`，根目录只保留受 allowlist 约束的 interfaces/tools/evals：
 
-- `agent/domain/` 定义任务图、会话、设备执行、会话证据、视觉场景、语义动作、确定性文字事务、canonical Controller/选择回执、一次性确认作用域和已验证 App 表面血缘合同；
+- `agent/domain/` 定义任务图、会话、设备执行、会话证据、视觉场景、语义动作、确定性文字事务、canonical Controller/选择回执和一次性确认作用域；
 - `agent/application/` 负责任务图规划、Qwen 单步决策、通用 Agent 编排、运行会话聚合以及开始、确认、重观察、自动推进、暂停和取消用例；
 - `agent/infrastructure/` 提供 DeepSeek/Qwen provider、场景观察、单动作执行 adapter、Robot/Replay 执行、设备独占、文件系统证据持久化、相机/动作协调、OCR/标定/方向门和设备控制器注册表；
 - `web_app.py` 保留 HTTP/Pydantic 转换与组合根职责。

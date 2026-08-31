@@ -315,6 +315,7 @@ class Runtime:
             trusted_observation_frame_validator=(
                 validate_trusted_observation_against_frames
             ),
+            decision_source=self.generic_scene_observer,
         )
         self.device_task_registry = DeviceTaskRegistry(
             lease_directory=SHARED_DEVICE_LEASE_DIR

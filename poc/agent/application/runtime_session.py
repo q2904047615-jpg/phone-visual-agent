@@ -11,7 +11,6 @@ from agent.domain import (
     CanonicalSelectionReceipt,
     ConfirmationAuthority,
     EffectConfirmationAuthority,
-    VerifiedAppSurfaceLineage,
 )
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.task_graph import DynamicTaskGraph
@@ -51,7 +50,6 @@ class UniversalAgentSessionState:
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
-    verified_app_surface_lineage: VerifiedAppSurfaceLineage | None = None
     last_confirmation_failure: dict[str, Any] | None = None
     capability_gap: dict[str, Any] | None = None
     effect_previews: tuple[dict[str, Any], ...] = ()
@@ -109,7 +107,8 @@ class UniversalAgentSessionState:
             'effect_confirmation_ready': bool(self.status == 'awaiting_effect_confirmation'
             and self.effect_confirmation_authority is not None and (not self.effect_confirmation_authority.consumed)),
             'capability_gap': self._serialize(self.capability_gap),
-            'verified_app_surface_lineage': self._serialize(self.verified_app_surface_lineage),
+            # Retain the public response key while the retired lineage authority no longer exists.
+            'verified_app_surface_lineage': None,
             'effect_previews': [dict(item) for item in self.effect_previews],
             'effect_verification': self._serialize(self.effect_verification),
             'device_capability': self.adapter.capability_snapshot().to_dict() if callable(getattr(self.adapter,

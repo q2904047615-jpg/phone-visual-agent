@@ -214,6 +214,35 @@ class ScriptedQwen:
         available_action_kinds=None,
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
+        if len(self.calls) > 1:
+            proposal = GenericStepProposal(
+                status="finish",
+                reason="合成的新截图已经证明当前目标完成。",
+            )
+            decision = SimpleNamespace(
+                task_id=task_context["task_id"],
+                device_id=task_context["device_id"],
+                revision=task_context["revision"],
+                observation_id=trusted_observation.observation_id,
+                fingerprint=trusted_observation.fingerprint,
+                trusted_observation=trusted_observation,
+                target_region=None,
+                confidence=0.97,
+                proposal=proposal,
+                completion_evidence=(trusted_observation.scene.summary,),
+            )
+            decision.to_dict = lambda: {
+                "task_id": decision.task_id,
+                "device_id": decision.device_id,
+                "revision": decision.revision,
+                "observation_id": decision.observation_id,
+                "fingerprint": decision.fingerprint,
+                "status": "finish",
+                "next_action": None,
+                "reason": proposal.reason,
+                "completion_evidence": list(decision.completion_evidence),
+            }
+            return decision
         if self.action_kind == "back":
             params = {"expected_effect": {"scene_changed": True}}
         elif self.action_kind == "swipe":
@@ -309,6 +338,7 @@ class ScriptedQwen:
             target_region=region,
             confidence=0.97,
             proposal=proposal,
+            completion_evidence=(),
         )
         decision.to_dict = lambda: {
             "task_id": decision.task_id,
@@ -397,7 +427,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         )
         return orchestrator, session, planner, qwen, capture, robot
 
-    def test_unseen_open_goal_executes_one_navigation_tap_and_replans(self):
+    def test_unseen_open_goal_executes_one_navigation_tap_then_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, planner, qwen, _capture, robot = self._session(
                 temp,
@@ -426,10 +456,11 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual([], planner.replan_calls)
         self.assertEqual("synthetic.catalog", session.goal_draft.app_id)
 
-    def test_rephrased_back_goal_executes_one_back_and_replans(self):
+    def test_rephrased_back_goal_executes_one_back_then_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, planner, qwen, _capture, robot = self._session(
                 temp,
@@ -443,7 +474,8 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("back", ())], robot.calls)
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual([], planner.replan_calls)
         self.assertEqual("synthetic.reader", session.goal_draft.app_id)
 
     def test_third_unseen_app_combines_generic_swipe_without_code_branch(self):
@@ -460,7 +492,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("swipe_up", ())], robot.calls)
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(2, len(qwen.calls))
         self.assertEqual("synthetic.timeline", session.goal_draft.app_id)
 
     def test_two_phrasings_use_the_same_generic_action_contract(self):

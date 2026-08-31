@@ -7,7 +7,14 @@ from PIL import Image, ImageDraw
 
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.qwen_task_context import QwenTaskContext
-from agent.domain.task_graph import build_exact_action_task_graph
+from agent.domain.task_graph import (
+    CompletionCondition,
+    DynamicTaskGraph,
+    GraphGoal,
+    Subgoal,
+    TargetApp,
+    build_exact_action_task_graph,
+)
 from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.vision_model import VisionAgentError
@@ -53,6 +60,34 @@ def finish_payload(*, evidence_refs: list[str]) -> dict:
         "evidence_refs": evidence_refs,
         "confidence": 0.93,
         "reason": "当前截图已经直接证明本目标完成",
+    }
+
+
+def system_action_payload(*, action: str) -> dict:
+    return {
+        "status": "action",
+        "action": action,
+        "element_id": None,
+        "source_element_id": None,
+        "destination_element_id": None,
+        "direction": None,
+        "evidence_refs": [],
+        "confidence": 0.92,
+        "reason": "当前前台应用不是目标应用，先返回主屏幕继续寻找目标入口",
+    }
+
+
+def blocked_payload() -> dict:
+    return {
+        "status": "blocked",
+        "action": None,
+        "element_id": None,
+        "source_element_id": None,
+        "destination_element_id": None,
+        "direction": None,
+        "evidence_refs": [],
+        "confidence": 0.88,
+        "reason": "当前画面没有目标应用入口",
     }
 
 
@@ -129,7 +164,14 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
         self.context.validate()
 
-    def decide(self, payload: dict):
+    def decide(
+        self,
+        payload: dict,
+        *,
+        task_context: QwenTaskContext | None = None,
+        trusted_observation=None,
+        available_action_kinds: set[str] | None = None,
+    ):
         source = SameResponseDecisionSource(payload)
         observer = QwenVisualDecisionObserver(
             StatusOnlyProvider(),
@@ -140,11 +182,73 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
         decision = observer.decide(
             frames=self.frames,
-            task_context=self.context,
-            trusted_observation=self.observation,
-            available_action_kinds={"tap_semantic"},
+            task_context=task_context or self.context,
+            trusted_observation=trusted_observation or self.observation,
+            available_action_kinds=available_action_kinds or {"tap_semantic"},
         )
         return source, observer, decision
+
+    def wrong_app_target_case(self) -> tuple[QwenTaskContext, object]:
+        graph = DynamicTaskGraph(
+            task_id="task-open-target-app",
+            device_id="device-local-01",
+            revision=1,
+            status="running",
+            goal=GraphGoal(
+                objective="打开目标应用",
+                target_apps=(
+                    TargetApp(app_id="target_app", app_name="目标应用"),
+                ),
+                entities={"target_ui_label": "目标应用"},
+            ),
+            constraints=(),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="goal-complete",
+                    description="目标应用已在前台",
+                    evidence_required=("目标应用前台画面",),
+                ),
+            ),
+            risk_actions=(),
+            subgoals=(
+                Subgoal(
+                    subgoal_id="open-target-app",
+                    objective="打开目标应用",
+                    status="active",
+                    depends_on=(),
+                    constraints=(),
+                    completion_conditions=("目标应用已在前台",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="open-target-app",
+            raw_user_goal="打开目标应用",
+        )
+        graph.validate()
+        context = QwenTaskContext.from_dict(graph.to_qwen_context())
+        context = replace(
+            context,
+            semantic_ir=compile_formal_semantic_authority(graph).semantic_ir,
+        )
+        context.validate()
+        scene = UIScene(
+            app_id="other.app",
+            screen_id="other_main",
+            summary="当前显示另一个应用的主页面，画面内没有目标应用入口",
+            elements=(),
+            stable=True,
+            confidence=0.98,
+            fingerprint=self.scene.fingerprint,
+        )
+        observation = build_trusted_observation(
+            frames=self.frames,
+            device_id="device-local-01",
+            scene=scene,
+            observation_id="obs_fedcba9876543210fedcba9876543210",
+        )
+        return context, observation
 
     def test_model_named_element_maps_to_exactly_one_canonical_action(self) -> None:
         source, observer, decision = self.decide(
@@ -206,6 +310,41 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(VisionAgentError, "协议外字段"):
             self.decide(malformed)
+
+    def test_model_home_choice_maps_when_target_app_is_not_foreground(self) -> None:
+        context, observation = self.wrong_app_target_case()
+
+        _source, observer, decision = self.decide(
+            system_action_payload(action="home"),
+            task_context=context,
+            trusted_observation=observation,
+            available_action_kinds={"home"},
+        )
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("home", decision.proposal.action.action)
+        self.assertEqual(
+            ["home"],
+            [item["action"] for item in observer.last_diagnostics["canonical_choices"]],
+        )
+
+    def test_local_code_does_not_override_model_blocked_with_home(self) -> None:
+        context, observation = self.wrong_app_target_case()
+
+        _source, observer, decision = self.decide(
+            blocked_payload(),
+            task_context=context,
+            trusted_observation=observation,
+            available_action_kinds={"home"},
+        )
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIsNone(decision.proposal.action)
+        self.assertEqual(
+            ["home"],
+            [item["action"] for item in observer.last_diagnostics["canonical_choices"]],
+        )
+        self.assertEqual(1, observer.status()["model_blocked_count"])
 
 
 if __name__ == "__main__":

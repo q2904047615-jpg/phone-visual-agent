@@ -742,6 +742,26 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 prompt = provider.messages_seen[0][1]["content"][0]["text"]
                 self.assertNotIn("中央App内容未披露", prompt)
                 self.assertNotIn("固定遮罩", prompt)
+                self.assertIn(
+                    "当前前台App不是当前高层目标的目标App",
+                    prompt,
+                )
+                self.assertIn(
+                    "不得仅因目标App入口",
+                    prompt,
+                )
+                self.assertIn(
+                    "不在当前App画面而blocked",
+                    prompt,
+                )
+                self.assertIn(
+                    "back：只返回当前App或当前系统页面的上一层",
+                    prompt,
+                )
+                self.assertIn(
+                    "open_recent_apps：打开Android最近任务卡片页",
+                    prompt,
+                )
 
     def test_post_action_context_is_typed_prompt_data_and_separates_cache(
         self,

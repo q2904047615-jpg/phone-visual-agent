@@ -38,6 +38,17 @@ scene与input_structure必须共用一个coordinate_space，绝不能各用一�
 "source_element_id":null,"destination_element_id":null,"direction":null,
 "evidence_refs":[],"confidence":0.0,"reason":"当前画面无法唯一继续的具体原因"}}
 {{INPUT_RULE}}
+系统动作语义（均不绑定scene元素，每轮至多选择其中一个）：
+- home：返回Android启动器/主屏幕。当当前前台App不是当前高层目标的目标App，且当前
+  App画面内没有目标App入口时，可以选择home作为唯一下一步；不得仅因目标App入口
+  不在当前App画面而blocked。
+- back：只返回当前App或当前系统页面的上一层，不用于任意切换到另一个App。
+- open_recent_apps：打开Android最近任务卡片页；仅当当前目标需要查看、切换或清理
+  已存在的任务卡片时使用。
+- reveal_system_navigation：当前系统导航控件不可见、而下一步需要back、home或
+  open_recent_apps时，用它先显示系统导航。
+- wait_for_change：仅用于当前画面正在加载或变化、应等待其稳定的情况，不得用它替代
+  home、back或open_recent_apps等明确导航动作。
 decision规则：
 1. status=action时，action只能是tap_semantic、dismiss_overlay、input_verified_text、
    press_enter、clear_verified_text、double_tap、long_press、drag、swipe、back、home、

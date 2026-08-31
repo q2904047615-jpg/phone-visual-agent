@@ -15,21 +15,15 @@ from agent.domain.task_semantic_ir import (
     apply_formal_semantic_risk_policy,
     compile_formal_semantic_authority,
 )
-from agent.domain import task_graph as task_graph_domain
 from agent.domain.task_graph import (
     DynamicTaskGraph,
     ObservedState,
     REPLAN_TRIGGERS,
     ReplanRecord,
     TaskGraphError,
-    _apply_verified_navigation_completion,
     _graph_from_payload,
-    _normalize_single_effect_result_string,
-    _normalize_unique_planner_transport_aliases,
     _planner_transport_snapshot,
-    _project_terminal_single_navigation_candidate,
     _require_text,
-    _restore_completed_history_evidence,
     _validate_device_id,
     _validate_task_id,
 )
@@ -70,13 +64,9 @@ class DeepSeekTaskGraphPlanner:
         prompt = _initial_prompt(text)
         graph = self._request_graph(prompt, task_id=resolved_task_id, device_id=device_id, revision=1,
             raw_user_goal=text, validate=False)
-        # The typed graph is the sole planning authority. Only the syntax-only
-        # wire normalizers in ``_request_graph`` run before this strict check;
-        # local code never rewrites its surface, frontier, status or semantics.
         graph.validate()
         graph = self._apply_formal_semantic_authority(graph)
         graph.validate()
-        reject_if(graph.status == 'completed' or any((item.status == 'completed' for item in graph.subgoals)) or any((item.satisfied for item in graph.completion_conditions)), TaskGraphError("初始规划没有观察证据，不能宣称目标或子目标已完成。"))
         return graph
 
     def replan(self, graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str,
@@ -85,21 +75,27 @@ class DeepSeekTaskGraphPlanner:
         observation.validate()
         reject_if(trigger not in REPLAN_TRIGGERS, TaskGraphError(f"不支持的重规划触发原因：{trigger}"))
         _require_text(reason, "replan.reason")
+        self._validate_replan_input(graph, observation, trigger=trigger)
         self._reset_semantic_authority()
-        self._require_provider()
-        prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
-        candidate = self._request_graph(prompt, task_id=graph.task_id, device_id=graph.device_id,
-            revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective, validate=False)
-        candidate = _restore_completed_history_evidence(graph, candidate)
-        candidate = _project_terminal_single_navigation_candidate(graph, candidate, observation, trigger=trigger)
-        candidate = _apply_verified_navigation_completion(graph, candidate, observation, trigger=trigger)
-        # Validate the raw typed transport once before local projection.  The
-        # revision-specific execution-class and EffectIntent invariants are
-        # owned by _validate_replan_candidate below and must not be duplicated
-        # on the same candidate.
+        if trigger in {'action_result_matched', 'subgoal_completed'}:
+            snapshot = _planner_transport_snapshot(graph)
+            local_definition = {
+                'subgoals': snapshot['subgoals'],
+                'clarification_questions': [],
+            }
+            self.last_raw_response = ''
+            candidate = _graph_from_payload(local_definition, task_id=graph.task_id, device_id=graph.device_id,
+                revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective,
+                previous=graph, observation=observation, trigger=trigger)
+        else:
+            self._require_provider()
+            prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
+            candidate = self._request_graph(prompt, task_id=graph.task_id, device_id=graph.device_id,
+                revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective,
+                previous=graph, observation=observation, trigger=trigger, validate=False)
         candidate.validate()
         candidate = self._apply_formal_semantic_authority(candidate)
-        self._validate_replan_candidate(graph, candidate, observation, trigger=trigger)
+        candidate.validate()
         previous_ids = {item.subgoal_id for item in graph.subgoals}
         completed_ids = tuple((item.subgoal_id for item in graph.subgoals if item.status == 'completed'))
         added_ids = tuple((item.subgoal_id for item in candidate.subgoals if item.subgoal_id not in previous_ids))
@@ -146,11 +142,9 @@ class DeepSeekTaskGraphPlanner:
         self.last_semantic_authority = None
         self.last_semantic_authority_error = ""
 
-    def _validate_replan_candidate(self, graph: DynamicTaskGraph, candidate: DynamicTaskGraph,
-        observation: ObservedState, *, trigger: str) -> None:
-        """Apply every safety and evidence check to one replan candidate."""
+    def _validate_replan_input(self, graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str) -> None:
+        """Validate only the one local event that can advance the runtime."""
 
-        reject_if(candidate.revision != graph.revision + 1, TaskGraphError('重规划 revision 必须严格等于上一 revision + 1。'))
         transition = observation.verified_action_transition
         if trigger in {'action_result_matched', 'action_result_mismatch'}:
             reject_if(transition is None, TaskGraphError("动作结果重规划缺少本地 verified action transition。"))
@@ -164,16 +158,8 @@ class DeepSeekTaskGraphPlanner:
         elif trigger == 'observation_changed' and transition is not None:
             raise TaskGraphError("纯观察变化不得携带动作执行回执。")
 
-        task_graph_domain._validate_execution_class_revision(graph, candidate)
-        task_graph_domain._validate_preserved_effect_intents(graph, candidate)
-        candidate.validate()
-        previous_current = graph.active_subgoal()
-        candidate_current = candidate.active_subgoal()
-        reject_if(trigger == 'action_result_mismatch' and previous_current is not None and (next((item.status for item in candidate.subgoals if item.subgoal_id == previous_current.subgoal_id), None) == 'completed'), TaskGraphError('动作结果不匹配时不能完成回执绑定的上一活动子目标。'))
-        reject_if(trigger == 'subgoal_completed' and previous_current is not None and (previous_current.external_impact == 'read_only') and (candidate_current is not None) and (candidate_current.external_impact == 'read_only'), TaskGraphError('read_only 完成复核不能继续保留 read_only 活动子目标；当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。'))
-        task_graph_domain._validate_revision(graph, candidate, observation)
-
     def _request_graph(self, prompt: str, *, task_id: str, device_id: str, revision: int, raw_user_goal: str,
+        previous: DynamicTaskGraph | None=None, observation: ObservedState | None=None, trigger: str='',
         validate: bool=True) -> DynamicTaskGraph:
         raw = self.provider.chat_json([{'role': 'user', 'content': prompt}], max_tokens=2400)
         self.last_raw_response = raw
@@ -181,10 +167,8 @@ class DeepSeekTaskGraphPlanner:
             payload = _parse_json_object(raw)
         except GenericIntentError as exc:
             raise TaskGraphError(str(exc)) from exc
-        payload = _normalize_single_effect_result_string(payload)
-        payload = _normalize_unique_planner_transport_aliases(payload)
         graph = _graph_from_payload(payload, task_id=task_id, device_id=device_id, revision=revision,
-            raw_user_goal=raw_user_goal)
+            raw_user_goal=raw_user_goal, previous=previous, observation=observation, trigger=trigger)
         if validate:
             graph.validate()
         return graph
@@ -214,7 +198,7 @@ def _replan_prompt(graph: DynamicTaskGraph, observation: ObservedState, *, trigg
     return _render_prompt("deepseek_replan.txt",
         GRAPH=json.dumps(_planner_transport_snapshot(graph), ensure_ascii=False),
         TRIGGER=json.dumps(trigger, ensure_ascii=False), REASON=json.dumps(reason, ensure_ascii=False),
-        OBSERVATION=json.dumps(observation.to_dict(), ensure_ascii=False), SCHEMA=_schema_prompt())
+        OBSERVATION=json.dumps(observation.to_dict(), ensure_ascii=False))
 
 
 def _schema_prompt() -> str:

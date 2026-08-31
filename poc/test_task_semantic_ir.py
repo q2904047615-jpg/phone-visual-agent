@@ -949,7 +949,6 @@ class TaskSemanticIRTests(unittest.TestCase):
 
         mutations = (
             conditions([]),
-            conditions(["消息已发送", "输入框为空"]),
             conditions(["不得发送消息"]),
             conditions(["消息尚未发送"]),
             effect(source_subgoal_ids=["open_wechat", "send_message"]),
@@ -978,6 +977,17 @@ class TaskSemanticIRTests(unittest.TestCase):
                         device_id="device-local-01",
                         task_id=f"closed-effect-result-{index}",
                     )
+
+    def test_multiple_positive_effect_results_are_derived_without_a_model_copy(self):
+        payload = current_send_failure_payload()
+        payload["effect_intents"][0]["expected_results"] = ["模型旧副本不会被读取"]
+        payload["subgoals"][1]["completion_conditions"] = ["消息已发送", "输入框为空"]
+
+        graph = DeepSeekTaskGraphPlanner(OneResponseProvider(payload)).plan(
+            RAW_GOAL, device_id="device-local-01", task_id="derived-effect-results"
+        )
+
+        self.assertEqual(("消息已发送", "输入框为空"), graph.risk_actions[0].expected_result_texts)
 
     def test_constraint_wording_never_changes_shadow_risk(self):
         variants = (

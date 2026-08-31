@@ -1,38 +1,33 @@
-JSON 只允许以下结构：
+只返回一个 JSON 对象，不要 Markdown：
 {
-  "status":"ready|running|completed|blocked",
-  "goal":{
-    "objective":"用户目标，可保留点击、滑动、输入、长按、拖动等自然动作意图，但不得含坐标或系统命令",
-    "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称；设备或当前表面任务可为空数组"}],
-    "entities":{"recipient":"发送文字消息时逐字复制用户指定收件人；否则省略","input_text":"需要输入时逐字复制原文；否则省略","target_ui_label":"具名字面目标；否则省略","target_surface":"仅 device|system|current_surface；App任务省略","spatial_hint":"仅用户明确给出的上中下左右提示；否则省略","其他键":"仅供规划说明，不能扩大执行权限"}
+  "goal": {
+    "objective": "逐字保留用户目标",
+    "target_apps": [{"app_id": "稳定小写ID", "app_name": "App名称"}],
+    "entities": {"用户明确给出的对象或正文角色": "逐字值"}
   },
-  "constraints":["全局约束"],
-  "completion_conditions":[{
-    "condition_id":"小写稳定ID",
-    "description":"最终完成条件",
-    "evidence_required":["需要从画面看到的事实"],
-    "satisfied":false,
-    "evidence":[]
+  "constraints": ["用户明确约束"],
+  "completion_conditions": [{
+    "condition_id": "稳定小写ID",
+    "description": "最终需要出现的正向结果",
+    "evidence_required": ["从动作后新画面或结果中需要看到的事实"]
   }],
-  "effect_intents":[{
-    "effect_id":"小写稳定ID",
-    "kind":"send_message|publish_content|relationship_change|membership_change|data_mutation|authentication|financial_transaction|sensitive_permission_change|irreversible_account_deletion|irreversible_data_deletion",
-    "target_entity_roles":["goal.entities 中作为效果对象的键"],
-    "payload_entity_roles":["goal.entities 中作为效果正文或值的键"],
-    "source_subgoal_ids":["实际产生该效果的子目标ID"],
-    "expected_results":["逐字复制绑定子目标中的正向完成条件；单一效果任务也可复制唯一最终正向完成条件"]
+  "effect_intents": [{
+    "effect_id": "稳定小写ID",
+    "kind": "send_message|publish_content|relationship_change|membership_change|data_mutation|authentication|financial_transaction|sensitive_permission_change|irreversible_account_deletion|irreversible_data_deletion",
+    "target_entity_roles": ["goal.entities 中的对象角色"],
+    "payload_entity_roles": ["goal.entities 中的正文或值角色"],
+    "source_subgoal_ids": ["实际产生该效果的子目标ID"]
   }],
-  "subgoals":[{
-    "subgoal_id":"小写稳定ID",
-    "objective":"要执行的自然动作意图及其可验证后置状态",
-    "status":"pending|active|completed|blocked|skipped",
-    "depends_on":["前置子目标ID"],
-    "constraints":["本子目标约束"],
-    "completion_conditions":["本子目标完成条件"],
-    "completion_evidence":[],
-    "effect_ids":["本子目标实际产生的 effect_id；纯观察或导航为空"],
-    "execution_class":"observe|navigate|effect|unknown"
+  "subgoals": [{
+    "subgoal_id": "稳定小写ID",
+    "objective": "一个高层状态目标，不含坐标或系统命令",
+    "depends_on": ["前置子目标ID"],
+    "constraints": ["本子目标约束"],
+    "completion_conditions": ["动作后应出现的正向结果"],
+    "execution_class": "observe|navigate|effect|unknown"
   }],
-  "active_subgoal_id":"活动子目标ID或null",
-  "clarification_questions":["阻塞时需要用户补充的信息"]
+  "clarification_questions": ["只有缺少信息导致目标无法唯一执行时才填写"]
 }
+
+不要输出 status、active_subgoal_id、satisfied、evidence、completion_evidence、effect_ids 或
+expected_results。本地运行时会从计划顺序、依赖、当前新截图和一次动作结果派生这些显示字段。

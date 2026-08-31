@@ -57,7 +57,7 @@ from agent.application.input_value_lineage import (
 from agent.domain.input_value_lineage import TypedInputLineage
 import agent.domain.generic_goal as generic_goal_domain
 
-SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-31-single-step-scene-decision-v3"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-01-single-step-scene-decision-v4"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-08-31-single-step-qwen-decision-v3"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
@@ -162,6 +162,7 @@ class _SingleStepObserverBase:
         self._current_stage = "idle"
         self._last_stage = "idle"
         self.supports_post_action_visual_context = True
+        self.supports_runtime_action_contract = True
         self._observation_cache_lock = threading.RLock()
         self._observation_cache: OrderedDict[str, tuple[UIScene, dict[str, Any]]] = OrderedDict()
         self._observation_cache_limit = 32
@@ -210,7 +211,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
 
     def observe(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
         device_id: str | None=None, input_lineage_override: TypedInputLineage | None=None,
-        post_action_context: post_action_contract.PostActionVisualContext | dict[str, Any] | None=None) -> UIScene:
+        post_action_context: post_action_contract.PostActionVisualContext | dict[str, Any] | None=None,
+        available_action_kinds: Iterable[str] | None=None) -> UIScene:
         if isinstance(post_action_context, dict):
             post_action_context = post_action_contract.PostActionVisualContext.from_dict(post_action_context)
         elif post_action_context is not None:
@@ -239,8 +241,10 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             fingerprint = local_frame_fingerprint(frame)
             context = generic_goal_domain.safe_goal_context(goal_context or {})
             goal = _goal_view(context)
+            runtime_actions = _normalize_runtime_action_kinds(available_action_kinds)
             cache_key = _observation_cache_key(device_id=device_id, fingerprint=fingerprint, goal_context=context,
-                input_lineage=input_lineage_override, post_action_context=post_action_context)
+                input_lineage=input_lineage_override, post_action_context=post_action_context,
+                available_action_kinds=runtime_actions)
             if cache_key is not None:
                 with self._observation_cache_lock:
                     cached_entry = self._observation_cache.get(cache_key)
@@ -276,7 +280,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
 
             prompt = _single_step_observation_prompt(context, include_input_structure=input_structure_required,
                 current_input_text=ledger_value_hint, image_count=len(model_frames),
-                request_image_size=request_image_size, post_action_context=post_action_context)
+                request_image_size=request_image_size, post_action_context=post_action_context,
+                available_action_kinds=runtime_actions)
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             for (index, item) in enumerate(model_frames, start=1):
                 content.extend(({'type': 'text', 'text': f'IMAGE {index} - SAME STABLE PHONE SURFACE'},
@@ -361,6 +366,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 'frame_size': list(frame.size), 'request_image_size': list(request_image_size),
                 'coordinate_normalization': envelope.get('coordinate_normalization'), 'fingerprint': fingerprint,
                 'element_count': len(scene.elements), 'decision_status': model_decision['status'],
+                'available_action_kinds': list(runtime_actions),
                 'model_call_elapsed_seconds': [call_elapsed],
                 'model_call_token_budgets': [SINGLE_STEP_OUTPUT_TOKENS],
                 'elapsed_seconds': round(time.perf_counter() - started, 3)}
@@ -477,7 +483,8 @@ LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
 
 def _single_step_observation_prompt(context: dict[str, Any], *, include_input_structure: bool,
     current_input_text: str | None, image_count: int, request_image_size: tuple[int, int],
-    post_action_context: post_action_contract.PostActionVisualContext | None) -> str:
+    post_action_context: post_action_contract.PostActionVisualContext | None,
+    available_action_kinds: tuple[str, ...]) -> str:
     request_width, request_height = request_image_size
     scene_contract = _compact_prompt(context, wire_height=request_height,
         input_structure_is_value_authority=include_input_structure)
@@ -503,7 +510,20 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
     return _render_prompt("single_step_observation.txt", SCENE_CONTRACT=scene_contract,
         INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule, POST_ACTION_RULE=post_action_rule,
         INPUT_RULE=input_rule, REQUEST_WIDTH=str(request_width), REQUEST_HEIGHT=str(request_height),
-        OBSERVATION_PROTOCOL=SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION)
+        OBSERVATION_PROTOCOL=SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION,
+        AVAILABLE_ACTIONS_JSON=json.dumps(list(available_action_kinds), ensure_ascii=False, separators=(',', ':')))
+
+
+def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return tuple(sorted(CANONICAL_ACTION_KINDS))
+    try:
+        normalized = frozenset(str(item or '').strip() for item in value)
+    except TypeError as exc:
+        raise VisionAgentError("本轮可用动作集合必须是可迭代字符串。") from exc
+    reject_if(not normalized or '' in normalized or normalized - CANONICAL_ACTION_KINDS,
+        VisionAgentError("本轮可用动作集合为空或包含协议外动作。"))
+    return tuple(sorted(normalized))
 
 
 def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_image_size: tuple[int,
@@ -2169,12 +2189,13 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
 
 def _observation_cache_key(*, device_id: str | None, fingerprint: str, goal_context: dict[str, Any],
     input_lineage: TypedInputLineage | None, post_action_context: post_action_contract.PostActionVisualContext |
-    None) -> str | None:
+    None, available_action_kinds: tuple[str, ...]) -> str | None:
     resolved_device = str(device_id or "").strip()
     if resolved_device.casefold() in {'', 'unbound', 'unknown', 'none', 'null'}:
         return None
     lineage_payload = input_lineage.to_dict() if input_lineage is not None else None
     payload = {'device_id': resolved_device, 'fingerprint': str(fingerprint or '').strip(),
         'goal_context': goal_context, 'input_lineage': lineage_payload,
-        'post_action_context': post_action_context.to_dict() if post_action_context is not None else None}
+        'post_action_context': post_action_context.to_dict() if post_action_context is not None else None,
+        'available_action_kinds': list(available_action_kinds)}
     return canonical_digest(payload)

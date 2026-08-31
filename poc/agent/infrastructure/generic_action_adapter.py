@@ -708,6 +708,8 @@ class GenericSingleActionAdapter:
         input_lineage_override: TypedInputLineage | None=None,
         post_action_context: PostActionVisualContext | None=None) -> UIScene:
         kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
+        if getattr(self.observer, 'supports_runtime_action_contract', False) is True:
+            kwargs['available_action_kinds'] = self.supported_action_kinds()
         if getattr(self.observer, 'input_lineage_store', None) is not None:
             kwargs["device_id"] = self.device_id
             kwargs["input_lineage_override"] = input_lineage_override

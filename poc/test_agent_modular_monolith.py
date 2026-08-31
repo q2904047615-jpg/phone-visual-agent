@@ -1851,7 +1851,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(observer_module, "PostActionVisualContext"))
         self.assertEqual(
-            "2026-08-31-single-step-scene-decision-v3",
+            "2026-09-01-single-step-scene-decision-v4",
             observer_module.SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
 

@@ -38,9 +38,12 @@ scene与input_structure必须共用一个coordinate_space，绝不能各用一�
 "source_element_id":null,"destination_element_id":null,"direction":null,
 "evidence_refs":[],"confidence":0.0,"reason":"当前画面无法唯一继续的具体原因"}}
 {{INPUT_RULE}}
+当前设备本轮可用动作（唯一运行时动作集合）：{{AVAILABLE_ACTIONS_JSON}}。
+status=action时的action必须来自这个集合；未列出的协议动作在本轮不可用。
 系统动作语义（均不绑定scene元素，每轮至多选择其中一个）：
 - home：返回Android启动器/主屏幕。当当前前台App不是当前高层目标的目标App，且当前
-  App画面内没有目标App入口时，可以选择home作为唯一下一步；不得仅因目标App入口
+  App画面内没有目标App入口时，只要home在本轮可用动作集合中，就应选择home作为
+  唯一下一步；不得仅因目标App入口
   不在当前App画面而blocked。
 - back：只返回当前App或当前系统页面的上一层，不用于任意切换到另一个App。
 - open_recent_apps：打开Android最近任务卡片页；仅当当前目标需要查看、切换或清理
@@ -50,7 +53,8 @@ scene与input_structure必须共用一个coordinate_space，绝不能各用一�
 - wait_for_change：仅用于当前画面正在加载或变化、应等待其稳定的情况，不得用它替代
   home、back或open_recent_apps等明确导航动作。
 decision规则：
-1. status=action时，action只能是tap_semantic、dismiss_overlay、input_verified_text、
+1. status=action时，action必须来自上面的本轮可用动作集合。协议允许的动作全集是
+   tap_semantic、dismiss_overlay、input_verified_text、
    press_enter、clear_verified_text、double_tap、long_press、drag、swipe、back、home、
    open_recent_apps、reveal_system_navigation、wait_for_change或launch_app。只选择当前
    画面和当前高层目标所需的一步，不预测下一页动作。
@@ -61,9 +65,12 @@ decision规则：
 3. 当前高层目标已经由本图证明时写status=finish、action及动作引用均为null，并在
    evidence_refs中写一个或多个`scene.summary`或`element:<本响应element_id>`。不要把
    “刚才动作可能成功”当成finish；只看本轮JPEG和本响应scene。
-4. 目标在当前画面确实不可唯一执行且也未完成时写status=blocked，动作引用和
-   evidence_refs均为空，并具体说明缺少什么。不要仅因存在辅助容器或多个非动作事实
-   blocked；模型应在多个可执行元素中按用户当前目标直接选出一个。
+4. status=blocked只表示：当前目标尚未完成，并且本轮可用动作集合中的所有动作都无法
+   从当前画面取得进展；“当前画面没有最终目标控件”本身不等于blocked。若判断必须退出
+   当前App或返回Launcher/主屏幕才能继续，且home在本轮可用动作集合中，必须写
+   status=action、action=home。blocked时动作引用和evidence_refs均为空，并具体说明所有
+   可用动作为什么都不能推进。不要仅因存在辅助容器或多个非动作事实blocked；模型应在
+   多个可执行元素中按用户当前目标直接选出一个。
 5. action与blocked的evidence_refs必须为空。所有decision字段始终完整出现；confidence
    为0..1。decision不得携带正文、包名、坐标、candidate ID或多步计划。
 

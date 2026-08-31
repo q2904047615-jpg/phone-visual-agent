@@ -727,6 +727,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     frames=frames,
                     goal_context=goal_context,
                     device_id="device-local-01",
+                    available_action_kinds={"back", "home"},
                 )
 
                 image_parts = [
@@ -760,6 +761,22 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 )
                 self.assertIn(
                     "open_recent_apps：打开Android最近任务卡片页",
+                    prompt,
+                )
+                self.assertIn(
+                    '当前设备本轮可用动作（唯一运行时动作集合）：["back","home"]',
+                    prompt,
+                )
+                self.assertIn(
+                    "若判断必须退出",
+                    prompt,
+                )
+                self.assertIn(
+                    "当前App或返回Launcher/主屏幕才能继续",
+                    prompt,
+                )
+                self.assertIn(
+                    "必须写\n   status=action、action=home",
                     prompt,
                 )
 
@@ -830,6 +847,62 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(
             "pending_visual_verification",
             observer.last_diagnostics["post_action_visual_context"]["outcome"],
+        )
+
+    def test_runtime_action_set_changes_prompt_and_cache_identity(self) -> None:
+        envelope = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": scene_payload(),
+            "input_structure": None,
+        }
+        provider = SequenceProvider(
+            [
+                json.loads(json.dumps(envelope)),
+                json.loads(json.dumps(envelope)),
+            ]
+        )
+        observer = SingleStepGenericSceneObserver(provider)
+        frames = stable_frames()
+        goal_context = {
+            "objective": "打开目标应用",
+            "execution_class": "navigate",
+            "completion_conditions": ["目标应用主页面可见"],
+        }
+
+        observer.observe(
+            frames=frames,
+            goal_context=goal_context,
+            device_id="device-local-01",
+            available_action_kinds={"home"},
+        )
+        observer.observe(
+            frames=frames,
+            goal_context=goal_context,
+            device_id="device-local-01",
+            available_action_kinds={"back"},
+        )
+        observer.observe(
+            frames=frames,
+            goal_context=goal_context,
+            device_id="device-local-01",
+            available_action_kinds={"back"},
+        )
+
+        self.assertEqual(2, provider.calls)
+        home_prompt = provider.messages_seen[0][1]["content"][0]["text"]
+        back_prompt = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn(
+            '当前设备本轮可用动作（唯一运行时动作集合）：["home"]',
+            home_prompt,
+        )
+        self.assertIn(
+            '当前设备本轮可用动作（唯一运行时动作集合）：["back"]',
+            back_prompt,
         )
 
     def test_post_action_context_cannot_predeclare_matched(self) -> None:

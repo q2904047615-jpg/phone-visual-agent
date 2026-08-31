@@ -3137,6 +3137,38 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
             self.assertEqual([], list(evidence_dir.glob("*_qwen_failure.json")))
 
+    def test_adapter_passes_the_device_runtime_action_set_to_qwen(self):
+        class RuntimeActionObserver(FakeSceneObserver):
+            supports_runtime_action_contract = True
+
+            def __init__(self, scenes):
+                super().__init__(scenes)
+                self.available_action_sets = []
+
+            def observe(
+                self,
+                *,
+                frames,
+                goal_context=None,
+                available_action_kinds=None,
+            ):
+                self.available_action_sets.append(frozenset(available_action_kinds or ()))
+                return super().observe(frames=frames, goal_context=goal_context)
+
+        observer = RuntimeActionObserver([scene("fresh")])
+        adapter = self._adapter(observer, FakeRobot())
+
+        adapter.capture_scene(
+            goal(),
+            evidence_dir=None,
+            prefix="before_step_1",
+        )
+
+        self.assertEqual(
+            [adapter.supported_action_kinds()],
+            observer.available_action_sets,
+        )
+
     def test_diagnostic_write_failure_preserves_primary_observation_error(self):
         observer = RawFailureSceneObserver('{"broken":true}')
         with tempfile.TemporaryDirectory() as temp, patch(

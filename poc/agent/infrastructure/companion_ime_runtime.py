@@ -11,6 +11,7 @@ import ssl
 from typing import Any, Callable, Mapping
 
 from agent.domain.text_transport import TextTransportProfile
+from agent.domain.foreground_app_identity import ForegroundAppIdentity
 from agent.infrastructure.companion_ime_transport import (
     CompanionImePairingAuthority,
     CompanionImeTextTransport,
@@ -383,6 +384,20 @@ class CompanionImeRuntimeRegistry:
     ) -> CompanionImeTextTransport | None:
         runtime = self._devices.get(str(device_id or "").strip())
         return runtime.transport if runtime is not None else None
+
+    def foreground_identity_for_device(
+        self,
+        device_id: str,
+    ) -> ForegroundAppIdentity | None:
+        runtime = self._devices.get(str(device_id or "").strip())
+        return runtime.bridge.foreground_app_identity() if runtime is not None else None
+
+    def foreground_identity_status_for_device(
+        self,
+        device_id: str,
+    ) -> dict[str, Any] | None:
+        runtime = self._devices.get(str(device_id or "").strip())
+        return runtime.bridge.foreground_identity_status() if runtime is not None else None
 
     def pairing_authority_for_device(
         self,

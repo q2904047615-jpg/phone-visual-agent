@@ -1,5 +1,6 @@
 package com.visualagent.companionime.transport;
 
+import com.visualagent.companionime.foreground.ForegroundAppIdentity;
 import com.visualagent.companionime.protocol.AuthenticatedMessages;
 import com.visualagent.companionime.protocol.CommandEnvelope;
 import com.visualagent.companionime.protocol.LengthPrefixedJsonCodec;
@@ -25,6 +26,7 @@ public final class CompanionCommandClient {
     public void processEditorSession(
             PairingRecord pairing,
             String editorSessionId,
+            ForegroundAppIdentity foregroundIdentity,
             ReplayGuard replayGuard,
             CommandExecution execution,
             BooleanSupplier editorSessionActive) throws IOException, ProtocolException {
@@ -38,20 +40,11 @@ public final class CompanionCommandClient {
                 if (!editorSessionActive.getAsBoolean()) {
                     return;
                 }
-                double nowEpoch = System.currentTimeMillis() / 1000.0;
-                JSONObject hello = AuthenticatedMessages.bridgeHello(
-                        pairing.pairingId(),
-                        pairing.deviceId(),
-                        nowEpoch,
-                        sharedKey);
-                String helloNonce = AuthenticatedMessages.innerNonce(hello, "hello");
-                LengthPrefixedJsonCodec.write(managedSocket.getOutputStream(), hello);
-                AuthenticatedMessages.verifyBridgeHelloAck(
-                        LengthPrefixedJsonCodec.read(managedSocket.getInputStream()),
-                        pairing.pairingId(),
-                        pairing.deviceId(),
-                        helloNonce,
-                        sharedKey);
+                authenticateAndPublish(
+                        managedSocket, pairing, foregroundIdentity, sharedKey);
+                if (!editorSessionActive.getAsBoolean()) {
+                    return;
+                }
 
                 JSONObject ready = AuthenticatedMessages.editorReady(
                         pairing.pairingId(),
@@ -101,6 +94,53 @@ public final class CompanionCommandClient {
             }
             Arrays.fill(sharedKey, (byte) 0);
         }
+    }
+
+    public void publishForegroundState(
+            PairingRecord pairing,
+            ForegroundAppIdentity foregroundIdentity)
+            throws IOException, ProtocolException {
+        byte[] sharedKey = pairing.sharedKey();
+        SSLSocket socket = null;
+        try {
+            socket = PinnedTlsSocket.connect(
+                    pairing.host(), pairing.port(), pairing.certificateSha256());
+            activeSocket.set(socket);
+            try (SSLSocket managedSocket = socket) {
+                authenticateAndPublish(
+                        managedSocket, pairing, foregroundIdentity, sharedKey);
+            }
+        } finally {
+            if (socket != null) {
+                activeSocket.compareAndSet(socket, null);
+            }
+            Arrays.fill(sharedKey, (byte) 0);
+        }
+    }
+
+    private static void authenticateAndPublish(
+            SSLSocket socket,
+            PairingRecord pairing,
+            ForegroundAppIdentity foregroundIdentity,
+            byte[] sharedKey) throws IOException, ProtocolException {
+        double nowEpoch = System.currentTimeMillis() / 1000.0;
+        JSONObject hello = AuthenticatedMessages.bridgeHello(
+                pairing.pairingId(), pairing.deviceId(), nowEpoch, sharedKey);
+        String helloNonce = AuthenticatedMessages.innerNonce(hello, "hello");
+        LengthPrefixedJsonCodec.write(socket.getOutputStream(), hello);
+        AuthenticatedMessages.verifyBridgeHelloAck(
+                LengthPrefixedJsonCodec.read(socket.getInputStream()),
+                pairing.pairingId(), pairing.deviceId(), helloNonce, sharedKey);
+
+        JSONObject state = AuthenticatedMessages.foregroundState(
+                pairing.pairingId(), pairing.deviceId(), foregroundIdentity,
+                System.currentTimeMillis() / 1000.0, sharedKey);
+        String stateNonce = AuthenticatedMessages.innerNonce(
+                state, "foreground_state");
+        LengthPrefixedJsonCodec.write(socket.getOutputStream(), state);
+        AuthenticatedMessages.verifyForegroundStateAck(
+                LengthPrefixedJsonCodec.read(socket.getInputStream()),
+                pairing.pairingId(), pairing.deviceId(), stateNonce, sharedKey);
     }
 
     public void cancelActive() {

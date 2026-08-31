@@ -345,6 +345,9 @@ class Runtime:
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
                 text_transport=self.text_transport_for_device(device_id),
+                foreground_identity_provider=lambda: (
+                    self.companion_ime_runtime.foreground_identity_for_device(device_id)
+                ),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
@@ -441,6 +444,9 @@ class Runtime:
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
                 text_transport=self.text_transport_for_device(device_id),
+                foreground_identity_provider=lambda: (
+                    self.companion_ime_runtime.foreground_identity_for_device(device_id)
+                ),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,

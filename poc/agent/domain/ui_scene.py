@@ -524,11 +524,13 @@ def scene_surface_kind(scene: UIScene) -> str:
     scene.validate()
     foreground = scene.foreground_app_id.strip().casefold()
     screen = scene.screen_id.strip().casefold()
+    concrete_package = bool(re.fullmatch(r'[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+', foreground))
     if (screen in {'system_recent_tasks', 'android_recent_tasks', 'recent_tasks', 'recent_apps',
-        'recents'} and foreground in {'system', 'android_system', 'launcher', 'unknown'}):
+        'recents'} and (foreground in {'system', 'android_system', 'launcher', 'unknown'} or concrete_package)):
         return "recent_tasks"
     identity = f"{foreground} {screen}"
-    if any((token in identity for token in ('launcher', 'home_screen', 'desktop'))):
+    if screen in {'android_home', 'ios_home', 'launcher', 'home_screen'} or any((token in identity for token in (
+        'launcher', 'home_screen', 'desktop'))):
         return "launcher"
     if scene.overlays:
         return "system_dialog" if "system" in identity else "app"
@@ -544,10 +546,11 @@ def _is_system_navigation_bar_fact(meaning: str) -> bool:
 def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:
     """Apply deterministic facts that must not depend on model interpretation."""
 
-    normalized_screen = screen_id.strip().lower()
-    if normalized_screen in {'android_home', 'ios_home', 'launcher', 'home_screen'}:
-        return "launcher"
     normalized_app = app_id.strip().lower()
+    normalized_screen = screen_id.strip().lower()
+    concrete_package = bool(re.fullmatch(r'[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+', normalized_app))
+    if normalized_screen in {'android_home', 'ios_home', 'launcher', 'home_screen'} and not concrete_package:
+        return "launcher"
     return normalized_app or "unknown"
 
 

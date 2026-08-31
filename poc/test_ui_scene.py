@@ -8,6 +8,7 @@ from agent.domain.ui_scene import (
     UIElement,
     UIScene,
     UISceneError,
+    scene_surface_kind,
 )
 from agent.domain.universal_action_controller import (
     LOCAL_POINT_GROUNDING_SOURCE,
@@ -167,6 +168,13 @@ class UISceneTests(unittest.TestCase):
         )
         self.assertEqual(current.foreground_app_id, "launcher")
         self.assertEqual(current.to_dict()["foreground_app_id"], "launcher")
+
+    def test_home_screen_preserves_trusted_concrete_launcher_package(self) -> None:
+        current = UIScene.from_dict({"foreground_app_id": "com.miui.home", "screen_id": "android_home",
+            "summary": "安卓桌面", "elements": [], "stable": True, "confidence": 0.95})
+
+        self.assertEqual("com.miui.home", current.foreground_app_id)
+        self.assertEqual("launcher", scene_surface_kind(current))
 
     def test_scene_rejects_model_action_fields(self) -> None:
         with self.assertRaisesRegex(UISceneError, "动作字段"):

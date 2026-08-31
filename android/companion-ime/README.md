@@ -1,7 +1,9 @@
 # Visual Agent Companion IME
 
 This is the project-owned Android text transport for the canonical
-`input_verified_text` and `clear_verified_text` actions. It is deliberately not
+`input_verified_text` and `clear_verified_text` actions. It also reports one
+signed current-foreground package-name fact so the visual model cannot invent
+which App owns the screen. It is deliberately not
 a visual agent, UI locator, task planner, clipboard helper, Accessibility
 service, ADB Keyboard, or shell bridge. It can only operate the Android
 `InputConnection` that is currently owned by this IME.
@@ -12,10 +14,19 @@ service, ADB Keyboard, or shell bridge. It can only operate the Android
 2. Open **Visual Agent Companion IME**.
 3. Enter the controller host, TLS port, the controller certificate's SHA-256
    fingerprint, and a one-time pairing token. The token is never persisted.
-4. Use the two buttons to open Android's input-method settings and select this
-   IME.
-5. Keep the phone and controller on a network on which the configured TLS port
+4. Open **Grant current-App access**, find **Visual Agent Companion IME**, and
+   enable Usage Access. This permission is used only to select the latest
+   `ACTIVITY_RESUMED` package and event time in memory; usage history, durations,
+   screen content, and UI nodes are never transmitted or persisted.
+5. Use the two input-method buttons to enable and select this IME.
+6. Keep the phone and controller on a network on which the configured TLS port
    is reachable.
+
+Updating an already paired installation to APK version `0.2.0` preserves the
+existing pairing. A paired `0.1.x` client keeps its existing text transport
+against the new controller, but it has no system foreground identity and the
+controller therefore uses the explicit Qwen visual fallback until `0.2.0` is
+installed and Usage Access is granted.
 
 The phone initiates every TLS connection. A manually supplied certificate pin
 is the trust root, so a private/self-signed controller certificate is allowed
@@ -83,7 +94,28 @@ The server returns exact `{hello_ack, signature}`; `hello_ack` contains
 `device_id, nonce, pairing_id, protocol_version, status=accepted,
 type=bridge_hello_ack` and must echo the hello nonce.
 
-For each active Android editor connection the IME generates a new opaque
+After hello, every connection sends exact `{foreground_state, signature}` under
+the separate `2026-09-01-foreground-app-identity-v1` protocol. It contains only:
+
+```text
+device_id, event_at_epoch, expires_at_epoch, issued_at_epoch, nonce,
+observed_at_epoch, package_name, pairing_id, protocol_version, reason_code,
+source, type=foreground_state
+```
+
+`source=editor_info` uses Android's system-verified `EditorInfo.packageName`
+while an editor is active. Otherwise `source=usage_stats` carries the latest
+`ACTIVITY_RESUMED` package and event time. If Usage Access is unavailable, the
+strict alternate shape is `source=unavailable`, null package/event, and a short
+reason code. The server authenticates freshness, device, pairing, HMAC, and
+nonce, then returns signed `foreground_state_ack`. The Android app refreshes
+this fact on a separate short TLS connection; it never sends the queried event
+history. A fresh system fact is the sole App-identity authority for that
+observation. When none is fresh, Qwen's visual App identity is the explicit
+fallback rather than a concurrent vote. Page type, controls, and actions remain
+Qwen responsibilities.
+
+For each active Android editor connection the IME then generates a new opaque
 `editor_session_id`, then sends exact `{ready, signature}`. `ready` contains:
 
 ```text
@@ -181,8 +213,10 @@ Use another unused ASCII drive letter if `R:` already exists.
 The expected APK is
 `app/build/outputs/apk/debug/app-debug.apk`.
 
-On 2026-08-30 this module was built on Windows with JDK 17.0.20.1, Gradle 8.9,
-Platform 35 and Build Tools 35.0.0. All 38 JVM tests passed, `lintDebug` completed
-with zero errors (13 warnings), and `assembleDebug` produced the expected APK.
-This build evidence does not replace installation, input-method selection,
-pairing, or real-device input acceptance.
+On 2026-09-01 version `0.2.0` was built on Windows with JDK 17.0.20.1,
+Gradle 8.9, Platform 35 and Build Tools 35.0.0. All 42 JVM tests passed,
+`lintDebug` completed with zero errors (15 warnings), and `assembleDebug`
+produced a 53,627-byte APK with SHA-256
+`7E7EBC75E0CA9F672A5634F1FED6A7E82A1BBDB4EEE39386667B88D34259145E`.
+This build evidence does not replace installation, Usage Access, input-method
+selection, pairing, or real-device input acceptance.

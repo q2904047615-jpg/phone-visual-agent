@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unittest
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -21,6 +22,7 @@ from agent.infrastructure.generic_scene_observer import (
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from agent.infrastructure.dashscope_vision_provider import _image_data_url
 from agent.domain.vision_model import VisionAgentError
+from agent.domain.foreground_app_identity import ForegroundAppIdentity
 
 
 def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
@@ -203,6 +205,41 @@ class SequenceProvider(FakeProvider):
                 confidence=float(value.get("confidence") or 0.0),
             )
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+class TrustedForegroundIdentityTests(unittest.TestCase):
+    def test_signed_system_identity_overrides_model_app_id_but_not_page_semantics(self) -> None:
+        provider = FakeProvider(scene_payload())
+        now = time.time()
+        identity = ForegroundAppIdentity(device_id="device-local-01", package_name="com.android.settings",
+            source="usage_stats", event_at_epoch=now - 10, observed_at_epoch=now)
+
+        observed = SingleStepGenericSceneObserver(provider).observe(frames=stable_frames(),
+            goal_context={"objective": "打开系统设置"}, device_id="device-local-01",
+            available_action_kinds={"home", "launch_app"}, trusted_foreground_identity=identity)
+
+        self.assertEqual("com.android.settings", observed.foreground_app_id)
+        self.assertEqual("app_home", observed.screen_id)
+        prompt = provider.messages[1]["content"][0]["text"]
+        self.assertIn("com.android.settings", prompt)
+        self.assertIn("不得根据JPEG", prompt)
+
+    def test_no_system_identity_keeps_visual_fallback_and_identity_changes_bust_cache(self) -> None:
+        provider = FakeProvider(scene_payload())
+        observer = SingleStepGenericSceneObserver(provider)
+        frames = stable_frames()
+        visual = observer.observe(frames=frames, goal_context={"objective": "观察当前页面"},
+            device_id="device-local-01", available_action_kinds={"home"})
+        now = time.time()
+        identity = ForegroundAppIdentity(device_id="device-local-01", package_name="com.tencent.mm",
+            source="editor_info", event_at_epoch=now, observed_at_epoch=now)
+        system = observer.observe(frames=frames, goal_context={"objective": "观察当前页面"},
+            device_id="device-local-01", available_action_kinds={"home"},
+            trusted_foreground_identity=identity)
+
+        self.assertEqual("calculator", visual.foreground_app_id)
+        self.assertEqual("com.tencent.mm", system.foreground_app_id)
+        self.assertEqual(2, provider.calls)
 
 
 def stable_frames(color: tuple[int, int, int] = (30, 40, 50)) -> list[Image.Image]:

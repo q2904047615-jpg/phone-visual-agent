@@ -1,5 +1,7 @@
 package com.visualagent.companionime.protocol;
 
+import com.visualagent.companionime.foreground.ForegroundAppIdentity;
+
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -17,6 +19,10 @@ public final class AuthenticatedMessages {
     private static final Set<String> READY_ACK_KEYS = exact(
             "protocol_version", "type", "device_id", "pairing_id", "editor_session_id",
             "nonce", "status");
+    private static final Set<String> FOREGROUND_ACK_ENVELOPE_KEYS = exact(
+            "foreground_state_ack", "signature");
+    private static final Set<String> FOREGROUND_ACK_KEYS = exact(
+            "protocol_version", "type", "device_id", "pairing_id", "nonce", "status");
 
     private AuthenticatedMessages() {
     }
@@ -81,6 +87,59 @@ public final class AuthenticatedMessages {
             return envelope("ready", ready, sharedKey);
         } catch (JSONException error) {
             throw new ProtocolException("unable to create editor ready", error);
+        }
+    }
+
+    public static JSONObject foregroundState(
+            String pairingId,
+            String deviceId,
+            ForegroundAppIdentity identity,
+            double nowEpoch,
+            byte[] sharedKey) throws ProtocolException {
+        JSONObject state = new JSONObject();
+        try {
+            state.put("protocol_version", ProtocolConstants.FOREGROUND_IDENTITY_VERSION);
+            state.put("type", "foreground_state");
+            state.put("device_id", deviceId);
+            state.put("pairing_id", pairingId);
+            state.put("package_name", identity.packageName() == null
+                    ? JSONObject.NULL : identity.packageName());
+            state.put("source", identity.source());
+            state.put("event_at_epoch", identity.eventAtEpoch() == null
+                    ? JSONObject.NULL : identity.eventAtEpoch());
+            state.put("observed_at_epoch", identity.observedAtEpoch());
+            state.put("reason_code", identity.reasonCode() == null
+                    ? JSONObject.NULL : identity.reasonCode());
+            state.put("issued_at_epoch", nowEpoch);
+            state.put("expires_at_epoch", nowEpoch + SESSION_AUTH_SECONDS);
+            state.put("nonce", Nonce.create());
+            return envelope("foreground_state", state, sharedKey);
+        } catch (JSONException error) {
+            throw new ProtocolException("unable to create foreground state", error);
+        }
+    }
+
+    public static void verifyForegroundStateAck(
+            JSONObject envelope,
+            String pairingId,
+            String deviceId,
+            String stateNonce,
+            byte[] sharedKey) throws ProtocolException {
+        StrictJson.requireExactKeys(envelope, FOREGROUND_ACK_ENVELOPE_KEYS);
+        JSONObject ack = requireObject(envelope, "foreground_state_ack");
+        StrictJson.requireExactKeys(ack, FOREGROUND_ACK_KEYS);
+        HmacAuthenticator.verify(
+                ack, StrictJson.requireString(envelope, "signature", 64), sharedKey);
+        if (!ProtocolConstants.FOREGROUND_IDENTITY_VERSION.equals(
+                StrictJson.requireString(ack, "protocol_version", 128))
+                || !"foreground_state_ack".equals(
+                        StrictJson.requireString(ack, "type", 64))
+                || !deviceId.equals(StrictJson.requireIdentifier(ack, "device_id"))
+                || !pairingId.equals(StrictJson.requireIdentifier(ack, "pairing_id"))
+                || !stateNonce.equals(StrictJson.requireNonce(ack, "nonce"))
+                || !"accepted".equals(StrictJson.requireString(ack, "status", 32))) {
+            throw new ProtocolException(
+                    "foreground state acknowledgement is not bound to this client");
         }
     }
 

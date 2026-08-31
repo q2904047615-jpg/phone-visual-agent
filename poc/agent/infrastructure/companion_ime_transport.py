@@ -33,6 +33,11 @@ from agent.domain.text_transport import (
     sign_text_transport_payload,
     verify_text_transport_signature,
 )
+from agent.domain.foreground_app_identity import (
+    FOREGROUND_APP_IDENTITY_PROTOCOL,
+    FOREGROUND_APP_IDENTITY_TTL_SECONDS,
+    ForegroundAppIdentity,
+)
 from agent.infrastructure.windows_companion_pairing_store import (
     StoredCompanionPairing,
     WindowsCompanionPairingStore,
@@ -47,6 +52,10 @@ _HELLO_FIELDS = frozenset({"protocol_version", "type", "device_id", "pairing_id"
     "expires_at_epoch", "nonce"})
 _READY_FIELDS = frozenset({"protocol_version", "type", "device_id", "pairing_id", "editor_session_id",
     "issued_at_epoch", "expires_at_epoch", "nonce"})
+_FOREGROUND_STATE_FIELDS = frozenset({"protocol_version", "type", "device_id", "pairing_id", "package_name",
+    "source", "event_at_epoch", "observed_at_epoch", "reason_code", "issued_at_epoch", "expires_at_epoch",
+    "nonce"})
+_ANDROID_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
 _PAIR_REQUEST_FIELDS = frozenset({"protocol_version", "type", "installation_id", "client_nonce",
     "one_time_token"})
 _PAIR_CONFIRM_FIELDS = frozenset({"protocol_version", "type", "installation_id", "client_nonce",
@@ -54,6 +63,35 @@ _PAIR_CONFIRM_FIELDS = frozenset({"protocol_version", "type", "installation_id",
 _PAIR_CONFIRM_ENVELOPE_FIELDS = frozenset({"confirm", "signature"})
 _PAIR_COMMIT_ENVELOPE_FIELDS = frozenset({"commit", "signature"})
 _MAX_FRAME_BYTES = TEXT_TRANSPORT_MAX_FRAME_BYTES
+
+
+def _validate_foreground_state_shape(state: Mapping[str, Any]) -> None:
+    if not isinstance(state, Mapping) or set(state) != _FOREGROUND_STATE_FIELDS:
+        raise TextTransportContractError("Companion 前台 App 状态字段无效。")
+    if state.get("protocol_version") != FOREGROUND_APP_IDENTITY_PROTOCOL or state.get("type") != "foreground_state":
+        raise TextTransportContractError("Companion 前台 App 状态协议无效。")
+    source = state.get("source")
+    package_name, event_at, reason_code = state.get("package_name"), state.get("event_at_epoch"), state.get(
+        "reason_code")
+    observed = state.get("observed_at_epoch")
+    issued, expires, nonce = state.get("issued_at_epoch"), state.get("expires_at_epoch"), state.get("nonce")
+    numeric = (observed, issued, expires)
+    if (any(isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item))
+        for item in numeric) or float(expires) <= float(issued) or float(observed) > float(expires)
+        or not isinstance(nonce, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{15,127}", nonce)):
+        raise TextTransportContractError("Companion 前台 App 状态时间或 nonce 无效。")
+    if source == "unavailable":
+        if (package_name is not None or event_at is not None or not isinstance(reason_code, str)
+            or not _REASON_CODE.fullmatch(reason_code)):
+            raise TextTransportContractError("Companion 前台 App 不可用状态无效。")
+        return
+    if source not in {"editor_info", "usage_stats"} or not isinstance(package_name,
+        str) or not _ANDROID_PACKAGE.fullmatch(package_name) or reason_code is not None:
+        raise TextTransportContractError("Companion 前台 App 身份来源或包名无效。")
+    if (isinstance(event_at, bool) or not isinstance(event_at, (int, float))
+        or not math.isfinite(float(event_at)) or float(event_at) > float(observed)):
+        raise TextTransportContractError("Companion 前台 App 事件时间无效。")
 
 
 class PairingTokenRegistry:
@@ -653,6 +691,22 @@ def build_companion_ime_editor_ready(profile: TextTransportProfile, pairing_key:
         pairing_key)})
 
 
+def build_companion_foreground_state(profile: TextTransportProfile, pairing_key: bytes, *, package_name: str | None,
+    source: str, event_at_epoch: float | None, observed_at_epoch: float, reason_code: str | None, nonce: str,
+    issued_at_epoch: float, expires_at_epoch: float) -> bytes:
+    """Build one signed current-foreground identity or explicit unavailable state."""
+
+    profile.validate()
+    state = {"protocol_version": FOREGROUND_APP_IDENTITY_PROTOCOL, "type": "foreground_state",
+        "device_id": profile.device_id, "pairing_id": profile.pairing_id, "package_name": package_name,
+        "source": source, "event_at_epoch": event_at_epoch, "observed_at_epoch": float(observed_at_epoch),
+        "reason_code": reason_code, "issued_at_epoch": float(issued_at_epoch),
+        "expires_at_epoch": float(expires_at_epoch), "nonce": nonce}
+    _validate_foreground_state_shape(state)
+    return canonical_text_transport_json({"foreground_state": state,
+        "signature": sign_text_transport_payload(state, pairing_key)})
+
+
 class TlsCompanionImeBridgeServer:
     """Length-prefixed TLS channel accepting one authenticated device connection."""
 
@@ -676,6 +730,8 @@ class TlsCompanionImeBridgeServer:
         self._listener: socket.socket | None = None
         self._connection: ssl.SSLSocket | None = None
         self._editor_session_id: str | None = None
+        self._foreground_identity: ForegroundAppIdentity | None = None
+        self._foreground_status: dict[str, Any] = {"available": False, "reason_code": "not_reported"}
         self._connection_guard = threading.RLock()
         self._exchange_guard = threading.Lock()
         self._hello_nonces: dict[str, float] = {}
@@ -738,6 +794,24 @@ class TlsCompanionImeBridgeServer:
         with self._connection_guard:
             return self._editor_session_id
 
+    def foreground_app_identity(self) -> ForegroundAppIdentity | None:
+        """Return only a fresh signed Android system identity for this exact device."""
+
+        with self._connection_guard:
+            identity = self._foreground_identity
+        if identity is None or not identity.is_fresh(float(self._clock()),
+            ttl_seconds=FOREGROUND_APP_IDENTITY_TTL_SECONDS):
+            return None
+        return identity
+
+    def foreground_identity_status(self) -> dict[str, Any]:
+        with self._connection_guard:
+            status = dict(self._foreground_status)
+            identity = self._foreground_identity
+        status["fresh"] = bool(identity is not None and identity.is_fresh(float(self._clock()),
+            ttl_seconds=FOREGROUND_APP_IDENTITY_TTL_SECONDS))
+        return status
+
     def exchange_once(self, payload: bytes, *, timeout_seconds: float) -> bytes:
         with self._exchange_guard:
             with self._connection_guard:
@@ -783,7 +857,19 @@ class TlsCompanionImeBridgeServer:
                     continue
                 ack = self._verify_hello(hello)
                 _send_frame(connection, ack)
-                ready = _receive_frame(connection)
+                next_frame = _receive_frame(connection)
+                try:
+                    next_envelope = json.loads(next_frame.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    next_envelope = None
+                if isinstance(next_envelope, Mapping) and "foreground_state" in next_envelope:
+                    foreground_ack = self._verify_foreground_state(next_frame)
+                    _send_frame(connection, foreground_ack)
+                    ready = _receive_frame(connection)
+                else:
+                    # A paired 0.1.x client still retains text transport while the
+                    # fresh system-identity source remains explicitly unavailable.
+                    ready = next_frame
                 editor_session_id, ready_ack = self._verify_ready(ready)
                 _send_frame(connection, ready_ack)
                 connection.settimeout(None)
@@ -835,6 +921,50 @@ class TlsCompanionImeBridgeServer:
             "device_id": self._profile.device_id, "pairing_id": self._profile.pairing_id, "nonce": nonce,
             "status": "accepted"}
         return canonical_text_transport_json({"hello_ack": ack, "signature": sign_text_transport_payload(ack, key)})
+
+    def _verify_foreground_state(self, value: bytes) -> bytes:
+        try:
+            envelope = json.loads(value.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TextTransportContractError("Companion 前台 App 状态不是有效 JSON。") from exc
+        if not isinstance(envelope, Mapping) or set(envelope) != {"foreground_state", "signature"}:
+            raise TextTransportContractError("Companion 前台 App 状态 envelope 无效。")
+        state = envelope["foreground_state"]
+        _validate_foreground_state_shape(state)
+        if state["device_id"] != self._profile.device_id or state["pairing_id"] != self._profile.pairing_id:
+            raise TextTransportScopeError("Companion 前台 App 状态不属于当前 profile。")
+        key = self._pairing_tokens.resolve(self._profile.pairing_id)
+        if key is None:
+            raise TextTransportAuthenticationError("Companion IME pairing 不可用。")
+        verify_text_transport_signature(state, envelope["signature"], key)
+        now = float(self._clock())
+        if now < float(state["issued_at_epoch"]) or now > float(state["expires_at_epoch"]):
+            raise TextTransportContractError("Companion 前台 App 状态已过期。")
+        replay_key = f"foreground:{state['nonce']}"
+        self._hello_nonces = {item: expiry for item, expiry in self._hello_nonces.items() if expiry >= now}
+        if replay_key in self._hello_nonces:
+            raise TextTransportReplayError("Companion 前台 App 状态 nonce 已使用。")
+        self._hello_nonces[replay_key] = float(state["expires_at_epoch"])
+        if state["source"] == "unavailable":
+            identity = None
+            status = {"available": False, "source": "unavailable", "reason_code": state["reason_code"],
+                "observed_at_epoch": float(state["observed_at_epoch"])}
+        else:
+            identity = ForegroundAppIdentity(device_id=state["device_id"], package_name=state["package_name"],
+                source=state["source"], event_at_epoch=float(state["event_at_epoch"]),
+                observed_at_epoch=float(state["observed_at_epoch"]))
+            identity.validate()
+            status = {"available": True, "source": identity.source, "package_name": identity.package_name,
+                "event_at_epoch": identity.event_at_epoch, "observed_at_epoch": identity.observed_at_epoch,
+                "reason_code": None}
+        with self._connection_guard:
+            self._foreground_identity = identity
+            self._foreground_status = status
+        ack = {"protocol_version": FOREGROUND_APP_IDENTITY_PROTOCOL, "type": "foreground_state_ack",
+            "device_id": self._profile.device_id, "pairing_id": self._profile.pairing_id,
+            "nonce": state["nonce"], "status": "accepted"}
+        return canonical_text_transport_json({"foreground_state_ack": ack,
+            "signature": sign_text_transport_payload(ack, key)})
 
     def _verify_ready(self, value: bytes) -> tuple[str, bytes]:
         try:
@@ -891,4 +1021,4 @@ __all__ = ["CompanionImeBridgeChannel", "CompanionImeCommandVerifier", "Companio
     "CompletedCompanionImePairing",
     "CompanionImeTextTransport", "NonceReplayGuard", "OneTimePairingGrant", "OneTimePairingTokenRegistry",
     "PairingTokenRegistry", "TlsCompanionImeBridgeServer", "build_companion_ime_ack",
-    "build_companion_ime_bridge_hello", "build_companion_ime_editor_ready"]
+    "build_companion_foreground_state", "build_companion_ime_bridge_hello", "build_companion_ime_editor_ready"]

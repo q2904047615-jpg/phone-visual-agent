@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
+import re
 import time
 from typing import Any, Callable, Iterable
 
@@ -24,11 +25,12 @@ from agent.domain.ui_scene import UIElement
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-01-qwen-same-response-action-finish-v7"
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-01-qwen-same-response-action-finish-v8"
 QWEN_VISUAL_DECISION_MODEL_ROLE = "single_response_scene_action_or_finish"
 SINGLE_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
     'clear_verified_text', 'double_tap', 'long_press'})
 QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
+_ANDROID_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
 
 
 def _targets_single_element(kind: str, params: Mapping[str, Any]) -> bool:
@@ -165,7 +167,8 @@ class QwenVisualDecisionObserver:
             for item in choices], 'device_action_kinds': sorted(available_actions)}
 
         if payload['status'] == 'finish':
-            decision = _finish_decision(payload, context=context, observation=trusted_observation)
+            decision = _finish_decision(payload, context=context, observation=trusted_observation,
+                launch_target=launch_target)
             self._metrics['model_finish_count'] += 1
         else:
             matches = tuple(item for item in choices if _choice_matches_model_decision(item, payload))
@@ -280,7 +283,14 @@ def _hydrate_canonical_selection(payload: Mapping[str, Any], *,
 
 
 def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation) -> QwenVisualDecision:
+    observation: trusted_observation_domain.TrustedObservation,
+    launch_target: Mapping[str, str] | None=None) -> QwenVisualDecision:
+    expected_app_id = str((launch_target or {}).get('expected_app_id') or '').strip()
+    current_app_id = str(observation.scene.foreground_app_id or '').strip()
+    reject_if(bool(_ANDROID_PACKAGE.fullmatch(expected_app_id) and _ANDROID_PACKAGE.fullmatch(current_app_id)
+        and expected_app_id.casefold() != current_app_id.casefold()),
+        VisionAgentError("当前Android系统前台包名与正式目标App不一致，Qwen不能把本轮判为finish："
+            f"current={current_app_id}，expected={expected_app_id}。"))
     evidence: list[str] = []
     for ref in payload.get('evidence_refs') or ():
         if ref == 'scene.summary':

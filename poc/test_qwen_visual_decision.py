@@ -171,6 +171,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         task_context: QwenTaskContext | None = None,
         trusted_observation=None,
         available_action_kinds: set[str] | None = None,
+        launch_target: dict[str, str] | None = None,
     ):
         source = SameResponseDecisionSource(payload)
         observer = QwenVisualDecisionObserver(
@@ -185,6 +186,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
             task_context=task_context or self.context,
             trusted_observation=trusted_observation or self.observation,
             available_action_kinds=available_action_kinds or {"tap_semantic"},
+            launch_target=launch_target,
         )
         return source, observer, decision
 
@@ -299,6 +301,34 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
     def test_finish_rejects_evidence_outside_current_scene(self) -> None:
         with self.assertRaisesRegex(VisionAgentError, "未知scene证据"):
             self.decide(finish_payload(evidence_refs=["history:old-frame"]))
+
+    def test_finish_rejects_real_foreground_package_that_conflicts_with_target_registry(self) -> None:
+        context, observation = self.wrong_app_target_case()
+        conflicting_scene = replace(observation.scene, app_id="com.tencent.mm",
+            summary="微信当前可见，系统设置尚未打开")
+        conflicting_observation = build_trusted_observation(frames=self.frames,
+            device_id="device-local-01", scene=conflicting_scene,
+            observation_id="obs_11111111111111111111111111111111")
+
+        with self.assertRaisesRegex(VisionAgentError, "前台包名与正式目标App不一致"):
+            self.decide(finish_payload(evidence_refs=["scene.summary"]), task_context=context,
+                trusted_observation=conflicting_observation,
+                available_action_kinds={"home", "launch_app"},
+                launch_target={"launch_ref": "settings", "expected_app_id": "com.android.settings"})
+
+    def test_finish_allows_matching_trusted_target_package(self) -> None:
+        context, observation = self.wrong_app_target_case()
+        matching_scene = replace(observation.scene, app_id="com.android.settings",
+            summary="系统设置主页面当前可见")
+        matching_observation = build_trusted_observation(frames=self.frames,
+            device_id="device-local-01", scene=matching_scene,
+            observation_id="obs_22222222222222222222222222222222")
+
+        _source, _observer, decision = self.decide(finish_payload(evidence_refs=["scene.summary"]),
+            task_context=context, trusted_observation=matching_observation,
+            available_action_kinds={"home", "launch_app"},
+            launch_target={"launch_ref": "settings", "expected_app_id": "com.android.settings"})
+        self.assertEqual("finish", decision.proposal.status)
 
     def test_decision_wire_shape_is_exact(self) -> None:
         malformed = action_payload(element_id="target-button")

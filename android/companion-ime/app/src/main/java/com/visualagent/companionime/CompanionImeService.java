@@ -9,6 +9,8 @@ import android.view.inputmethod.InputConnection;
 
 import com.visualagent.companionime.editor.EditorActionRunner;
 import com.visualagent.companionime.editor.InputConnectionAdapter;
+import com.visualagent.companionime.foreground.ForegroundAppIdentity;
+import com.visualagent.companionime.foreground.ForegroundAppIdentityReader;
 import com.visualagent.companionime.protocol.CommandEnvelope;
 import com.visualagent.companionime.replay.ReplayGuard;
 import com.visualagent.companionime.replay.SharedPreferencesReplayStore;
@@ -30,23 +32,35 @@ public final class CompanionImeService extends InputMethodService {
     private final Object editorLock = new Object();
 
     private volatile String currentEditorSessionId;
+    private volatile String currentEditorPackageName;
+    private volatile double currentEditorEventAtEpoch = Double.NaN;
     private Thread worker;
+    private Thread foregroundWorker;
     private EncryptedPairingStore pairingStore;
     private SharedPreferences.OnSharedPreferenceChangeListener pairingListener;
     private ReplayGuard replayGuard;
     private final CompanionCommandClient commandClient = new CompanionCommandClient();
+    private final CompanionCommandClient foregroundClient = new CompanionCommandClient();
     private final EditorActionRunner actionRunner = new EditorActionRunner();
+    private ForegroundAppIdentityReader foregroundIdentityReader;
 
     @Override
     public void onCreate() {
         super.onCreate();
         pairingStore = new EncryptedPairingStore(this);
-        pairingListener = (preferences, key) -> commandClient.cancelActive();
+        pairingListener = (preferences, key) -> {
+            commandClient.cancelActive();
+            foregroundClient.cancelActive();
+        };
         pairingStore.registerChangeListener(pairingListener);
         replayGuard = new ReplayGuard(new SharedPreferencesReplayStore(this));
+        foregroundIdentityReader = new ForegroundAppIdentityReader(this);
         running.set(true);
         worker = new Thread(this::runCommandLoop, "companion-ime-command-loop");
         worker.start();
+        foregroundWorker = new Thread(
+                this::runForegroundLoop, "companion-ime-foreground-loop");
+        foregroundWorker.start();
     }
 
     @Override
@@ -54,10 +68,16 @@ public final class CompanionImeService extends InputMethodService {
         super.onStartInput(attribute, restarting);
         synchronized (editorLock) {
             currentEditorSessionId = UUID.randomUUID().toString();
+            currentEditorPackageName = attribute == null ? null : attribute.packageName;
+            currentEditorEventAtEpoch = System.currentTimeMillis() / 1000.0;
         }
         commandClient.cancelActive();
+        foregroundClient.cancelActive();
         if (worker != null) {
             worker.interrupt();
+        }
+        if (foregroundWorker != null) {
+            foregroundWorker.interrupt();
         }
     }
 
@@ -65,8 +85,11 @@ public final class CompanionImeService extends InputMethodService {
     public void onFinishInput() {
         synchronized (editorLock) {
             currentEditorSessionId = null;
+            currentEditorPackageName = null;
+            currentEditorEventAtEpoch = Double.NaN;
         }
         commandClient.cancelActive();
+        foregroundClient.cancelActive();
         super.onFinishInput();
     }
 
@@ -75,20 +98,33 @@ public final class CompanionImeService extends InputMethodService {
         running.set(false);
         synchronized (editorLock) {
             currentEditorSessionId = null;
+            currentEditorPackageName = null;
+            currentEditorEventAtEpoch = Double.NaN;
         }
         commandClient.cancelActive();
+        foregroundClient.cancelActive();
         if (pairingStore != null && pairingListener != null) {
             pairingStore.unregisterChangeListener(pairingListener);
         }
         if (worker != null) {
             worker.interrupt();
         }
+        if (foregroundWorker != null) {
+            foregroundWorker.interrupt();
+        }
         super.onDestroy();
     }
 
     private void runCommandLoop() {
         while (running.get()) {
-            String editorSessionId = currentEditorSessionId;
+            String editorSessionId;
+            String editorPackageName;
+            double editorEventAtEpoch;
+            synchronized (editorLock) {
+                editorSessionId = currentEditorSessionId;
+                editorPackageName = currentEditorPackageName;
+                editorEventAtEpoch = currentEditorEventAtEpoch;
+            }
             if (editorSessionId == null) {
                 waitWithoutLogging();
                 continue;
@@ -100,9 +136,12 @@ public final class CompanionImeService extends InputMethodService {
                     continue;
                 }
                 try {
+                    ForegroundAppIdentity identity = foregroundIdentityReader.read(
+                            editorPackageName, editorEventAtEpoch);
                     commandClient.processEditorSession(
                             pairing,
                             editorSessionId,
+                            identity,
                             replayGuard,
                             command -> executeOnCurrentEditor(editorSessionId, command),
                             () -> running.get()
@@ -112,6 +151,34 @@ public final class CompanionImeService extends InputMethodService {
                 }
             } catch (Exception ignored) {
                 // Deliberately do not log protocol payloads or exception messages.
+            }
+            waitWithoutLogging();
+        }
+    }
+
+    private void runForegroundLoop() {
+        while (running.get()) {
+            try {
+                PairingRecord pairing = pairingStore.load();
+                if (pairing == null) {
+                    waitWithoutLogging();
+                    continue;
+                }
+                try {
+                    String editorPackageName;
+                    double editorEventAtEpoch;
+                    synchronized (editorLock) {
+                        editorPackageName = currentEditorPackageName;
+                        editorEventAtEpoch = currentEditorEventAtEpoch;
+                    }
+                    ForegroundAppIdentity identity = foregroundIdentityReader.read(
+                            editorPackageName, editorEventAtEpoch);
+                    foregroundClient.publishForegroundState(pairing, identity);
+                } finally {
+                    pairing.destroy();
+                }
+            } catch (Exception ignored) {
+                // Deliberately do not log identities, protocol payloads, or exceptions.
             }
             waitWithoutLogging();
         }

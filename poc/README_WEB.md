@@ -71,6 +71,13 @@ pairing HTTP 路由。已有有效配对时，此流程只同步同一 active ke
 且只接受原 `installation_id`。重装 App、换手机或需要换 key 时，必须先由用户显式撤销两端旧配对再重新
 配对，不能让两个安装实例共享同一设备 key。
 
+APK `0.2.0` 还需在系统的“有权查看使用情况的应用/Usage Access”中启用 **Visual Agent Companion
+IME**。Companion 只在内存中选出最新 `ACTIVITY_RESUMED` 的包名和事件时间（输入连接活跃时优先使用
+系统校验的 `EditorInfo.packageName`），经现有配对密钥签名后发送；不上传或保存使用历史、停留时长、
+屏幕内容或 UI 节点。新观察有新鲜系统包名时，它是 App 身份的唯一权威，Qwen 仍只负责 App 内页面、
+控件和下一 canonical 动作；状态不可用或超过 6 秒时才明确回退到当前截图视觉身份。旧 APK 没有该帧，
+但仍保留原有文字 transport，不会因项目 API 加载新协议而失效；覆盖安装 `0.2.0` 可保留现有配对。
+
 可选 App 包名直启配置：
 
 - `ROBOT_APP_PACKAGE_REGISTRY`：指向本机可信的 JSON 注册表；未设置时读取

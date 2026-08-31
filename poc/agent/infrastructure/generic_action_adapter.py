@@ -17,6 +17,7 @@ from PIL import Image, ImageChops, ImageStat
 from agent.domain.canonical_action_protocol import CanonicalActionProtocolError
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutor
 from agent.domain.confirmation_authority import ConfirmationAuthority
+from agent.domain.foreground_app_identity import ForegroundAppIdentity
 from agent.domain.text_transport import text_digest
 from agent.application.text_transport import TrustedTextTransportPort
 from agent.infrastructure import RobotDeviceExecutor
@@ -611,6 +612,7 @@ class GenericSingleActionAdapter:
     def __init__(self, *, capture: Callable[[], Image.Image], observer: SingleStepGenericSceneObserver, robot: Any,
         device_executor: DeviceExecutor | None=None, app_launcher: Any=None,
         text_transport: TrustedTextTransportPort | None=None,
+        foreground_identity_provider: Callable[[], ForegroundAppIdentity | None] | None=None,
         controller: UniversalActionController | None=None,
         frame_interval: float=0.37, post_action_settle: float=1.5, post_action_timeout: float | None=None,
         post_action_continuous_timeout: float | None=None, post_action_max_observations: int=2,
@@ -625,6 +627,7 @@ class GenericSingleActionAdapter:
         self.robot = robot
         self.app_launcher = app_launcher
         self.text_transport = text_transport
+        self.foreground_identity_provider = foreground_identity_provider
         if text_transport is not None:
             text_transport.profile.validate()
             reject_if(text_transport.profile.device_id != device_id,
@@ -710,9 +713,19 @@ class GenericSingleActionAdapter:
         kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
         if getattr(self.observer, 'supports_runtime_action_contract', False) is True:
             kwargs['available_action_kinds'] = self.supported_action_kinds()
-        if getattr(self.observer, 'input_lineage_store', None) is not None:
+        if (getattr(self.observer, 'input_lineage_store', None) is not None
+            or getattr(self.observer, 'supports_trusted_foreground_identity', False) is True):
             kwargs["device_id"] = self.device_id
+        if getattr(self.observer, 'input_lineage_store', None) is not None:
             kwargs["input_lineage_override"] = input_lineage_override
+        if (self.foreground_identity_provider is not None
+            and getattr(self.observer, 'supports_trusted_foreground_identity', False) is True):
+            identity = self.foreground_identity_provider()
+            if identity is not None:
+                identity.validate()
+                reject_if(identity.device_id != self.device_id,
+                    GenericActionAdapterError("Companion 前台 App 身份与当前设备不一致。"))
+                kwargs["trusted_foreground_identity"] = identity
         if (post_action_context is not None and getattr(self.observer, 'supports_post_action_visual_context',
             False) is True):
             kwargs["post_action_context"] = post_action_context

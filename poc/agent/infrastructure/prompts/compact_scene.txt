@@ -5,10 +5,7 @@
 
 用最短JSON报告：当前前台App、页面类型、最上层弹层，以及与目标直接相关的可见控件。
 规则：
-1. 桌面写 launcher；系统最近任务页面必须写foreground_app_id=system、
-   screen_id=system_recent_tasks；不确定写 unknown。不得把目标App当成当前App，也不得把
-   current_foreground、current_app、foreground_app、target_app 或 active_app 等引用占位符
-   写成foreground_app_id；该字段只能来自当前画面的视觉身份。
+1. {{FOREGROUND_IDENTITY_RULE}}
 2. elements最多{{MAX_ELEMENTS}}个。必须先报告目标相关控件和当前输入框，
    再报告关闭/返回与必要导航；省略新闻、商品、图片、标签组等无关内容。
 3. bounds使用[left,top,right,bottom]：横轴为0..1000，纵轴为0..{{WIRE_HEIGHT}}。

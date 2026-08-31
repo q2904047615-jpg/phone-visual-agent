@@ -1,5 +1,7 @@
 package com.visualagent.companionime.protocol;
 
+import com.visualagent.companionime.foreground.ForegroundAppIdentity;
+
 import org.json.JSONObject;
 import org.junit.Test;
 
@@ -50,6 +52,30 @@ public final class AuthenticatedMessagesTest {
                 keys(hello));
         HmacAuthenticator.verify(
                 hello, envelope.getString("signature"), CommandFixtures.KEY);
+    }
+
+    @Test
+    public void foregroundStateUsesSeparateProtocolAndExactSignedShape() throws Exception {
+        ForegroundAppIdentity identity = ForegroundAppIdentity.usageStats(
+                "com.android.settings", 990.0, 1000.0);
+        JSONObject envelope = AuthenticatedMessages.foregroundState(
+                "pairing-1", "device-1", identity, 1000.25, CommandFixtures.KEY);
+        JSONObject state = envelope.getJSONObject("foreground_state");
+
+        assertEquals(ProtocolConstants.FOREGROUND_IDENTITY_VERSION,
+                state.getString("protocol_version"));
+        assertEquals("com.android.settings", state.getString("package_name"));
+        assertEquals("usage_stats", state.getString("source"));
+        assertTrue(state.isNull("reason_code"));
+        assertEquals(new HashSet<>(Arrays.asList("foreground_state", "signature")),
+                keys(envelope));
+        assertEquals(new HashSet<>(Arrays.asList(
+                        "protocol_version", "type", "device_id", "pairing_id",
+                        "package_name", "source", "event_at_epoch", "observed_at_epoch",
+                        "reason_code", "issued_at_epoch", "expires_at_epoch", "nonce")),
+                keys(state));
+        HmacAuthenticator.verify(
+                state, envelope.getString("signature"), CommandFixtures.KEY);
     }
 
     @Test

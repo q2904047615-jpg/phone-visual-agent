@@ -20,12 +20,14 @@ from agent.domain.text_transport import (
     sign_text_transport_payload,
     text_digest,
 )
+from agent.domain.foreground_app_identity import FOREGROUND_APP_IDENTITY_PROTOCOL
 from agent.infrastructure import companion_ime_transport as bridge_module
 from agent.infrastructure.companion_ime_transport import (
     CompanionImeCommandVerifier,
     CompanionImeTextTransport,
     PairingTokenRegistry,
     TlsCompanionImeBridgeServer,
+    build_companion_foreground_state,
     build_companion_ime_ack,
     build_companion_ime_bridge_hello,
     build_companion_ime_editor_ready,
@@ -319,6 +321,57 @@ class CompanionImeTlsBridgeTests(unittest.TestCase):
             server._verify_ready(ready)
         self.assertTrue(server.is_secure())
         self.assertFalse(server.is_available())
+
+    def test_signed_foreground_identity_is_fresh_replay_guarded_and_can_be_cleared(self) -> None:
+        profile = _profile()
+        clock = [NOW]
+        server = TlsCompanionImeBridgeServer(profile, _registry(), ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+            clock=lambda: clock[0])
+        state = build_companion_foreground_state(profile, PAIRING_KEY, package_name="com.tencent.mm",
+            source="usage_stats", event_at_epoch=NOW - 20, observed_at_epoch=NOW,
+            reason_code=None, nonce="foreground-000000001", issued_at_epoch=NOW - 1,
+            expires_at_epoch=NOW + 10)
+
+        ack = json.loads(server._verify_foreground_state(state))
+        self.assertEqual(FOREGROUND_APP_IDENTITY_PROTOCOL, ack["foreground_state_ack"]["protocol_version"])
+        identity = server.foreground_app_identity()
+        self.assertIsNotNone(identity)
+        self.assertEqual("com.tencent.mm", identity.package_name)
+        self.assertEqual("usage_stats", identity.source)
+        with self.assertRaises(TextTransportReplayError):
+            server._verify_foreground_state(state)
+
+        unavailable = build_companion_foreground_state(profile, PAIRING_KEY, package_name=None,
+            source="unavailable", event_at_epoch=None, observed_at_epoch=NOW, reason_code="usage_access_not_granted",
+            nonce="foreground-000000002", issued_at_epoch=NOW - 1, expires_at_epoch=NOW + 10)
+        server._verify_foreground_state(unavailable)
+        self.assertIsNone(server.foreground_app_identity())
+        self.assertEqual("usage_access_not_granted", server.foreground_identity_status()["reason_code"])
+
+    def test_foreground_identity_rejects_tamper_wrong_device_and_staleness(self) -> None:
+        profile = _profile()
+        clock = [NOW]
+        server = TlsCompanionImeBridgeServer(profile, _registry(), ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+            clock=lambda: clock[0])
+        state = build_companion_foreground_state(profile, PAIRING_KEY, package_name="com.android.settings",
+            source="editor_info", event_at_epoch=NOW - 2, observed_at_epoch=NOW,
+            reason_code=None, nonce="foreground-000000011", issued_at_epoch=NOW - 1,
+            expires_at_epoch=NOW + 10)
+        tampered = json.loads(state)
+        tampered["foreground_state"]["package_name"] = "com.tencent.mm"
+        with self.assertRaises(TextTransportAuthenticationError):
+            server._verify_foreground_state(json.dumps(tampered).encode("utf-8"))
+
+        wrong_state = build_companion_foreground_state(_profile(device_id="device-2"), PAIRING_KEY,
+            package_name="com.android.settings", source="usage_stats", event_at_epoch=NOW - 2,
+            observed_at_epoch=NOW, reason_code=None, nonce="foreground-000000012",
+            issued_at_epoch=NOW - 1, expires_at_epoch=NOW + 10)
+        with self.assertRaises(TextTransportScopeError):
+            server._verify_foreground_state(wrong_state)
+
+        server._verify_foreground_state(state)
+        clock[0] = NOW + 7
+        self.assertIsNone(server.foreground_app_identity())
 
 
 if __name__ == "__main__":

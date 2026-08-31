@@ -15,6 +15,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import com.visualagent.companionime.security.EncryptedPairingStore;
+import com.visualagent.companionime.foreground.ForegroundAppIdentityReader;
 import com.visualagent.companionime.security.PairingClient;
 import com.visualagent.companionime.security.PairingRecord;
 
@@ -31,6 +32,7 @@ public final class PairingActivity extends Activity {
     private EditText oneTimeToken;
     private Button pairButton;
     private TextView status;
+    private TextView usageAccessStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,6 +41,15 @@ public final class PairingActivity extends Activity {
         pairingStore = new EncryptedPairingStore(this);
         setContentView(buildContent());
         refreshPairingStatus();
+        refreshUsageAccessStatus();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (usageAccessStatus != null) {
+            refreshUsageAccessStatus();
+        }
     }
 
     @Override
@@ -61,7 +72,9 @@ public final class PairingActivity extends Activity {
         TextView explanation = new TextView(this);
         explanation.setText(
                 "Pair once over pinned TLS, then enable and select this input method. "
-                        + "The one-time token and text commands are never persisted.");
+                        + "Grant Usage Access so the controller can receive only the current "
+                        + "foreground package name. Usage history, screen content, the one-time "
+                        + "token, and text commands are never persisted.");
         explanation.setPadding(0, padding / 2, 0, padding / 2);
         content.addView(explanation, matchWrap());
 
@@ -89,6 +102,10 @@ public final class PairingActivity extends Activity {
                     (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             manager.showInputMethodPicker();
         }), matchWrap());
+        content.addView(button("Grant current-App access", view ->
+                startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))), matchWrap());
+        usageAccessStatus = new TextView(this);
+        content.addView(usageAccessStatus, matchWrap());
         content.addView(button("Remove pairing", view -> removePairing()), matchWrap());
 
         status = new TextView(this);
@@ -180,5 +197,11 @@ public final class PairingActivity extends Activity {
                 record.destroy();
             }
         }
+    }
+
+    private void refreshUsageAccessStatus() {
+        usageAccessStatus.setText(ForegroundAppIdentityReader.hasUsageAccess(this)
+                ? "Current-App access granted."
+                : "Current-App access not granted; foreground identity will use visual fallback.");
     }
 }

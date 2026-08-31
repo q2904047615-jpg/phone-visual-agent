@@ -300,6 +300,31 @@ class UISceneTests(unittest.TestCase):
             scene(target, conflicting, confidence=0.6).unique_trusted_goal_element()
         )
 
+    def test_non_actionable_goal_context_does_not_veto_unique_action_target(self) -> None:
+        target = element(
+            "wechat",
+            "launch_wechat",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        page_context = element(
+            "pages",
+            "paged_viewport",
+            role="container",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "scrollable": True,
+                "scroll_axis": "horizontal",
+                "page_index": 2,
+                "page_count": 4,
+            },
+        )
+
+        self.assertEqual(
+            target,
+            scene(target, page_context).unique_trusted_goal_element(),
+        )
+
     def test_completion_evidence_never_makes_screen_action_executable(self) -> None:
         evidence = element(
             "visible-count",

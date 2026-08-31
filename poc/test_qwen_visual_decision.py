@@ -337,6 +337,92 @@ class PagedViewportSelectionRegressionTests(unittest.TestCase):
 
         self.assertIsNone(selected_direction())
 
+    def test_paged_viewport_context_does_not_veto_visible_app_button(self) -> None:
+        task_id = "task_visible_app_with_paged_context"
+        device_id = "device-local-01"
+        surface = SurfaceRef("surface_wechat", "app", app_id="wechat", app_name="微信")
+        semantic_ir = TaskSemanticIR(
+            task_id=task_id,
+            device_id=device_id,
+            revision=1,
+            raw_goal="打开微信",
+            surfaces=(surface,),
+            entities=(),
+            effects=(),
+            subgoals=(
+                SemanticSubgoal(
+                    "launch_wechat",
+                    surface.surface_id,
+                    "active",
+                    "navigation_only",
+                ),
+            ),
+        )
+        context = SimpleNamespace(
+            semantic_ir=semantic_ir,
+            current_subgoal={"subgoal_id": "launch_wechat"},
+            current_execution_class="navigate",
+            effect_action_allowed=False,
+        )
+        current_scene = UIScene(
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="微信按钮与桌面分页信息同时可见",
+            elements=(
+                UIElement(
+                    element_id="e1",
+                    role="button",
+                    meaning="launch_wechat",
+                    label="微信",
+                    bounds=(0.36, 0.617, 0.56, 0.75),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                    evidence=("绿色双气泡图标，下方标注微信",),
+                ),
+                UIElement(
+                    element_id="e2",
+                    role="container",
+                    meaning="paged_viewport",
+                    label="桌面分页区域",
+                    bounds=(0.0, 0.0, 1.0, 0.898),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "scrollable": True,
+                        "scroll_axis": "horizontal",
+                        "page_index": 2,
+                        "page_count": 4,
+                    },
+                    evidence=("四个分页圆点中第三个高亮",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+        )
+        observation = SimpleNamespace(
+            scene=current_scene,
+            target_local_candidate=current_scene.unique_trusted_goal_element,
+        )
+
+        choices = _selection_choices(
+            context,
+            observation,
+            frozenset({"back", "swipe", "tap_semantic", "wait_for_change"}),
+        )
+        selected = _deterministic_exact_selection_payload(
+            context,
+            choices,
+            observation=observation,
+        )
+
+        self.assertIsNotNone(selected)
+        selected_choice = next(
+            item for item in choices if item["choice_id"] == selected["choice_id"]
+        )
+        self.assertEqual("tap_semantic", selected_choice["action"])
+        self.assertEqual("e1", selected_choice["element_id"])
+
 
 class ElementBoundSwipeSelectionRegressionTests(unittest.TestCase):
     @staticmethod

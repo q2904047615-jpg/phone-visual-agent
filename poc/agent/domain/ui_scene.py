@@ -386,7 +386,7 @@ class UIScene:
         raise UISceneError(f"当前场景不存在元素：{expected}")
 
     def unique_trusted_goal_element(self, *, min_confidence: float=MIN_TARGET_CONFIDENCE) -> UIElement | None:
-        """Return the sole strong goal element without trusting the whole scene."""
+        """Return the sole strong actionable goal element in this scene."""
 
         self.validate()
         matches = tuple((element for element in self.elements if element.role in TARGET_LOCAL_ACTION_ROLES
@@ -398,8 +398,6 @@ class UIScene:
         for other in self.elements:
             if other.element_id == candidate.element_id:
                 continue
-            if other.states.get('goal_relevant') is True and float(other.confidence) >= min_confidence:
-                return None
             if (other.role in TARGET_LOCAL_ACTION_ROLES and float(other.confidence) >= min_confidence
                 and (bounds_overlap(candidate.bounds, other.bounds)['iou'] >= 0.5)):
                 return None

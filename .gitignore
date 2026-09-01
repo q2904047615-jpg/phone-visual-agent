@@ -16,6 +16,7 @@ tools/
 .ruff_cache/
 .playwright-cli/
 **/.playwright-cli/
+**/node_modules/
 poc/.venv/
 .venv/
 venv/

@@ -17,6 +17,19 @@ worker、旧任务队列或旧语义执行接口。
 DeepSeek 使用项目当前配置读取凭据。密钥不写入报告、不输出到终端，也不通过临时
 HTTP 命令传递。
 
+### 本地回归依赖
+
+Python 运行依赖由 `requirements-web.txt` 声明。前端浏览器合同测试的 Node 依赖由
+`package.json` 与 `package-lock.json` 固定；首次运行前在 `poc` 目录执行：
+
+```powershell
+npm ci
+npm test
+```
+
+`npm test` 依次运行不启动浏览器的协议测试和 Playwright 浏览器合同测试。真实模式启动脚本
+使用 `agent_api_cli.py bootstrap` 校验当前服务的 OpenAPI 与认证，不再硬编码探测某个业务路由。
+
 ### 可选 Companion IME 配置与首次配对
 
 `ROBOT_COMPANION_IME_REGISTRY` 可指向本机 Companion IME JSON 注册表；未设置时读取

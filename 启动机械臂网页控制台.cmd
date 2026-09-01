@@ -33,7 +33,7 @@ echo Starting local service first. The browser will open after it is ready...
 start "Robot Web Console Server" /D "%CD%" ".venv\Scripts\python.exe" -m uvicorn web_app:app --host 127.0.0.1 --port 8765
 
 for /L %%I in (1,1,30) do (
-  powershell.exe -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8765/api/device' -TimeoutSec 1; if ($r.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
+  ".venv\Scripts\python.exe" -X utf8 agent_api_cli.py --base-url http://127.0.0.1:8765 bootstrap >nul 2>&1
   if not errorlevel 1 goto :ready
   >nul ping 127.0.0.1 -n 2
 )

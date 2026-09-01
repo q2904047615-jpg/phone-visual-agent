@@ -12,12 +12,9 @@ from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-20-deepseek-typed-task-graph-v4"
 SUBGOAL_EXTERNAL_IMPACTS = frozenset({'read_only', 'navigation_only', 'external_state', 'unknown'})
-PLANNER_EXECUTION_CLASSES = frozenset({'observe', 'navigate', 'effect', 'unknown'})
 PLANNER_EFFECT_KINDS = frozenset({'send_message', 'publish_content', 'relationship_change', 'membership_change',
     'data_mutation', 'authentication', 'financial_transaction', 'sensitive_permission_change',
     'irreversible_account_deletion', 'irreversible_data_deletion'})
-_RUNTIME_IMPACT_BY_EXECUTION_CLASS = {'observe': 'read_only', 'navigate': 'navigation_only', 'effect': 'external_state',
-    'unknown': 'unknown'}
 NON_EFFECT_RESULT_PATTERN = re.compile(
     r"(?:保持|维持|仍然|仍旧).{0,24}(?:不变|原样|未发生|未触发|未执行)|"
     r"(?:未|没有|尚未|不得|不要|禁止|不能).{0,20}"
@@ -27,7 +24,8 @@ NON_EFFECT_RESULT_PATTERN = re.compile(
     r"\b(?:send|submit|publish|follow|comment|pay|login|authorize|delete|modify|save|sync)\b",
     re.IGNORECASE,
 )
-_EXECUTION_CLASS_BY_RUNTIME_IMPACT = {value: key for key, value in _RUNTIME_IMPACT_BY_EXECUTION_CLASS.items()}
+_EXECUTION_CLASS_BY_RUNTIME_IMPACT = {'read_only': 'observe', 'navigation_only': 'navigate',
+    'external_state': 'effect', 'unknown': 'unknown'}
 GRAPH_STATUSES = frozenset({'ready', 'running', 'awaiting_confirmation', 'completed', 'blocked'})
 SUBGOAL_STATUSES = frozenset({'pending', 'active', 'completed', 'blocked', 'skipped'})
 REPLAN_TRIGGERS = frozenset({'observation_changed', 'action_result_matched', 'action_mismatch',
@@ -678,7 +676,6 @@ def _subgoal_definition_wire(subgoal: Subgoal) -> dict[str, Any]:
         'depends_on': list(subgoal.depends_on),
         'constraints': list(subgoal.constraints),
         'completion_conditions': list(subgoal.completion_conditions),
-        'execution_class': _EXECUTION_CLASS_BY_RUNTIME_IMPACT[subgoal.external_impact],
     }
 
 
@@ -809,16 +806,14 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
 
 def _subgoal_from_payload(value: Any) -> Subgoal:
     item = _definition_object(value, {'subgoal_id', 'objective', 'depends_on', 'constraints',
-        'completion_conditions', 'execution_class'}, 'subgoals[]')
-    execution_class = str(item.get("execution_class") or "").strip().lower()
-    reject_if(execution_class not in PLANNER_EXECUTION_CLASSES, TaskGraphError(f'subgoals.execution_class 无效：{execution_class}'))
+        'completion_conditions'}, 'subgoals[]')
     return Subgoal(subgoal_id=str(item.get('subgoal_id') or '').strip().lower(),
         objective=_require_text(item.get('objective'), 'subgoals.objective'),
         status='pending', depends_on=_id_tuple(item.get('depends_on'),
         'subgoals.depends_on'), constraints=_text_tuple(item.get('constraints'), 'subgoals.constraints'),
         completion_conditions=_text_tuple(item.get('completion_conditions'), 'subgoals.completion_conditions'),
         completion_evidence=(), risk_action_ids=(),
-        external_impact=_RUNTIME_IMPACT_BY_EXECUTION_CLASS[execution_class])
+        external_impact='navigation_only')
 
 
 def _definition_object(value: Any, keys: set[str], path: str) -> dict[str, Any]:
@@ -829,6 +824,8 @@ def _definition_object(value: Any, keys: set[str], path: str) -> dict[str, Any]:
 
 
 def _derive_subgoal_effect_links(subgoals: tuple[Subgoal, ...], effects: tuple[RiskAction, ...]) -> tuple[Subgoal, ...]:
+    """Derive the sole runtime effect relationship from typed effect intents."""
+
     links: dict[str, list[str]] = {item.subgoal_id: [] for item in subgoals}
     for effect in effects:
         for subgoal_id in effect.subgoal_ids:
@@ -836,11 +833,8 @@ def _derive_subgoal_effect_links(subgoals: tuple[Subgoal, ...], effects: tuple[R
     linked: list[Subgoal] = []
     for subgoal in subgoals:
         effect_ids = tuple(links[subgoal.subgoal_id])
-        reject_if(subgoal.external_impact == 'external_state' and not effect_ids,
-            TaskGraphError(f'effect 子目标必须被一个 effect_intent 绑定：{subgoal.subgoal_id}'))
-        reject_if(subgoal.external_impact != 'external_state' and effect_ids,
-            TaskGraphError(f'effect_intent 只能绑定 execution_class=effect 的子目标：{subgoal.subgoal_id}'))
-        linked.append(replace(subgoal, risk_action_ids=effect_ids))
+        linked.append(replace(subgoal, risk_action_ids=effect_ids,
+            external_impact='external_state' if effect_ids else 'navigation_only'))
     return tuple(linked)
 
 

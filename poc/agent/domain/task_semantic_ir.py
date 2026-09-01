@@ -611,13 +611,10 @@ def _compile_runtime_graph_semantics(graph: Any) -> tuple[TaskSemanticIR, tuple[
         for semantic, context in zip(semantic_subgoals, input_contexts):
             actions = action_values.get(semantic.subgoal_id, set())
             owns_typed_action = bool(actions & {"input_verified_text", "clear_verified_text"})
-            literal_matches = [item for item in input_entities if isinstance(item.value,
-                str) and item.value and (item.value.casefold() in context)]
-            owns_exact_literal = len(literal_matches) == 1 and literal_matches[0].entity_id == entity.entity_id
             owns = owns_typed_action and (len(input_entities) == 1 or bool(label and label.casefold()
-                in context)) or owns_exact_literal
+                in context))
             verifies_exact_value = entity.entity_id in verified_input_subjects.get(semantic.subgoal_id, set())
-            if verifies_exact_value or (owns and semantic.external_impact != 'read_only'):
+            if verifies_exact_value or owns:
                 sources.append(semantic.subgoal_id)
         typed_fields.append(InputFieldIntent(field_id, entity.entity_id, label, recipient_refs,
             tuple(dict.fromkeys(sources)), isinstance(entity.value, str) and '\n' in entity.value))

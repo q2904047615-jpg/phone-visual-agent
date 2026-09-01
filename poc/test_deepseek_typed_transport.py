@@ -32,15 +32,17 @@ class RawProvider:
         return self.raw
 
 
-def subgoal(subgoal_id, objective, *, depends_on=(), execution_class="navigate", result="目标状态可见"):
-    return {
+def subgoal(subgoal_id, objective, *, depends_on=(), execution_class=None, result="目标状态可见"):
+    value = {
         "subgoal_id": subgoal_id,
         "objective": objective,
         "depends_on": list(depends_on),
         "constraints": [],
         "completion_conditions": [result],
-        "execution_class": execution_class,
     }
+    if execution_class is not None:
+        value["execution_class"] = execution_class
+    return value
 
 
 def initial_plan(*, subgoals=None, effects=(), entities=None, objective="完成普通手机任务"):
@@ -183,16 +185,87 @@ class SimplePlannerTransportTests(unittest.TestCase):
         }
         raw = initial_plan(
             entities={"recipient": "文件传输助手", "input_text": "你好"},
-            subgoals=[subgoal("send", "向文件传输助手发送你好", execution_class="effect", result="消息你好已发送")],
+            subgoals=[subgoal("send", "向文件传输助手发送你好", execution_class="navigate", result="消息你好已发送")],
             effects=[effect],
             objective="向文件传输助手发送你好",
         )
         graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(raw["goal"]["objective"], device_id="phone-1")
 
         self.assertEqual(("send_message",), graph.subgoals[0].risk_action_ids)
+        self.assertEqual("external_state", graph.subgoals[0].external_impact)
         self.assertEqual(("消息你好已发送",), graph.risk_actions[0].expected_result_texts)
         self.assertFalse(graph.risk_actions[0].confirmation_required)
         self.assertEqual("ready", graph.status)
+
+    def test_retired_execution_class_cannot_veto_input_then_send_plan(self):
+        raw = initial_plan(
+            objective="打开微信，给文件传输助手输入 aaazjie？你好，然后发送",
+            entities={"recipient": "文件传输助手", "input_text": "aaazjie？你好"},
+            subgoals=[
+                subgoal("open_wechat", "打开微信应用", execution_class="navigate", result="微信主界面可见"),
+                subgoal("navigate_to_file_transfer", "进入文件传输助手的聊天界面",
+                    depends_on=("open_wechat",), execution_class="navigate", result="聊天界面显示文件传输助手"),
+                subgoal("input_message", "在输入框输入文本 aaazjie？你好",
+                    depends_on=("navigate_to_file_transfer",), execution_class="effect",
+                    result="输入框显示文本 aaazjie？你好"),
+                subgoal("send_message", "发送输入的消息", depends_on=("input_message",),
+                    execution_class="effect", result="消息已发送，聊天界面出现发送的消息"),
+            ],
+            effects=[{
+                "effect_id": "send_message_effect",
+                "kind": "send_message",
+                "target_entity_roles": ["recipient"],
+                "payload_entity_roles": ["input_text"],
+                "source_subgoal_ids": ["send_message"],
+            }],
+        )
+        raw["goal"]["target_apps"] = [{"app_id": "wechat", "app_name": "微信"}]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+            raw["goal"]["objective"], device_id="phone-1"
+        )
+
+        by_id = {item.subgoal_id: item for item in graph.subgoals}
+        self.assertEqual("navigation_only", by_id["input_message"].external_impact)
+        self.assertEqual((), by_id["input_message"].risk_action_ids)
+        self.assertEqual("external_state", by_id["send_message"].external_impact)
+        self.assertEqual(("send_message_effect",), by_id["send_message"].risk_action_ids)
+        self.assertEqual("open_wechat", graph.active_subgoal_id)
+
+    def test_effect_source_is_authoritative_across_app_and_wording_variation(self):
+        raw = initial_plan(
+            objective="在浏览器表单填写 alpha，然后提交表单",
+            entities={"input_text": "alpha", "target": "当前表单"},
+            subgoals=[
+                subgoal("fill_form", "在表单输入框填写 alpha", execution_class="effect",
+                    result="表单输入框逐字显示 alpha"),
+                subgoal("submit_form", "提交当前表单", depends_on=("fill_form",),
+                    execution_class="observe", result="页面显示表单提交成功"),
+            ],
+            effects=[{
+                "effect_id": "submit_effect",
+                "kind": "data_mutation",
+                "target_entity_roles": ["target"],
+                "payload_entity_roles": ["input_text"],
+                "source_subgoal_ids": ["submit_form"],
+            }],
+        )
+        raw["goal"]["target_apps"] = [{"app_id": "browser", "app_name": "浏览器"}]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+            raw["goal"]["objective"], device_id="phone-1"
+        )
+
+        by_id = {item.subgoal_id: item for item in graph.subgoals}
+        self.assertEqual("navigation_only", by_id["fill_form"].external_impact)
+        self.assertEqual("external_state", by_id["submit_form"].external_impact)
+
+    def test_initial_prompt_does_not_request_duplicate_execution_class(self):
+        provider = FakeProvider(initial_plan())
+        DeepSeekTaskGraphPlanner(provider).plan("完成普通手机任务", device_id="phone-1")
+
+        prompt = provider.messages[0][0]["content"]
+        self.assertNotIn('"execution_class"', prompt)
 
     def test_only_authentication_and_payment_require_confirmation(self):
         cases = (
@@ -204,11 +277,12 @@ class SimplePlannerTransportTests(unittest.TestCase):
                 effect = {"effect_id": "effect", "kind": kind, "target_entity_roles": [target_role],
                     "payload_entity_roles": [], "source_subgoal_ids": ["step"]}
                 raw = initial_plan(entities=entities,
-                    subgoals=[subgoal("step", "执行用户明确要求的操作", execution_class="effect",
+                    subgoals=[subgoal("step", "执行用户明确要求的操作", execution_class="navigate",
                         result="用户要求的结果已经出现")], effects=[effect])
                 graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan("执行该操作", device_id="phone-1")
                 self.assertEqual("awaiting_confirmation", graph.status)
                 self.assertTrue(graph.risk_actions[0].confirmation_required)
+                self.assertEqual("external_state", graph.subgoals[0].external_impact)
 
     def test_matched_action_advances_to_remaining_subgoal(self):
         first = subgoal("open_app", "打开目标应用")
@@ -250,8 +324,43 @@ class SimplePlannerTransportTests(unittest.TestCase):
         self.assertEqual("recover", revised.active_subgoal_id)
         self.assertFalse(any(item.status == "completed" for item in revised.subgoals))
 
+    def test_mismatch_replan_merges_effect_history_before_deriving_links(self):
+        effect = {
+            "effect_id": "send_effect",
+            "kind": "send_message",
+            "target_entity_roles": ["recipient"],
+            "payload_entity_roles": ["input_text"],
+            "source_subgoal_ids": ["send_message"],
+        }
+        provider = FakeProvider(
+            initial_plan(
+                objective="向文件传输助手发送 hello",
+                entities={"recipient": "文件传输助手", "input_text": "hello"},
+                subgoals=[subgoal("send_message", "发送 hello", result="消息 hello 已发送")],
+                effects=[effect],
+            ),
+            remaining(subgoal("recover", "根据当前新画面重新定位发送入口")),
+        )
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(
+            "向文件传输助手发送 hello", device_id="phone-1"
+        )
+
+        revised = planner.replan(
+            graph,
+            matched_observation(graph, outcome="mismatched"),
+            trigger="action_result_mismatch",
+            reason="发送动作没有产生预期变化",
+        )
+
+        by_id = {item.subgoal_id: item for item in revised.subgoals}
+        self.assertEqual("recover", revised.active_subgoal_id)
+        self.assertEqual("navigation_only", by_id["recover"].external_impact)
+        self.assertEqual(("send_effect",), by_id["send_message"].risk_action_ids)
+        self.assertEqual("external_state", by_id["send_message"].external_impact)
+
     def test_visible_completion_uses_current_observation_and_advances(self):
-        first = subgoal("inspect", "读取当前可见结果", execution_class="observe")
+        first = subgoal("inspect", "读取当前可见结果")
         second = subgoal("open_next", "进入下一页面", depends_on=("inspect",))
         provider = FakeProvider(initial_plan(subgoals=[first, second]), remaining(second))
         planner = DeepSeekTaskGraphPlanner(provider)
@@ -291,6 +400,20 @@ class SimplePlannerTransportTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(TaskGraphError, "依赖形成环"):
             DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan("完成循环计划", device_id="phone-1")
+
+    def test_effect_reference_to_unknown_subgoal_is_still_rejected(self):
+        raw = initial_plan(effects=[{
+            "effect_id": "send_effect",
+            "kind": "send_message",
+            "target_entity_roles": [],
+            "payload_entity_roles": [],
+            "source_subgoal_ids": ["missing_subgoal"],
+        }])
+
+        with self.assertRaisesRegex(TaskGraphError, "引用不存在子目标"):
+            DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                "完成普通手机任务", device_id="phone-1"
+            )
 
     def test_clarification_blocks_only_when_model_reports_missing_user_information(self):
         raw = initial_plan()

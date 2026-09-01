@@ -23,8 +23,7 @@
     "objective": "一个高层状态目标，不含坐标或系统命令",
     "depends_on": ["前置子目标ID"],
     "constraints": ["本子目标约束"],
-    "completion_conditions": ["动作后应出现的正向结果"],
-    "execution_class": "observe|navigate|effect|unknown"
+    "completion_conditions": ["动作后应出现的正向结果"]
   }],
   "clarification_questions": ["只有缺少信息导致目标无法唯一执行时才填写"]
 }

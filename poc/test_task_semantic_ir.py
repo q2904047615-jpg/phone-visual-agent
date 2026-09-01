@@ -951,7 +951,6 @@ class TaskSemanticIRTests(unittest.TestCase):
             conditions([]),
             conditions(["不得发送消息"]),
             conditions(["消息尚未发送"]),
-            effect(source_subgoal_ids=["open_wechat", "send_message"]),
             effect(source_subgoal_ids=["missing_subgoal"]),
             effect(target_entity_roles=["missing_recipient"]),
             effect(payload_entity_roles=["missing_payload"]),

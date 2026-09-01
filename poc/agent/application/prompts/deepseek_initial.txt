@@ -11,8 +11,9 @@
 3. 按数组顺序给出计划；依赖只引用确有前置关系的子目标。本地会自动选择第一个可执行节点。
 4. 输入、打开、点击、滑动、返回、发送、提交、删除等普通任务都可以规划。只有登录/身份认证使用
    authentication，付款/资金交易使用 financial_transaction；其它效果不会要求确认。
-5. 产生外部结果的子目标使用 execution_class=effect，并由一个 effect_intent 的 source_subgoal_ids 绑定。
-   纯导航用 navigate，纯查看用 observe。完成条件只写正向结果，禁止事项只放 constraints。
+5. 外部效果只由 effect_intent.source_subgoal_ids 绑定实际产生该结果的子目标；不要另写 execution_class、
+   effect_ids 或其它效果关系副本。把正文写入输入框但尚未发送属于准备步骤，实际发送才属于 send_message
+   effect。完成条件只写正向结果，禁止事项只放 constraints。
 6. 发送消息时将收件人逐字写入 entities.recipient、正文逐字写入 entities.input_text；多字段输入使用
    entities.input_fields，每项包含 field_id、可见 field_label 和逐字 text。
 7. 用户说当前页面/当前应用且不需要 App 名称时，target_apps 可用

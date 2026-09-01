@@ -166,13 +166,6 @@ class VisionSessionUsageLedger:
             self._totals['network_attempts'] += max(0, int(network_attempts))
             self._add_elapsed(elapsed)
 
-    def record_cache_hit(self, *, stage: str, fingerprint: str) -> None:
-        stage, fingerprint = self._metadata(stage, fingerprint)
-        with self._lock:
-            self._totals['observation_cache_hits'] += 1
-            self._events.append({'event': 'observation_cache_hit', 'outcome': 'reused', 'timestamp': self._timestamp(),
-                'stage': stage, 'fingerprint': fingerprint, 'model': self.expected_model, 'network_attempts': 0})
-
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
             totals = dict(self._totals)

@@ -46,14 +46,6 @@ class GenericIntentDraft(ValidatedDataclassWire):
         for value in (*self.constraints, *self.account_effects):
             reject_if(not isinstance(value, str) or not value.strip(), GenericIntentError("约束和账号影响必须是非空字符串。"))
 
-_INPUT_TERMS = ('输入框', '文本框', '搜索框', '编辑框', '地址栏', '字段进入编辑', '字段获得焦点', '字段内容', '草稿区域', '草稿字段', 'input field',
-    'search box', 'text field', 'editable field', 'draft field', 'draft area', 'address bar', 'textbox', 'input_text',
-    '输入模式', '直输模式', '键盘模式', '软键盘', 'input mode', 'keyboard mode', 'soft keyboard', ' ime ', 'direct_latin',
-    'chinese_pinyin')
-_MODE_SWITCH_TERMS = ('切换输入模式', '输入模式切换', '切换到英文', '切到英文', '英文直输', '切换到中文', '切到中文', '切换直输模式', '切换为直输模式',
-    'switch input mode', 'switch keyboard mode', 'direct_latin', 'chinese_pinyin')
-_CLEAR_TERMS = ('清空', '清除', '置空', '删除', '文字变为空', '内容变为空', '恢复为空', '恢复为空白', 'clear text', 'clear the text',
-    'clear draft', 'empty the input', 'empty the field', 'remove the text', 'delete')
 _ACTIVE_VISUAL_FIELDS = {'subgoal_id', 'objective', 'constraints', 'completion_conditions', 'execution_class',
     'goal_entities'}
 
@@ -121,12 +113,12 @@ class ActiveVisualGoal:
         fields = self.root_entities.get("input_fields")
         field_id, label, _ = self.field
         text = self.transaction_text
-        if not isinstance(fields, list) or not field_id or (not label) or (not text):
+        if not isinstance(fields, list) or not field_id or (not text):
             return False
         exact = sum((isinstance(item, dict) and item.get('field_id') == field_id and (item.get('field_label') == label)
             and (item.get('text') == text) for item in fields))
-        labels = sum(isinstance(item, dict) and item.get("field_label") == label for item in fields)
-        return exact == labels == 1
+        identities = sum(isinstance(item, dict) and item.get("field_id") == field_id for item in fields)
+        return exact == identities == 1
 
     @property
     def predecessor(self) -> tuple[str, str, str]:
@@ -148,28 +140,16 @@ class ActiveVisualGoal:
 
     @property
     def mode_switch_requested(self) -> bool:
-        selectors: list[Any] = [self.focus]
-        if (self.has_active_focus and str(self.focus.get('subgoal_id') or '').strip() == 'exact_tap_semantic'
-            and str(self.goal_entities.get('target_ui_label') or '').strip()):
-            original = self.root_entities.get("original_goal_visual_context")
-            if isinstance(original, str) and original.strip():
-                selectors.append(original)
-        visible = json.dumps(selectors, ensure_ascii=False).casefold()
-        return any(term in visible for term in _MODE_SWITCH_TERMS)
+        return False
 
     @property
     def input_requested(self) -> bool:
-        if self.target_only or self.transaction_text or self.mode_switch_requested:
-            return True
-        source = self.root if not self.has_active_focus else {'objective': self.focus.get('objective'),
-            'completion_conditions': self.focus.get('completion_conditions')}
-        visible = json.dumps(source, ensure_ascii=False).casefold()
-        return any(term in visible for term in _INPUT_TERMS)
+        return bool(self.field[0])
 
     @property
     def clear_requested(self) -> bool:
-        visible = str(self.focus.get("objective") or "").casefold()
-        return self.input_requested and any(term in visible for term in _CLEAR_TERMS)
+        return bool(self.input_requested
+            and self.goal_entities.get('active_input_operation') == 'clear_verified_text')
 
     @property
     def has_explicit_text(self) -> bool:

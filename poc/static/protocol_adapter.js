@@ -6,6 +6,7 @@
   const terminalStatuses = new Set(["succeeded", "completed", "blocked", "failed", "cancelled"]);
   const activeSubgoalStatuses = new Set(["current", "running", "active", "in_progress"]);
   const formalDeepSeekProtocol = "2026-08-20-deepseek-typed-task-graph-v4";
+  const formalQwenProtocol = "2026-09-01-qwen-same-response-action-finish-v9";
 
   function asObject(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -112,7 +113,7 @@
     const required = [
       "protocol_version", "task_id", "device_id", "revision", "status", "goal",
       "constraints", "completion_conditions", "effect_intents", "subgoals",
-      "active_subgoal_id", "clarification_questions", "replan_history",
+      "active_subgoal_id", "clarification_questions",
     ];
     if (required.some(key => !Object.prototype.hasOwnProperty.call(value, key))) return false;
     const retired = ["risk_actions", "confirmation_gate", "current_external_impact"];
@@ -158,16 +159,16 @@
 
   function isQwenDecision(value) {
     const decision = asObject(value);
-    return /qwen-visual-decision-v\d+/.test(String(decision.protocol_version || ""))
-      || (Object.prototype.hasOwnProperty.call(decision, "next_action")
-        && decision.task_id !== undefined
-        && decision.revision !== undefined
-        && decision.status !== undefined);
+    return String(decision.protocol_version || "") === formalQwenProtocol
+      && ["action", "finish"].includes(String(decision.status || "").toLowerCase());
   }
 
   function normalizeQwenDecision(rawDecision) {
     const decision = asObject(rawDecision);
-    const status = String(firstDefined(decision.status, "blocked")).toLowerCase();
+    const protocolVersion = String(firstDefined(decision.protocol_version, ""));
+    const rawStatus = String(firstDefined(decision.status, "unknown")).toLowerCase();
+    const validProtocol = protocolVersion === formalQwenProtocol;
+    const status = validProtocol && ["action", "finish"].includes(rawStatus) ? rawStatus : "unknown";
     const nextAction = asObject(decision.next_action);
     const params = asObject(nextAction.params);
     const targetRegion = firstDefined(decision.target_region, null);
@@ -178,13 +179,11 @@
       params.label,
       params.target,
       elementId,
-      status === "blocked" ? "当前步骤已阻止" : "未提供语义目标",
+      "未提供语义目标",
     ));
-    const isExecutable = status === "action" && Boolean(actionType);
-    const protocolVersion = String(firstDefined(decision.protocol_version, ""));
-    const protocolMatch = protocolVersion.match(/qwen-visual-decision-v\d+/);
+    const isExecutable = validProtocol && status === "action" && Boolean(actionType);
     return {
-      protocol: protocolMatch ? protocolMatch[0] : "qwen-visual-decision",
+      protocol: validProtocol ? "qwen-same-response-action-finish-v9" : "unsupported-protocol",
       protocolVersion,
       status,
       decisionNodeId: String(firstDefined(nextAction.node_id, "")),
@@ -192,7 +191,7 @@
       semanticTarget,
       elementId,
       targetRegion,
-      expectedChange: firstDefined(decision.expected_result, {}),
+      expectedChange: {},
       confidence: firstDefined(decision.confidence, null),
       reason: String(firstDefined(decision.reason, "Qwen 未提供判断理由")),
       taskId: String(firstDefined(decision.task_id, "")),
@@ -269,35 +268,18 @@
     };
   }
 
-  function normalizeTransition(entry, verification, replanHistory) {
-    const explicit = asObject(firstDefined(entry.transition, entry.replan));
+  function normalizeTransition(entry, verification) {
+    const explicit = asObject(firstDefined(entry.transition, entry.post_action_transition));
     const sourceRevision = firstDefined(entry.task_revision, entry.revision, null);
-    const nextReplan = replanHistory.find(item => {
-      const candidate = asObject(item);
-      return Number.isInteger(sourceRevision)
-        && candidate.revision === sourceRevision + 1
-        && String(candidate.scene_id || "")
-        && String(candidate.scene_id) === verification.afterObservationId;
-    });
-    const hasExplicit = Object.keys(explicit).length > 0;
-    const replan = hasExplicit ? explicit : asObject(nextReplan);
-    const trigger = String(firstDefined(replan.trigger, ""));
-    const declaredKind = String(firstDefined(replan.outcome, replan.kind, ""));
-    const allowedKinds = new Set(["advance", "replan", "blocked"]);
-    const kind = allowedKinds.has(declaredKind)
-      ? declaredKind
-      : hasExplicit
-        ? "unknown"
-        : Object.keys(replan).length
-          ? (trigger === "subgoal_completed" ? "advance" : "replan")
-          : "unknown";
+    const declaredKind = String(firstDefined(explicit.transition_kind, explicit.kind, ""));
+    const kind = declaredKind || (verification.afterObservationId ? "new_screenshot_decision" : "unknown");
     return {
       kind,
-      trigger,
-      reason: String(firstDefined(replan.reason, "")),
+      trigger: "",
+      reason: String(firstDefined(explicit.reason, "")),
       fromRevision: sourceRevision,
-      toRevision: Number.isInteger(replan.revision) ? replan.revision : null,
-      raw: replan,
+      toRevision: null,
+      raw: explicit,
     };
   }
 
@@ -349,7 +331,7 @@
       const candidate = firstDefined(entry.qwen_decision, entry.visual_decision);
       const action = isQwenDecision(candidate)
         ? normalizeQwenDecision(candidate)
-        : normalizeQwenDecision({ status: "blocked", reason: "该 v4 历史轮次没有 Qwen 决策。" });
+        : normalizeQwenDecision({ status: "unknown", reason: "该历史轮次没有当前 Qwen 决策。" });
       const verification = normalizeVerification(entry, action);
       const controllerGate = normalizeControllerGate(firstDefined(
         entry.controller_decision,
@@ -370,11 +352,7 @@
         reason: String(firstDefined(entry.reason, "已执行并重新观察")),
         physicalActions: Number(firstDefined(asObject(entry.execution).physical_actions, 0)),
         verification,
-        transition: normalizeTransition(
-          entry,
-          verification,
-          context.replanHistory || [],
-        ),
+        transition: normalizeTransition(entry, verification),
         scopeState: historicalScope,
         completionEvidence: normalizeStringList(entry.completion_evidence),
         evidence: normalizeStringList(firstDefined(
@@ -560,10 +538,8 @@
     const physicalActions = Number(firstDefined(session.physical_actions, 0));
     const failedReason = String(firstDefined(session.failed_reason, ""));
     const autoPauseReason = String(firstDefined(session.auto_pause_reason, ""));
-    const replanHistory = Array.isArray(graph.replan_history) ? graph.replan_history : [];
     const history = normalizeHistory(session.history, {
       sessionId: String(firstDefined(session.session_id, session.id, "")),
-      replanHistory,
     });
     const trustedObservation = asObject(firstDefined(
       session.trusted_observation,
@@ -603,9 +579,7 @@
       ? "stopped"
       : status === "blocked"
         ? "blocked"
-        : status === "replanning"
-          ? "replan"
-          : status === "awaiting_confirmation"
+        : status === "awaiting_confirmation"
             ? "awaiting_confirmation"
             : status === "awaiting_effect_confirmation"
               ? "awaiting_effect_confirmation"
@@ -680,7 +654,6 @@
         revision,
         status: String(firstDefined(graph.status, graph.task_status, status)),
         currentSubgoalId: currentSubgoal.id,
-        replanHistory: replanHistory.map(item => ({ ...asObject(item) })),
       },
       executionTrace: [
         ...history.map(item => ({

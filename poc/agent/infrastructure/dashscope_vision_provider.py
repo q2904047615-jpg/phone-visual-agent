@@ -174,11 +174,6 @@ class DashScopeVisionProvider:
         finally:
             self._active_call_metadata.reset(token)
 
-    def record_observation_cache_hit(self, *, stage: str, fingerprint: str) -> None:
-        ledger = self._active_usage_ledger.get()
-        if ledger is not None:
-            ledger.record_cache_hit(stage=stage, fingerprint=fingerprint)
-
     def _chat(
         self,
         messages: list[dict[str, Any]],

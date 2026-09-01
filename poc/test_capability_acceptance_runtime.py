@@ -256,7 +256,6 @@ class FakeTrialResult:
                         "target_element_id": "source",
                         "destination_element_id": "destination",
                         "before_fingerprint": "fingerprint-execution-before",
-                        "expected_effect": {"scene_changed": True},
                     },
                     "before_scene": self._drag_scene(
                         source_bounds=[0.1, 0.2, 0.2, 0.3],
@@ -277,7 +276,6 @@ class FakeTrialResult:
                         "hold_seconds": 0.8,
                         "target_element_id": "item",
                         "before_fingerprint": "fingerprint-execution-before",
-                        "expected_effect": {"scene_changed": True},
                     },
                     "before_scene": self._long_press_scene(
                         fingerprint="fingerprint-execution-before",

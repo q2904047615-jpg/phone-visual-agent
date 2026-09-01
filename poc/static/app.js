@@ -53,7 +53,7 @@ const statusNames = {
 
 const decisionStatusNames = {
   action: "唯一下一动作",
-  blocked: "Qwen 已阻止",
+  finish: "当前目标完成",
   unknown: "等待视觉决策",
 };
 
@@ -429,9 +429,7 @@ function renderTrace() {
     return;
   }
   const transitionNames = {
-    advance: "推进",
-    replan: "重规划",
-    advance_or_replan: "推进 / 重规划",
+    new_screenshot_decision: "新截图决策",
     blocked: "阻止",
     stopped: "停止",
     awaiting_confirmation: "等待动作确认",
@@ -488,7 +486,7 @@ function renderTrace() {
           <span class="scope-state ${escapeHtml(scopeState.state)}"><b>确认作用域</b>${escapeHtml(scopeNames[scopeState.state] || scopeState.state)}${scopeState.reason ? ` · ${escapeHtml(scopeState.reason)}` : ""}</span>
         </div>
         ${(verification.errors || []).length ? `<small>验证/阻止原因：${escapeHtml(verification.errors.join("；"))}</small>` : ""}
-        ${transition.reason ? `<small>推进/重规划原因：${escapeHtml(transition.reason)}</small>` : ""}
+        ${transition.reason ? `<small>下一截图原因：${escapeHtml(transition.reason)}</small>` : ""}
         ${(verification.evidence || item.evidence || []).length ? `<small>证据：${escapeHtml(publicEvidenceSummary(verification.evidence || item.evidence))}</small>` : ""}
       </div>
     </article>`;
@@ -544,7 +542,7 @@ function renderAction() {
     && view.scopeState.state !== "active";
   const highAttention = view.effectPolicy.requiresConfirmation;
   const riskSummary = view.effectPolicy.currentActions.map(item => `${item.id}：${item.kind}`).join("；");
-  const actionMetadata = String(action.protocol || "").startsWith("qwen-visual-decision-v")
+  const actionMetadata = action.protocol === "qwen-same-response-action-finish-v9"
     ? `<div class="action-metadata">
          <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
          <span>status ${escapeHtml(action.status)}</span>
@@ -560,11 +558,7 @@ function renderAction() {
   content.className = "action-content";
   content.innerHTML = view.isTerminal
     ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(view.failedReason || action.reason || "会话已经结束。")}</p>`
-    : (action.status === "blocked"
-        ? `<div class="next-action-title"><span>${escapeHtml(decisionStatusNames.blocked)}</span><b class="risk-tag">不可执行</b></div>
-           <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
-           <p>${escapeHtml(action.reason)}</p>${actionMetadata}`
-        : view.status === "paused_after_action"
+    : (view.status === "paused_after_action"
       ? `<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>`
       : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${staleScope ? '<b class="risk-tag">旧确认已失效</b>' : effectPhase ? '<b class="risk-tag">需要效果确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
          <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
@@ -581,7 +575,7 @@ function renderAction() {
           <small>${staleScope ? `当前作用域不可执行：${escapeHtml(view.scopeState.reason || "任务或画面已变化")}；必须重新观察。` : "后端 scope 与当前权威任务、观察和动作字段一致；本次只允许一个动作，之后必须重新观察。"}</small>`);
 
   const disabled = state.busy || state.paused ? "disabled" : "";
-  if (view.isTerminal || action.status === "blocked") {
+  if (view.isTerminal) {
     controls.innerHTML = "";
   } else if (staleScope) {
     controls.innerHTML = `

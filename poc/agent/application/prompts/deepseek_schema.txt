@@ -3,7 +3,7 @@
   "goal": {
     "objective": "逐字保留用户目标",
     "target_apps": [{"app_id": "稳定小写ID", "app_name": "App名称"}],
-    "entities": {"用户明确给出的对象或正文角色": "逐字值"}
+    "entities": {"用户明确给出的对象或正文角色": "逐字值；只清空字段可用 input_fields[].target_only=true"}
   },
   "constraints": ["用户明确约束"],
   "completion_conditions": [{
@@ -23,7 +23,9 @@
     "objective": "一个高层状态目标，不含坐标或系统命令",
     "depends_on": ["前置子目标ID"],
     "constraints": ["本子目标约束"],
-    "completion_conditions": ["动作后应出现的正向结果"]
+    "completion_conditions": ["动作后应出现的正向结果"],
+    "input_field_id": "仅输入类子目标填写；单字段固定为 primary_input，多字段使用 entities.input_fields[].field_id",
+    "input_operation": "仅输入类子目标填写：focus|input_verified_text|clear_verified_text|press_enter"
   }],
   "clarification_questions": ["只有缺少信息导致目标无法唯一执行时才填写"]
 }

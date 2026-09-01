@@ -29,8 +29,6 @@ from agent.domain.validation import canonical_digest
 from agent.infrastructure import RobotDeviceExecutor
 from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
-    _post_action_observation_context,
-    _post_action_visual_context,
     stable_qwerty_ocr_anchors,
     stable_text_ocr_grounding,
 )
@@ -41,13 +39,6 @@ from agent.infrastructure.generic_scene_observer import (
     SingleStepGenericSceneObserver,
 )
 from agent.infrastructure.observation_images import local_frame_fingerprint
-from agent.domain.input_value_lineage import (
-    input_screen_identity_compatible,
-    input_screen_identity_family,
-)
-from agent.infrastructure.file_system_input_lineage_store import (
-    FileSystemTypedInputLineageStore as TypedInputLineageStore,
-)
 from agent.infrastructure.observation_images import measure_frame_sharpness
 from agent.infrastructure.orientation_safety import (
     LOCAL_QWERTY_ORIENTATION_SOURCE,
@@ -110,7 +101,7 @@ class FakeSceneObserver:
         self.calls = 0
         self.goal_contexts = []
 
-    def observe(self, *, frames, goal_context=None):
+    def _next_scene(self, *, goal_context=None):
         self.calls += 1
         self.goal_contexts.append(goal_context)
         result = self.scenes.pop(0)
@@ -122,6 +113,16 @@ class FakeSceneObserver:
                 camera_alignment=aligned_camera_facts(),
             )
         return result
+
+    def observe_with_decision(self, *, frames, goal_context=None, **_kwargs):
+        del frames
+        result = self._next_scene(goal_context=goal_context)
+        return result, {
+            "status": "finish",
+            "evidence_refs": ["scene.summary"],
+            "confidence": 1.0,
+            "reason": "测试观察器在同一帧返回 scene 与 decision。",
+        }
 
 class RawFailureSceneObserver(FakeSceneObserver):
     def __init__(self, raw_response: str) -> None:
@@ -323,6 +324,20 @@ class ClickReceiptRobot(FakeRobot):
 class GenericSingleActionAdapter(_GenericSingleActionAdapter):
     def __init__(self, *args, device_id="test-device", **kwargs):
         super().__init__(*args, device_id=device_id, **kwargs)
+
+    def execute(self, *args, planned_frames=(), **kwargs):
+        # Production receives the exact Qwen observation frames from the
+        # orchestrator.  Direct adapter tests emulate that caller explicitly;
+        # the production adapter itself no longer observes or reselects here.
+        if not planned_frames:
+            observed, frames, _paths, _model_decision = self.capture_scene(
+                kwargs["goal"],
+                evidence_dir=kwargs.get("evidence_dir"),
+                prefix="test_orchestrator_before",
+            )
+            kwargs["planned_scene"] = observed
+            planned_frames = tuple(frames)
+        return super().execute(*args, planned_frames=planned_frames, **kwargs)
 
 
 class FakeCompanionTextTransport:
@@ -542,11 +557,7 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
         return SemanticAction(
             node_id="reveal-navigation",
             action="reveal_system_navigation",
-            params={
-                "expected_effect": {
-                    "system_ui": {"navigation_bar_visible": True}
-                }
-            },
+            params={},
         )
 
     def test_requires_structured_system_ui_pre_and_post_facts(self):
@@ -643,29 +654,11 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
                 "role": element.role,
                 "label": element.label,
                 "states": dict(element.states),
-                "expected_effect": {
-                    "content_changed": True,
-                    "element_absent": {
-                        "element_id": element.element_id,
-                        "meaning": element.meaning,
-                        "role": element.role,
-                        "label": element.label,
-                    },
-                },
-                "formal_candidate_id": "candidate.swipe",
-                "formal_transition": {
-                    "expectations": [
-                        {
-                            "subject_ref": "element.preview",
-                            "predicate": "element.exists",
-                            "operator": "absent",
-                        }
-                    ]
-                },
             },
         )
 
-    def test_controller_derives_path_and_requires_same_target_to_disappear(self):
+
+    def test_controller_derives_path_and_accepts_fresh_stable_receipt(self):
         controller = UniversalActionController()
         before = self.before_scene()
         resolved = controller.resolve_one(self.action(), before, confirmed=True)
@@ -676,80 +669,8 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
         self.assertEqual("preview-card", resolved.target_element_id)
         self.assertEqual("up", resolved.direction)
 
-        role_drift_same_card = replace(
-            before,
-            summary="同一应用卡片仍在",
-            fingerprint="after-role-drift",
-            elements=(
-                replace(
-                    before.elements[0],
-                    element_id="new-observation-card-id",
-                    role="container",
-                    meaning="app_card",
-                    bounds=(0.27, 0.32, 0.73, 0.86),
-                ),
-            ),
-        )
-        with self.assertRaisesRegex(UniversalActionError, "同一目标仍然可见"):
-            controller.verify_after_action(
-                resolved,
-                before,
-                role_drift_same_card,
-            )
-
-        different_surface_same_name = UIScene(
-            app_id="launcher",
-            screen_id="home_screen",
-            summary="已回到桌面，同名应用入口可见",
-            elements=(
-                UIElement(
-                    # IDs and labels may both be reused by a fresh observation;
-                    # neither makes this launcher icon the dismissed card.
-                    element_id="preview-card",
-                    role="icon",
-                    meaning="application_launcher_icon",
-                    label="示例应用",
-                    bounds=(0.39, 0.63, 0.57, 0.78),
-                    confidence=0.99,
-                    states={"visible": True},
-                    evidence=("桌面应用入口",),
-                ),
-            ),
-            stable=True,
-            confidence=0.99,
-            fingerprint="after-launcher-same-name",
-            camera_alignment=aligned_camera_facts(),
-        )
-        evidence = controller.verify_after_action(
-            resolved,
-            before,
-            different_surface_same_name,
-        )
-        self.assertIn(
-            "控制器确认目标元素已消失：示例应用",
-            evidence,
-        )
-
-        after_absent = replace(
-            before,
-            summary="应用卡片已消失",
-            fingerprint="after-absent",
-            elements=(
-                UIElement(
-                    element_id="empty-state",
-                    role="text",
-                    meaning="empty_recent_tasks",
-                    label="没有最近使用的应用",
-                    bounds=(0.20, 0.40, 0.80, 0.48),
-                    confidence=0.99,
-                ),
-            ),
-        )
-        evidence = controller.verify_after_action(resolved, before, after_absent)
-        self.assertIn(
-            "控制器确认目标元素已消失：示例应用",
-            evidence,
-        )
+        unchanged = replace(before, fingerprint="fresh-stable-receipt")
+        self.assertEqual((), controller.verify_after_action(resolved, before, unchanged))
 
     def test_targeted_transport_uses_relative_path_but_viewport_keeps_preset(self):
         robot = FakeRobot()
@@ -786,338 +707,10 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
             ).validate()
 
 
-class FormalTypedTransitionControllerTests(unittest.TestCase):
-    def test_home_requires_typed_launcher_postcondition(self):
-        controller = UniversalActionController()
-        before = scene("before", screen_id="settings_main", app_id="settings")
-        action = SemanticAction(
-            node_id="formal-home",
-            action="home",
-            params={
-                "formal_candidate_id": "candidate.home",
-                "formal_transition": {
-                    "transition_id": "transition.home",
-                    "precondition_claim_ids": ["claim.surface"],
-                    "expectations": [
-                        {
-                            "subject_ref": "surface.current",
-                            "predicate": "surface.kind",
-                            "operator": "equals",
-                            "value": "launcher",
-                        }
-                    ],
-                    "exploratory": False,
-                },
-            },
-        )
-        resolved = controller.resolve_one(action, before, confirmed=True)
-        self.assertEqual("candidate.home", resolved.formal_candidate_id)
-        self.assertEqual(
-            "surface.kind",
-            resolved.formal_transition["expectations"][0]["predicate"],
-        )
+class ExactTypedInputControllerTests(unittest.TestCase):
 
-        controller.verify_after_action(
-            resolved,
-            before,
-            scene("after", screen_id="android_home", app_id="unknown"),
-        )
-        with self.assertRaisesRegex(UniversalActionError, "typed surface.kind"):
-            controller.verify_after_action(
-                resolved,
-                before,
-                scene("wrong", screen_id="settings_detail", app_id="settings"),
-            )
 
-    def test_formal_input_uses_exact_element_identity_not_goal_relevant_flag(self):
-        controller = UniversalActionController()
-        before = UIScene(
-            app_id="generic_app",
-            screen_id="editor",
-            summary="唯一聚焦输入框",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="application_text_input",
-                    label="输入",
-                    bounds=(0.1, 0.1, 0.9, 0.2),
-                    confidence=0.97,
-                    states={
-                        "focused": True,
-                        "value": "",
-                        "keyboard_layout": "qwerty",
-                        "keyboard_input_mode": "direct_latin",
-                        "keyboard_case_mode": "lower",
-                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-                        "goal_relevant": False,
-                    },
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="before-input",
-        )
-        action = SemanticAction(
-            node_id="formal-input",
-            action="input_verified_text",
-            params={
-                "element_id": "field",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "输入",
-                "states": {"focused": True},
-                "text": "agent",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {"value": "agent"},
-                    }
-                },
-                "formal_candidate_id": "candidate.input",
-                "formal_transition": {
-                    "transition_id": "transition.input",
-                    "precondition_claim_ids": ["claim.field"],
-                    "expectations": [
-                        {
-                            "subject_ref": "element.field",
-                            "predicate": "element.state.value",
-                            "operator": "equals",
-                            "value": "agent",
-                        }
-                    ],
-                    "exploratory": False,
-                },
-            },
-        )
-        resolved = controller.resolve_one(action, before, confirmed=True)
-        after = UIScene(
-            app_id="generic_app",
-            screen_id="editor",
-            summary="输入完成",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="application_text_input",
-                    label="输入",
-                    bounds=(0.1, 0.1, 0.9, 0.2),
-                    confidence=0.97,
-                    states={"focused": True, "value": "agent"},
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="after-input",
-        )
-        controller.verify_after_action(resolved, before, after)
 
-    def test_formal_chinese_input_verifies_preedit_before_candidate_selection(self):
-        controller = UniversalActionController()
-        before_states = {
-            "focused": True,
-            "value": "",
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "chinese_pinyin",
-            "keyboard_case_mode": "lower",
-            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-            "input_field_id": "field_primary",
-            "goal_relevant": False,
-        }
-        before = UIScene(
-            app_id="generic_app",
-            screen_id="editor",
-            summary="唯一聚焦中文输入框",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="application_text_input",
-                    label="消息",
-                    bounds=(0.1, 0.1, 0.9, 0.2),
-                    confidence=0.97,
-                    states=before_states,
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="before-chinese-input",
-        )
-        expected_states = {
-            "value": "",
-            "ime_preedit_text": "nihao",
-            "ime_exact_candidate_text": "你好",
-        }
-        action = SemanticAction(
-            node_id="formal-chinese-input",
-            action="input_verified_text",
-            params={
-                "element_id": "field",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "消息",
-                "states": before_states,
-                "text": "你好",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": expected_states,
-                    }
-                },
-                "formal_candidate_id": "candidate.chinese-input",
-                "formal_transition": {
-                    "transition_id": "transition.chinese-input",
-                    "precondition_claim_ids": ["claim.field"],
-                    "expectations": [
-                        {
-                            "subject_ref": "element.field",
-                            "predicate": f"element.state.{name}",
-                            "operator": "equals",
-                            "value": value,
-                        }
-                        for name, value in expected_states.items()
-                    ],
-                    "exploratory": False,
-                },
-            },
-        )
-
-        resolved = controller.resolve_one(action, before, confirmed=True)
-        after = replace(
-            before,
-            summary="拼音组合和唯一候选可见",
-            fingerprint="after-chinese-input",
-            elements=(
-                replace(
-                    before.elements[0],
-                    states={**before_states, **expected_states},
-                ),
-            ),
-        )
-        controller.verify_after_action(resolved, before, after)
-
-        wrong_candidate = replace(
-            after,
-            fingerprint="wrong-chinese-candidate",
-            elements=(
-                replace(
-                    after.elements[0],
-                    states={
-                        **after.elements[0].states,
-                        "ime_exact_candidate_text": "您好",
-                    },
-                ),
-            ),
-        )
-        with self.assertRaisesRegex(UniversalActionError, "唯一逐字一致的中文候选"):
-            controller.verify_after_action(resolved, before, wrong_candidate)
-
-    def test_formal_direct_latin_input_accepts_only_exact_visible_preedit_candidate(self):
-        controller = UniversalActionController()
-        before_states = {
-            "focused": True,
-            "value": "",
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "direct_latin",
-            "keyboard_case_mode": "lower",
-            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-            "input_field_id": "field_primary",
-            "goal_relevant": False,
-        }
-        before = UIScene(
-            app_id="generic_app",
-            screen_id="editor",
-            summary="唯一聚焦英文输入框",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="application_text_input",
-                    label="消息",
-                    bounds=(0.1, 0.1, 0.9, 0.2),
-                    confidence=0.97,
-                    states=before_states,
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="before-direct-preedit",
-        )
-        action = SemanticAction(
-            node_id="formal-direct-preedit",
-            action="input_verified_text",
-            params={
-                "element_id": "field",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "消息",
-                "states": before_states,
-                "text": "first",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {"value": "first"},
-                    }
-                },
-                "formal_candidate_id": "candidate.direct-preedit",
-                "formal_transition": {
-                    "transition_id": "transition.direct-preedit",
-                    "precondition_claim_ids": ["claim.field"],
-                    "expectations": [
-                        {
-                            "subject_ref": "element.field",
-                            "predicate": "element.state.value",
-                            "operator": "equals",
-                            "value": "first",
-                        }
-                    ],
-                    "exploratory": False,
-                },
-            },
-        )
-        resolved = controller.resolve_one(action, before, confirmed=True)
-        field = replace(
-            before.elements[0],
-            states={
-                **before_states,
-                "keyboard_input_mode": "chinese_pinyin",
-                "ime_preedit_text": "first",
-                "ime_exact_candidate_text": "first",
-            },
-        )
-        candidate = UIElement(
-            element_id="local_audited_ime_candidate_1",
-            role="button",
-            meaning="ime_exact_candidate",
-            label="first",
-            bounds=(0.1, 0.6, 0.25, 0.64),
-            confidence=1.0,
-            states={
-                "goal_relevant": True,
-                "fully_visible": True,
-                "ime_candidate": True,
-                "input_element_id": "field",
-                "prior_input_value": "",
-                "expected_input_value": "first",
-                "pinyin": "first",
-            },
-            evidence=("逐字相同的英文联想候选",),
-        )
-        after = replace(
-            before,
-            summary="英文预编辑及逐字相同候选可见",
-            fingerprint="after-direct-preedit",
-            elements=(field, candidate),
-        )
-        controller.verify_after_action(resolved, before, after)
-
-        wrong = replace(
-            after,
-            fingerprint="wrong-direct-preedit",
-            elements=(field, replace(candidate, label="firstly")),
-        )
-        with self.assertRaisesRegex(UniversalActionError, "文字不匹配"):
-            controller.verify_after_action(resolved, before, wrong)
 
     def test_companion_clear_binds_typed_field_without_keyboard_geometry(self):
         controller = UniversalActionController()
@@ -1131,7 +724,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
             "element_id": "field", "target": "application_text_input", "role": "input", "label": "草稿",
             "states": before.elements[0].states, "text_transport": "companion_ime",
             "input_field_id": "field_primary", "prior_input_value": "草稿🙂", "expected_input_value": "",
-            "expected_effect": {"element_state": {"meaning": "application_text_input", "states": {"value": ""}}},
         })
 
         resolved = controller.resolve_one(action, before, confirmed=True)
@@ -1147,108 +739,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(UniversalActionError, "预编辑"):
             controller.verify_after_action(resolved, before, stale_preedit)
 
-    def test_focus_only_input_tap_requires_fresh_dedicated_input_audit(self):
-        controller = UniversalActionController()
-        before = UIScene(
-            app_id="com.example.messaging",
-            screen_id="named_conversation",
-            summary="底部唯一空白编辑面尚未聚焦",
-            elements=(
-                UIElement(
-                    element_id="coarse-input",
-                    role="input",
-                    meaning="message_input_field",
-                    label="",
-                    bounds=(0.12, 0.91, 0.78, 0.96),
-                    confidence=0.99,
-                    states={
-                        "goal_relevant": True,
-                        "fully_visible": True,
-                        "focus_only_input_surface": True,
-                    },
-                    evidence=("底部工具栏中唯一完整白色文本输入区域",),
-                ),
-            ),
-            stable=True,
-            confidence=0.99,
-            fingerprint="before-focus-only",
-        )
-        action = SemanticAction(
-            node_id="focus-input",
-            action="tap_semantic",
-            params={
-                "element_id": "coarse-input",
-                "target": "message_input_field",
-                "role": "input",
-                "label": "",
-                "states": dict(before.elements[0].states),
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "message_input_field",
-                        "states": {"focused": True},
-                    }
-                },
-                "formal_candidate_id": "candidate.focus-input",
-                "formal_transition": {
-                    "transition_id": "transition.focus-input",
-                    "precondition_claim_ids": ["claim.coarse-input"],
-                    "expectations": [
-                        {
-                            "subject_ref": "element.coarse-input",
-                            "predicate": "element.state.focused",
-                            "operator": "equals",
-                            "value": True,
-                        }
-                    ],
-                    "exploratory": False,
-                },
-            },
-        )
-        resolved = controller.resolve_one(action, before, confirmed=True)
-        audited_after = UIScene(
-            app_id="com.example.messaging",
-            screen_id="named_conversation",
-            summary="专用输入审计建立typed字段并证明聚焦",
-            elements=(
-                UIElement(
-                    element_id="local_audited_input_1",
-                    role="input",
-                    meaning="application_text_input",
-                    label="",
-                    bounds=(0.12, 0.52, 0.78, 0.60),
-                    confidence=1.0,
-                    states={
-                        "goal_relevant": True,
-                        "fully_visible": True,
-                        "focused": True,
-                        "value": "",
-                        "input_field_id": "message_field",
-                        "primary_input_geometry_verified": True,
-                        "geometry_audit_source": "input_structure_audit",
-                    },
-                    evidence=("输入结构审计确认唯一聚焦应用输入框",),
-                ),
-            ),
-            stable=True,
-            confidence=1.0,
-            fingerprint="after-dedicated-audit",
-        )
-
-        controller.verify_after_action(resolved, before, audited_after)
-
-        unaudited_after = replace(
-            audited_after,
-            elements=(
-                replace(
-                    audited_after.elements[0],
-                    element_id="coarse-after",
-                    states={"fully_visible": True, "focused": True},
-                ),
-            ),
-            fingerprint="after-without-dedicated-audit",
-        )
-        with self.assertRaisesRegex(UniversalActionError, "typed focused"):
-            controller.verify_after_action(resolved, before, unaudited_after)
 
     def test_press_enter_requires_newline_key_and_verifies_exact_multiline_value(self):
         controller = UniversalActionController()
@@ -1302,26 +792,6 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
                 "role": "button",
                 "label": "↵",
                 "states": {"key_action": "newline"},
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {"value": "first\n"},
-                    }
-                },
-                "formal_candidate_id": "candidate.enter",
-                "formal_transition": {
-                    "transition_id": "transition.enter",
-                    "precondition_claim_ids": ["claim.enter"],
-                    "expectations": [
-                        {
-                            "subject_ref": "element.field",
-                            "predicate": "element.state.value",
-                            "operator": "equals",
-                            "value": "first\n",
-                        }
-                    ],
-                    "exploratory": False,
-                },
             },
         )
         resolved = controller.resolve_one(action, before, confirmed=True)
@@ -1389,55 +859,31 @@ class GenericActionAdapterTests(unittest.TestCase):
         ):
             self.assertNotIn(retired_name, source)
 
-    def test_adapter_forwards_only_typed_post_action_visual_context(self) -> None:
-        class RecordingObserver(FakeSceneObserver):
-            supports_post_action_visual_context = True
+    def test_production_execute_requires_the_current_qwen_frames(self) -> None:
+        robot = FakeRobot()
+        adapter = _GenericSingleActionAdapter(
+            capture=lambda: Image.new("RGB", (540, 960), "gray"),
+            observer=FakeSceneObserver([]),
+            robot=robot,
+            device_id="test-device",
+            frame_interval=0,
+            post_action_settle=0,
+        )
 
-            def __init__(self, scenes):
-                super().__init__(scenes)
-                self.post_action_contexts = []
-
-            def observe(
-                self,
-                *,
-                frames,
-                goal_context=None,
-                post_action_context=None,
-            ):
-                self.post_action_contexts.append(post_action_context)
-                return super().observe(frames=frames, goal_context=goal_context)
-
-        observer = RecordingObserver([scene("post-action")])
-        adapter = self._adapter(observer, FakeRobot())
-        context = _post_action_visual_context(
-            ResolvedSemanticAction(
-                node_id="resolved-back",
-                kind="back",
-                before_fingerprint="a" * 64,
-                formal_candidate_id="candidate.back",
-                formal_transition={
-                    "transition_id": "transition.back",
-                    "precondition_claim_ids": ["claim.surface"],
-                    "expectations": [
-                        {
-                            "subject_ref": "surface_current",
-                            "predicate": "surface.navigation_depth",
-                            "operator": "changed",
-                        }
-                    ],
-                    "exploratory": False,
-                },
+        with self.assertRaisesRegex(GenericActionAdapterError, "产生该 Qwen 动作的当前截图帧"):
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="must-bind-current-frame",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+                planned_scene=scene("planned"),
+                goal=goal(),
+                confirmed=True,
             )
-        )
-        self.assertIsNotNone(context)
 
-        adapter._observe_scene(
-            [Image.new("RGB", (540, 960), "gray") for _ in range(4)],
-            {"objective": "观察当前画面"},
-            post_action_context=context,
-        )
+        self.assertEqual([], robot.actions)
 
-        self.assertEqual([context], observer.post_action_contexts)
 
     @staticmethod
     def _coarse_text_target_scene() -> tuple[UIScene, SemanticAction]:
@@ -1626,36 +1072,6 @@ class GenericActionAdapterTests(unittest.TestCase):
         gray = Image.new("RGB", (540, 960), "gray")
         planned_fingerprint = local_frame_fingerprint(gray)
         planned = self._literal_input_scene(planned_fingerprint)
-        fresh_missing = self._literal_input_scene(
-            planned_fingerprint,
-            include_key=False,
-        )
-        planned_audited = self._literal_input_scene(
-            planned_fingerprint,
-            audited=True,
-        )
-        fresh_audited = self._literal_input_scene(
-            planned_fingerprint,
-            audited=True,
-        )
-        planned_audited = replace(
-            planned_audited,
-            elements=tuple(
-                replace(element, bounds=(0.40, 0.68, 0.60, 0.74))
-                if element.element_id == "local_audited_literal_key_1"
-                else element
-                for element in planned_audited.elements
-            ),
-        )
-        fresh_audited = replace(
-            fresh_audited,
-            elements=tuple(
-                replace(element, bounds=(0.32, 0.664, 0.52, 0.724))
-                if element.element_id == "local_audited_literal_key_1"
-                else element
-                for element in fresh_audited.elements
-            ),
-        )
         after = self._literal_input_scene(
             "after-live2",
             value="live2",
@@ -1671,38 +1087,20 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
         )
         key = planned.get_element("local_audited_literal_key_1")
-        expected_effect = {
-            "element_state": {
-                "meaning": "application_text_input",
-                "states": {"value": "live2"},
-            }
-        }
 
         result = adapter.execute(
             requested_action=SemanticAction(
                 node_id="literal-2",
                 action="tap_semantic",
                 params={
-                    "formal_candidate_id": "candidate-literal-2",
-                    "formal_transition": {
-                        "transition_id": "transition-literal-2",
-                        "precondition_claim_ids": ["claim-input-live"],
-                        "expectations": [
-                            {
-                                "subject_ref": "element.local_audited_input_1",
-                                "predicate": "element.state.value",
-                                "operator": "equals",
-                                "value": "live2",
-                            }
-                        ],
-                        "exploratory": False,
-                    },
+
+
                     "element_id": key.element_id,
                     "target": key.meaning,
                     "role": key.role,
                     "label": key.label,
                     "states": dict(key.states),
-                    "expected_effect": expected_effect,
+
                 },
             ),
             planned_scene=planned,
@@ -1783,37 +1181,19 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
         )
         key = planned.get_element("local_audited_enter_key_1")
-        expected_effect = {
-            "element_state": {
-                "meaning": "application_text_input",
-                "states": {"value": "first\n"},
-            }
-        }
         result = adapter.execute(
             requested_action=SemanticAction(
                 node_id="enter",
                 action="press_enter",
                 params={
-                    "formal_candidate_id": "candidate-enter",
-                    "formal_transition": {
-                        "transition_id": "transition-enter",
-                        "precondition_claim_ids": ["claim-enter"],
-                        "expectations": [
-                            {
-                                "subject_ref": "element.local_audited_input_1",
-                                "predicate": "element.state.value",
-                                "operator": "equals",
-                                "value": "first\n",
-                            }
-                        ],
-                        "exploratory": False,
-                    },
+
+
                     "element_id": key.element_id,
                     "target": key.meaning,
                     "role": key.role,
                     "label": key.label,
                     "states": dict(key.states),
-                    "expected_effect": expected_effect,
+
                 },
             ),
             planned_scene=planned,
@@ -1879,49 +1259,6 @@ class GenericActionAdapterTests(unittest.TestCase):
         result.validate()
         return result
 
-    def test_only_strict_primary_input_audit_can_reuse_confirmation(self):
-        planned = self._strict_primary_input_scene()
-        field = planned.elements[0]
-        requested = SemanticAction(
-            node_id="type-body",
-            action="input_verified_text",
-            params={
-                "formal_candidate_id": "candidate-type-body",
-                "element_id": field.element_id,
-                "target": field.meaning,
-                "role": field.role,
-                "label": field.label,
-                "states": dict(field.states),
-                "text": "agent",
-            },
-        )
-
-        self.assertTrue(
-            GenericSingleActionAdapter._primary_input_confirmation_reusable(
-                requested,
-                planned,
-            )
-        )
-
-        ordinary_field = replace(
-            field,
-            states={
-                **field.states,
-                "primary_input_geometry_verified": False,
-            },
-        )
-        ordinary = replace(planned, elements=(ordinary_field,))
-        ordinary_request = replace(
-            requested,
-            params={**requested.params, "states": dict(ordinary_field.states)},
-        )
-        self.assertFalse(
-            GenericSingleActionAdapter._primary_input_confirmation_reusable(
-                ordinary_request,
-                ordinary,
-            )
-        )
-
     def test_local_qwerty_rows_replace_only_direction_model_call(self):
         planned = self._strict_primary_input_scene()
         field = planned.elements[0]
@@ -1929,7 +1266,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             node_id="type-body",
             action="input_verified_text",
             params={
-                "formal_candidate_id": "candidate-type-body",
+
                 "element_id": field.element_id,
                 "target": field.meaning,
                 "role": field.role,
@@ -2015,32 +1352,15 @@ class GenericActionAdapterTests(unittest.TestCase):
                 node_id="type-body",
                 action="input_verified_text",
                 params={
-                    "formal_candidate_id": "candidate-type-body",
-                    "formal_transition": {
-                        "transition_id": "transition-type-body",
-                        "precondition_claim_ids": ["claim-body-empty"],
-                        "expectations": [
-                            {
-                                "subject_ref": "element.local_audited_input_1",
-                                "predicate": "element.state.value",
-                                "operator": "equals",
-                                "value": "agent",
-                            }
-                        ],
-                        "exploratory": False,
-                    },
+
+
                     "element_id": field.element_id,
                     "target": field.meaning,
                     "role": field.role,
                     "label": field.label,
                     "states": dict(field.states),
                     "text": "agent",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": "agent"},
-                        }
-                    },
+
                 },
             ),
             planned_scene=planned,
@@ -2058,7 +1378,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([("input", "agent")], robot.actions)
         self.assertEqual(1, observer.calls)
-        self.assertTrue(result.primary_input_confirmation_reused)
+        self.assertFalse(result.primary_input_confirmation_reused)
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual(
             LOCAL_QWERTY_ORIENTATION_SOURCE,
@@ -2069,267 +1389,50 @@ class GenericActionAdapterTests(unittest.TestCase):
             observer.last_orientation_audit_diagnostics["model_calls"],
         )
 
-    def test_literal_key_receipt_reconciles_only_proven_visual_soft_wrap(self):
-        before = self._literal_input_scene("before", value="live", audited=True)
-        expected_effect = {
-            "element_state": {
-                "meaning": "application_text_input",
-                "states": {"value": "live2"},
-            }
-        }
+    def test_post_action_scene_is_never_rewritten_from_transport_expectations(self):
+        self.assertFalse(hasattr(GenericSingleActionAdapter, "_primary_input_confirmation_reusable"))
+        self.assertFalse(hasattr(GenericSingleActionAdapter, "_rebind_action"))
+        self.assertFalse(hasattr(GenericSingleActionAdapter, "_reconcile_literal_key_visual_wrap"))
+        self.assertFalse(hasattr(GenericSingleActionAdapter, "_reconcile_verified_text_horizontal_suffix"))
+
+        prior = "releasecandidate"
+        fragment = "continuation"
+        observed_suffix = "didatecontinuation"
+        before = self._literal_input_scene("before", value=prior, include_key=False)
+        after = self._literal_input_scene("after", value=observed_suffix, include_key=False)
         resolved = ResolvedSemanticAction(
-            node_id="literal-2",
-            kind="tap_semantic",
-            normalized_point=(0.22, 0.735),
-            target_element_id="local_audited_literal_key_1",
+            node_id="no-post-rewrite",
+            kind="input_verified_text",
+            text=prior + fragment,
+            input_fragment=fragment,
+            input_method="direct_latin",
+            prior_input_value=prior,
+            expected_input_value=prior + fragment,
+            expected_input_state={},
+            target_element_id="local_audited_input_1",
             before_fingerprint=before.fingerprint,
-            expected_effect=expected_effect,
         )
-        wrapped = self._literal_input_scene(
-            "after-live2",
-            value="li\nve2",
-            include_key=False,
-        )
+        adapter = self._adapter(FakeSceneObserver([after]), FakeRobot())
+        stable_frames = [Image.new("RGB", (540, 960), "white") for _ in range(4)]
 
-        reconciled = GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
-            resolved,
-            before,
-            wrapped,
-        )
+        with patch.object(
+            adapter,
+            "_capture_stable_post_action_frames",
+            return_value=(stable_frames, ()),
+        ), self.assertRaisesRegex(GenericActionAdapterError, "文字不匹配"):
+            adapter._observe_stable_post_action_scene(
+                goal(),
+                before=before,
+                before_frames=tuple(stable_frames),
+                resolved=resolved,
+                evidence_dir=None,
+                evidence_prefix="no-post-rewrite",
+            )
 
-        input_element = reconciled.get_element("local_audited_input_1")
-        self.assertEqual("live2", input_element.states["value"])
-        self.assertEqual("live2", input_element.label)
-        self.assertIn("本地逐键回执确认该换行为控件视觉软折行", input_element.evidence)
-        UniversalActionController().verify_after_action(resolved, before, reconciled)
-
-        wrong_text = self._literal_input_scene(
-            "after-wrong",
-            value="li\nve3",
-            include_key=False,
-        )
-        missing_evidence_input = wrapped.get_element("local_audited_input_1")
-        missing_evidence = replace(
-            wrapped,
-            elements=(
-                replace(missing_evidence_input, evidence=("可见输入框",)),
-            ),
-        )
-        reconciled_without_repeated_text = GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
-            resolved,
-            before,
-            missing_evidence,
-        )
         self.assertEqual(
-            "live2",
-            reconciled_without_repeated_text.get_element("local_audited_input_1").states["value"],
+            observed_suffix,
+            after.get_element("local_audited_input_1").states["value"],
         )
-        for unsafe_after in (wrong_text,):
-            with self.subTest(fingerprint=unsafe_after.fingerprint):
-                self.assertIs(
-                    unsafe_after,
-                    GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
-                        resolved,
-                        before,
-                        unsafe_after,
-                    ),
-                )
-
-        newline_target = replace(
-            resolved,
-            expected_effect={
-                "element_state": {
-                    "meaning": "application_text_input",
-                    "states": {"value": "live\n2"},
-                }
-            },
-        )
-        self.assertIs(
-            wrapped,
-            GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
-                newline_target,
-                before,
-                wrapped,
-            ),
-        )
-
-    def test_verified_text_reconciles_only_cross_boundary_horizontal_suffix(self):
-        cases = (
-            (
-                "abcdefghijklmnopqrst",
-                "uvwxyzabcdefghijk",
-                "nopqrstuvwxyzabcdefghijk",
-                "input_field_1",
-            ),
-            (
-                "releasecandidate",
-                "continuation",
-                "didatecontinuation",
-                "notes_field",
-            ),
-        )
-        for prior, fragment, observed, field_id in cases:
-            with self.subTest(field_id=field_id):
-                expected = prior + fragment
-                before = self._literal_input_scene(
-                    "before-" + field_id,
-                    value=prior,
-                    include_key=False,
-                )
-                before_input = before.get_element("local_audited_input_1")
-                before = replace(
-                    before,
-                    elements=(
-                        replace(
-                            before_input,
-                            states={
-                                **before_input.states,
-                                "input_field_id": field_id,
-                                "input_multiline": False,
-                            },
-                        ),
-                    ),
-                )
-                after = self._literal_input_scene(
-                    "after-" + field_id,
-                    value=observed,
-                    include_key=False,
-                )
-                after_input = after.get_element("local_audited_input_1")
-                after = replace(
-                    after,
-                    screen_id="unknown",
-                    elements=(
-                        replace(
-                            after_input,
-                            bounds=(0.13, 0.68, 0.87, 0.77),
-                            states={
-                                **after_input.states,
-                                "input_field_id": field_id,
-                                "input_multiline": False,
-                            },
-                        ),
-                    ),
-                )
-                resolved = ResolvedSemanticAction(
-                    node_id="verified-text-" + field_id,
-                    kind="input_verified_text",
-                    text=expected,
-                    input_fragment=fragment,
-                    input_method="direct_latin",
-                    prior_input_value=prior,
-                    expected_input_value=expected,
-                    target_element_id="local_audited_input_1",
-                    before_fingerprint=before.fingerprint,
-                    expected_effect={
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": expected},
-                        }
-                    },
-                    formal_candidate_id="candidate-" + field_id,
-                    formal_transition={
-                        "transition_id": "transition-" + field_id,
-                        "precondition_claim_ids": ["claim-" + field_id],
-                        "expectations": [
-                            {
-                                "subject_ref": "element." + field_id,
-                                "predicate": "element.state.value",
-                                "operator": "equals",
-                                "value": expected,
-                            }
-                        ],
-                        "exploratory": False,
-                    },
-                )
-
-                reconciled = (
-                    GenericSingleActionAdapter._reconcile_verified_text_horizontal_suffix(
-                        resolved,
-                        before,
-                        after,
-                    )
-                )
-
-                reconciled_input = reconciled.get_element("local_audited_input_1")
-                self.assertEqual(expected, reconciled_input.states["value"])
-                self.assertEqual(
-                    observed,
-                    reconciled_input.states["visible_value_suffix"],
-                )
-                self.assertEqual(
-                    "horizontal_suffix",
-                    reconciled_input.states["value_visibility"],
-                )
-                UniversalActionController().verify_after_action(
-                    resolved,
-                    before,
-                    reconciled,
-                )
-
-                wrong_field_input = replace(
-                    after_input,
-                    states={
-                        **after_input.states,
-                        "input_field_id": field_id + "-other",
-                        "input_multiline": False,
-                    },
-                )
-                no_overlap_input = replace(
-                    after_input,
-                    label=fragment,
-                    states={
-                        **after_input.states,
-                        "value": fragment,
-                        "input_field_id": field_id,
-                        "input_multiline": False,
-                    },
-                    evidence=(f"应用输入框当前文字：{fragment}", "caret"),
-                )
-                wrong_prefix = "x" + observed[1:]
-                wrong_prefix_input = replace(
-                    after_input,
-                    label=wrong_prefix,
-                    states={
-                        **after_input.states,
-                        "value": wrong_prefix,
-                        "input_field_id": field_id,
-                        "input_multiline": False,
-                    },
-                    evidence=(f"应用输入框当前文字：{wrong_prefix}", "caret"),
-                )
-                missing_evidence_input = replace(
-                    after.get_element("local_audited_input_1"),
-                    evidence=("可见输入框", "caret"),
-                )
-                reconciled_without_repeated_suffix = (
-                    GenericSingleActionAdapter._reconcile_verified_text_horizontal_suffix(
-                        resolved,
-                        before,
-                        replace(after, elements=(missing_evidence_input,)),
-                    )
-                )
-                self.assertEqual(
-                    expected,
-                    reconciled_without_repeated_suffix.get_element(
-                        "local_audited_input_1"
-                    ).states["value"],
-                )
-                for unsafe_input in (
-                    wrong_field_input,
-                    no_overlap_input,
-                    wrong_prefix_input,
-                ):
-                    unsafe_after = replace(after, elements=(unsafe_input,))
-                    self.assertIs(
-                        unsafe_after,
-                        GenericSingleActionAdapter._reconcile_verified_text_horizontal_suffix(
-                            resolved,
-                            before,
-                            unsafe_after,
-                        ),
-                    )
-
     def test_placeholder_loss_recovery_executes_only_authorized_suffix(self):
         gray = Image.new("RGB", (540, 960), "gray")
 
@@ -2385,32 +1488,15 @@ class GenericActionAdapterTests(unittest.TestCase):
                 node_id="append-second",
                 action="input_verified_text",
                 params={
-                    "formal_candidate_id": "candidate-append-second",
-                    "formal_transition": {
-                        "transition_id": "transition-append-second",
-                        "precondition_claim_ids": ["claim-append-second"],
-                        "expectations": [
-                            {
-                                "subject_ref": "element.input_field_1",
-                                "predicate": "element.state.value",
-                                "operator": "equals",
-                                "value": expected,
-                            }
-                        ],
-                        "exploratory": False,
-                    },
+
+
                     "element_id": field.element_id,
                     "target": field.meaning,
                     "role": field.role,
                     "label": field.label,
                     "states": dict(field.states),
                     "text": expected,
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": field.meaning,
-                            "states": {"value": expected},
-                        }
-                    },
+
                 },
             ),
             planned_scene=planned,
@@ -2424,398 +1510,12 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual("input_field_1", result.before_scene.elements[0].states["input_field_id"])
 
-    def test_completed_navigation_observes_result_without_source_target(self):
-        planned = scene("planned")
-        fresh = replace(planned, fingerprint="fresh")
-        after = scene(
-            "after",
-            screen_id="browser_home",
-            app_id="browser",
-            element_id="browser-content",
-        )
-        observer = FakeSceneObserver([after])
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
-            observer=observer,
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
 
-        result = adapter.execute(
-            requested_action=SemanticAction(
-                node_id="open-browser",
-                action="tap_semantic",
-                params={
-                    "element_id": "e1",
-                    "target": "app_icon",
-                    "role": "icon",
-                    "label": "设置",
-                    "states": {},
-                    "expected_effect": {
-                        "scene_changed": True,
-                    },
-                },
-            ),
-            planned_scene=planned,
-            planned_frames=tuple(
-                Image.new("RGB", (540, 960), "gray") for _ in range(4)
-            ),
-            goal=navigation_goal(),
-            confirmed=True,
-        )
 
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual(1, len(observer.goal_contexts))
-        post_focus = observer.goal_contexts[0]["entities"][
-            "active_subgoal_visual_context"
-        ]
-        self.assertNotIn("target_ui_label", post_focus["goal_entities"])
-        self.assertEqual(
-            "verified_navigation_result_v1",
-            post_focus["goal_entities"]["observation_phase"],
-        )
-        self.assertEqual("观察本次导航后的当前稳定画面", post_focus["objective"])
 
-    def test_post_navigation_result_context_is_fail_closed(self):
-        safe = ResolvedSemanticAction(
-            node_id="open-browser",
-            kind="tap_semantic",
-            expected_effect={
-                "scene_changed": True,
-            },
-        )
-        original = navigation_goal().to_dict()
-        self.assertNotEqual(
-            original,
-            _post_action_observation_context(
-                navigation_goal(),
-                safe,
-                physical_action_executed=True,
-            ),
-        )
 
-        self.assertEqual(
-            original,
-            _post_action_observation_context(navigation_goal(), safe),
-        )
 
-        unsafe_cases = (
-            (
-                navigation_goal(execution_class="effect"),
-                safe,
-            ),
-            (
-                navigation_goal(),
-                replace(
-                    safe,
-                    expected_effect={
-                        "scene_changed": True,
-                        "element_state": {
-                            "meaning": "toggle",
-                            "states": {"checked": True},
-                        },
-                    },
-                ),
-            ),
-            (navigation_goal(), replace(safe, kind="input_verified_text")),
-            (
-                navigation_goal(),
-                replace(
-                    safe,
-                    expected_effect={
-                        "scene_changed": True,
-                        "system_ui": {"navigation_bar_visible": True},
-                    },
-                ),
-            ),
-        )
-        for case_goal, resolved in unsafe_cases:
-            with self.subTest(
-                execution_class=case_goal.entities["active_subgoal_visual_context"][
-                    "execution_class"
-                ],
-                kind=resolved.kind,
-                expected=resolved.expected_effect,
-            ):
-                self.assertEqual(
-                    case_goal.to_dict(),
-                    _post_action_observation_context(
-                        case_goal,
-                        resolved,
-                        physical_action_executed=True,
-                    ),
-                )
 
-        spoofed = navigation_goal(execution_class="effect")
-        spoofed_focus = spoofed.entities["active_subgoal_visual_context"]
-        spoofed_focus["objective"] = "观察本次导航后的当前稳定画面"
-        spoofed_focus["completion_conditions"] = [
-            "当前稳定结果画面已被重新观察"
-        ]
-        spoofed_focus["goal_entities"]["observation_phase"] = (
-            "verified_navigation_result_v1"
-        )
-        sanitized = _post_action_observation_context(spoofed, safe)
-        self.assertNotIn(
-            "observation_phase",
-            sanitized["entities"]["active_subgoal_visual_context"][
-                "goal_entities"
-            ],
-        )
-
-    def test_post_action_context_discards_non_active_subgoal_focus(self):
-        current_goal = navigation_goal()
-        current_goal.entities["next_subgoal_visual_context"] = {
-            "subgoal_id": "read_title",
-            "objective": "读取当前页面主标题",
-            "constraints": ["仅读取"],
-            "completion_conditions": ["页面主标题已读取"],
-            "execution_class": "observe",
-            "goal_entities": {"target_surface": "current_surface"},
-        }
-        resolved = ResolvedSemanticAction(
-            node_id="open-browser",
-            kind="tap_semantic",
-            expected_effect={"scene_changed": True},
-        )
-
-        result = _post_action_observation_context(
-            current_goal,
-            resolved,
-            physical_action_executed=True,
-        )
-        focus = result["entities"]["active_subgoal_visual_context"]
-
-        self.assertEqual("open_browser", focus["subgoal_id"])
-        self.assertNotIn("next_subgoal_visual_context", result["entities"])
-        self.assertEqual(
-            "verified_navigation_result_v1",
-            focus["goal_entities"]["observation_phase"],
-        )
-
-    def test_input_focus_never_switches_to_successor_at_typed_terminal_value(self):
-        current_goal = navigation_goal()
-        active = current_goal.entities["active_subgoal_visual_context"]
-        active["objective"] = "在主题字段输入 first"
-        active["goal_entities"].update(
-            {
-                "active_input_transaction_text": "first",
-                "active_input_field_id": "subject_field",
-                "active_input_field_label": "主题",
-                "active_input_multiline": False,
-            }
-        )
-        current_goal.entities["next_subgoal_visual_context"] = {
-            "subgoal_id": "input_body",
-            "objective": "在正文字段输入 second",
-            "constraints": ["不要发送"],
-            "completion_conditions": ["正文字段逐字为 second"],
-            "execution_class": "navigate",
-            "goal_entities": {
-                "active_input_transaction_text": "second",
-                "active_input_field_id": "body_field",
-                "active_input_field_label": "正文",
-                "active_input_multiline": False,
-            },
-        }
-        partial = ResolvedSemanticAction(
-            node_id="type-partial",
-            kind="input_verified_text",
-            prior_input_value="",
-            expected_input_value="fir",
-            expected_effect={
-                "element_state": {
-                    "meaning": "application_text_input",
-                    "states": {"value": "fir"},
-                }
-            },
-        )
-        terminal = replace(partial, expected_input_value="first")
-
-        partial_context = _post_action_observation_context(
-            current_goal,
-            partial,
-            physical_action_executed=True,
-        )
-        terminal_context = _post_action_observation_context(
-            current_goal,
-            terminal,
-            physical_action_executed=True,
-        )
-
-        self.assertEqual(
-            "open_browser",
-            partial_context["entities"]["active_subgoal_visual_context"][
-                "subgoal_id"
-            ],
-        )
-        self.assertEqual(
-            "open_browser",
-            terminal_context["entities"]["active_subgoal_visual_context"][
-                "subgoal_id"
-            ],
-        )
-        self.assertNotIn("next_subgoal_visual_context", partial_context["entities"])
-        self.assertNotIn("next_subgoal_visual_context", terminal_context["entities"])
-
-    def test_executed_back_and_swipe_use_result_focused_compact_observation(self):
-        cases = (
-            (
-                "back-live",
-                "back",
-                {"scene_changed": True},
-                "按一次返回键",
-                ["动作后出现新的稳定画面"],
-            ),
-            (
-                "swipe-live",
-                "swipe",
-                {"content_changed": True},
-                "在当前模式选择页向上滑动一次",
-                ["验收模式选项出现在当前画面中"],
-            ),
-            (
-                "back-content-variation",
-                "back",
-                {"content_changed": True},
-                "返回上一层并观察内容变化",
-                ["当前内容已变化"],
-            ),
-            (
-                "swipe-scene-variation",
-                "swipe",
-                {"scene_changed": True},
-                "横向滑动到下一页",
-                ["下一页稳定画面已显示"],
-            ),
-        )
-        for node_id, kind, expected_effect, objective, conditions in cases:
-            with self.subTest(kind=kind, expected_effect=expected_effect):
-                current_goal = navigation_goal()
-                focus = current_goal.entities["active_subgoal_visual_context"]
-                focus["objective"] = objective
-                focus["completion_conditions"] = conditions
-                resolved = ResolvedSemanticAction(
-                    node_id=node_id,
-                    kind=kind,
-                    expected_effect=expected_effect,
-                )
-
-                result = _post_action_observation_context(
-                    current_goal,
-                    resolved,
-                    physical_action_executed=True,
-                )
-
-                result_focus = result["entities"]["active_subgoal_visual_context"]
-                self.assertNotIn("target_ui_label", result_focus["goal_entities"])
-                self.assertEqual(
-                    "verified_navigation_result_v1",
-                    result_focus["goal_entities"]["observation_phase"],
-                )
-                self.assertEqual(
-                    "观察本次导航后的当前稳定画面",
-                    result_focus["objective"],
-                )
-
-    def test_executed_back_and_swipe_attest_result_context_in_adapter(self):
-        cases = (
-            ("back", {"scene_changed": True}, {}),
-            ("swipe", {"content_changed": True}, {"direction": "up"}),
-        )
-        for kind, expected_effect, action_params in cases:
-            with self.subTest(kind=kind):
-                planned = scene("planned", screen_id="verification_list")
-                after = scene("after", screen_id="verification_list_after")
-                observer = FakeSceneObserver([after])
-                robot = FakeRobot()
-                adapter = GenericSingleActionAdapter(
-                    capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
-                    observer=observer,
-                    robot=robot,
-                    frame_interval=0,
-                    post_action_settle=0,
-                )
-                params = dict(action_params)
-                params["expected_effect"] = expected_effect
-
-                result = adapter.execute(
-                    requested_action=SemanticAction(
-                        node_id=f"live-{kind}",
-                        action=kind,
-                        params=params,
-                    ),
-                    planned_scene=planned,
-                    planned_frames=tuple(
-                        Image.new("RGB", (540, 960), "gray") for _ in range(4)
-                    ),
-                    goal=navigation_goal(),
-                    confirmed=True,
-                )
-
-                self.assertEqual(1, result.physical_actions)
-                post_focus = observer.goal_contexts[-1]["entities"][
-                    "active_subgoal_visual_context"
-                ]
-                self.assertEqual(
-                    "verified_navigation_result_v1",
-                    post_focus["goal_entities"]["observation_phase"],
-                )
-
-    def test_back_and_swipe_result_marker_rejects_unexecuted_or_wrong_effect(self):
-        base_goal = navigation_goal()
-        cases = (
-            (
-                False,
-                ResolvedSemanticAction(
-                    node_id="unexecuted-back",
-                    kind="back",
-                    expected_effect={"scene_changed": True},
-                ),
-            ),
-            (
-                True,
-                ResolvedSemanticAction(
-                    node_id="unchanged-swipe",
-                    kind="swipe",
-                    expected_effect={"content_changed": False},
-                ),
-            ),
-            (
-                True,
-                ResolvedSemanticAction(
-                    node_id="wrong-effect-back",
-                    kind="back",
-                    expected_effect={
-                        "scene_changed": True,
-                        "element_state": {"meaning": "toggle"},
-                    },
-                ),
-            ),
-            (
-                True,
-                ResolvedSemanticAction(
-                    node_id="unknown-effect-swipe",
-                    kind="swipe",
-                    expected_effect={
-                        "content_changed": True,
-                        "coordinates_changed": True,
-                    },
-                ),
-            ),
-        )
-        for executed, resolved in cases:
-            with self.subTest(node_id=resolved.node_id):
-                self.assertEqual(
-                    base_goal.to_dict(),
-                    _post_action_observation_context(
-                        base_goal,
-                        resolved,
-                        physical_action_executed=executed,
-                    ),
-                )
 
     def test_stable_local_ocr_snaps_qwerty_row_heights(self):
         payload = {
@@ -3158,6 +1858,22 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
             self.assertEqual([], list(evidence_dir.glob("*_qwen_failure.json")))
 
+    def test_scene_only_observer_cannot_reenter_the_runtime_contract(self):
+        class ObsoleteSceneOnlyObserver:
+            def observe(self, *, frames, goal_context=None):
+                del frames, goal_context
+                return scene("obsolete-scene-only")
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            r"不支持同一截图响应中的 scene \+ decision 合同",
+        ):
+            self._adapter(ObsoleteSceneOnlyObserver(), FakeRobot()).capture_scene(
+                goal(),
+                evidence_dir=None,
+                prefix="before_step_1",
+            )
+
     def test_adapter_passes_the_device_runtime_action_set_to_qwen(self):
         class RuntimeActionObserver(FakeSceneObserver):
             supports_runtime_action_contract = True
@@ -3166,7 +1882,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 super().__init__(scenes)
                 self.available_action_sets = []
 
-            def observe(
+            def observe_with_decision(
                 self,
                 *,
                 frames,
@@ -3174,7 +1890,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 available_action_kinds=None,
             ):
                 self.available_action_sets.append(frozenset(available_action_kinds or ()))
-                return super().observe(frames=frames, goal_context=goal_context)
+                return super().observe_with_decision(frames=frames, goal_context=goal_context)
 
         observer = RuntimeActionObserver([scene("fresh")])
         adapter = self._adapter(observer, FakeRobot())
@@ -3274,7 +1990,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
 
         class PreserveOptionalAlignmentObserver(FakeSceneObserver):
-            def observe(self, *, frames, goal_context=None):
+            def _next_scene(self, *, goal_context=None):
                 self.calls += 1
                 self.goal_contexts.append(goal_context)
                 result = self.scenes.pop(0)
@@ -3337,9 +2053,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 node_id="generic_step_1",
                 action="reveal_system_navigation",
                 params={
-                    "expected_effect": {
-                        "system_ui": {"navigation_bar_visible": True}
-                    }
+
                 },
             ),
             planned_scene=planned,
@@ -3372,27 +2086,24 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
         )
 
-        result = adapter.execute(
-            requested_action=SemanticAction(
-                node_id="generic_step_1",
-                action="reveal_system_navigation",
-                params={
-                    "expected_effect": {
-                        "system_ui": {"navigation_bar_visible": True}
-                    }
-                },
-            ),
-            planned_scene=planned,
-            planned_frames=tuple(
-                Image.new("RGB", (540, 960), "gray") for _ in range(4)
-            ),
-            goal=goal(),
-            confirmed=True,
-        )
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "结构化导航栏可见证据",
+        ):
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="generic_step_1",
+                    action="reveal_system_navigation",
+                    params={},
+                ),
+                planned_scene=planned,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                ),
+                goal=goal(),
+                confirmed=True,
+            )
 
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual("mismatched", result.action_outcome)
-        self.assertTrue(result.verification_errors)
         self.assertEqual([("reveal_system_navigation",)], robot.actions)
 
     def test_confirmed_home_executes_exactly_once_and_reobserves(self):
@@ -3419,7 +2130,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         action = SemanticAction(
             node_id="return-to-launcher",
             action="home",
-            params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+            params={},
         )
 
         result = self._adapter(observer, robot).execute(
@@ -3440,7 +2151,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_fixed_system_home_uses_frame_binding_when_app_content_is_hidden(self):
         class ExactAlignmentObserver(FakeSceneObserver):
-            def observe(self, *, frames, goal_context=None):
+            def _next_scene(self, *, goal_context=None):
                 self.calls += 1
                 self.goal_contexts.append(goal_context)
                 result = self.scenes.pop(0)
@@ -3479,10 +2190,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 node_id="fixed-system-home",
                 action="home",
                 params={
-                    "expected_effect": {
-                        "scene_changed": True,
-                        "app_id": "launcher",
-                    }
+
                 },
             ),
             planned_scene=planned,
@@ -3509,7 +2217,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             requested_action=SemanticAction(
                 node_id="return-to-launcher",
                 action="home",
-                params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+                params={},
             ),
             planned_scene=planned,
             goal=goal(),
@@ -3521,7 +2229,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertFalse(result.hardware_receipt["mechanical_contact_ack"])
         self.assertIsNone(robot.consume_last_click_receipt())
 
-    def test_invalid_home_click_receipt_stops_before_post_action_observation(self):
+    def test_invalid_home_click_receipt_stops_before_fresh_screenshot_observation(self):
         planned = scene("planned", screen_id="settings_home", app_id="settings")
         fresh = scene("before", screen_id="settings_home", app_id="settings")
         observer = FakeSceneObserver([fresh])
@@ -3532,7 +2240,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 requested_action=SemanticAction(
                     node_id="return-to-launcher",
                     action="home",
-                    params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+                    params={},
                 ),
                 planned_scene=planned,
                 goal=goal(),
@@ -3544,7 +2252,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
-        fresh = scene("before", element_id="fresh", bounds=(0.11, 0.21, 0.31, 0.41))
+        fresh = scene("before", bounds=(0.11, 0.21, 0.31, 0.41))
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver([fresh, after])
         robot = FakeRobot()
@@ -3600,7 +2308,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
 
         planned = input_scene("planned", "field-planned")
-        fresh = input_scene("before", "field-fresh")
+        fresh = input_scene("before", "field-planned")
         after = UIScene(
             app_id="browser",
             screen_id="search",
@@ -3632,12 +2340,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 "label": "搜索",
                 "states": {"focused": True},
                 "text": "agent",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "搜索输入框",
-                        "states": {"value": "agent"},
-                    }
-                },
+
             },
         )
 
@@ -3689,219 +2392,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([], blocked_robot.actions)
         self.assertEqual(2, observer.calls)
 
-    def test_confirmed_chinese_input_types_pinyin_then_requires_exact_candidate(self):
-        class ContinuationObserver(FakeSceneObserver):
-            input_lineage_store = object()
-
-            def __init__(self, scenes):
-                super().__init__(scenes)
-                self.lineage_overrides = []
-
-            def observe(
-                self,
-                *,
-                frames,
-                goal_context=None,
-                device_id=None,
-                input_lineage_override=None,
-            ):
-                self.lineage_overrides.append(input_lineage_override)
-                return super().observe(frames=frames, goal_context=goal_context)
-
-        def input_scene(fingerprint, *, ime=False):
-            states = {
-                "focused": True,
-                "fully_visible": True,
-                "value": "",
-                "input_field_id": "input_field_1",
-                "keyboard_layout": "qwerty",
-                "keyboard_input_mode": "chinese_pinyin",
-                "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-                "goal_relevant": True,
-            }
-            if ime:
-                states.update(
-                    {
-                        "ime_preedit_text": "nihao",
-                        "ime_exact_candidate_text": "你好",
-                    }
-                )
-            return UIScene(
-                app_id="chat",
-                screen_id="conversation",
-                summary="消息输入框和中文键盘可见",
-                elements=(
-                    UIElement(
-                        element_id="field",
-                        role="input",
-                        meaning="application_text_input",
-                        label="消息",
-                        bounds=(0.1, 0.1, 0.9, 0.2),
-                        confidence=0.97,
-                        states=states,
-                        evidence=("输入框与中文拼音键盘可见",),
-                    ),
-                ),
-                stable=True,
-                confidence=0.96,
-                fingerprint=fingerprint,
-            )
-
-        before = input_scene("before")
-        after = input_scene("after", ime=True)
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="input-chinese",
-            action="input_verified_text",
-            params={
-                "element_id": "field",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "消息",
-                "states": before.elements[0].states,
-                "text": "你好",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {
-                            "value": "",
-                            "ime_preedit_text": "nihao",
-                            "ime_exact_candidate_text": "你好",
-                        },
-                    }
-                },
-            },
-        )
-
-        observer = ContinuationObserver([before, after])
-        result = self._adapter(observer, robot).execute(
-            requested_action=action,
-            planned_scene=before,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual([("pinyin", "你好", "nihao")], robot.actions)
-        self.assertEqual("matched", result.action_outcome)
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual(
-            [None, "pending_verified_chinese_preedit_action"],
-            [
-                getattr(item, "source", None)
-                for item in observer.lineage_overrides
-            ],
-        )
-
-    def test_confirmed_chinese_input_accepts_localized_same_surface_identity(self):
-        before_states = {
-            "focused": True,
-            "value": "复杂输入",
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "chinese_pinyin",
-            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-            "goal_relevant": True,
-        }
-        before = UIScene(
-            app_id="微信",
-            screen_id="聊天界面",
-            summary="输入框显示既有中文，键盘已聚焦",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="application_text_input",
-                    label="复杂输入",
-                    bounds=(0.11, 0.52, 0.70, 0.57),
-                    confidence=1.0,
-                    states=before_states,
-                ),
-            ),
-            stable=True,
-            confidence=1.0,
-            fingerprint="before",
-            camera_alignment=aligned_camera_facts(),
-        )
-        after = UIScene(
-            app_id="当前会话标题",
-            screen_id="chat_input",
-            summary="同一输入框显示验收的拼音和候选",
-            elements=(
-                replace(
-                    before.elements[0],
-                    bounds=(0.13, 0.535, 0.70, 0.58),
-                    states={
-                        **before_states,
-                        "ime_preedit_text": "yanshou",
-                        "ime_exact_candidate_text": "验收",
-                    },
-                ),
-            ),
-            stable=True,
-            confidence=1.0,
-            fingerprint="after",
-            camera_alignment=aligned_camera_facts(),
-        )
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="input-next-chinese-segment",
-            action="input_verified_text",
-            params={
-                "element_id": "field",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "复杂输入",
-                "states": before_states,
-                "text": "复杂输入验收",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {
-                            "value": "复杂输入",
-                            "ime_preedit_text": "yanshou",
-                            "ime_exact_candidate_text": "验收",
-                        },
-                    }
-                },
-            },
-        )
-
-        result = self._adapter(
-            FakeSceneObserver([before, after, after]),
-            robot,
-        ).execute(
-            requested_action=action,
-            planned_scene=before,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual([("pinyin", "验收", "yanshou")], robot.actions)
-        self.assertEqual(
-            "matched",
-            result.action_outcome,
-            result.verification_errors,
-        )
-        self.assertEqual(1, result.physical_actions)
-
-    def test_input_surface_family_does_not_bridge_different_page_families(self):
-        self.assertTrue(
-            input_screen_identity_compatible(
-                "聊天界面",
-                "chat_input",
-            )
-        )
-        self.assertFalse(
-            input_screen_identity_compatible(
-                "聊天界面",
-                "search_input",
-            )
-        )
-        self.assertEqual(
-            "",
-            input_screen_identity_family("unknown"),
-        )
-
-    def test_typed_field_identity_bridges_only_model_screen_wording_drift(self):
+    def test_typed_field_identity_bridges_optional_visual_wording_and_mode_drift(self):
         states = {
             "focused": True,
             "fully_visible": True,
@@ -3954,28 +2445,10 @@ class GenericActionAdapterTests(unittest.TestCase):
             input_method="direct_latin",
             prior_input_value="first\n",
             expected_input_value="first\nsecond",
+            input_field_id="input_field_1",
+            expected_input_state={},
             target_element_id="before-field",
             before_fingerprint=before.fingerprint,
-            expected_effect={
-                "element_state": {
-                    "meaning": "application_text_input",
-                    "states": {"value": "first\nsecond"},
-                }
-            },
-            formal_candidate_id="candidate-append-second",
-            formal_transition={
-                "transition_id": "transition-append-second",
-                "precondition_claim_ids": ["claim-append-second"],
-                "expectations": [
-                    {
-                        "subject_ref": "element.input_field_1",
-                        "predicate": "element.state.value",
-                        "operator": "equals",
-                        "value": "first\nsecond",
-                    }
-                ],
-                "exploratory": False,
-            },
         )
 
         UniversalActionController().verify_after_action(resolved, before, after)
@@ -3992,8 +2465,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 ),
             ),
         )
-        concrete_before = replace(before, app_id="com.example.source")
-        different_package = replace(after, app_id="com.example.other")
         changed_mode = replace(
             after,
             elements=(
@@ -4006,11 +2477,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 ),
             ),
         )
-        for unsafe_before, unsafe_after in (
-            (before, different_field),
-            (concrete_before, different_package),
-            (before, changed_mode),
-        ):
+        for unsafe_before, unsafe_after in ((before, different_field),):
             with self.subTest(
                 before_app_id=unsafe_before.app_id,
                 app_id=unsafe_after.app_id,
@@ -4023,92 +2490,8 @@ class GenericActionAdapterTests(unittest.TestCase):
                         unsafe_after,
                     )
 
-    def test_post_action_transient_mismatch_is_not_resampled(self):
-        states = {
-            "focused": True,
-            "value": "",
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "chinese_pinyin",
-            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-            "goal_relevant": True,
-        }
-        before = UIScene(
-            app_id="chat",
-            screen_id="conversation",
-            summary="消息输入框和中文键盘可见",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="application_text_input",
-                    label="消息",
-                    bounds=(0.1, 0.1, 0.9, 0.2),
-                    confidence=0.97,
-                    states=states,
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="before",
-        )
-        transient = replace(
-            before,
-            summary="首轮暂态观察遗漏输入框",
-            elements=(),
-            fingerprint="transient",
-        )
-        after = replace(
-            before,
-            summary="输入框与逐字中文候选均已验证",
-            elements=(
-                replace(
-                    before.elements[0],
-                    states={
-                        **states,
-                        "ime_preedit_text": "fuzashuru",
-                        "ime_exact_candidate_text": "复杂输入",
-                    },
-                ),
-            ),
-            fingerprint="after",
-        )
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="input-chinese-segment",
-            action="input_verified_text",
-            params={
-                "element_id": "field",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "消息",
-                "states": states,
-                "text": "复杂输入",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {
-                            "value": "",
-                            "ime_preedit_text": "fuzashuru",
-                            "ime_exact_candidate_text": "复杂输入",
-                        },
-                    }
-                },
-            },
-        )
-        observer = FakeSceneObserver([before, transient, after])
+        UniversalActionController().verify_after_action(resolved, before, changed_mode)
 
-        result = self._adapter(observer, robot).execute(
-            requested_action=action,
-            planned_scene=before,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual([("pinyin", "复杂输入", "fuzashuru")], robot.actions)
-        self.assertEqual(2, observer.calls)
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual("mismatched", result.action_outcome)
-        self.assertTrue(result.verification_errors)
 
     def test_confirmed_clear_uses_exact_observed_count_and_fresh_qwerty_geometry(self):
         def input_scene(fingerprint, element_id, value):
@@ -4140,7 +2523,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
 
         planned = input_scene("planned", "planned-field", "lxs,")
-        fresh = input_scene("before", "fresh-field", "lxs,")
+        fresh = input_scene("before", "planned-field", "lxs,")
         after = input_scene("after", "after-field", "")
         robot = FakeRobot()
         snapped_anchors = {
@@ -4167,12 +2550,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "role": "input",
                     "label": "",
                     "states": dict(planned.elements[0].states),
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "draft_input",
-                            "states": {"value": ""},
-                        }
-                    },
+
                 },
             ),
             planned_scene=planned,
@@ -4185,7 +2563,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
 
-    def test_matched_direct_input_persists_lineage_and_clear_discards_it(self):
+    def test_direct_input_and_clear_use_current_exact_value_without_persistent_lineage(self):
         def input_scene(fingerprint, value, *, goal_relevant=True):
             return UIScene(
                 app_id="generic_app",
@@ -4206,6 +2584,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                             "keyboard_layout": "qwerty",
                             "keyboard_input_mode": "direct_latin",
                             "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                            "input_field_id": "field",
                             "goal_relevant": goal_relevant,
                         },
                         evidence=(f"应用输入框当前文字：{value}",),
@@ -4217,104 +2596,61 @@ class GenericActionAdapterTests(unittest.TestCase):
                 camera_alignment=aligned_camera_facts(),
             )
 
-        with tempfile.TemporaryDirectory() as temp:
-            store = TypedInputLineageStore(Path(temp))
-            before = input_scene("before", "")
-            after = input_scene("after", "longinput")
-            robot = FakeRobot()
-            result = self._adapter(
-                FakeSceneObserver([before, after]),
-                robot,
-                input_lineage_store=store,
-            ).execute(
-                requested_action=SemanticAction(
-                    node_id="type-segment",
-                    action="input_verified_text",
-                    params={
-                        "element_id": "field",
-                        "target": "application_text_input",
-                        "role": "input",
-                        "label": "",
-                        "states": dict(before.elements[0].states),
-                        "text": "longinput",
-                        "expected_effect": {
-                            "element_state": {
-                                "meaning": "application_text_input",
-                                "states": {"value": "longinput"},
-                            }
-                        },
-                    },
-                ),
+        before = input_scene("before", "")
+        after = input_scene("after", "longinput")
+        robot = FakeRobot()
+        input_action = SemanticAction(
+            node_id="type-segment",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "",
+                "states": dict(before.elements[0].states),
+                "text": "longinput",
+            },
+        )
+        result = self._adapter(FakeSceneObserver([before, after]), robot).execute(
+            requested_action=input_action,
+            planned_scene=before,
+            goal=goal(),
+            confirmed=True,
+        )
+        self.assertEqual("matched", result.action_outcome)
+
+        clear_after = input_scene("cleared", "", goal_relevant=False)
+        clear_result = self._adapter(FakeSceneObserver([after, clear_after]), FakeRobot()).execute(
+            requested_action=SemanticAction(
+                node_id="clear-segment",
+                action="clear_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "application_text_input",
+                    "role": "input",
+                    "label": "longinput",
+                    "states": dict(after.elements[0].states),
+                },
+            ),
+            planned_scene=after,
+            goal=goal(),
+            confirmed=True,
+        )
+        self.assertEqual("matched", clear_result.action_outcome)
+
+        wrong_after = input_scene("wrong-after", "longinpuw")
+        mismatch_robot = FakeRobot()
+        with self.assertRaisesRegex(GenericActionAdapterError, "文字不匹配") as caught:
+            self._adapter(FakeSceneObserver([before, wrong_after]), mismatch_robot).execute(
+                requested_action=input_action,
                 planned_scene=before,
                 goal=goal(),
                 confirmed=True,
             )
-            self.assertEqual("matched", result.action_outcome)
-            self.assertEqual("longinput", store.load("test-device").exact_value)
+        self.assertEqual(1, caught.exception.physical_actions)
+        self.assertEqual(1, len(mismatch_robot.actions))
 
-            clear_after = input_scene("cleared", "", goal_relevant=False)
-            clear_result = self._adapter(
-                FakeSceneObserver([after, clear_after]),
-                FakeRobot(),
-                input_lineage_store=store,
-            ).execute(
-                requested_action=SemanticAction(
-                    node_id="clear-segment",
-                    action="clear_verified_text",
-                    params={
-                        "element_id": "field",
-                        "target": "application_text_input",
-                        "role": "input",
-                        "label": "longinput",
-                        "states": dict(after.elements[0].states),
-                        "expected_effect": {
-                            "element_state": {
-                                "meaning": "application_text_input",
-                                "states": {"value": ""},
-                            }
-                        },
-                    },
-                ),
-                planned_scene=after,
-                goal=goal(),
-                confirmed=True,
-            )
-            self.assertEqual("matched", clear_result.action_outcome)
-            self.assertIsNone(store.load("test-device"))
-
-            bad_store = TypedInputLineageStore(Path(temp) / "bad")
-            wrong_after = input_scene("wrong-after", "longinpuw")
-            mismatch = self._adapter(
-                FakeSceneObserver([before, wrong_after, wrong_after]),
-                FakeRobot(),
-                input_lineage_store=bad_store,
-            ).execute(
-                requested_action=SemanticAction(
-                    node_id="type-mismatch",
-                    action="input_verified_text",
-                    params={
-                        "element_id": "field",
-                        "target": "application_text_input",
-                        "role": "input",
-                        "label": "",
-                        "states": dict(before.elements[0].states),
-                        "text": "longinput",
-                        "expected_effect": {
-                            "element_state": {
-                                "meaning": "application_text_input",
-                                "states": {"value": "longinput"},
-                            }
-                        },
-                    },
-                ),
-                planned_scene=before,
-                goal=goal(),
-                confirmed=True,
-            )
-            self.assertEqual("mismatched", mismatch.action_outcome)
-            self.assertIsNone(bad_store.load("test-device"))
-
-    def test_confirmed_input_accepts_unique_overlapping_post_input_alias(self):
+    def test_confirmed_input_uses_qwen_selected_id_before_exact_post_receipt(self):
         def input_scene(
             fingerprint,
             element_id,
@@ -4358,7 +2694,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             "planned", "planned-input", "target_text_input", "", ""
         )
         fresh = input_scene(
-            "before", "fresh-input", "target_text_input", "", ""
+            "before", "planned-input", "target_text_input", "", ""
         )
         after = input_scene(
             "after", "audited-input", "application_text_input", "agent", "agent"
@@ -4382,12 +2718,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "goal_relevant": True,
                     },
                     "text": "agent",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "target_text_input",
-                            "states": {"value": "agent"},
-                        }
-                    },
+
                 },
             ),
             planned_scene=planned,
@@ -4451,12 +2782,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "goal_relevant": True,
                     },
                     "text": "agent",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "target_text_input",
-                            "states": {"value": "agent"},
-                        }
-                    },
+
                 },
             ),
             planned_scene=planned,
@@ -4491,8 +2817,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             "states": before.elements[0].states, "text": expected, "text_transport": "companion_ime",
             "input_field_id": "field_primary", "prior_input_value": "前缀",
             "input_fragment": "🙂\nsecond@例", "expected_input_value": expected,
-            "expected_effect": {"element_state": {"meaning": "application_text_input",
-                "states": {"value": expected}}},
+
         })
         authority = ConfirmationAuthority(session_id="session-1", task_id="task-1", device_id="test-device",
             revision=3, subgoal_id="subgoal-1", effect_ids=(), observation_id="observation-1",
@@ -4516,7 +2841,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertNotIn(expected, json.dumps(result.execution_metadata, ensure_ascii=False))
         self.assertEqual("accepted", result.execution_metadata["transport_status"])
 
-    def test_confirmed_input_rejects_different_concrete_page_identity(self):
+    def test_confirmed_input_accepts_optional_page_wording_change_with_exact_value(self):
         before = UIScene(
             app_id="browser",
             screen_id="page-a",
@@ -4552,9 +2877,9 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         robot = FakeRobot()
 
-        result = self._adapter(FakeSceneObserver([before, after, after]), robot).execute(
+        result = self._adapter(FakeSceneObserver([before, after]), robot).execute(
             requested_action=SemanticAction(
-                node_id="reject-page-switch",
+                node_id="accept-page-wording-change",
                 action="input_verified_text",
                 params={
                     "element_id": "field",
@@ -4563,100 +2888,15 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "label": "输入框",
                     "states": before.elements[0].states,
                     "text": "agent",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "target_text_input",
-                            "states": {"value": "agent"},
-                        }
-                    },
                 },
             ),
             planned_scene=before,
             goal=goal(),
             confirmed=True,
         )
-
-        self.assertEqual("mismatched", result.action_outcome)
-        self.assertTrue(
-            all("App 或页面身份发生变化" in error for error in result.verification_errors)
-        )
+        self.assertEqual("matched", result.action_outcome)
         self.assertEqual(1, result.physical_actions)
 
-    def test_confirmed_input_rejects_unknown_identity_when_keyboard_mode_changes(self):
-        before = UIScene(
-            app_id="browser",
-            screen_id="page-a",
-            summary="输入页",
-            elements=(
-                UIElement(
-                    element_id="field",
-                    role="input",
-                    meaning="target_text_input",
-                    label="输入框",
-                    bounds=(0.1, 0.1, 0.9, 0.2),
-                    confidence=0.98,
-                    states={
-                        "focused": True,
-                        "value": "",
-                        "keyboard_layout": "qwerty",
-                        "keyboard_input_mode": "direct_latin",
-                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-                        "goal_relevant": True,
-                    },
-                ),
-            ),
-            stable=True,
-            confidence=0.98,
-            fingerprint="before",
-            camera_alignment=aligned_camera_facts(),
-        )
-        after = replace(
-            before,
-            app_id="unknown",
-            screen_id="unknown",
-            fingerprint="after",
-            elements=(
-                replace(
-                    before.elements[0],
-                    states={
-                        **before.elements[0].states,
-                        "value": "agent",
-                        "keyboard_input_mode": "chinese_pinyin",
-                    },
-                ),
-            ),
-        )
-        robot = FakeRobot()
-
-        result = self._adapter(FakeSceneObserver([before, after, after]), robot).execute(
-            requested_action=SemanticAction(
-                node_id="reject-mode-drift",
-                action="input_verified_text",
-                params={
-                    "element_id": "field",
-                    "target": "target_text_input",
-                    "role": "input",
-                    "label": "输入框",
-                    "states": before.elements[0].states,
-                    "text": "agent",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "target_text_input",
-                            "states": {"value": "agent"},
-                        }
-                    },
-                },
-            ),
-            planned_scene=before,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual("mismatched", result.action_outcome)
-        self.assertTrue(
-            all("App 或页面身份发生变化" in error for error in result.verification_errors)
-        )
-        self.assertEqual(1, result.physical_actions)
 
     def test_execution_result_keeps_exact_four_verified_after_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")
@@ -4664,13 +2904,12 @@ class GenericActionAdapterTests(unittest.TestCase):
         before_fingerprint = local_frame_fingerprint(gray)
         after_fingerprint = local_frame_fingerprint(white)
         planned = scene(before_fingerprint)
-        fresh = scene(before_fingerprint, element_id="fresh")
         after = scene(
             after_fingerprint,
             screen_id="app_home",
             element_id="after",
         )
-        observer = FakeSceneObserver([fresh, after])
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -4689,6 +2928,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             result = adapter.execute(
                 requested_action=action,
                 planned_scene=planned,
+                planned_frames=(gray, gray.copy(), gray.copy(), gray.copy()),
                 goal=goal(),
                 confirmed=True,
                 evidence_dir=Path(temp),
@@ -4726,10 +2966,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
             observer=FakeSceneObserver(
-                [
-                    scene(before_fingerprint, element_id="fresh"),
-                    scene(after_fingerprint, screen_id="app_home", element_id="after"),
-                ]
+                [scene(after_fingerprint, screen_id="app_home", element_id="after")]
             ),
             robot=FakeRobot(),
             frame_interval=0,
@@ -4744,6 +2981,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         result = adapter.execute(
             requested_action=action,
             planned_scene=scene(before_fingerprint),
+            planned_frames=(gray, gray.copy(), gray.copy(), gray.copy()),
             goal=goal(),
             confirmed=True,
         )
@@ -4751,1386 +2989,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         selected_fingerprint = local_frame_fingerprint(result.after_frames[0])
         self.assertEqual(result.after_scene.fingerprint, selected_fingerprint)
 
-    def test_rebind_accepts_same_visible_target_when_meaning_wording_changes(self):
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="android_home",
-            summary="主屏幕",
-            elements=(
-                UIElement(
-                    element_id="douyin_app_icon",
-                    role="icon",
-                    meaning="抖音应用启动入口",
-                    label="抖音",
-                    bounds=(0.69, 0.63, 0.84, 0.76),
-                    confidence=0.98,
-                    states={"goal_relevant": True},
-                ),
-            ),
-            stable=True,
-            confidence=0.97,
-            fingerprint="planned",
-        )
-        fresh = UIScene(
-            app_id="unknown",
-            screen_id="android_home",
-            summary="主屏幕",
-            elements=(
-                UIElement(
-                    element_id="e1",
-                    role="icon",
-                    meaning="抖音应用图标",
-                    label="抖音",
-                    bounds=(0.70, 0.64, 0.85, 0.77),
-                    confidence=0.97,
-                    states={"goal_relevant": True},
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="planned",
-        )
-        after = scene(
-            "after",
-            screen_id="app_home",
-            element_id="after",
-            app_id="douyin",
-        )
-        observer = FakeSceneObserver([fresh, after])
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="generic_step_1",
-            action="tap_semantic",
-            params={
-                "element_id": "douyin_app_icon",
-                "target": "抖音应用启动入口",
-                "role": "icon",
-                "label": "抖音",
-                "states": {"goal_relevant": True},
-            },
-        )
-        result = self._adapter(observer, robot).execute(
-            requested_action=action,
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual(1, len(robot.actions))
-
-    def test_formal_rebind_accepts_stable_visible_identity_after_wording_drift(self):
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="unknown",
-            summary="主屏幕",
-            elements=(
-                UIElement(
-                    element_id="browser_app_icon",
-                    role="icon",
-                    meaning="启动浏览器应用",
-                    label="浏览器",
-                    bounds=(0.12, 0.03, 0.33, 0.17),
-                    confidence=0.98,
-                    states={"goal_relevant": True},
-                ),
-            ),
-            stable=True,
-            confidence=0.97,
-            fingerprint="planned",
-        )
-        fresh = UIScene(
-            app_id="launcher",
-            screen_id="home_screen",
-            summary="主屏幕",
-            elements=(
-                UIElement(
-                    element_id="browser_icon",
-                    role="icon",
-                    meaning="launch_browser_app",
-                    label="浏览器",
-                    bounds=(0.13, 0.03, 0.32, 0.16),
-                    confidence=0.98,
-                    states={"goal_relevant": True},
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="fresh",
-        )
-        after = UIScene(
-            app_id="browser",
-            screen_id="browser_home",
-            summary="浏览器首页",
-            stable=True,
-            confidence=0.95,
-            fingerprint="after",
-        )
-        robot = FakeRobot()
-        rebound = self._adapter(
-            FakeSceneObserver([]),
-            robot,
-        )._rebind_action(
-            SemanticAction(
-                node_id="open-browser",
-                action="tap_semantic",
-                params={
-                    "element_id": "browser_app_icon",
-                    "target": "启动浏览器应用",
-                    "role": "icon",
-                    "label": "浏览器",
-                    "states": {"goal_relevant": True},
-                    "formal_candidate_id": "candidate-browser",
-                },
-            ),
-            planned,
-            fresh,
-        )
-
-        self.assertEqual([], robot.actions)
-        self.assertEqual("launch_browser_app", rebound.params["target"])
-
-    def test_rebind_accepts_exact_local_gesture_mode_selector_label(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="unknown",
-            summary="本地验收模式列表",
-            elements=(
-                UIElement(
-                    element_id="mode",
-                    role="button",
-                    meaning="long_press_target",
-                    label="长按目标",
-                    bounds=(0.12, 0.76, 0.88, 0.85),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = UIScene(
-            app_id="unknown",
-            screen_id="unknown",
-            summary="本地验收模式列表",
-            elements=(
-                UIElement(
-                    element_id="fresh-mode",
-                    role="button",
-                    meaning="select_long_press_target_mode",
-                    label="长按目标",
-                    bounds=(0.12, 0.77, 0.88, 0.86),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        robot = FakeRobot()
-        result = self._adapter(
-            FakeSceneObserver([fresh, scene("after", screen_id="long-press")]),
-            robot,
-        ).execute(
-            requested_action=SemanticAction(
-                node_id="open-mode",
-                action="tap_semantic",
-                params={
-                    "element_id": "mode",
-                    "target": "long_press_target",
-                    "role": "button",
-                    "label": "长按目标",
-                    "states": states,
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual([("tap", 500, 815)], robot.actions)
-        self.assertEqual(
-            "select_long_press_target_mode",
-            result.rebound_action.params["target"],
-        )
-
-    def test_rebind_uses_planned_selector_semantics_when_fresh_wording_is_minimal(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="acceptance_modes",
-            summary="本地模式列表",
-            elements=(
-                UIElement(
-                    element_id="planned-mode",
-                    role="list_item",
-                    meaning="acceptance_mode_option",
-                    label="语义点击",
-                    bounds=(0.12, 0.35, 0.88, 0.43),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-mode",
-                    meaning="语义动作控件",
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        robot = FakeRobot()
-
-        result = self._adapter(
-            FakeSceneObserver([fresh, scene("after", screen_id="semantic-mode")]),
-            robot,
-        ).execute(
-            requested_action=SemanticAction(
-                node_id="open-mode",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned-mode",
-                    "target": "acceptance_mode_option",
-                    "role": "list_item",
-                    "label": "语义点击",
-                    "states": states,
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 500, 390)], robot.actions)
-        self.assertEqual("语义动作控件", result.rebound_action.params["target"])
-
-    def test_rebind_uses_chinese_planned_selector_semantics(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="acceptance_modes",
-            summary="本地模式列表",
-            elements=(
-                UIElement(
-                    element_id="planned-mode",
-                    role="list_item",
-                    meaning="验收模式选项",
-                    label="语义点击",
-                    bounds=(0.12, 0.35, 0.88, 0.43),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-mode",
-                    meaning="语义动作控件",
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        robot = FakeRobot()
-
-        result = self._adapter(
-            FakeSceneObserver([fresh, scene("after", screen_id="semantic-mode")]),
-            robot,
-        ).execute(
-            requested_action=SemanticAction(
-                node_id="open-mode",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned-mode",
-                    "target": "验收模式选项",
-                    "role": "list_item",
-                    "label": "语义点击",
-                    "states": states,
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 500, 390)], robot.actions)
-        self.assertEqual("语义动作控件", result.rebound_action.params["target"])
-
-    def test_rebind_accepts_exact_navigation_label_across_selector_roles(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        label = "连续闭环：滑动→点击→返回"
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="acceptance_modes",
-            summary="本地验收模式列表",
-            elements=(
-                UIElement(
-                    element_id="mode",
-                    role="list_item",
-                    meaning="continuous_loop_acceptance_mode_entry",
-                    label=label,
-                    bounds=(0.13, 0.79, 0.87, 0.86),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-mode",
-                    role="button",
-                    meaning="target_entry",
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        robot = FakeRobot()
-
-        result = self._adapter(
-            FakeSceneObserver([fresh, scene("after", screen_id="sequence")]),
-            robot,
-        ).execute(
-            requested_action=SemanticAction(
-                node_id="open-mode",
-                action="tap_semantic",
-                params={
-                    "element_id": "mode",
-                    "target": "continuous_loop_acceptance_mode_entry",
-                    "role": "list_item",
-                    "label": label,
-                    "states": states,
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 500, 825)], robot.actions)
-        self.assertEqual("button", result.rebound_action.params["role"])
-        self.assertEqual("target_entry", result.rebound_action.params["target"])
-
-    def test_rebind_accepts_exact_text_link_after_button_role_drift(self):
-        states = {"fully_visible": True}
-        label = "返回验收模式选择"
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="unknown",
-            summary="本地验收详情页",
-            elements=(
-                UIElement(
-                    element_id="planned-link",
-                    role="button",
-                    meaning="back_navigation",
-                    label=label,
-                    bounds=(0.118, 0.095, 0.415, 0.125),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-link",
-                    role="text",
-                    meaning="navigation_link",
-                    bounds=(0.13, 0.095, 0.43, 0.125),
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        for action in ("tap_semantic", "dismiss_overlay"):
-            with self.subTest(action=action):
-                adapter = self._adapter(FakeSceneObserver([fresh]), FakeRobot())
-                rebound = adapter._rebind_action(
-                    SemanticAction(
-                        node_id="return-to-list",
-                        action=action,
-                        params={
-                            "element_id": "planned-link",
-                            "target": "back_navigation",
-                            "role": "button",
-                            "label": label,
-                            "states": states,
-                        },
-                    ),
-                    planned,
-                    fresh,
-                )
-
-                self.assertEqual("fresh-link", rebound.params["element_id"])
-                self.assertEqual("text", rebound.params["role"])
-                self.assertEqual("navigation_link", rebound.params["target"])
-
-    def test_rebind_accepts_unique_unlabeled_icon_button_role_drift(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        planned = UIScene(
-            app_id="browser",
-            screen_id="page",
-            summary="浏览器页面",
-            elements=(
-                UIElement(
-                    element_id="planned-home",
-                    role="icon",
-                    meaning="home",
-                    label="",
-                    bounds=(0.83, 0.91, 0.93, 0.97),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-home",
-                    role="button",
-                ),
-            ),
-            fingerprint="fresh",
-        )
-
-        rebound = self._adapter(
-            FakeSceneObserver([fresh]), FakeRobot()
-        )._rebind_action(
-            SemanticAction(
-                node_id="open-home",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned-home",
-                    "target": "home",
-                    "role": "icon",
-                    "label": "",
-                    "states": states,
-                    "formal_candidate_id": "candidate-home",
-                },
-            ),
-            planned,
-            fresh,
-        )
-
-        self.assertEqual("fresh-home", rebound.params["element_id"])
-        self.assertEqual("button", rebound.params["role"])
-
-    def test_rebind_rejects_ambiguous_unlabeled_icon_button_role_drift(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        planned = UIScene(
-            app_id="browser",
-            screen_id="page",
-            summary="浏览器页面",
-            elements=(
-                UIElement(
-                    element_id="planned-icon",
-                    role="icon",
-                    meaning="navigation",
-                    label="",
-                    bounds=(0.1, 0.9, 0.2, 0.97),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(planned.elements[0], element_id="fresh-a", role="button"),
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-b",
-                    role="button",
-                    bounds=(0.3, 0.9, 0.4, 0.97),
-                ),
-            ),
-            fingerprint="fresh",
-        )
-
-        with self.assertRaisesRegex(
-            GenericActionAdapterError,
-            "目标语义不再严格唯一",
-        ):
-            self._adapter(
-                FakeSceneObserver([fresh]), FakeRobot()
-            )._rebind_action(
-                SemanticAction(
-                    node_id="ambiguous-navigation",
-                    action="tap_semantic",
-                    params={
-                        "element_id": "planned-icon",
-                        "target": "navigation",
-                        "role": "icon",
-                        "label": "",
-                        "states": states,
-                        "formal_candidate_id": "candidate-navigation",
-                    },
-                ),
-                planned,
-                fresh,
-            )
-
-    def test_rebind_accepts_fresh_positive_fully_visible_attestation(self):
-        planned = scene("planned")
-        fresh_element = replace(
-            planned.elements[0],
-            element_id="fresh-target",
-            states={**planned.elements[0].states, "fully_visible": True},
-        )
-        fresh = replace(
-            planned,
-            elements=(fresh_element,),
-            fingerprint="fresh",
-        )
-        after = scene("after", screen_id="next-screen", element_id="after")
-        robot = FakeRobot()
-
-        result = self._adapter(
-            FakeSceneObserver([fresh, after]),
-            robot,
-        ).execute(
-            requested_action=SemanticAction(
-                node_id="open-target",
-                action="tap_semantic",
-                params={
-                    "element_id": planned.elements[0].element_id,
-                    "target": planned.elements[0].meaning,
-                    "role": planned.elements[0].role,
-                    "label": planned.elements[0].label,
-                    "states": dict(planned.elements[0].states),
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 300, 400)], robot.actions)
-        self.assertTrue(result.rebound_action.params["states"]["fully_visible"])
-
-    def test_rebind_ignores_goal_relevant_context_drift(self):
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="acceptance_modes",
-            summary="本地验收模式列表",
-            elements=(
-                UIElement(
-                    element_id="planned-second-item",
-                    role="list_item",
-                    meaning="验收模式选项",
-                    label="语义点击",
-                    bounds=(0.13, 0.39, 0.87, 0.47),
-                    confidence=1.0,
-                    states={"goal_relevant": True, "fully_visible": True},
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-second-item",
-                    states={"goal_relevant": False, "fully_visible": True},
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        robot = FakeRobot()
-
-        result = self._adapter(
-            FakeSceneObserver([fresh, scene("after", screen_id="tap-mode")]),
-            robot,
-        ).execute(
-            requested_action=SemanticAction(
-                node_id="open-second-item",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned-second-item",
-                    "target": "验收模式选项",
-                    "role": "list_item",
-                    "label": "语义点击",
-                    "states": {"goal_relevant": True, "fully_visible": True},
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 500, 430)], robot.actions)
-        self.assertFalse(result.rebound_action.params["states"]["goal_relevant"])
-
-    def test_tap_reuses_single_step_geometry_when_pixels_match(self):
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="acceptance_modes",
-            summary="本地验收模式列表",
-            elements=(
-                UIElement(
-                    element_id="planned-second-item",
-                    role="list_item",
-                    meaning="验收模式选项",
-                    label="语义点击",
-                    bounds=(0.13, 0.39, 0.87, 0.47),
-                    confidence=1.0,
-                    states={"goal_relevant": True, "fully_visible": True},
-                    evidence=("第二项语义点击完整可见",),
-                ),
-            ),
-            fingerprint="planned",
-            camera_alignment=aligned_camera_facts(),
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-second-item",
-                    bounds=(0.13, 0.50, 0.87, 0.58),
-                    states={"goal_relevant": False, "fully_visible": True},
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        planned_audited = replace(
-            planned,
-            elements=(replace(planned.elements[0], bounds=(0.15, 0.40, 0.85, 0.47)),),
-        )
-        fresh_audited = replace(
-            fresh,
-            elements=(replace(fresh.elements[0], bounds=(0.15, 0.40, 0.85, 0.47)),),
-        )
-        observer = FakeSceneObserver([scene("after", screen_id="tap-mode")])
-        robot = FakeRobot()
-
-        result = self._adapter(observer, robot).execute(
-            requested_action=SemanticAction(
-                node_id="open-second-item",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned-second-item",
-                    "target": "验收模式选项",
-                    "role": "list_item",
-                    "label": "语义点击",
-                    "states": {"goal_relevant": True, "fully_visible": True},
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-            planned_frames=tuple(
-                Image.new("RGB", (540, 960), "gray") for _ in range(4)
-            ),
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 500, 430)], robot.actions)
-
-    def test_rebind_accepts_tight_loose_audit_boxes_for_same_static_target(self):
-        planned = scene(
-            "planned",
-            bounds=(0.11, 0.235, 0.43, 0.27),
-        )
-        fresh = replace(planned, fingerprint="fresh")
-        planned_audited = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    bounds=(0.11, 0.235, 0.43, 0.27),
-                ),
-            ),
-        )
-        fresh_audited = replace(
-            fresh,
-            elements=(
-                replace(
-                    fresh.elements[0],
-                    bounds=(0.0828, 0.225, 0.3372, 0.255),
-                ),
-            ),
-        )
-        after = scene("after", screen_id="acceptance_modes", element_id="after")
-        observer = FakeSceneObserver([after])
-        robot = FakeRobot()
-
-        result = self._adapter(observer, robot).execute(
-            requested_action=SemanticAction(
-                node_id="return-to-list",
-                action="tap_semantic",
-                params={
-                    "element_id": "e1",
-                    "target": "app_icon",
-                    "role": planned.elements[0].role,
-                    "label": planned.elements[0].label,
-                    "states": dict(planned.elements[0].states),
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-            planned_frames=tuple(
-                Image.new("RGB", (540, 960), "gray") for _ in range(4)
-            ),
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 270, 252)], robot.actions)
-
-    def test_rebind_keeps_geometry_gate_for_input_structure_control(self):
-        attested_states = {
-            "independent_geometry_verified": True,
-            "geometry_audit_source": "input_structure_audit",
-        }
-        planned = replace(
-            scene("planned", bounds=(0.10, 0.61, 0.24, 0.635)),
-            elements=(
-                replace(
-                    scene("planned").elements[0],
-                    states=attested_states,
-                    evidence=("独立几何审计",),
-                    bounds=(0.10, 0.61, 0.24, 0.635),
-                ),
-            ),
-        )
-        fresh = replace(
-            planned,
-            fingerprint="fresh",
-            elements=(
-                replace(planned.elements[0], bounds=(0.09, 0.626, 0.192, 0.654)),
-            ),
-        )
-        requested = SemanticAction(
-            node_id="ordinary-button",
-            action="tap_semantic",
-            params={
-                "element_id": planned.elements[0].element_id,
-                "target": planned.elements[0].meaning,
-                "role": planned.elements[0].role,
-                "label": planned.elements[0].label,
-                "states": dict(planned.elements[0].states),
-            },
-        )
-
-        with self.assertRaisesRegex(
-            GenericActionAdapterError,
-            "目标区域已明显移动",
-        ):
-            self._adapter(FakeSceneObserver([]), FakeRobot())._rebind_action(
-                requested,
-                planned,
-                fresh,
-                local_frame_identity_verified=True,
-            )
-
-    def test_matching_pixels_do_not_accept_a_second_model_geometry_veto(self):
-        planned = scene("planned", bounds=(0.08, 0.225, 0.34, 0.255))
-        fresh = replace(planned, fingerprint="fresh")
-        planned_audited = planned
-        fresh_audited = replace(
-            fresh,
-            elements=(
-                replace(
-                    fresh.elements[0],
-                    bounds=(0.083, 0.27, 0.337, 0.30),
-                ),
-            ),
-        )
-        observer = FakeSceneObserver(
-            [scene("after", screen_id="acceptance_modes", element_id="after")]
-        )
-        robot = FakeRobot()
-
-        result = self._adapter(observer, robot).execute(
-            requested_action=SemanticAction(
-                node_id="return-text-link",
-                action="tap_semantic",
-                params={
-                    "element_id": "e1",
-                    "target": "app_icon",
-                    "role": planned.elements[0].role,
-                    "label": planned.elements[0].label,
-                    "states": dict(planned.elements[0].states),
-                },
-            ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-            planned_frames=tuple(
-                Image.new("RGB", (540, 960), "gray") for _ in range(4)
-            ),
-        )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 210, 240)], robot.actions)
-
-    def test_rebind_rejects_fresh_negative_fully_visible_attestation(self):
-        planned = scene("planned")
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-target",
-                    states={**planned.elements[0].states, "fully_visible": False},
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        robot = FakeRobot()
-
-        with self.assertRaisesRegex(GenericActionAdapterError, "状态"):
-            self._adapter(FakeSceneObserver([fresh]), robot).execute(
-                requested_action=SemanticAction(
-                    node_id="open-target",
-                    action="tap_semantic",
-                    params={
-                        "element_id": planned.elements[0].element_id,
-                        "target": planned.elements[0].meaning,
-                        "role": planned.elements[0].role,
-                        "label": planned.elements[0].label,
-                        "states": dict(planned.elements[0].states),
-                    },
-                ),
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-            )
-
-        self.assertEqual([], robot.actions)
-
-    def test_rebind_does_not_treat_action_words_as_a_risk_blacklist(self):
-        states = {"goal_relevant": True, "fully_visible": True}
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="unknown",
-            summary="模式列表",
-            elements=(
-                UIElement(
-                    element_id="mode",
-                    role="button",
-                    meaning="long_press_target",
-                    label="长按删除",
-                    bounds=(0.12, 0.76, 0.88, 0.85),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh-mode",
-                    meaning="select_long_press_delete_mode",
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        rebound = self._adapter(FakeSceneObserver([]), FakeRobot())._rebind_action(
-            SemanticAction(
-                node_id="open-mode",
-                action="tap_semantic",
-                params={
-                    "element_id": "mode",
-                    "target": "long_press_target",
-                    "role": "button",
-                    "label": "长按删除",
-                    "states": states,
-                },
-            ),
-            planned,
-            fresh,
-        )
-        self.assertEqual("fresh-mode", rebound.params["element_id"])
-
-    def test_rebind_does_not_infer_risk_from_changed_meaning_text(self):
-        planned = UIScene(
-            app_id="settings",
-            screen_id="edit",
-            summary="编辑页",
-            elements=(
-                UIElement(
-                    element_id="return_button",
-                    role="button",
-                    meaning="return",
-                    label="返回",
-                    bounds=(0.1, 0.1, 0.3, 0.2),
-                    confidence=0.96,
-                    states={"enabled": True},
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = UIScene(
-            app_id="settings",
-            screen_id="edit",
-            summary="编辑页",
-            elements=(
-                UIElement(
-                    element_id="save_return_button",
-                    role="button",
-                    meaning="save_and_return",
-                    label="返回",
-                    bounds=(0.1, 0.1, 0.3, 0.2),
-                    confidence=0.96,
-                    states={"enabled": True},
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        rebound = self._adapter(FakeSceneObserver([]), FakeRobot())._rebind_action(
-            SemanticAction(
-                node_id="return",
-                action="tap_semantic",
-                params={
-                    "element_id": "return_button",
-                    "target": "return",
-                    "role": "button",
-                    "label": "返回",
-                    "states": {"enabled": True},
-                    "formal_candidate_id": "candidate-return",
-                },
-            ),
-            planned,
-            fresh,
-        )
-        self.assertEqual("save_return_button", rebound.params["element_id"])
-
-    def test_visible_target_identity_survives_free_meaning_drift(self):
-        states = {"goal_relevant": True, "fully_visible": True, "enabled": True}
-
-        def target_scene(
-            fingerprint,
-            *,
-            label,
-            meaning,
-            element_id,
-            bounds=(0.13, 0.45, 0.87, 0.53),
-        ):
-            return UIScene(
-                app_id="unknown",
-                screen_id="acceptance_modes",
-                summary="唯一目标完整可见",
-                elements=(
-                    UIElement(
-                        element_id=element_id,
-                        role="button",
-                        meaning=meaning,
-                        label=label,
-                        bounds=bounds,
-                        confidence=1.0,
-                        states=states,
-                    ),
-                ),
-                stable=True,
-                confidence=1.0,
-                fingerprint=fingerprint,
-            )
-
-        cases = (
-            (
-                "两个字段分别输入",
-                "two_fields_input_test",
-                "two_fields_input",
-            ),
-            ("Open details", "open_details_card", "details_entry"),
-        )
-        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
-        for label, planned_meaning, fresh_meaning in cases:
-            with self.subTest(label=label):
-                planned = target_scene(
-                    "planned",
-                    label=label,
-                    meaning=planned_meaning,
-                    element_id="planned-target",
-                )
-                fresh = target_scene(
-                    "fresh",
-                    label=label,
-                    meaning=fresh_meaning,
-                    element_id="fresh-target",
-                    bounds=(0.132, 0.451, 0.868, 0.531),
-                )
-                requested = SemanticAction(
-                    node_id="exact-target",
-                    action="tap_semantic",
-                    params={
-                        "element_id": "planned-target",
-                        "target": planned_meaning,
-                        "role": "button",
-                        "label": label,
-                        "states": states,
-                    },
-                )
-                rebound = adapter._rebind_action(
-                    requested,
-                    planned,
-                    fresh,
-                )
-
-                self.assertEqual("fresh-target", rebound.params["element_id"])
-                self.assertEqual(fresh_meaning, rebound.params["target"])
-
-    def test_meaning_wording_does_not_bypass_other_rebind_gates(self):
-        label = "两个字段分别输入"
-        states = {"goal_relevant": True, "fully_visible": True, "enabled": True}
-        planned_element = UIElement(
-            element_id="planned-target",
-            role="button",
-            meaning="two_fields_input_test",
-            label=label,
-            bounds=(0.13, 0.45, 0.87, 0.53),
-            confidence=1.0,
-            states=states,
-        )
-
-        def target_scene(
-            fingerprint,
-            *,
-            element=planned_element,
-            app_id="settings",
-            screen_id="acceptance_modes",
-            extra_elements=(),
-        ):
-            return UIScene(
-                app_id=app_id,
-                screen_id=screen_id,
-                summary="验收模式列表",
-                elements=(element, *extra_elements),
-                stable=True,
-                confidence=1.0,
-                fingerprint=fingerprint,
-            )
-
-        planned = target_scene("planned")
-        requested = SemanticAction(
-            node_id="exact-target",
-            action="tap_semantic",
-            params={
-                "element_id": "planned-target",
-                "target": planned_element.meaning,
-                "role": planned_element.role,
-                "label": label,
-                "states": states,
-            },
-        )
-        drifted = replace(
-            planned_element,
-            element_id="fresh-target",
-            meaning="two_fields_input",
-        )
-        duplicate = replace(
-            drifted,
-            element_id="duplicate-target",
-            bounds=(0.13, 0.55, 0.87, 0.63),
-        )
-        cases = (
-            (
-                "different-label",
-                target_scene(
-                    "fresh-label",
-                    element=replace(drifted, label="另一个入口"),
-                ),
-            ),
-            (
-                "duplicate-label",
-                target_scene(
-                    "fresh-duplicate",
-                    element=drifted,
-                    extra_elements=(duplicate,),
-                ),
-            ),
-            (
-                "state-conflict",
-                target_scene(
-                    "fresh-state",
-                    element=replace(
-                        drifted,
-                        states={**states, "enabled": False},
-                    ),
-                ),
-            ),
-            (
-                "fresh-not-fully-visible",
-                target_scene(
-                    "fresh-visible",
-                    element=replace(
-                        drifted,
-                        states={**states, "fully_visible": False},
-                    ),
-                ),
-            ),
-            (
-                "app-switch",
-                target_scene("fresh-app", element=drifted, app_id="browser"),
-            ),
-            (
-                "screen-switch",
-                target_scene(
-                    "fresh-screen",
-                    element=drifted,
-                    screen_id="other_screen",
-                ),
-            ),
-            (
-                "geometry-conflict",
-                target_scene(
-                    "fresh-geometry",
-                    element=replace(
-                        drifted,
-                        bounds=(0.05, 0.75, 0.35, 0.84),
-                    ),
-                ),
-            ),
-        )
-        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
-        for name, fresh in cases:
-            with self.subTest(name=name), self.assertRaises(GenericActionAdapterError):
-                adapter._rebind_action(
-                    requested,
-                    planned,
-                    fresh,
-                )
-
-        role_wording_drift = adapter._rebind_action(
-            requested,
-            planned,
-            target_scene(
-                "fresh-role",
-                element=replace(drifted, role="text"),
-            ),
-        )
-        self.assertEqual("fresh-target", role_wording_drift.params["element_id"])
-
-    def test_rebind_allows_unique_overlapping_input_meaning_alias(self):
-        states = {"goal_relevant": True, "fully_visible": True, "value": ""}
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="input_page",
-            summary="唯一空输入框可见",
-            elements=(
-                UIElement(
-                    element_id="planned_input",
-                    role="input",
-                    meaning="application_text_input",
-                    label="",
-                    bounds=(0.13, 0.51, 0.87, 0.60),
-                    confidence=1.0,
-                    states=states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh_input",
-                    meaning="text_input_field",
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        adapter = self._adapter(FakeSceneObserver([fresh]), FakeRobot())
-
-        rebound = adapter._rebind_action(
-            SemanticAction(
-                node_id="focus-input",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned_input",
-                    "target": "application_text_input",
-                    "role": "input",
-                    "label": "",
-                    "states": states,
-                },
-            ),
-            planned,
-            fresh,
-        )
-
-        self.assertEqual("fresh_input", rebound.params["element_id"])
-        self.assertEqual("text_input_field", rebound.params["target"])
-
-    def test_rebind_accepts_unknown_to_known_keyboard_case_enrichment(self):
-        planned_states = {
-            "goal_relevant": True,
-            "fully_visible": True,
-            "value": "",
-            "focused": True,
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "chinese_pinyin",
-            "keyboard_case_mode": "unknown",
-        }
-        planned = UIScene(
-            app_id="chat",
-            screen_id="conversation",
-            summary="唯一空白输入框已聚焦",
-            elements=(
-                UIElement(
-                    element_id="planned_input",
-                    role="input",
-                    meaning="application_text_input",
-                    label="",
-                    bounds=(0.15, 0.54, 0.69, 0.59),
-                    confidence=1.0,
-                    states=planned_states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh_states = dict(planned_states)
-        fresh_states.update(
-            {
-                "goal_relevant": False,
-                "keyboard_case_mode": "lower",
-            }
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh_input",
-                    bounds=(0.153, 0.54, 0.69, 0.585),
-                    states=fresh_states,
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
-
-        rebound = adapter._rebind_action(
-            SemanticAction(
-                node_id="input-long-text",
-                action="input_verified_text",
-                params={
-                    "element_id": "planned_input",
-                    "target": "application_text_input",
-                    "role": "input",
-                    "label": "",
-                    "states": planned_states,
-                    "text": "复杂输入验收2026",
-                    "formal_candidate_id": "candidate-long-text",
-                },
-            ),
-            planned,
-            fresh,
-        )
-
-        self.assertEqual("fresh_input", rebound.params["element_id"])
-        self.assertEqual("lower", rebound.params["states"]["keyboard_case_mode"])
-
-    def test_rebind_rejects_known_keyboard_case_change(self):
-        planned_states = {
-            "fully_visible": True,
-            "value": "",
-            "focused": True,
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "direct_latin",
-            "keyboard_case_mode": "lower",
-        }
-        planned = UIScene(
-            app_id="form",
-            screen_id="edit",
-            summary="输入框已聚焦",
-            elements=(
-                UIElement(
-                    element_id="planned_input",
-                    role="input",
-                    meaning="application_text_input",
-                    label="",
-                    bounds=(0.1, 0.2, 0.9, 0.3),
-                    confidence=1.0,
-                    states=planned_states,
-                ),
-            ),
-            fingerprint="planned",
-        )
-        fresh_states = dict(planned_states)
-        fresh_states["keyboard_case_mode"] = "upper"
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    element_id="fresh_input",
-                    states=fresh_states,
-                ),
-            ),
-            fingerprint="fresh",
-        )
-        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
-
-        with self.assertRaisesRegex(
-            GenericActionAdapterError,
-            "目标语义不再严格唯一",
-        ):
-            adapter._rebind_action(
-                SemanticAction(
-                    node_id="input-latin",
-                    action="input_verified_text",
-                    params={
-                        "element_id": "planned_input",
-                        "target": "application_text_input",
-                        "role": "input",
-                        "label": "",
-                        "states": planned_states,
-                        "text": "agent",
-                        "formal_candidate_id": "candidate-latin",
-                    },
-                ),
-                planned,
-                fresh,
-            )
-
-    def test_changed_target_region_before_confirmation_stops_without_robot_action(self):
-        planned = scene("planned")
-        fresh = scene("fresh", bounds=(0.65, 0.65, 0.85, 0.85))
-        observer = FakeSceneObserver([fresh])
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="generic_step_1",
-            action="tap_semantic",
-            params={"element_id": "e1", "target": "app_icon"},
-        )
-
-        with self.assertRaisesRegex(GenericActionAdapterError, "区域"):
-            self._adapter(observer, robot).execute(
-                requested_action=action,
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-            )
-        self.assertEqual(robot.actions, [])
-
-    def test_changed_target_state_before_confirmation_stops_without_robot_action(self):
+    def test_changed_non_authoritative_state_does_not_reselect_or_veto(self):
         planned = UIScene(
             app_id="unknown",
             screen_id="android_home",
@@ -6154,7 +3013,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             summary="主屏幕",
             elements=(
                 UIElement(
-                    element_id="fresh",
+                    element_id="e1",
                     role="icon",
                     meaning="app_icon",
                     label="设置",
@@ -6166,18 +3025,21 @@ class GenericActionAdapterTests(unittest.TestCase):
             fingerprint="fresh",
         )
         robot = FakeRobot()
-        with self.assertRaisesRegex(GenericActionAdapterError, "语义|状态"):
-            self._adapter(FakeSceneObserver([fresh]), robot).execute(
-                requested_action=SemanticAction(
-                    node_id="generic_step_1",
-                    action="tap_semantic",
-                    params={"element_id": "e1", "target": "app_icon"},
-                ),
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-            )
-        self.assertEqual([], robot.actions)
+        result = self._adapter(
+            FakeSceneObserver([fresh, scene("after", screen_id="app_home")]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="generic_step_1",
+                action="tap_semantic",
+                params={"element_id": "e1", "target": "app_icon"},
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+        self.assertEqual([("tap", 300, 400)], robot.actions)
+        self.assertEqual("matched", result.action_outcome)
 
     def test_each_execution_uses_unique_evidence_paths(self):
         action = SemanticAction(
@@ -6189,7 +3051,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             evidence_dir = Path(temp)
             first = self._adapter(
                 FakeSceneObserver(
-                    [scene("same", element_id="fresh-1"), scene("after-1", screen_id="app_home")]
+                    [scene("same"), scene("after-1", screen_id="app_home")]
                 ),
                 FakeRobot(),
             ).execute(
@@ -6202,7 +3064,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             first_bytes = {path: Path(path).read_bytes() for path in first.evidence}
             second = self._adapter(
                 FakeSceneObserver(
-                    [scene("same", element_id="fresh-2"), scene("after-2", screen_id="app_home")]
+                    [scene("same"), scene("after-2", screen_id="app_home")]
                 ),
                 FakeRobot(),
             ).execute(
@@ -6218,25 +3080,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 first_bytes,
                 {path: Path(path).read_bytes() for path in first.evidence},
             )
-
-    def test_changed_screen_before_confirmation_stops_without_robot_action(self):
-        planned = scene("planned")
-        changed = scene("before", screen_id="app_home")
-        observer = FakeSceneObserver([changed])
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="generic_step_1",
-            action="tap_semantic",
-            params={"element_id": "e1", "target": "app_icon"},
-        )
-        with self.assertRaisesRegex(GenericActionAdapterError, "已变化"):
-            self._adapter(observer, robot).execute(
-                requested_action=action,
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-            )
-        self.assertEqual(robot.actions, [])
 
     def test_matching_local_frames_override_model_screen_id_wording_drift(self):
         planned = scene("planned", screen_id="generic_action_verification_page")
@@ -6254,7 +3097,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         action = SemanticAction(
             node_id="generic_step_1",
             action="swipe",
-            params={"direction": "up", "expected_effect": {"scene_changed": True}},
+            params={"direction": "up", },
         )
 
         result = adapter.execute(
@@ -6283,7 +3126,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         action = SemanticAction(
             node_id="generic_step_1",
             action="swipe",
-            params={"direction": "up", "expected_effect": {"scene_changed": True}},
+            params={"direction": "up", },
         )
 
         with tempfile.TemporaryDirectory() as temp:
@@ -6453,12 +3296,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "label": "",
                     "states": states,
                     "text": target_text,
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": first_segment},
-                        }
-                    },
+
                 },
             ),
             planned_scene=planned,
@@ -6655,7 +3493,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "destination_role": "container",
                     "destination_label": "绿色终点",
                     "destination_states": {"fully_visible": True},
-                    "expected_effect": {"scene_changed": True},
+
                 },
             ),
             planned_scene=planned,
@@ -6749,7 +3587,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "label": "长按我 · 不要移动",
                     "states": states,
                     "duration_ms": 800,
-                    "expected_effect": {"scene_changed": True},
+
                 },
             ),
             planned_scene=planned,
@@ -6817,7 +3655,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "label": "长按我 · 不要移动",
                         "states": states,
                         "duration_ms": 800,
-                        "expected_effect": {"scene_changed": True},
+
                     },
                 ),
                 planned_scene=planned,
@@ -6876,7 +3714,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "role": "list_item",
                     "label": "预览图",
                     "states": states,
-                    "expected_effect": {"scene_changed": True},
+
                 },
             ),
             planned_scene=planned,
@@ -6891,7 +3729,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, result.hardware_receipt["click_count"])
 
-    def test_drag_rebind_accepts_safe_meaning_synonyms_for_exact_labelled_endpoints(self):
+    def test_drag_rebind_reuses_exact_endpoint_ids_despite_wording_drift(self):
         def make_scene(fingerprint, source_meaning, destination_meaning):
             return UIScene(
                 app_id="local.acceptance",
@@ -6933,7 +3771,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             bounds=(0.62, 0.68, 0.78, 0.82),
         )
         after = replace(after, elements=(moved_source, after.elements[1]))
-        observer = FakeSceneObserver([fresh, after])
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -6958,7 +3796,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "destination_role": "container",
                     "destination_label": "绿色终点",
                     "destination_states": {"goal_relevant": True, "fully_visible": True},
-                    "expected_effect": {"scene_changed": True},
+
                 },
             ),
             planned_scene=planned,
@@ -6987,7 +3825,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         action = SemanticAction(
             node_id="generic_step_1",
             action="swipe",
-            params={"direction": "up", "expected_effect": {"scene_changed": True}},
+            params={"direction": "up", },
         )
 
         with self.assertRaisesRegex(GenericActionAdapterError, "本地真实画面已变化"):
@@ -7034,7 +3872,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_goal_polluted_home_app_is_normalized_before_confirmation(self):
         planned = scene("planned", app_id="douyin")
-        fresh = scene("before", element_id="fresh", app_id="unknown")
+        fresh = scene("before", app_id="unknown")
         after = scene(
             "after",
             screen_id="app_home",
@@ -7059,9 +3897,9 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(len(robot.actions), 1)
 
-    def test_failed_post_verification_never_retries_physical_action(self):
+    def test_ordinary_unchanged_screen_is_a_valid_fresh_receipt(self):
         planned = scene("same")
-        fresh = scene("same", element_id="fresh")
+        fresh = scene("same")
         unchanged = scene("same", element_id="after")
         observer = FakeSceneObserver([fresh, unchanged, unchanged])
         robot = FakeRobot()
@@ -7077,9 +3915,9 @@ class GenericActionAdapterTests(unittest.TestCase):
             confirmed=True,
         )
         self.assertEqual(result.physical_actions, 1)
-        self.assertEqual(result.action_outcome, "mismatched")
-        self.assertTrue(result.verification_errors)
-        self.assertIn("没有可验证", result.verification_errors[-1])
+        self.assertEqual(result.action_outcome, "matched")
+        self.assertEqual(result.verification_errors, ())
+        self.assertEqual(observer.calls, 2)
         self.assertEqual(len(robot.actions), 1)
 
     def test_navigation_receipt_does_not_depend_on_next_input_readiness(self):
@@ -7119,7 +3957,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 params={
                     "element_id": "e1",
                     "target": "app_icon",
-                    "expected_effect": {"scene_changed": True},
+
                 },
             ),
             planned_scene=planned,
@@ -7137,9 +3975,8 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_post_action_waits_until_four_frame_window_is_locally_stable(self):
         planned = scene("planned")
-        fresh = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
-        observer = FakeSceneObserver([fresh, after])
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         # Four gray frames are used by confirmation.  The post-action window
         # then sees a black/white transition before four consecutive white
@@ -7163,13 +4000,16 @@ class GenericActionAdapterTests(unittest.TestCase):
         result = adapter.execute(
             requested_action=action,
             planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
             goal=goal(),
             confirmed=True,
         )
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
         self.assertEqual(capture.calls, 9)
-        self.assertEqual(observer.calls, 2)
+        self.assertEqual(observer.calls, 1)
 
     def test_input_post_action_waits_past_stable_blur_until_clarity_recovers(self):
         sharp = textured_phone_frame()
@@ -7294,7 +4134,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 resolved = ResolvedSemanticAction(
                     node_id="continuous",
                     kind=kind,
-                    expected_effect={},
+                    expected_input_state={},
                 )
                 self.assertTrue(
                     adapter._requires_post_action_phone_view_identity(resolved)
@@ -7304,7 +4144,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         navigation = ResolvedSemanticAction(
             node_id="navigation",
             kind="tap_semantic",
-            expected_effect={"scene_changed": True},
+            expected_input_state={},
         )
         self.assertFalse(
             adapter._requires_post_action_phone_view_identity(navigation)
@@ -7348,17 +4188,12 @@ class GenericActionAdapterTests(unittest.TestCase):
         input_focus = ResolvedSemanticAction(
             node_id="focus-input",
             kind="tap_semantic",
-            expected_effect={
-                "element_state": {
-                    "meaning": "application_text_input",
-                    "states": {"focused": True},
-                }
-            },
+            expected_input_state={},
         )
         navigation = ResolvedSemanticAction(
             node_id="open-page",
             kind="tap_semantic",
-            expected_effect={"scene_changed": True},
+            expected_input_state={},
         )
 
         self.assertFalse(
@@ -7380,11 +4215,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 mutation = ResolvedSemanticAction(
                     node_id=kind,
                     kind=kind,
-                    expected_effect={
-                        "element_state": {
-                            "meaning": "application_text_input",
-                        }
-                    },
+                    expected_input_state={},
                 )
                 self.assertTrue(
                     GenericSingleActionAdapter._requires_post_action_relative_clarity(
@@ -7471,48 +4302,10 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(len(frames), 4)
 
-    def test_post_action_mismatch_stops_after_one_observation(self):
-        planned = scene("planned")
-        fresh = scene("before", element_id="fresh")
-        transitional = UIScene(
-            app_id="unknown",
-            screen_id="loading",
-            summary="过渡中",
-            elements=(),
-            stable=False,
-            confidence=0.30,
-            fingerprint="transition",
-        )
-        after = scene("after", screen_id="app_home", element_id="after")
-        observer = FakeSceneObserver([fresh, transitional, after])
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=observer,
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-            post_action_timeout=1,
-        )
-        action = SemanticAction(
-            node_id="generic_step_1",
-            action="tap_semantic",
-            params={"element_id": "e1", "target": "app_icon"},
-        )
-        result = adapter.execute(
-            requested_action=action,
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
-        self.assertEqual(result.physical_actions, 1)
-        self.assertEqual(robot.actions, [("tap", 300, 400)])
-        self.assertEqual(observer.calls, 2)
-        self.assertEqual(result.action_outcome, "mismatched")
 
     def test_post_action_format_failure_does_not_resample_model(self):
         planned = scene("planned")
-        fresh = scene("before", element_id="fresh")
+        fresh = scene("before")
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver(
             [fresh, VisionAgentError("模型返回的 JSON 无法解析"), after]
@@ -7546,7 +4339,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(robot.actions, [("tap", 300, 400)])
         self.assertEqual(caught.exception.physical_actions, 1)
         self.assertEqual(observer.calls, 2)
-        self.assertEqual(capture.calls, 8)
+        self.assertEqual(capture.calls, 12)
         self.assertEqual(len(caught.exception.evidence), 8)
         self.assertEqual(
             caught.exception.observation_errors,
@@ -7556,7 +4349,7 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_first_post_action_format_failure_stops_after_one_robot_action(self):
         observer = FakeSceneObserver(
             [
-                scene("before", element_id="fresh"),
+                scene("before"),
                 VisionAgentError("模型返回的 JSON 无法解析"),
                 VisionAgentError("模型返回的 JSON 无法解析"),
             ]
@@ -7596,10 +4389,10 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("第1轮动作后观察失败", str(caught.exception))
         self.assertNotIn("第2轮动作后观察失败", str(caught.exception))
 
-    def test_post_action_observation_limit_is_hard_capped_at_one_call(self):
+    def test_each_action_uses_exactly_one_fresh_screenshot_observation(self):
         observer = FakeSceneObserver(
             [
-                scene("before", element_id="fresh"),
+                scene("before"),
                 VisionAgentError("模型返回的 JSON 无法解析：first"),
                 VisionAgentError("模型返回的 JSON 无法解析：second"),
                 scene("after", screen_id="app_home", element_id="after"),
@@ -7614,7 +4407,6 @@ class GenericActionAdapterTests(unittest.TestCase):
             frame_interval=0,
             post_action_settle=0,
             post_action_timeout=1,
-            post_action_max_observations=5,
         )
 
         with self.assertRaises(GenericActionAdapterError) as caught:
@@ -7629,16 +4421,15 @@ class GenericActionAdapterTests(unittest.TestCase):
                 confirmed=True,
             )
 
-        self.assertEqual(adapter.post_action_max_observations, 2)
         self.assertEqual(caught.exception.physical_actions, 1)
         self.assertEqual(observer.calls, 2)
-        self.assertEqual(capture.calls, 8)
+        self.assertEqual(capture.calls, 12)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 
     def test_format_error_stops_before_any_second_capture(self):
         observer = FakeSceneObserver(
             [
-                scene("before", element_id="fresh"),
+                scene("before"),
                 VisionAgentError("模型返回的 JSON 无法解析：first"),
             ]
         )
@@ -7678,7 +4469,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_confirmed_dismiss_uses_dedicated_physical_entry(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
-        fresh = scene("before", element_id="fresh", bounds=(0.11, 0.21, 0.31, 0.41))
+        fresh = scene("before", bounds=(0.11, 0.21, 0.31, 0.41))
         after = scene("after", screen_id="app_home", element_id="after")
         robot = FakeRobot()
         action = SemanticAction(
@@ -7700,44 +4491,10 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(robot.actions, [("dismiss", 210, 310)])
 
-    def test_semantic_mismatch_returns_without_any_second_capture(self):
-        unchanged = scene("camera-noise-only", element_id="after")
-        observer = FakeSceneObserver(
-            [scene("before", element_id="fresh"), unchanged]
-        )
-        robot = FakeRobot()
-        adapter = SecondPostCaptureFailureAdapter(
-            capture=SequenceCapture(["gray"] * 8),
-            observer=observer,
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-            post_action_timeout=1,
-        )
-
-        with tempfile.TemporaryDirectory() as temp:
-            result = adapter.execute(
-                requested_action=SemanticAction(
-                    node_id="generic_step_1",
-                    action="tap_semantic",
-                    params={"element_id": "e1", "target": "app_icon"},
-                ),
-                planned_scene=scene("planned"),
-                goal=goal(),
-                confirmed=True,
-                evidence_dir=Path(temp),
-            )
-
-        self.assertEqual(result.physical_actions, 1)
-        self.assertEqual(len(result.verification_errors), 1)
-        self.assertIn("语义变化", result.verification_errors[0])
-        self.assertEqual(len(result.evidence), 8)
-        self.assertEqual(observer.calls, 2)
-        self.assertEqual(robot.actions, [("tap", 300, 400)])
 
     def test_post_action_non_format_failure_is_not_retried(self):
         observer = FakeSceneObserver(
-            [scene("before", element_id="fresh"), VisionAgentError("请求超时")]
+            [scene("before"), VisionAgentError("请求超时")]
         )
         robot = FakeRobot()
         capture = SequenceCapture(["gray"] * 8)
@@ -7764,13 +4521,12 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.physical_actions, 1)
         self.assertEqual(observer.calls, 2)
-        self.assertEqual(capture.calls, 8)
+        self.assertEqual(capture.calls, 12)
         self.assertEqual(len(robot.actions), 1)
 
     def test_post_action_timeout_stops_without_calling_model_or_tapping_again(self):
         planned = scene("planned")
-        fresh = scene("before", element_id="fresh")
-        observer = FakeSceneObserver([fresh])
+        observer = FakeSceneObserver([])
         robot = FakeRobot()
         capture = SequenceCapture(
             ["gray"] * 4 + ["black", "white", "black", "white"]
@@ -7795,11 +4551,14 @@ class GenericActionAdapterTests(unittest.TestCase):
             adapter.execute(
                 requested_action=action,
                 planned_scene=planned,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                ),
                 goal=goal(),
                 confirmed=True,
             )
         self.assertEqual(ctx.exception.physical_actions, 1)
-        self.assertEqual(observer.calls, 1)
+        self.assertEqual(observer.calls, 0)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 
 

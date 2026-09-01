@@ -19,7 +19,6 @@ from agent.application.vision_usage import VisionSessionUsageLedger
 
 
 POST_ACTION_TRANSITION_PROTOCOL_VERSION = '2026-08-16-universal-post-action-transition-v1'
-CORRECTIVE_RETRY_PROTOCOL_VERSION = '2026-08-24-fresh-observation-corrective-retry-v1'
 
 
 @dataclass
@@ -46,16 +45,10 @@ class UniversalAgentSessionState:
     local_exact_input_authority: bool = field(default=False, repr=False)
     automatic_loop_enabled: bool = False
     auto_pause_reason: str = ""
-    corrective_retry_history: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
-    last_confirmation_failure: dict[str, Any] | None = None
-    capability_gap: dict[str, Any] | None = None
     effect_previews: tuple[dict[str, Any], ...] = ()
-    effect_verification: dict[str, Any] | None = None
-    semantic_task_context: Any = field(default=None, repr=False)
-    confirm_stage: str = ""
     failed_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().astimezone().isoformat(timespec='seconds'))
 
@@ -87,16 +80,15 @@ class UniversalAgentSessionState:
             'created_at': self.created_at, 'status': self.status, 'step_number': self.step_number,
             'physical_actions': self.physical_actions, 'qwen_usage': self._serialize(self.vision_usage),
             'local_exact_input_authority': self.local_exact_input_authority,
-            'failed_reason': self.failed_reason, 'confirm_stage': self.confirm_stage, 'task_graph': graph,
+            'failed_reason': self.failed_reason, 'confirm_stage': '', 'task_graph': graph,
             'goal': self._serialize(self.goal_draft), 'trusted_observation': observation, 'current_scene': scene,
             'qwen_decision': decision, 'proposal': proposal, 'controller_decision': controller,
             'history': list(self.history), 'evidence': list(dict.fromkeys(self.evidence_paths)),
             'automatic_loop_enabled': self.automatic_loop_enabled, 'auto_pause_reason': self.auto_pause_reason,
-            'corrective_retry_protocol': CORRECTIVE_RETRY_PROTOCOL_VERSION,
-            'corrective_retry_history': [dict(item) for item in self.corrective_retry_history],
+            'corrective_retry_protocol': None, 'corrective_retry_history': [],
             'post_action_transition_protocol': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             'last_post_action_transition': self._serialize(self.last_post_action_transition),
-            'last_confirmation_failure': self._serialize(self.last_confirmation_failure),
+            'last_confirmation_failure': None,
             'available_action_kinds': sorted(self.adapter.supported_action_kinds() if callable(getattr(self.adapter,
             'supported_action_kinds', None)) else CANONICAL_ACTION_KINDS),
             'confirmation_scope': self._active_scope(self.confirmation_authority),
@@ -106,11 +98,11 @@ class UniversalAgentSessionState:
             'effect_confirmation_scope': self._active_scope(self.effect_confirmation_authority),
             'effect_confirmation_ready': bool(self.status == 'awaiting_effect_confirmation'
             and self.effect_confirmation_authority is not None and (not self.effect_confirmation_authority.consumed)),
-            'capability_gap': self._serialize(self.capability_gap),
+            'capability_gap': None,
             # Retain the public response key while the retired lineage authority no longer exists.
             'verified_app_surface_lineage': None,
             'effect_previews': [dict(item) for item in self.effect_previews],
-            'effect_verification': self._serialize(self.effect_verification),
+            'effect_verification': None,
             'device_capability': self.adapter.capability_snapshot().to_dict() if callable(getattr(self.adapter,
             'capability_snapshot', None)) else None, 'effect_confirmation_preview': dict(
             self.effect_confirmation_authority.intent_preview) if self.effect_confirmation_authority is not None

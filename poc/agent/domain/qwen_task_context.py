@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from .validation import dataclass_wire, reject_if
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import agent.domain.generic_goal as generic_goal_domain
-from agent.domain.task_semantic_ir import TaskSemanticIR
 from agent.domain.vision_model import VisionAgentError
 
 
@@ -18,6 +17,7 @@ TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 ALLOWED_TASK_STATUSES = {'ready', 'running', 'awaiting_confirmation', 'completed', 'blocked'}
 ALLOWED_EXECUTION_CLASSES = {'observe', 'navigate', 'effect', 'unknown'}
+ALLOWED_INPUT_OPERATIONS = {'focus', 'input_verified_text', 'clear_verified_text', 'press_enter'}
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,6 @@ class QwenTaskContext(Mapping[str, Any]):
     current_execution_class: str
     effect_intents: tuple[dict[str, Any], ...]
     effect_gate: dict[str, Any]
-    semantic_ir: TaskSemanticIR | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> 'QwenTaskContext':
@@ -65,20 +64,20 @@ class QwenTaskContext(Mapping[str, Any]):
         reject_if(isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1, VisionAgentError("revision 必须是正整数。"))
         reject_if(self.task_status not in ALLOWED_TASK_STATUSES, VisionAgentError(f"task_status 无效：{self.task_status}"))
         reject_if(self.current_execution_class not in ALLOWED_EXECUTION_CLASSES, VisionAgentError(f'current_execution_class 无效：{self.current_execution_class}'))
-        if self.semantic_ir is not None:
-            self.semantic_ir.validate()
-            expected_scope = (self.task_id, self.device_id, self.revision)
-            actual_scope = (self.semantic_ir.task_id, self.semantic_ir.device_id, self.semantic_ir.revision)
-            reject_if(actual_scope != expected_scope, VisionAgentError("TaskSemanticIR 与 Qwen task scope 不一致。"))
-
         subgoal_allowed = {'subgoal_id', 'objective', 'status', 'depends_on', 'constraints', 'completion_conditions',
-            'completion_evidence', 'effect_ids', 'execution_class'}
+            'completion_evidence', 'execution_class', 'input_field_id', 'input_operation'}
         unexpected_subgoal = set(self.current_subgoal) - subgoal_allowed
         reject_if(unexpected_subgoal, VisionAgentError('current_subgoal 包含协议外字段：' + ', '.join(sorted(unexpected_subgoal))))
         reject_if(not str(self.current_subgoal.get('subgoal_id') or '').strip(), VisionAgentError("current_subgoal 缺少 subgoal_id。"))
         reject_if(not str(self.current_subgoal.get('objective') or '').strip(), VisionAgentError("current_subgoal 缺少 objective。"))
         reject_if(str(self.current_subgoal.get('status') or '') != 'active', VisionAgentError("Qwen入口只接受 status=active 的 current_subgoal。"))
         reject_if(str(self.current_subgoal.get('execution_class') or '') != self.current_execution_class, VisionAgentError('current_subgoal.execution_class 与顶层上下文不一致。'))
+        field_id = str(self.current_subgoal.get('input_field_id') or '').strip()
+        operation = str(self.current_subgoal.get('input_operation') or '').strip()
+        reject_if(bool(field_id) != bool(operation), VisionAgentError(
+            'current_subgoal typed input 绑定必须同时包含 input_field_id 与 input_operation。'))
+        reject_if(operation and operation not in ALLOWED_INPUT_OPERATIONS, VisionAgentError(
+            f'current_subgoal.input_operation 无效：{operation}'))
         generic_goal_domain.safe_goal_context(self.to_dict())
 
         effect_allowed = {'effect_id', 'kind', 'target_entity_roles', 'payload_entity_roles', 'source_subgoal_ids',
@@ -97,25 +96,15 @@ class QwenTaskContext(Mapping[str, Any]):
 
         effect_ids = [str(item.get("effect_id") or "").strip() for item in self.effect_intents]
         reject_if(any((not item for item in effect_ids)) or len(effect_ids) != len(set(effect_ids)), VisionAgentError("effect_intents 含空ID或重复ID。"))
-        subgoal_effect_ids = _text_tuple(self.current_subgoal.get('effect_ids') or [], 'current_subgoal.effect_ids')
-        reject_if(len(subgoal_effect_ids) != len(set(subgoal_effect_ids)), VisionAgentError("current_subgoal.effect_ids 含重复效果ID。"))
-        gate_allowed = {'required', 'state', 'effect_ids', 'effect_action_allowed'}
-        gate_allowed.add("scope")
+        gate_allowed = {'state', 'effect_action_allowed', 'scope'}
         reject_if(set(self.effect_gate) != gate_allowed, VisionAgentError("effect_gate 字段不完整或包含协议外字段。"))
-        required = self.effect_gate.get("required")
         allowed = self.effect_gate.get("effect_action_allowed")
-        reject_if(not isinstance(required, bool) or not isinstance(allowed, bool), VisionAgentError("effect_gate 布尔字段格式无效。"))
+        reject_if(not isinstance(allowed, bool), VisionAgentError("effect_gate.effect_action_allowed 格式无效。"))
         state = str(self.effect_gate.get("state") or "").strip()
         reject_if(state not in {'not_required', 'awaiting_confirmation', 'confirmed'}, VisionAgentError(f"effect_gate.state 无效：{state}"))
-        gate_effect_ids = _text_tuple(self.effect_gate.get('effect_ids') or [], 'effect_gate.effect_ids')
-        reject_if(len(gate_effect_ids) != len(set(gate_effect_ids)), VisionAgentError("effect_gate.effect_ids 含重复效果ID。"))
         confirmation_effect_ids = {str(item.get('effect_id') or '').strip() for item
             in self.effect_intents if isinstance(item.get('local_policy'),
             dict) and item['local_policy'].get('confirmation_required') is True}
-        reject_if(
-            set(gate_effect_ids) != confirmation_effect_ids or set(effect_ids) != set(subgoal_effect_ids),
-            VisionAgentError('effect_intents、current_subgoal 与 effect_gate 效果ID不一致。'),
-        )
 
         scope = _require_dict(self.effect_gate.get('scope'), 'effect_gate.scope')
         scope_allowed = {"task_id", "device_id", "revision", "subgoal_id"}
@@ -128,13 +117,12 @@ class QwenTaskContext(Mapping[str, Any]):
         external = self.current_execution_class in {"effect", "unknown"}
         reject_if(self.current_execution_class == 'unknown', VisionAgentError("unknown 子目标禁止进入视觉动作协议。"))
         if external and confirmation_effect_ids:
-            reject_if(not required or not gate_effect_ids, VisionAgentError("需确认的效果子目标必须关闭效果确认门。"))
             reject_if(state not in {'awaiting_confirmation', 'confirmed'}, VisionAgentError("外部状态子目标的确认门状态无效。"))
             reject_if(state == 'confirmed' and (not allowed), VisionAgentError("确认门状态与 effect_action_allowed 冲突。"))
             reject_if(state != 'confirmed' and allowed, VisionAgentError("未确认效果不能允许受限效果动作。"))
         elif external:
-            reject_if(required or gate_effect_ids or state != 'not_required' or (not allowed), VisionAgentError("自动外部效果的本地策略授权状态无效。"))
-        elif required or gate_effect_ids or allowed or (state != 'not_required'):
+            reject_if(state != 'not_required' or (not allowed), VisionAgentError("自动外部效果的本地策略授权状态无效。"))
+        elif allowed or (state != 'not_required'):
             raise VisionAgentError("只读/导航子目标不得伪造效果确认状态。")
 
     @property
@@ -145,28 +133,29 @@ class QwenTaskContext(Mapping[str, Any]):
     def requested_input_text(self) -> str | None:
         """Return the exact text authorized by DeepSeek, never model-invented text."""
 
-        if self.semantic_ir is not None and self.semantic_ir.input_fields:
-            active_id = str(self.current_subgoal.get("subgoal_id") or "")
-            entities = {item.entity_id: item for item in self.semantic_ir.entities}
-            relevant = [item for item in self.semantic_ir.input_fields if active_id in item.source_subgoal_ids]
-            if not relevant and len(self.semantic_ir.input_fields) == 1:
-                relevant = [self.semantic_ir.input_fields[0]]
-            reject_if(not relevant and len(self.semantic_ir.input_fields) > 1, VisionAgentError('当前子目标没有绑定唯一 typed input field，禁止猜测多个字段。'))
-            reject_if(len(relevant) > 1, VisionAgentError("当前子目标同时绑定多个输入字段，缺少唯一字段选择。"))
-            if relevant:
-                raw = entities[relevant[0].payload_ref].value
-                reject_if(not isinstance(raw, str), VisionAgentError("typed input payload 不是文字。"))
-                return raw
-
         entities = self.goal.get("entities") or {}
-        raw = entities.get("input_text")
+        field_id = str(self.current_subgoal.get('input_field_id') or '').strip()
+        operation = str(self.current_subgoal.get('input_operation') or '').strip()
+        if not field_id or operation != 'input_verified_text':
+            return None
+        if field_id == 'primary_input':
+            raw = entities.get("input_text")
+        else:
+            fields = entities.get('input_fields')
+            reject_if(not isinstance(fields, list), VisionAgentError(
+                '当前子目标引用多字段输入，但 goal.entities.input_fields 不存在。'))
+            matches = [item for item in fields if isinstance(item, dict)
+                and str(item.get('field_id') or '') == field_id]
+            reject_if(len(matches) != 1, VisionAgentError(
+                f'当前子目标 typed input field 不是唯一声明字段：{field_id}'))
+            raw = matches[0].get('text')
         if raw is None:
             return None
         reject_if(not isinstance(raw, str) or not raw or len(raw) > 4000 or ('\r' in raw), VisionAgentError("goal.entities.input_text 必须为1～4000个字符。"))
         return raw
 
     def to_dict(self) -> dict[str, Any]:
-        return dataclass_wire(self, omit=('semantic_ir',))
+        return dataclass_wire(self)
 
     def __getitem__(self, key: str) -> Any:
         return self.to_dict()[key]

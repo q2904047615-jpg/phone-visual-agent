@@ -66,6 +66,23 @@ test("typed v4 graph is the only formal executable DeepSeek protocol", () => {
   assert.equal(view.currentSubgoal.executionClass, "navigate");
 });
 
+test("same-response Qwen v9 is the only executable visual decision protocol", () => {
+  const view = Protocol.adaptSession(navigationSession());
+  assert.equal(view.visualAction.protocol, "qwen-same-response-action-finish-v9");
+  assert.equal(view.visualAction.status, "action");
+  assert.equal(view.visualAction.isExecutable, true);
+});
+
+test("retired Qwen protocol cannot mint an executable action", () => {
+  const raw = navigationSession();
+  raw.qwen_decision.protocol_version = "2026-08-14-qwen-visual-decision-v5";
+  const view = Protocol.adaptSession(raw);
+  assert.equal(view.visualAction.protocol, "unsupported-protocol");
+  assert.equal(view.visualAction.status, "unknown");
+  assert.equal(view.visualAction.isExecutable, false);
+  assert.throws(() => Protocol.createConfirmationGrant(view, "phone-01"), /确认作用域/);
+});
+
 test("retired protocol version is unsupported and cannot mint authority", () => {
   const raw = navigationSession();
   raw.task_graph.protocol_version = "retired-deepseek-protocol";

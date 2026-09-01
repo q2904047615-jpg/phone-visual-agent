@@ -5,7 +5,6 @@ import json
 import subprocess
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,29 +13,15 @@ from PIL import Image
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.canonical_action_protocol import (
-    canonical_candidate_expected_result,
-    compile_canonical_action_catalog,
+    CanonicalActionProtocolError,
+    bind_same_response_action,
 )
 from agent.domain.device_execution import DeviceActionRequest
 from agent.domain.semantic_action import SemanticAction
-from agent.domain.task_graph import (
-    CompletionCondition,
-    DynamicTaskGraph,
-    GraphGoal,
-    Subgoal,
-    TargetApp,
-)
-from agent.domain.task_semantic_ir import (
-    ConstraintIntent,
-    SemanticSubgoal,
-    SurfaceRef,
-    TaskSemanticIR,
-)
 from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.trusted_observation import TrustedObservation
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.universal_action_controller import (
-    ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
 )
@@ -81,83 +66,64 @@ def _launcher_icon(app_name: str) -> UIElement:
     )
 
 
-def _app_ir(*, app_id: str, app_name: str) -> tuple[TaskSemanticIR, SurfaceRef]:
-    surface = SurfaceRef(
-        surface_id=f"surface_{app_id}",
-        kind="app",
-        app_id=app_id,
-        app_name=app_name,
-    )
-    semantic_ir = TaskSemanticIR(
-        task_id=f"task-open-{app_id}",
+def _launch_context(*, app_id: str, app_name: str) -> QwenTaskContext:
+    task_id = f"task-open-{app_id}"
+    subgoal_id = f"open_{app_id}"
+    return QwenTaskContext(
+        protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+        task_id=task_id,
         device_id="device-1",
         revision=1,
-        raw_goal=f"打开{app_name}",
-        surfaces=(surface,),
-        entities=(),
-        effects=(),
-        constraints=(),
-        subgoals=(
-            SemanticSubgoal(
-                subgoal_id=f"open_{app_id}",
-                surface_ref=surface.surface_id,
-                status="active",
-                external_impact="navigation_only",
-            ),
-        ),
+        task_status="running",
+        goal={
+            "objective": f"打开{app_name}",
+            "target_apps": [{"app_id": app_id, "app_name": app_name}],
+            "entities": {},
+        },
+        global_constraints=(),
+        goal_completion_conditions=(),
+        current_subgoal={
+            "subgoal_id": subgoal_id,
+            "objective": f"打开{app_name}",
+            "status": "active",
+            "depends_on": (),
+            "constraints": (),
+            "completion_conditions": (f"{app_name}已在前台",),
+            "completion_evidence": (),
+            "execution_class": "navigate",
+        },
+        current_execution_class="navigate",
+        effect_intents=(),
+        effect_gate={
+            "state": "not_required",
+            "effect_action_allowed": False,
+            "scope": {
+                "task_id": task_id,
+                "device_id": "device-1",
+                "revision": 1,
+                "subgoal_id": subgoal_id,
+            },
+        },
     )
-    return semantic_ir, surface
 
 
-def _launch_graph(*, app_id: str, app_name: str) -> DynamicTaskGraph:
-    graph = DynamicTaskGraph(
-        task_id=f"task-launch-{app_id}",
+def _trusted(scene: UIScene) -> TrustedObservation:
+    return TrustedObservation(
+        observation_id="obs_0123456789abcdef",
         device_id="device-1",
-        revision=1,
-        status="running",
-        goal=GraphGoal(
-            objective=f"打开{app_name}",
-            target_apps=(TargetApp(app_id=app_id, app_name=app_name),),
-            entities={"target_ui_label": app_name},
+        fingerprint=scene.fingerprint,
+        scene=scene,
+        local_stability=LocalFrameStability(
+            stable=True,
+            mean_delta=0.0,
+            max_delta=0.0,
+            frame_count=1,
+            threshold=1.0,
+            reason="test",
         ),
-        constraints=(),
-        completion_conditions=(
-            CompletionCondition(
-                condition_id="goal-complete",
-                description=f"{app_name}已在前台",
-                evidence_required=(f"{app_name}前台画面",),
-            ),
-        ),
-        risk_actions=(),
-        subgoals=(
-            Subgoal(
-                subgoal_id="open-target-app",
-                objective=f"打开{app_name}",
-                status="active",
-                depends_on=(),
-                constraints=(),
-                completion_conditions=(f"{app_name}已在前台",),
-                completion_evidence=(),
-                risk_action_ids=(),
-                external_impact="navigation_only",
-            ),
-            Subgoal(
-                subgoal_id="safe-followup",
-                objective="继续处理当前页面",
-                status="pending",
-                depends_on=("open-target-app",),
-                constraints=(),
-                completion_conditions=("后续目标可见",),
-                completion_evidence=(),
-                risk_action_ids=(),
-                external_impact="navigation_only",
-            ),
-        ),
-        active_subgoal_id="open-target-app",
-        raw_user_goal=f"打开{app_name}后继续",
+        selected_frame_index=0,
+        frame_sharpness_scores=(1.0,),
     )
-    graph.validate()
-    return graph
 
 
 def _write_registry(root: Path, payload: dict) -> Path:
@@ -200,9 +166,9 @@ class _SequenceObserver:
         self.scenes = list(scenes)
         self.calls = 0
 
-    def observe(self, *, frames, goal_context=None):
+    def observe_with_decision(self, *, frames, goal_context=None, **_kwargs):
         self.calls += 1
-        return self.scenes.pop(0)
+        return self.scenes.pop(0), {"status": "finish", "evidence_refs": ["scene.summary"]}
 
 
 def _launch_goal() -> GenericIntentDraft:
@@ -216,124 +182,48 @@ def _launch_goal() -> GenericIntentDraft:
 
 
 class LaunchAppCanonicalTests(unittest.TestCase):
-    def test_two_apps_generate_one_opaque_launch_candidate(self) -> None:
+    def test_two_apps_bind_current_qwen_action_to_one_opaque_launch_target(self) -> None:
         samples = (
-            (
-                "sample_app",
-                "示例应用",
-                "launch_ref.sample_app",
-                "com.example.sample",
-            ),
+            ("sample_app", "示例应用", "launch_ref.sample_app", "com.example.sample"),
             ("notes", "便签", "launch_ref.notes", "com.example.notes"),
         )
         for app_id, app_name, launch_ref, expected_app_id in samples:
             with self.subTest(app_id=app_id):
-                semantic_ir, surface = _app_ir(app_id=app_id, app_name=app_name)
-                constraint = ConstraintIntent("required-open-action", "required_action", value="tap_semantic")
-                semantic_ir = replace(semantic_ir, constraints=(constraint,), subgoals=(replace(
-                    semantic_ir.subgoals[0], constraint_refs=(constraint.constraint_id,)),))
-                current = _scene(
-                    app_id="launcher",
-                    fingerprint=f"before-{app_id}",
-                    elements=(_launcher_icon(app_name),),
-                )
-                report = compile_canonical_action_catalog(
-                    current,
-                    semantic_ir,
-                    {"launch_app", "tap_semantic", "home"},
+                context = _launch_context(app_id=app_id, app_name=app_name)
+                observation = _trusted(_scene(
+                    app_id="launcher", fingerprint=f"before-{app_id}",
+                ))
+                action = bind_same_response_action(
+                    {"action": "launch_app"},
+                    context=context,
+                    observation=observation,
+                    available_action_kinds={"launch_app", "tap_semantic", "home"},
                     launch_target={
                         "launch_ref": launch_ref,
                         "expected_app_id": expected_app_id,
+                        "target_app_id": app_id,
+                        "target_app_name": app_name,
                     },
                 )
 
-                self.assertEqual(["launch_app"], [item.action_kind for item in report.candidates])
-                candidate = report.candidates[0]
+                self.assertEqual("launch_app", action.action)
                 self.assertEqual(
                     {
-                        "target_surface_id": surface.surface_id,
+                        "target_surface_id": "target_app",
                         "target_app_id": app_id,
                         "target_app_name": app_name,
                         "launch_ref": launch_ref,
                         "expected_app_id": expected_app_id,
                     },
-                    candidate.parameters,
+                    action.params,
                 )
-                self.assertNotIn("package_name", candidate.parameters)
-                self.assertNotIn("shell", candidate.parameters)
-                self.assertNotIn("command", candidate.parameters)
-                self.assertEqual(
-                    {"app_id": app_id},
-                    canonical_candidate_expected_result(candidate, current),
-                )
-                self.assertTrue(
-                    any(
-                        expectation.predicate == "surface.active_ref"
-                        and expectation.operator == "equals"
-                        and expectation.value == surface.surface_id
-                        for expectation in candidate.transition.expectations
-                    )
-                )
+                self.assertNotIn("package_name", action.params)
+                self.assertNotIn("shell", action.params)
+                self.assertNotIn("command", action.params)
 
     def test_qwen_same_response_selects_launch_and_local_code_only_maps_it(self) -> None:
-        semantic_ir, _surface = _app_ir(app_id="sample_app", app_name="示例应用")
-        subgoal_id = semantic_ir.subgoals[0].subgoal_id
-        context = QwenTaskContext(
-            protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
-            task_id=semantic_ir.task_id,
-            device_id=semantic_ir.device_id,
-            revision=semantic_ir.revision,
-            task_status="running",
-            goal={
-                "objective": "打开示例应用",
-                "target_apps": [{"app_id": "sample_app", "app_name": "示例应用"}],
-                "entities": {},
-            },
-            global_constraints=(),
-            goal_completion_conditions=(),
-            current_subgoal={
-                "subgoal_id": subgoal_id,
-                "objective": "打开示例应用",
-                "status": "active",
-                "depends_on": (),
-                "constraints": (),
-                "completion_conditions": ("示例应用已在前台",),
-                "completion_evidence": (),
-                "effect_ids": (),
-                "execution_class": "navigate",
-            },
-            current_execution_class="navigate",
-            effect_intents=(),
-            effect_gate={
-                "required": False,
-                "state": "not_required",
-                "effect_ids": [],
-                "effect_action_allowed": False,
-                "scope": {
-                    "task_id": semantic_ir.task_id,
-                    "device_id": semantic_ir.device_id,
-                    "revision": semantic_ir.revision,
-                    "subgoal_id": subgoal_id,
-                },
-            },
-            semantic_ir=semantic_ir,
-        )
-        observation = TrustedObservation(
-            observation_id="obs_0123456789abcdef",
-            device_id=semantic_ir.device_id,
-            fingerprint="launch-selector-frame",
-            scene=_scene(app_id="launcher", fingerprint="launch-selector-frame"),
-            local_stability=LocalFrameStability(
-                stable=True,
-                mean_delta=0.0,
-                max_delta=0.0,
-                frame_count=1,
-                threshold=1.0,
-                reason="test",
-            ),
-            selected_frame_index=0,
-            frame_sharpness_scores=(1.0,),
-        )
+        context = _launch_context(app_id="sample_app", app_name="示例应用")
+        observation = _trusted(_scene(app_id="launcher", fingerprint="launch-selector-frame"))
 
         class Provider:
             calls = 0
@@ -345,22 +235,6 @@ class LaunchAppCanonicalTests(unittest.TestCase):
             def _chat(self, *_args, **_kwargs) -> str:
                 self.calls += 1
                 raise AssertionError("同一观察响应已含决策，不应发起第二次模型调用")
-
-            @staticmethod
-            def decision_for(fingerprint: str) -> dict:
-                if fingerprint != "launch-selector-frame":
-                    raise AssertionError("decision 必须绑定当前截图 fingerprint")
-                return {
-                    "status": "action",
-                    "action": "launch_app",
-                    "element_id": None,
-                    "source_element_id": None,
-                    "destination_element_id": None,
-                    "direction": None,
-                    "evidence_refs": [],
-                    "confidence": 0.96,
-                    "reason": "当前目标是启动已登记应用",
-                }
 
         provider = Provider()
         selector = QwenVisualDecisionObserver(
@@ -375,6 +249,19 @@ class LaunchAppCanonicalTests(unittest.TestCase):
             launch_target={
                 "launch_ref": "launch_ref.sample_app",
                 "expected_app_id": "com.example.sample",
+                "target_app_id": "sample_app",
+                "target_app_name": "示例应用",
+            },
+            model_decision={
+                "status": "action",
+                "action": "launch_app",
+                "element_id": None,
+                "source_element_id": None,
+                "destination_element_id": None,
+                "direction": None,
+                "evidence_refs": [],
+                "confidence": 0.96,
+                "reason": "当前目标是启动已登记应用",
             },
         )
 
@@ -384,44 +271,21 @@ class LaunchAppCanonicalTests(unittest.TestCase):
         self.assertEqual("launch_app", decision.proposal.action.action)
         self.assertEqual("launch_ref.sample_app", decision.proposal.action.params["launch_ref"])
 
-    def test_missing_mapping_preserves_visual_fallback(self) -> None:
-        semantic_ir, _surface = _app_ir(
-            app_id="sample_app",
-            app_name="示例应用",
-        )
-        launcher = _scene(
+    def test_missing_launch_mapping_rejects_without_locally_selecting_a_fallback(self) -> None:
+        context = _launch_context(app_id="sample_app", app_name="示例应用")
+        observation = _trusted(_scene(
             app_id="launcher",
             fingerprint="launcher-before",
             elements=(_launcher_icon("示例应用"),),
-        )
-        launcher_report = compile_canonical_action_catalog(
-            launcher,
-            semantic_ir,
-            {"launch_app", "tap_semantic", "home"},
-            launch_target=None,
-        )
-        self.assertEqual(
-            ["tap_semantic"],
-            [item.action_kind for item in launcher_report.candidates],
-        )
-        self.assertEqual(
-            "target-app-icon",
-            launcher_report.candidates[0].parameters["element_id"],
-        )
-
-        other_app_report = compile_canonical_action_catalog(
-            _scene(app_id="com.example.other", fingerprint="other-before"),
-            semantic_ir,
-            {"launch_app", "tap_semantic", "home"},
-            launch_target=None,
-        )
-        self.assertEqual(
-            ["home"],
-            [item.action_kind for item in other_app_report.candidates],
-        )
-        self.assertFalse(
-            any(item.action_kind == "launch_app" for item in other_app_report.candidates)
-        )
+        ))
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "可信包名映射"):
+            bind_same_response_action(
+                {"action": "launch_app"},
+                context=context,
+                observation=observation,
+                available_action_kinds={"launch_app", "tap_semantic", "home"},
+                launch_target=None,
+            )
 
 
 class AdbPackageLauncherTests(unittest.TestCase):
@@ -630,28 +494,20 @@ class LaunchAppVerificationTests(unittest.TestCase):
         launch_ref: str = "launch_ref.sample_app",
         expected_app_id: str = "com.example.sample",
     ) -> tuple[UIScene, SemanticAction]:
-        semantic_ir, surface = _app_ir(app_id=app_id, app_name=app_name)
         before = _scene(app_id="launcher", fingerprint="before-launch")
-        report = compile_canonical_action_catalog(
-            before,
-            semantic_ir,
-            {"launch_app", "tap_semantic", "home"},
+        action = bind_same_response_action(
+            {"action": "launch_app"},
+            context=_launch_context(app_id=app_id, app_name=app_name),
+            observation=_trusted(before),
+            available_action_kinds={"launch_app", "tap_semantic", "home"},
             launch_target={
                 "launch_ref": launch_ref,
                 "expected_app_id": expected_app_id,
+                "target_app_id": app_id,
+                "target_app_name": app_name,
             },
         )
-        candidate = report.candidates[0]
-        return before, SemanticAction(
-            node_id="launch-target-app",
-            action="launch_app",
-            params={
-                **candidate.parameters,
-                "formal_candidate_id": candidate.candidate_id,
-                "formal_transition": candidate.transition.to_dict(),
-                "expected_effect": canonical_candidate_expected_result(candidate, before),
-            },
-        )
+        return before, action
 
     @classmethod
     def _execute_through_adapter(cls, runner) -> tuple[object, int, int, int]:
@@ -660,7 +516,7 @@ class LaunchAppVerificationTests(unittest.TestCase):
             app_id="com.example.sample",
             fingerprint="after-launch",
         )
-        observer = _SequenceObserver((before, after))
+        observer = _SequenceObserver((after,))
         capture_calls = 0
 
         def capture() -> Image.Image:
@@ -697,6 +553,7 @@ class LaunchAppVerificationTests(unittest.TestCase):
             ).execute(
                 requested_action=action,
                 planned_scene=before,
+                planned_frames=tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4)),
                 goal=_launch_goal(),
                 confirmed=True,
             )
@@ -708,7 +565,7 @@ class LaunchAppVerificationTests(unittest.TestCase):
 
         self.assertEqual(1, transport_calls)
         self.assertEqual(8, capture_calls)
-        self.assertEqual(2, observer_calls)
+        self.assertEqual(1, observer_calls)
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
         execution_metadata = result.to_dict()["execution_metadata"]
@@ -729,14 +586,14 @@ class LaunchAppVerificationTests(unittest.TestCase):
 
                 self.assertEqual(1, transport_calls)
                 self.assertEqual(8, capture_calls)
-                self.assertEqual(2, observer_calls)
+                self.assertEqual(1, observer_calls)
                 self.assertEqual(1, result.physical_actions)
                 self.assertEqual("matched", result.action_outcome)
                 execution_metadata = result.to_dict()["execution_metadata"]
                 self.assertEqual("adb_package_launch", execution_metadata["transport"])
                 self.assertIs(False, execution_metadata["mechanical_contact_ack"])
 
-    def test_controller_requires_typed_app_visual_identity(self) -> None:
+    def test_controller_verifies_trusted_package_or_current_app_identity(self) -> None:
         before, action = self._candidate_action()
         controller = UniversalActionController()
         resolved = controller.resolve_one(action, before, confirmed=True)
@@ -756,7 +613,6 @@ class LaunchAppVerificationTests(unittest.TestCase):
             _scene(app_id="com.example.other", fingerprint="after-other"),
             _scene(app_id="unknown", fingerprint="after-unknown"),
             _scene(app_id="launcher", fingerprint="after-launcher"),
-            _scene(app_id="com.example.sample", fingerprint=before.fingerprint),
         )
         for after in invalid_after_scenes:
             with self.subTest(after_app=after.foreground_app_id, fingerprint=after.fingerprint):

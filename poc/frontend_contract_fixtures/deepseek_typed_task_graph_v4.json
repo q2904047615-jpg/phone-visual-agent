@@ -30,8 +30,7 @@
       "subgoal_id": "submit_payment", "objective": "订单进入已付款状态", "status": "active", "depends_on": [], "constraints": ["执行前取得本地效果确认"],
       "completion_conditions": ["页面显示付款完成"], "completion_evidence": [], "effect_ids": ["payment_order"], "execution_class": "effect"
     },
-    "clarification_questions": [],
-    "replan_history": []
+    "clarification_questions": []
   },
   "to_qwen_context": {
     "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",

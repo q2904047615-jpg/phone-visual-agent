@@ -12,7 +12,6 @@ from agent.domain.qwen_task_context import DEVICE_ID_PATTERN
 from agent.domain.trusted_observation import (
     OBSERVATION_ID_PATTERN,
     TrustedObservation,
-    canonicalize_trusted_scene,
 )
 from agent.domain.ui_scene import UIScene
 from agent.domain.vision_model import VisionAgentError
@@ -41,14 +40,13 @@ def build_trusted_observation(*, frames: list[Image.Image], device_id: str, scen
     reject_if(sharpness[selected] < sharpness_floor, VisionAgentError(f'当前最清晰帧仍然模糊：sharpness={sharpness[selected]:.3f} < {sharpness_floor:.3f}。'))
     fingerprint = local_frame_fingerprint(frames[selected].convert("RGB"))
     scene.validate()
-    canonical_scene, aliases, conflicts = canonicalize_trusted_scene(scene)
     reject_if(not scene.stable, VisionAgentError("页面仍在变化，不能建立可信观察。"))
     reject_if(scene.fingerprint != fingerprint, VisionAgentError('只读观察 fingerprint 与当前本地帧不一致，拒绝建立可信候选。'))
     resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
     reject_if(not OBSERVATION_ID_PATTERN.fullmatch(resolved_id), VisionAgentError(f"observation_id 格式无效：{resolved_id!r}"))
     result = TrustedObservation(observation_id=resolved_id, device_id=str(device_id).strip(), fingerprint=fingerprint,
-        scene=canonical_scene, local_stability=stability, selected_frame_index=selected,
-        frame_sharpness_scores=sharpness, candidate_aliases=aliases, candidate_conflicts=conflicts)
+        scene=scene, local_stability=stability, selected_frame_index=selected,
+        frame_sharpness_scores=sharpness)
     validate_trusted_observation_against_frames(result, frames, allow_leading_outlier=True)
     return result
 

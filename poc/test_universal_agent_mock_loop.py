@@ -9,13 +9,15 @@ import unittest
 from PIL import Image, ImageDraw
 
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
-from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from agent.domain.task_graph import TargetApp
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
-from agent.domain.canonical_action_protocol import GenericStepProposal
+from agent.domain.canonical_action_protocol import (
+    GenericStepProposal,
+    bind_same_response_action,
+    normalize_model_step_decision,
+)
 from agent.infrastructure.orientation_safety import _claim_audit_seal
-from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from agent.application.universal_agent_orchestrator import (
     UniversalAgentOrchestrator,
@@ -112,17 +114,55 @@ def scene(
     )
 
 
+def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str) -> dict:
+    if status == "finish":
+        return {
+            "status": "finish",
+            "evidence_refs": ["scene.summary"],
+            "confidence": 0.97,
+            "reason": "合成的新截图已经证明当前目标完成。",
+        }
+    payload = {
+        "status": "action",
+        "action": action_kind,
+        "confidence": 0.97,
+        "reason": "合成观察在同一帧直接选择一个动作。",
+    }
+    if action_kind in {
+        "tap_semantic",
+        "dismiss_overlay",
+        "input_verified_text",
+        "press_enter",
+        "clear_verified_text",
+        "double_tap",
+        "long_press",
+    }:
+        if len(scene.elements) != 1:
+            raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
+        payload["element_id"] = scene.elements[0].element_id
+    elif action_kind == "swipe":
+        payload["direction"] = "up"
+    return payload
+
+
 class ScriptedObserver:
-    def __init__(self, before_scene: UIScene, after_scene: UIScene) -> None:
+    def __init__(self, before_scene: UIScene, after_scene: UIScene, action_kind: str) -> None:
         self.before_scene = before_scene
         self.after_scene = after_scene
+        self.action_kind = action_kind
         self.calls = 0
 
-    def observe(self, *, frames, goal_context):
+    def observe_with_decision(self, *, frames, goal_context):
         del goal_context
         self.calls += 1
         pixel = frames[-1].getpixel((0, 0))
-        return self.after_scene if pixel == (220, 238, 255) else self.before_scene
+        is_after = pixel == (220, 238, 255)
+        selected = self.after_scene if is_after else self.before_scene
+        return selected, _same_frame_model_decision(
+            selected,
+            status="finish" if is_after else "action",
+            action_kind=self.action_kind,
+        )
 
 class ScriptedCapture:
     def __init__(self, *, unstable_after: bool = False) -> None:
@@ -199,9 +239,7 @@ class RecordingRobot:
 
 
 class ScriptedQwen:
-    def __init__(self, action_kind: str, *, unsafe: bool = False) -> None:
-        self.action_kind = action_kind
-        self.unsafe = unsafe
+    def __init__(self) -> None:
         self.calls = []
 
     def decide(
@@ -212,12 +250,16 @@ class ScriptedQwen:
         trusted_observation,
         decision_number=1,
         available_action_kinds=None,
+        launch_target=None,
+        text_transport_profile=None,
+        model_decision,
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
-        if len(self.calls) > 1:
+        payload = normalize_model_step_decision(model_decision)
+        if payload["status"] == "finish":
             proposal = GenericStepProposal(
                 status="finish",
-                reason="合成的新截图已经证明当前目标完成。",
+                reason=payload["reason"],
             )
             decision = SimpleNamespace(
                 task_id=task_context["task_id"],
@@ -227,7 +269,7 @@ class ScriptedQwen:
                 fingerprint=trusted_observation.fingerprint,
                 trusted_observation=trusted_observation,
                 target_region=None,
-                confidence=0.97,
+                confidence=payload["confidence"],
                 proposal=proposal,
                 completion_evidence=(trusted_observation.scene.summary,),
             )
@@ -243,88 +285,35 @@ class ScriptedQwen:
                 "completion_evidence": list(decision.completion_evidence),
             }
             return decision
-        if self.action_kind == "back":
-            params = {"expected_effect": {"scene_changed": True}}
-        elif self.action_kind == "swipe":
-            params = {
-                "direction": "up",
-                "expected_effect": {"content_changed": True},
-            }
-        else:
-            element = trusted_observation.scene.elements[0]
-            params = {
-                "element_id": element.element_id,
-                "target": element.meaning,
-                "meaning": element.meaning,
-                "role": element.role,
-                "label": element.label,
-                "states": dict(element.states),
-                "expected_effect": {"scene_changed": True},
-            }
-        action = SemanticAction(
-            node_id=f"synthetic-{decision_number}",
-            action=self.action_kind,
-            params=params,
-        )
-        semantic_ir = getattr(task_context, "semantic_ir", None)
-        if semantic_ir is None:
-            raise AssertionError("ScriptedQwen 缺少 canonical TaskSemanticIR")
-        catalog = compile_canonical_action_catalog(
-            trusted_observation.scene,
-            semantic_ir,
-            available_action_kinds or (),
-        )
-        matches = [
-            item
-            for item in catalog.candidates
-            if item.action_kind == action.action
-            and (
-                action.action != "tap_semantic"
-                or str(item.parameters.get("element_id") or "")
-                == str(action.params.get("element_id") or "")
-            )
-            and (
-                action.action != "swipe"
-                or str(item.parameters.get("direction") or "")
-                == str(action.params.get("direction") or "")
-            )
-        ]
-        if len(matches) != 1:
-            raise AssertionError(
-                "ScriptedQwen 的动作未唯一绑定 canonical candidate："
-                f"{self.action_kind}; 候选="
-                f"{[(item.action_kind, item.parameters) for item in catalog.candidates]}"
-            )
-        candidate = matches[0]
-        action = replace(
-            action,
-            params={
-                **action.params,
-                "formal_candidate_id": candidate.candidate_id,
-                "formal_transition": candidate.transition.to_dict(),
-            },
+        action = bind_same_response_action(
+            payload,
+            context=task_context,
+            observation=trusted_observation,
+            available_action_kinds=available_action_kinds or (),
+            launch_target=launch_target,
+            text_transport_profile=text_transport_profile,
         )
         proposal = GenericStepProposal(
             status="action",
             action=action,
-            reason="合成可信观察中存在唯一通用候选。",
+            reason=payload["reason"],
         )
         region = SimpleNamespace(
             kind=(
                 "system_navigation"
-                if self.action_kind == "back"
+                if action.action == "back"
                 else "screen"
-                if self.action_kind == "swipe"
+                if action.action == "swipe"
                 else "element"
             ),
             element_id=(
                 ""
-                if self.action_kind in {"back", "swipe"}
+                if action.action in {"back", "swipe"}
                 else trusted_observation.scene.elements[0].element_id
             ),
             bounds=(
                 (0.0, 0.0, 1.0, 1.0)
-                if self.action_kind in {"back", "swipe"}
+                if action.action in {"back", "swipe"}
                 else trusted_observation.scene.elements[0].bounds
             ),
         )
@@ -336,7 +325,7 @@ class ScriptedQwen:
             fingerprint=trusted_observation.fingerprint,
             trusted_observation=trusted_observation,
             target_region=region,
-            confidence=0.97,
+            confidence=payload["confidence"],
             proposal=proposal,
             completion_evidence=(),
         )
@@ -381,10 +370,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         unstable_after: bool = False,
     ):
         initial = graph_for(app_id=app_id, app_name=app_name, raw_goal=raw_goal)
-        planner = FakeDeepSeekPlanner(
-            initial,
-            replan_result=replace(initial, revision=2),
-        )
+        planner = FakeDeepSeekPlanner(initial)
         before = scene(
             app_id=app_id,
             fingerprint=f"{app_id}-before",
@@ -398,7 +384,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             unsafe=unsafe,
         )
         capture = ScriptedCapture(unstable_after=unstable_after)
-        observer = ScriptedObserver(before, after)
+        observer = ScriptedObserver(before, after, action_kind)
         robot = RecordingRobot()
         adapter = GenericSingleActionAdapter(
             capture=capture,
@@ -408,9 +394,8 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             frame_interval=0,
             post_action_settle=0,
             post_action_timeout=0.02,
-            post_action_max_observations=1,
         )
-        qwen = ScriptedQwen(action_kind, unsafe=unsafe)
+        qwen = ScriptedQwen()
         orchestrator = UniversalAgentOrchestrator(
             deepseek_planner=planner,
             qwen_observer=qwen,
@@ -457,7 +442,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(planner.plan_calls))
         self.assertEqual("synthetic.catalog", session.goal_draft.app_id)
 
     def test_rephrased_back_goal_executes_one_back_then_finishes(self):
@@ -475,7 +460,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual([("back", ())], robot.calls)
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(planner.plan_calls))
         self.assertEqual("synthetic.reader", session.goal_draft.app_id)
 
     def test_third_unseen_app_combines_generic_swipe_without_code_branch(self):

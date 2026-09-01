@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -33,17 +32,24 @@ from agent.domain.task_graph import (
     build_exact_input_task_graph,
     complete_active_subgoal,
 )
-from agent.domain.task_semantic_ir import TaskSemanticIRError, compile_formal_semantic_authority, effect_preview_digest
-
-
-POST_ACTION_OUTCOMES = frozenset({'matched', 'mismatched'})
-CORRECTIVE_RETRY_IMPACTS = frozenset({'read_only', 'navigation_only'})
-CORRECTIVE_RETRY_ACTIONS = frozenset({'back', 'dismiss_overlay', 'double_tap', 'drag', 'home',
-    'open_recent_apps', 'long_press', 'swipe', 'tap_semantic'})
 
 
 class UniversalAgentOrchestratorError(RuntimeError):
     pass
+
+
+_STALE_FRAME_FAILURE_PREFIXES = (
+    '确认时本地真实画面已变化',
+    '确认时前台 App 已变化',
+    '确认时页面已变化',
+    '当前新截图不再包含 Qwen 已选',
+    '确认时目标区域已明显移动',
+    '确认前本地多帧稳定性检查未通过',
+)
+
+
+def _is_zero_action_stale_frame_fault(exc: GenericActionAdapterError) -> bool:
+    return exc.physical_actions == 0 and str(exc).startswith(_STALE_FRAME_FAILURE_PREFIXES)
 
 
 def _action_digest(action: Any) -> str:
@@ -81,114 +87,66 @@ def _effect_confirmation_material(graph: DynamicTaskGraph, current: Any) -> tupl
 class ObservationBridge:
     """Project the current local plan item into the one Qwen observation prompt."""
 
-    _APP_REFERENCE_IDS = frozenset({'unknown', 'current_foreground', 'current_app', 'foreground_app',
-        'target_app', 'active_app'})
     _SURFACE_IDENTITIES = {'device': ('device', '设备界面'), 'system': ('system', '系统界面'),
         'current_surface': ('current_surface', '当前界面')}
 
-    @classmethod
-    def _active_app_entry_target_label(cls, graph: DynamicTaskGraph, active: Any) -> str:
-        if active is None or active.external_impact != 'navigation_only':
-            return ''
-        objective = str(active.objective or '').strip()
-        eligible = [app for app in graph.goal.target_apps if str(app.app_name or '').strip()
-            and str(app.app_id or '').strip().casefold() not in cls._APP_REFERENCE_IDS]
-        mentioned = [app for app in eligible if app.app_name.casefold() in objective.casefold()]
-        if len(mentioned) != 1:
-            return ''
-        app_name = mentioned[0].app_name.strip()
-        literal = re.escape(app_name)
-        patterns = (rf'(?:打开|进入|启动|切换到|切至|前往)\s*(?:应用|app)?\s*{literal}',
-            rf'{literal}\s*(?:应用)?\s*(?:已打开|已启动|主界面可见|首页可见)',
-            rf'(?<![a-z0-9_])(?:open|launch|enter|go\s+to|switch\s+to)\s+(?:the\s+)?'
-            rf'(?:app\s+)?{literal}(?![a-z0-9_])')
-        return app_name if any(re.search(item, objective, flags=re.IGNORECASE) for item in patterns) else ''
-
     @staticmethod
-    def _typed_input_views(graph: DynamicTaskGraph, active: Any) -> tuple[dict[str, Any], dict[str, Any],
-        dict[str, Any]]:
-        try:
-            ir = compile_formal_semantic_authority(graph).semantic_ir
-        except TaskSemanticIRError:
-            return {}, {}, {}
-        typed = next((item for item in ir.subgoals if item.subgoal_id == getattr(active, 'subgoal_id', '')), None)
-        if typed is None:
-            return {}, {}, {}
-        entities = {item.entity_id: item for item in ir.entities}
-        fields = tuple(item for item in ir.input_fields if typed.subgoal_id in item.source_subgoal_ids)
-        constraints = {item.constraint_id: item for item in ir.constraints}
-        actions = {str(constraints[ref].value) for ref in typed.constraint_refs
-            if ref in constraints and constraints[ref].kind == 'required_action'}
-        active_input: dict[str, Any] = {}
-        if getattr(active, 'external_impact', '') in {'navigation_only', 'read_only'}:
-            if not fields and 'clear_verified_text' in actions and 'input_verified_text' not in actions:
-                active_input = {'text': '', 'field_id': 'input_field_clear_target', 'field_label': '',
-                    'multiline': False, 'target_only': True}
-            elif len(fields) == 1:
-                field = fields[0]
-                payload = entities.get(field.payload_ref)
-                if payload is not None and payload.role == 'input_text' and isinstance(payload.value,
-                    str) and payload.value:
-                    active_input = {'text': payload.value, 'field_id': field.field_id,
-                        'field_label': field.field_label, 'multiline': field.multiline}
-        predecessor: dict[str, Any] = {}
-        if active_input:
-            preceding = tuple(item for item in ir.input_fields if set(item.source_subgoal_ids).intersection(
-                typed.depends_on))
-            if len(preceding) == 1:
-                field = preceding[0]
-                payload = entities.get(field.payload_ref)
-                if payload is not None and payload.role == 'input_text' and payload.value:
-                    predecessor = {'field_id': field.field_id, 'field_label': field.field_label,
-                        'text': payload.value}
-        verification: dict[str, Any] = {}
-        if getattr(active, 'external_impact', '') == 'read_only' and not active_input:
-            desired = {item.state_id: item for item in ir.desired_states}
-            by_payload = {item.payload_ref: item for item in ir.input_fields}
-            values: dict[str, str] = {}
-            labels: dict[str, str] = {}
-            for ref in typed.desired_state_refs:
-                state = desired.get(ref)
-                field = by_payload.get(getattr(state, 'subject_ref', ''))
-                if state is None or state.predicate != 'input.value_equals' or not isinstance(state.value,
-                    str) or field is None:
-                    continue
-                values[field.field_id] = state.value
-                if field.field_label:
-                    labels[field.field_id] = field.field_label
-            if values:
-                verification = {'desired_input_values': values,
-                    **({'desired_input_labels': labels} if labels else {})}
-        return active_input, predecessor, verification
+    def _typed_input_view(graph: DynamicTaskGraph, active: Any) -> dict[str, Any]:
+        field_id = str(getattr(active, 'input_field_id', '') or '').strip()
+        operation = str(getattr(active, 'input_operation', '') or '').strip()
+        if not field_id or not operation:
+            return {}
+        entities = graph.goal.entities
+        label = ''
+        text: Any = None
+        if field_id == 'primary_input':
+            text = entities.get('input_text')
+            label = str(entities.get('target_ui_label') or '')
+        else:
+            fields = entities.get('input_fields')
+            matches = [item for item in fields or () if isinstance(item, dict)
+                and str(item.get('field_id') or '') == field_id]
+            reject_if(len(matches) != 1,
+                UniversalAgentOrchestratorError(f'当前子目标引用的 typed input field 不唯一：{field_id}'))
+            text = matches[0].get('text')
+            label = str(matches[0].get('field_label') or '')
+        if operation == 'clear_verified_text':
+            text = ''
+        reject_if(operation in {'focus', 'input_verified_text', 'press_enter'} and not isinstance(text, str),
+            UniversalAgentOrchestratorError(f'当前 typed input field 缺少逐字正文：{field_id}'))
+        return {'text': text if isinstance(text, str) else '', 'field_id': field_id, 'field_label': label,
+            'multiline': bool(isinstance(text, str) and '\n' in text), 'operation': operation,
+            'target_only': operation == 'clear_verified_text'}
 
     @classmethod
     def _subgoal_visual_context(cls, graph: DynamicTaskGraph, subgoal: Any) -> dict[str, Any]:
         entities = {key: value for key, value in graph.goal.entities.items() if key != 'input_fields'}
         for key in ('active_input_transaction_text', 'active_input_field_id', 'active_input_field_label',
-            'active_input_multiline'):
+            'active_input_multiline', 'active_input_operation', 'active_input_target_only'):
             entities.pop(key, None)
-        app_label = cls._active_app_entry_target_label(graph, subgoal)
-        if app_label:
-            entities['target_ui_label'] = app_label
-        active_input, predecessor, verification = cls._typed_input_views(graph, subgoal)
+        active_input = cls._typed_input_view(graph, subgoal)
         text = active_input.get('text')
         target_only = active_input.get('target_only') is True
         if isinstance(text, str) and (text or target_only):
             if text:
                 entities['active_input_transaction_text'] = text
             entities['active_input_field_id'] = active_input['field_id']
+            entities['active_input_operation'] = active_input['operation']
             if target_only:
                 entities['active_input_target_only'] = True
             if active_input.get('field_label'):
                 entities['active_input_field_label'] = active_input['field_label']
             entities['active_input_multiline'] = bool(active_input.get('multiline'))
-            if predecessor:
-                entities.update({'active_input_predecessor_field_id': predecessor['field_id'],
-                    'active_input_predecessor_field_label': predecessor['field_label'],
-                    'active_input_predecessor_text': predecessor['text']})
+            predecessors = [item for item in graph.subgoals if item.subgoal_id in subgoal.depends_on
+                and item.input_field_id]
+            if len(predecessors) == 1:
+                predecessor = cls._typed_input_view(graph, predecessors[0])
+                if predecessor.get('text'):
+                    entities.update({'active_input_predecessor_field_id': predecessor['field_id'],
+                        'active_input_predecessor_field_label': predecessor['field_label'],
+                        'active_input_predecessor_text': predecessor['text']})
         else:
             entities.pop('input_text', None)
-            entities.update(verification)
         return {'subgoal_id': subgoal.subgoal_id, 'objective': subgoal.objective,
             'constraints': list(subgoal.constraints), 'completion_conditions': list(subgoal.completion_conditions),
             'execution_class': {'read_only': 'observe', 'navigation_only': 'navigate',
@@ -329,38 +287,29 @@ class UniversalAgentOrchestrator:
                 'confirmed_device_id': graph.device_id, 'confirmed_subgoal_id': graph.active_subgoal_id,
                 'confirmed_revision': graph.revision}
         context = QwenTaskContext.from_dict(graph.to_qwen_context(**kwargs))
-        try:
-            authority = compile_formal_semantic_authority(graph)
-        except TaskSemanticIRError as exc:
-            raise UniversalAgentOrchestratorError(f'正式TaskSemanticIR拒绝：{exc}') from exc
-        session.effect_previews = tuple({**item, 'preview_digest': effect_preview_digest(item)}
-            for item in authority.effect_previews)
-        context = replace(context, semantic_ir=authority.semantic_ir)
+        session.effect_previews = tuple(dict(item) for item in graph.to_dict()['effect_intents'])
         context.validate()
-        session.semantic_task_context = context
         return context
 
     def _decide(self, session: UniversalAgentSessionState, *, frames: list[Any] | tuple[Any, ...],
-        observation: Any) -> Any:
+        observation: Any, model_decision: Mapping[str, Any]) -> Any:
         context = self._task_context(session)
         available = self._available_action_kinds(session)
-        ir = context.semantic_ir
-        assert ir is not None
-        active_id = str(context.current_subgoal.get('subgoal_id') or '')
-        typed_subgoal = next((item for item in ir.subgoals if item.subgoal_id == active_id), None)
-        surface = next((item for item in ir.surfaces if typed_subgoal is not None
-            and item.surface_id == typed_subgoal.surface_ref and item.kind == 'app'), None)
+        graph = session.task_graph
+        assert graph is not None
+        target = graph.goal.target_apps[0] if len(graph.goal.target_apps) == 1 else None
         resolver = getattr(session.adapter, 'resolve_app_launch_target', None)
-        launch = resolver(surface.app_id, surface.app_name) if surface is not None and callable(resolver) else None
+        launch = resolver(target.app_id, target.app_name) if target is not None and callable(resolver) else None
         launch_parameters = None
         if launch is None:
             available = available - {'launch_app'}
         else:
             launch_parameters = {'launch_ref': str(launch.launch_ref),
-                'expected_app_id': str(launch.expected_app_id)}
+                'expected_app_id': str(launch.expected_app_id),
+                'target_app_id': target.app_id, 'target_app_name': target.app_name}
         args: dict[str, Any] = {'frames': list(frames), 'task_context': context,
             'trusted_observation': observation, 'decision_number': session.step_number,
-            'available_action_kinds': available}
+            'available_action_kinds': available, 'model_decision': dict(model_decision)}
         if launch_parameters:
             args['launch_target'] = launch_parameters
         profile_provider = getattr(session.adapter, 'text_transport_profile', None)
@@ -382,14 +331,13 @@ class UniversalAgentOrchestrator:
             UniversalAgentOrchestratorError('Qwen决策没有绑定当前task/device/revision/observation。'))
         decision.proposal.validate(observation.scene)
 
-    @classmethod
-    def _selection_receipt(cls, session: UniversalAgentSessionState, decision: Any) -> CanonicalSelectionReceipt:
+    @staticmethod
+    def _selection_receipt(session: UniversalAgentSessionState, decision: Any) -> CanonicalSelectionReceipt:
+        del session
         action = getattr(getattr(decision, 'proposal', None), 'action', None)
         kind = str(getattr(action, 'action', '') or '')
-        if kind not in cls._available_action_kinds(session):
-            return CanonicalSelectionReceipt(allowed=False, reason=f'当前设备不支持canonical动作：{kind or "missing"}。')
         return CanonicalSelectionReceipt(allowed=True,
-            reason='Qwen同响应动作已精确绑定当前canonical candidate。', canonical_class=kind)
+            reason='Qwen同响应动作已绑定当前截图；最终设备能力由执行器校验。', canonical_class=kind)
 
     def _complete_from_finish(self, session: UniversalAgentSessionState, decision: Any) -> None:
         graph = session.task_graph
@@ -414,8 +362,7 @@ class UniversalAgentOrchestrator:
             self._set_status(session, 'needs_reobservation',
                 'Qwen已完成当前高层目标；下一目标必须取得新截图。')
 
-    def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any,
-        allow_action: bool=True, action_block_reason: str='') -> Any:
+    def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any) -> Any:
         graph = session.task_graph
         observation = session.trusted_observation
         assert graph is not None and observation is not None
@@ -427,18 +374,10 @@ class UniversalAgentOrchestrator:
             return decision
         reject_if(decision.proposal.status != 'action',
             UniversalAgentOrchestratorError('Qwen单步决策只允许action或finish。'))
-        if not allow_action:
-            session.controller_decision = CanonicalSelectionReceipt(allowed=False, reason=action_block_reason)
-            session.confirmation_authority = None
-            self._set_status(session, 'blocked', action_block_reason)
-            return decision
         receipt = self._selection_receipt(session, decision)
         session.controller_decision = receipt
         self._remember(session, session.evidence_store.write_controller_decision(session.step_number,
             receipt.to_dict()))
-        if not receipt.allowed:
-            self._set_status(session, 'blocked', receipt.reason)
-            return decision
         self._set_status(session, 'awaiting_confirmation')
         self._bind_confirmation(session)
         return decision
@@ -456,11 +395,14 @@ class UniversalAgentOrchestrator:
         self._clear_action(session)
         session.goal_draft = self.bridge.goal_draft(graph)
         self._set_status(session, 'observing')
-        scene, frames, paths = session.adapter.capture_scene(session.goal_draft,
+        scene, frames, paths, model_decision = session.adapter.capture_scene(session.goal_draft,
             evidence_dir=session.run_dir, prefix=f'before_step_{session.step_number}_frame')
+        reject_if(not isinstance(model_decision, Mapping),
+            UniversalAgentOrchestratorError('当前Qwen观察没有直接返回同响应action/finish。'))
         self._remember(session, paths)
         observation = self._build_observation(session, scene=scene, frames=frames)
-        decision = self._decide(session, frames=frames, observation=observation)
+        decision = self._decide(session, frames=frames, observation=observation,
+            model_decision=model_decision)
         self._stage_decision(session, decision=decision)
         self._write_snapshot(session)
         return decision
@@ -545,25 +487,13 @@ class UniversalAgentOrchestrator:
         required = {'session_id', 'task_id', 'device_id', 'revision', 'subgoal_id', 'effect_ids', 'intent_digest'}
         return cls._normalize_scope(value, required=required, digest_key='intent_digest', label='效果确认scope')
 
-    def _may_correct_after_mismatch(self, session: UniversalAgentSessionState, *, impact: str,
-        action_kind: str) -> bool:
-        if impact not in CORRECTIVE_RETRY_IMPACTS or action_kind not in CORRECTIVE_RETRY_ACTIONS:
-            return False
-        graph = session.task_graph
-        assert graph is not None
-        current = graph.active_subgoal()
-        key = (graph.revision, current.subgoal_id if current else '')
-        return not any((item.get('revision'), item.get('subgoal_id')) == key
-            for item in session.corrective_retry_history)
-
     def _confirm_one_locked(self, session: UniversalAgentSessionState, confirmation: Mapping[str, Any]) -> Any:
         authority = self._consume_confirmation(session, confirmation)
         graph, observation, decision = session.task_graph, session.trusted_observation, session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
         receipt = session.controller_decision
-        reject_if(receipt is None or not receipt.allowed,
+        reject_if(receipt is None,
             UniversalAgentOrchestratorError('动作缺少canonical映射回执。'))
-        session.confirm_stage = 'executing'
         self._set_status(session, 'executing_one_action')
         before_actions = session.physical_actions
         try:
@@ -574,7 +504,8 @@ class UniversalAgentOrchestrator:
         except GenericActionAdapterError as exc:
             session.physical_actions += max(0, int(exc.physical_actions))
             self._remember(session, exc.evidence)
-            self._set_status(session, 'needs_reobservation' if exc.physical_actions == 0 else 'failed', str(exc))
+            self._set_status(session,
+                'needs_reobservation' if _is_zero_action_stale_frame_fault(exc) else 'failed', str(exc))
             self._best_effort_snapshot(session)
             raise
 
@@ -592,8 +523,8 @@ class UniversalAgentOrchestrator:
             UniversalAgentOrchestratorError('执行结果没有绑定已消费的canonical动作。'))
         outcome = str(result.action_outcome or '')
         errors = tuple(str(item) for item in result.verification_errors if str(item).strip())
-        reject_if(outcome not in POST_ACTION_OUTCOMES or ((outcome == 'matched') == bool(errors)),
-            UniversalAgentOrchestratorError('动作outcome与verification_errors不一致。'))
+        reject_if(outcome != 'matched' or errors,
+            UniversalAgentOrchestratorError('执行器没有确认本次物理动作及必要硬校验。'))
         after_frames = tuple(result.after_frames)
         after_paths = tuple(str(item).strip() for item in result.after_frame_paths)
         reject_if(len(after_frames) < 4 or len(after_paths) != len(after_frames) or any(not item for item in after_paths),
@@ -612,23 +543,11 @@ class UniversalAgentOrchestrator:
             'after_observation_id': new_observation.observation_id,
             'after_fingerprint': new_observation.fingerprint}))
 
-        current = graph.active_subgoal()
-        impact = current.external_impact if current is not None else 'unknown'
-        allow_action = outcome == 'matched'
-        block_reason = ''
-        if outcome == 'mismatched':
-            allow_action = self._may_correct_after_mismatch(session, impact=impact,
-                action_kind=decision.proposal.action.action)
-            if allow_action:
-                session.corrective_retry_history.append({'revision': graph.revision,
-                    'subgoal_id': current.subgoal_id if current else '',
-                    'after_observation_id': new_observation.observation_id})
-            else:
-                block_reason = ('动作后新截图未证明预期结果；输入、效果或第二次导航失败均不自动重试。')
-
-        next_decision = self._decide(session, frames=after_frames, observation=new_observation)
-        self._stage_decision(session, decision=next_decision, allow_action=allow_action,
-            action_block_reason=block_reason)
+        reject_if(not isinstance(result.after_model_decision, Mapping),
+            UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
+        next_decision = self._decide(session, frames=after_frames, observation=new_observation,
+            model_decision=result.after_model_decision)
+        self._stage_decision(session, decision=next_decision)
         transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             'transition_kind': 'new_screenshot_decision', 'outcome': outcome,
             'physical_actions_before': before_actions, 'physical_actions': session.physical_actions,
@@ -638,7 +557,6 @@ class UniversalAgentOrchestrator:
         session.last_post_action_transition = transition
         self._remember(session, session.evidence_store.write_post_action_transition(session.step_number - 1,
             transition))
-        session.confirm_stage = 'completed'
         self._write_snapshot(session)
         return result
 
@@ -711,7 +629,15 @@ class UniversalAgentOrchestrator:
                         authority = session.confirmation_authority
                         reject_if(authority is None or authority.consumed,
                             UniversalAgentOrchestratorError('待执行动作缺少一次性scope。'))
-                        self._confirm_one_locked(session, authority.scope())
+                        try:
+                            self._confirm_one_locked(session, authority.scope())
+                        except GenericActionAdapterError as exc:
+                            # No device action occurred and the adapter already classified
+                            # the old screenshot as stale.  Discard that action and let the
+                            # next iteration obtain one new screenshot/Qwen decision.
+                            if exc.physical_actions != 0 or session.status != 'needs_reobservation':
+                                raise
+                            self._clear_action(session)
                     else:
                         session.auto_pause_reason = f'当前状态不能自动推进：{session.status}。'
                         break
@@ -720,7 +646,14 @@ class UniversalAgentOrchestrator:
                     session.auto_pause_reason = '达到本次自动循环迭代上限。'
                 elif session.physical_actions - start_actions >= max_physical_actions:
                     session.auto_pause_reason = '达到本次物理动作上限。'
+                session.automatic_loop_enabled = False
                 self._write_snapshot(session)
+        except Exception as exc:
+            session.automatic_loop_enabled = False
+            self._clear_action(session)
+            self._set_status(session, 'failed', str(exc).strip() or type(exc).__name__)
+            self._best_effort_snapshot(session)
+            raise
         finally:
             session.automatic_loop_enabled = False
             self._release_if_terminal(session)

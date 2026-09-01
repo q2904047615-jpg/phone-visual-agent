@@ -7,11 +7,6 @@ from typing import Any
 
 
 UI_SCENE_PROTOCOL_VERSION = "2026-08-14-ui-scene-v3"
-# Model confidence remains diagnostic.  Executability is established by typed
-# semantic state, legal geometry and uniqueness, not by a second score gate.
-TARGET_LOCAL_ACTION_ROLES = frozenset({'button', 'icon', 'input', 'text', 'tab', 'toggle', 'image', 'list_item'})
-COMPLETION_EVIDENCE_ROLES = frozenset({"container", "dialog"})
-
 ALLOWED_ROLES = {'button', 'icon', 'input', 'text', 'tab', 'toggle', 'image', 'list_item', 'dialog', 'keyboard_key',
     'container', 'unknown'}
 
@@ -288,37 +283,6 @@ class UIElement(ValidatedDataclassWire):
         return element
 
 
-def compact_drag_source_container_error(scene: Any, source: UIElement) -> str:
-    """Return why a container cannot represent one draggable object."""
-
-    if source.role != 'container':
-        return ""
-    label = str(source.label or "").strip()
-    if not label:
-        return "容器型拖动起点必须有逐字可见标签。"
-    if source.states.get('goal_relevant') is not True:
-        return "容器型拖动起点必须明确绑定当前目标。"
-    if source.states.get('fully_visible') is not True:
-        return "容器型拖动起点必须完整可见。"
-    left, top, right, bottom = (float(value) for value in source.bounds)
-    width = right - left
-    height = bottom - top
-    if width > 0.45 or height > 0.45 or width * height > 0.12:
-        return "拖动起点是过大的页面容器，不能视为单个可拖动物体。"
-    for candidate in getattr(scene, 'elements', ()):
-        if candidate.element_id == source.element_id:
-            continue
-        c_left, c_top, c_right, c_bottom = (float(value) for value in candidate.bounds)
-        center_x = (c_left + c_right) / 2.0
-        center_y = (c_top + c_bottom) / 2.0
-        if not (left <= center_x <= right and top <= center_y <= bottom):
-            continue
-        same_literal_text = candidate.role == 'text' and str(candidate.label or '').strip() == label
-        if not same_literal_text:
-            return "拖动起点容器包含其他可见元素，不能证明它是单个物体。"
-    return ""
-
-
 @dataclass(frozen=True)
 class UIScene:
     """App-independent visual scene graph consumed by the controller."""
@@ -360,25 +324,6 @@ class UIScene:
             reject_if(element.element_id in seen, UISceneError(f"元素ID重复：{element.element_id}"))
             seen.add(element.element_id)
 
-    def find_elements(self, *, label: str | None=None, meaning: str | None=None, role: str | None=None,
-        states: dict[str, Any] | None=None) -> tuple[UIElement, ...]:
-        self.validate()
-        expected_label = (label or "").strip().casefold()
-        expected_meaning = (meaning or "").strip().casefold()
-        expected_states = states or {}
-        matches: list[UIElement] = []
-        for element in self.elements:
-            if role and element.role != role:
-                continue
-            if expected_label and element.label.casefold() != expected_label:
-                continue
-            if expected_meaning and expected_meaning not in {element.meaning.casefold(), element.label.casefold()}:
-                continue
-            if any((element.states.get(key) != value for key, value in expected_states.items())):
-                continue
-            matches.append(element)
-        return tuple(matches)
-
     def get_element(self, element_id: str) -> UIElement:
         """Resolve one model element ID inside this exact observation only."""
 
@@ -390,31 +335,6 @@ class UIScene:
                 continue
             return element
         raise UISceneError(f"当前场景不存在元素：{expected}")
-
-    def unique_trusted_goal_element(self) -> UIElement | None:
-        """Return the sole actionable goal element; confidence is diagnostic only."""
-
-        self.validate()
-        matches = tuple((element for element in self.elements if element.role in TARGET_LOCAL_ACTION_ROLES
-            and element.states.get('goal_relevant') is True and (element.states.get('enabled') is not False)
-            and (element.states.get('visible') is not False)))
-        return matches[0] if len(matches) == 1 else None
-
-    def trusted_completion_evidence(self) -> tuple[UIElement, ...]:
-        """Return goal-bound read-only facts; confidence is diagnostic only."""
-
-        self.validate()
-        return tuple((element for element in self.elements if element.role in COMPLETION_EVIDENCE_ROLES
-            and element.states.get('goal_relevant') is True and (element.states.get('visible') is not False)
-            ))
-
-    def resolve_unique(self, *, meaning: str, label: str | None=None, role: str | None=None, states: dict[str,
-        Any] | None=None) -> UIElement:
-        reject_if(not self.stable, UISceneError("页面仍在变化，禁止定位控件。"))
-        matches = self.find_elements(meaning=meaning, label=label, role=role, states=states)
-        reject_if(not matches, UISceneError(f"未找到可信的语义控件：{meaning}"))
-        reject_if(len(matches) != 1, UISceneError(f"语义控件不唯一：{meaning}，共{len(matches)}个"))
-        return matches[0]
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -512,32 +432,6 @@ def scene_matches_app_identity(scene: UIScene, app_id: str, app_name: str='') ->
         'title', 'heading', 'app_header'))) and (str(element.label or '').strip().casefold() == app_name)
         and (element.states.get('fully_visible') is True)))
     return len(title_matches) == 1
-
-
-def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
-    """Bind a typed App surface to structured foreground identity facts."""
-
-    return scene_matches_app_identity(scene, getattr(target_surface, 'app_id', ''),
-        getattr(target_surface, 'app_name', ''))
-
-
-def scene_surface_kind(scene: UIScene) -> str:
-    """Return the one typed surface class used by catalog and receipt checks."""
-
-    scene.validate()
-    foreground = scene.foreground_app_id.strip().casefold()
-    screen = scene.screen_id.strip().casefold()
-    concrete_package = bool(re.fullmatch(r'[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+', foreground))
-    if (screen in {'system_recent_tasks', 'android_recent_tasks', 'recent_tasks', 'recent_apps',
-        'recents'} and (foreground in {'system', 'android_system', 'launcher', 'unknown'} or concrete_package)):
-        return "recent_tasks"
-    identity = f"{foreground} {screen}"
-    if screen in {'android_home', 'ios_home', 'launcher', 'home_screen'} or any((token in identity for token in (
-        'launcher', 'home_screen', 'desktop'))):
-        return "launcher"
-    if scene.overlays:
-        return "system_dialog" if "system" in identity else "app"
-    return "app"
 
 
 def _is_system_navigation_bar_fact(meaning: str) -> bool:

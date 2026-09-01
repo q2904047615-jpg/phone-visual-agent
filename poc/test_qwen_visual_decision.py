@@ -15,7 +15,6 @@ from agent.domain.task_graph import (
     TargetApp,
     build_exact_action_task_graph,
 )
-from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.vision_model import VisionAgentError
 from agent.infrastructure.observation_images import local_frame_fingerprint
@@ -91,16 +90,6 @@ def legacy_blocked_payload(*, reason: str = "当前画面没有目标应用入�
     }
 
 
-class SameResponseDecisionSource:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-        self.fingerprints: list[str] = []
-
-    def decision_for(self, fingerprint: str) -> dict:
-        self.fingerprints.append(fingerprint)
-        return dict(self.payload)
-
-
 class StatusOnlyProvider:
     configured = True
 
@@ -157,11 +146,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
         graph = replace(graph, status="running")
         graph.validate()
-        context = QwenTaskContext.from_dict(graph.to_qwen_context())
-        self.context = replace(
-            context,
-            semantic_ir=compile_formal_semantic_authority(graph).semantic_ir,
-        )
+        self.context = QwenTaskContext.from_dict(graph.to_qwen_context())
         self.context.validate()
 
     def decide(
@@ -173,10 +158,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         available_action_kinds: set[str] | None = None,
         launch_target: dict[str, str] | None = None,
     ):
-        source = SameResponseDecisionSource(payload)
         observer = QwenVisualDecisionObserver(
             StatusOnlyProvider(),
-            decision_source=source,
             trusted_observation_frame_validator=(
                 validate_trusted_observation_against_frames
             ),
@@ -187,8 +170,9 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
             trusted_observation=trusted_observation or self.observation,
             available_action_kinds=available_action_kinds or {"tap_semantic"},
             launch_target=launch_target,
+            model_decision=payload,
         )
-        return source, observer, decision
+        return payload, observer, decision
 
     def wrong_app_target_case(self) -> tuple[QwenTaskContext, object]:
         graph = DynamicTaskGraph(
@@ -230,10 +214,6 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
         graph.validate()
         context = QwenTaskContext.from_dict(graph.to_qwen_context())
-        context = replace(
-            context,
-            semantic_ir=compile_formal_semantic_authority(graph).semantic_ir,
-        )
         context.validate()
         scene = UIScene(
             app_id="other.app",
@@ -252,8 +232,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
         return context, observation
 
-    def test_model_named_element_maps_to_exactly_one_canonical_action(self) -> None:
-        source, observer, decision = self.decide(
+    def test_model_named_element_binds_directly_to_current_scene_action(self) -> None:
+        payload, observer, decision = self.decide(
             action_payload(element_id="target-button")
         )
 
@@ -262,17 +242,58 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         self.assertEqual(
             "target-button", decision.proposal.action.params["element_id"]
         )
-        self.assertEqual([self.observation.fingerprint], source.fingerprints)
+        self.assertEqual("target-button", payload["element_id"])
         self.assertEqual(0, observer.last_diagnostics["model_calls"])
         self.assertTrue(
             observer.last_diagnostics["decision_from_same_observation_response"]
         )
+        self.assertEqual("direct_current_frame", observer.last_diagnostics["canonical_binding"])
+        self.assertNotIn("canonical_choices", observer.last_diagnostics)
+        self.assertNotIn("expected_result", decision.to_dict())
+        self.assertFalse({"expected_effect", "formal_candidate_id", "formal_transition"}
+            .intersection(decision.proposal.action.params))
 
     def test_local_code_does_not_fallback_when_model_reference_is_wrong(self) -> None:
         with self.assertRaisesRegex(
-            VisionAgentError, "未精确映射唯一canonical candidate"
+            VisionAgentError, "不存在或不唯一"
         ):
             self.decide(action_payload(element_id="missing-button"))
+
+    def test_current_container_or_dialog_is_not_rejected_only_by_role(self) -> None:
+        for role in ("container", "dialog"):
+            with self.subTest(role=role):
+                scene = replace(self.scene, elements=(replace(self.scene.elements[0], role=role),
+                    self.scene.elements[1]))
+                observation = build_trusted_observation(frames=self.frames, device_id="device-local-01",
+                    scene=scene, observation_id=f"obs_{role}000000000000000000000000")
+                _source, _observer, decision = self.decide(action_payload(element_id="target-button"),
+                    trusted_observation=observation)
+                self.assertEqual(role, decision.proposal.action.params["role"])
+
+    def test_overlapping_optional_element_does_not_rewrite_qwen_selected_element(self) -> None:
+        selected = self.scene.elements[0]
+        optional = replace(
+            self.scene.elements[1],
+            element_id="optional-overlap",
+            bounds=selected.bounds,
+            label="可选重叠说明",
+            meaning="optional_context",
+        )
+        scene = replace(self.scene, elements=(selected, optional))
+        observation = build_trusted_observation(
+            frames=self.frames,
+            device_id="device-local-01",
+            scene=scene,
+            observation_id="obs_44444444444444444444444444444444",
+        )
+
+        _source, _observer, decision = self.decide(
+            action_payload(element_id=selected.element_id),
+            trusted_observation=observation,
+        )
+
+        self.assertEqual(2, len(observation.scene.elements))
+        self.assertEqual(selected.element_id, decision.proposal.action.params["element_id"])
 
     def test_scene_element_and_decision_confidence_are_diagnostic_only(self) -> None:
         low_scene = replace(
@@ -405,6 +426,16 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         self.assertEqual("action", decision.proposal.status)
         self.assertEqual("target-button", decision.proposal.action.params["element_id"])
 
+    def test_optional_action_evidence_refs_do_not_veto_or_become_completion(self) -> None:
+        payload = action_payload(element_id="target-button")
+        payload["evidence_refs"] = ["scene.summary", "element:target-button"]
+
+        _source, _observer, decision = self.decide(payload)
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual((), decision.completion_evidence)
+        self.assertEqual("target-button", decision.proposal.action.params["element_id"])
+
     def test_multi_action_plan_and_raw_coordinates_are_rejected(self) -> None:
         injected_fields = {
             "actions": [{"action": "tap_semantic", "element_id": "target-button"}],
@@ -471,10 +502,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
 
         self.assertEqual("action", decision.proposal.status)
         self.assertEqual("home", decision.proposal.action.action)
-        self.assertEqual(
-            ["home"],
-            [item["action"] for item in observer.last_diagnostics["canonical_choices"]],
-        )
+        self.assertEqual(["home"], observer.last_diagnostics["device_action_kinds"])
+        self.assertNotIn("canonical_choices", observer.last_diagnostics)
 
     def test_obsolete_model_blocked_responses_are_rejected(self) -> None:
         context, observation = self.wrong_app_target_case()

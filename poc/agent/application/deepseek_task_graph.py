@@ -5,25 +5,13 @@ import json
 from functools import lru_cache
 from importlib.resources import files
 import uuid
-from dataclasses import replace
 from typing import Any, Protocol
 
 from agent.domain.generic_goal import GenericIntentError, _parse_json_object
-from agent.domain.task_semantic_ir import (
-    SemanticRiskAuthorityReport,
-    TaskSemanticIRError,
-    apply_formal_semantic_risk_policy,
-    compile_formal_semantic_authority,
-)
 from agent.domain.task_graph import (
     DynamicTaskGraph,
-    ObservedState,
-    REPLAN_TRIGGERS,
-    ReplanRecord,
     TaskGraphError,
     _graph_from_payload,
-    _planner_transport_snapshot,
-    _require_text,
     _validate_device_id,
     _validate_task_id,
 )
@@ -36,13 +24,11 @@ class JsonTaskGraphProvider(Protocol):
     def chat_json(self, messages: list[dict[str, Any]], max_tokens: int = 2000) -> str: ...
 
 class DeepSeekTaskGraphPlanner:
-    """Create and revise high-level task graphs without any execution capability."""
+    """Create one high-level task graph, then leave the screenshot loop."""
 
     def __init__(self, provider: JsonTaskGraphProvider) -> None:
         self.provider = provider
         self.last_raw_response = ""
-        self.last_semantic_authority: SemanticRiskAuthorityReport | None = None
-        self.last_semantic_authority_error = ""
 
     def plan(
         self,
@@ -53,124 +39,40 @@ class DeepSeekTaskGraphPlanner:
     ) -> DynamicTaskGraph:
         # Internal whitespace can be literal user payload.  In particular, a
         # line feed is an authorized input character that must survive into
-        # the typed graph and semantic source spans unchanged.
+        # the typed graph unchanged.
         text = str(raw_goal or "").strip()
         reject_if(not text, TaskGraphError("用户目标不能为空。"))
         _validate_device_id(device_id)
         resolved_task_id = task_id or uuid.uuid4().hex
         _validate_task_id(resolved_task_id)
-        self._reset_semantic_authority()
         self._require_provider()
         prompt = _initial_prompt(text)
-        graph = self._request_graph(prompt, task_id=resolved_task_id, device_id=device_id, revision=1,
-            raw_user_goal=text, validate=False)
-        graph.validate()
-        graph = self._apply_formal_semantic_authority(graph)
+        graph = self._request_graph(
+            prompt,
+            task_id=resolved_task_id,
+            device_id=device_id,
+            revision=1,
+            raw_user_goal=text,
+        )
         graph.validate()
         return graph
 
-    def replan(self, graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str,
-        reason: str) -> DynamicTaskGraph:
-        graph.validate()
-        observation.validate()
-        reject_if(trigger not in REPLAN_TRIGGERS, TaskGraphError(f"不支持的重规划触发原因：{trigger}"))
-        _require_text(reason, "replan.reason")
-        self._validate_replan_input(graph, observation, trigger=trigger)
-        self._reset_semantic_authority()
-        if trigger in {'action_result_matched', 'subgoal_completed'}:
-            snapshot = _planner_transport_snapshot(graph)
-            local_definition = {
-                'subgoals': snapshot['subgoals'],
-                'clarification_questions': [],
-            }
-            self.last_raw_response = ''
-            candidate = _graph_from_payload(local_definition, task_id=graph.task_id, device_id=graph.device_id,
-                revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective,
-                previous=graph, observation=observation, trigger=trigger)
-        else:
-            self._require_provider()
-            prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
-            candidate = self._request_graph(prompt, task_id=graph.task_id, device_id=graph.device_id,
-                revision=graph.revision + 1, raw_user_goal=graph.raw_user_goal or graph.goal.objective,
-                previous=graph, observation=observation, trigger=trigger, validate=False)
-        candidate.validate()
-        candidate = self._apply_formal_semantic_authority(candidate)
-        candidate.validate()
-        previous_ids = {item.subgoal_id for item in graph.subgoals}
-        completed_ids = tuple((item.subgoal_id for item in graph.subgoals if item.status == 'completed'))
-        added_ids = tuple((item.subgoal_id for item in candidate.subgoals if item.subgoal_id not in previous_ids))
-        skipped_ids = tuple((item.subgoal_id for item in candidate.subgoals if item.status == 'skipped'
-            and next((old.status for old in graph.subgoals if old.subgoal_id == item.subgoal_id), None) != 'skipped'))
-        record = ReplanRecord(
-            revision=candidate.revision,
-            trigger=trigger,
-            reason=reason.strip(),
-            scene_id=observation.scene_id,
-            evidence=observation.visible_evidence,
-            retained_completed_subgoal_ids=completed_ids,
-            added_subgoal_ids=added_ids,
-            skipped_subgoal_ids=skipped_ids,
-            consumed_action_transition_receipt_id=(
-                observation.verified_action_transition.receipt_id
-                if observation.verified_action_transition is not None
-                and trigger in {
-                    "action_result_matched",
-                    "action_result_mismatch",
-                }
-                else ""
-            ),
-        )
-        revised = replace(candidate, replan_history=graph.replan_history + (record,))
-        revised.validate()
-        return revised
-
-    def _apply_formal_semantic_authority(self, graph: DynamicTaskGraph) -> DynamicTaskGraph:
-        """Apply typed field roles and local confirmation policy fail-closed."""
-
-        self.last_semantic_authority = None
-        self.last_semantic_authority_error = ""
-        try:
-            authority = compile_formal_semantic_authority(graph)
-            projected = apply_formal_semantic_risk_policy(graph, authority)
-        except TaskSemanticIRError as exc:
-            self.last_semantic_authority_error = str(exc)[:1000]
-            raise TaskGraphError(f"正式语义风险权威拒绝任务图：{exc}") from exc
-        self.last_semantic_authority = authority
-        return projected
-
-    def _reset_semantic_authority(self) -> None:
-        self.last_semantic_authority = None
-        self.last_semantic_authority_error = ""
-
-    def _validate_replan_input(self, graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str) -> None:
-        """Validate only the one local event that can advance the runtime."""
-
-        transition = observation.verified_action_transition
-        if trigger in {'action_result_matched', 'action_result_mismatch'}:
-            reject_if(transition is None, TaskGraphError("动作结果重规划缺少本地 verified action transition。"))
-            expected_outcome = 'matched' if trigger == 'action_result_matched' else 'mismatched'
-            reject_if(transition.outcome != expected_outcome, TaskGraphError("重规划触发与本地动作转换回执 outcome 不一致。"))
-            previous_current = graph.active_subgoal()
-            reject_if(transition.task_id != graph.task_id or transition.device_id != graph.device_id or transition.prior_revision != graph.revision or (transition.subgoal_id != graph.active_subgoal_id) or (transition.after_observation_id != observation.scene_id) or (previous_current is None), TaskGraphError("动作转换回执未严格绑定上一任务图及当前观察。"))
-            consumed_receipts = {item.consumed_action_transition_receipt_id for item
-                in graph.replan_history if item.consumed_action_transition_receipt_id}
-            reject_if(transition.receipt_id in consumed_receipts, TaskGraphError("动作转换回执已经消费，禁止跨 revision 重放。"))
-        elif trigger == 'observation_changed' and transition is not None:
-            raise TaskGraphError("纯观察变化不得携带动作执行回执。")
-
-    def _request_graph(self, prompt: str, *, task_id: str, device_id: str, revision: int, raw_user_goal: str,
-        previous: DynamicTaskGraph | None=None, observation: ObservedState | None=None, trigger: str='',
-        validate: bool=True) -> DynamicTaskGraph:
+    def _request_graph(self, prompt: str, *, task_id: str, device_id: str, revision: int,
+        raw_user_goal: str) -> DynamicTaskGraph:
         raw = self.provider.chat_json([{'role': 'user', 'content': prompt}], max_tokens=2400)
         self.last_raw_response = raw
         try:
             payload = _parse_json_object(raw)
         except GenericIntentError as exc:
             raise TaskGraphError(str(exc)) from exc
-        graph = _graph_from_payload(payload, task_id=task_id, device_id=device_id, revision=revision,
-            raw_user_goal=raw_user_goal, previous=previous, observation=observation, trigger=trigger)
-        if validate:
-            graph.validate()
+        graph = _graph_from_payload(
+            payload,
+            task_id=task_id,
+            device_id=device_id,
+            revision=revision,
+            raw_user_goal=raw_user_goal,
+        )
+        graph.validate()
         return graph
 
     def _require_provider(self) -> None:
@@ -192,13 +94,6 @@ def _render_prompt(name: str, **values: str) -> str:
 def _initial_prompt(raw_goal: str) -> str:
     return _render_prompt("deepseek_initial.txt", RAW_GOAL=json.dumps(raw_goal, ensure_ascii=False),
         SCHEMA=_schema_prompt())
-
-
-def _replan_prompt(graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str, reason: str) -> str:
-    return _render_prompt("deepseek_replan.txt",
-        GRAPH=json.dumps(_planner_transport_snapshot(graph), ensure_ascii=False),
-        TRIGGER=json.dumps(trigger, ensure_ascii=False), REASON=json.dumps(reason, ensure_ascii=False),
-        OBSERVATION=json.dumps(observation.to_dict(), ensure_ascii=False))
 
 
 def _schema_prompt() -> str:

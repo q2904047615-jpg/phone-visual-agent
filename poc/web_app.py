@@ -68,9 +68,6 @@ from agent.infrastructure.generic_action_adapter import (
 from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
-from agent.infrastructure.file_system_input_lineage_store import (
-    FileSystemTypedInputLineageStore,
-)
 from agent.infrastructure.trusted_observation_frames import (
     build_trusted_observation,
     validate_trusted_observation_against_frames,
@@ -94,11 +91,6 @@ from agent.domain.universal_action_controller import (
     UniversalActionError,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
-from agent.domain.task_semantic_ir import (
-    AUTHORITY_REPORT_PROTOCOL,
-    RISK_POLICY_PROTOCOL,
-    TASK_SEMANTIC_IR_PROTOCOL,
-)
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
@@ -295,9 +287,6 @@ class Runtime:
         self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
-        self.input_lineage_store = FileSystemTypedInputLineageStore(
-            WEB_OUTPUT_DIR / "state"
-        )
         self.companion_ime_runtime = CompanionImeRuntimeRegistry(
             COMPANION_IME_REGISTRY_PATH,
             pairing_state_directory=(
@@ -306,7 +295,6 @@ class Runtime:
         )
         self.generic_scene_observer = SingleStepGenericSceneObserver(
             self.vision_provider,
-            input_lineage_store=self.input_lineage_store,
             qwerty_row_snapper=stable_qwerty_ocr_anchors,
         )
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(self.intent_provider)
@@ -315,7 +303,6 @@ class Runtime:
             trusted_observation_frame_validator=(
                 validate_trusted_observation_against_frames
             ),
-            decision_source=self.generic_scene_observer,
         )
         self.device_task_registry = DeviceTaskRegistry(
             lease_directory=SHARED_DEVICE_LEASE_DIR
@@ -343,7 +330,6 @@ class Runtime:
                     MockRobotController,
                 ),
                 device_id=device_id,
-                input_lineage_store=self.input_lineage_store,
                 text_transport=self.text_transport_for_device(device_id),
                 foreground_identity_provider=lambda: (
                     self.companion_ime_runtime.foreground_identity_for_device(device_id)
@@ -442,7 +428,6 @@ class Runtime:
                     MockRobotController,
                 ),
                 device_id=device_id,
-                input_lineage_store=self.input_lineage_store,
                 text_transport=self.text_transport_for_device(device_id),
                 foreground_identity_provider=lambda: (
                     self.companion_ime_runtime.foreground_identity_for_device(device_id)
@@ -658,18 +643,28 @@ def device() -> dict[str, Any]:
             "hardware_capability_profile": hardware_capability_profile,
             "supported_app_scope": "dynamic",
             "typed_effect_authority": {
-                "semantic_ir_protocol": TASK_SEMANTIC_IR_PROTOCOL,
-                "authority_protocol": AUTHORITY_REPORT_PROTOCOL,
-                "effect_policy_protocol": RISK_POLICY_PROTOCOL,
-                "authority_scope": "typed_task_and_effect_policy",
+                "semantic_ir_protocol": None,
+                "authority_protocol": "2026-09-02-typed-effect-kind-v1",
+                "effect_policy_protocol": "2026-09-02-auth-payment-only-v1",
+                "authority_scope": "deepseek_typed_effect_kind",
                 "retired_remote_risk_diagnostics_enabled": False,
                 "canonical_action_protocol": CANONICAL_ACTION_PROTOCOL,
             },
             "observer": runtime.generic_scene_observer.status(),
         },
     }
-    status["active_tasks"] = []
     generic_sessions = runtime.universal_agent_session_service.active_snapshots()
+    active_sessions = [
+        {
+            "session_id": item["session_id"],
+            "device_id": item["device_id"],
+            "status": item["status"],
+            "step_number": item["step_number"],
+            "proposal": item["proposal"],
+        }
+        for item in generic_sessions
+    ]
+    status["active_tasks"] = [dict(item) for item in active_sessions]
     status["generic_supervised_execution"] = {
         "enabled": True,
         "automatic_loop_enabled": True,
@@ -680,16 +675,7 @@ def device() -> dict[str, Any]:
         "post_action_transition_protocol": (
             POST_ACTION_TRANSITION_PROTOCOL_VERSION
         ),
-        "active_sessions": [
-            {
-                "session_id": item["session_id"],
-                "device_id": item["device_id"],
-                "status": item["status"],
-                "step_number": item["step_number"],
-                "proposal": item["proposal"],
-            }
-            for item in generic_sessions
-        ],
+        "active_sessions": active_sessions,
     }
     return status
 
@@ -727,8 +713,8 @@ def runtime_doctor(device_id: str) -> dict[str, Any]:
                     "scene": UI_SCENE_PROTOCOL_VERSION,
                     "action": CANONICAL_ACTION_PROTOCOL,
                     "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
-                    "semantic_ir": TASK_SEMANTIC_IR_PROTOCOL,
-                    "risk": RISK_POLICY_PROTOCOL,
+                    "semantic_ir": None,
+                    "risk": "2026-09-02-auth-payment-only-v1",
                 },
             )
     finally:
@@ -1371,6 +1357,11 @@ def start_generic_supervised_session(
         TaskGraphError,
         VisionAgentError,
     ) as exc:
+        if session is None:
+            try:
+                session = runtime.universal_agent_session_service.require(session_id)
+            except AgentSessionNotFoundError:
+                pass
         failure = _generic_supervised_failure(session, exc)
         failure["evidence"] = [
             str(path) for path in sorted(run_dir.glob("*.jpg"))

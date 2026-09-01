@@ -174,7 +174,6 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                     "target_element_id": "source",
                     "destination_element_id": "destination",
                     "before_fingerprint": "fingerprint-execution-before",
-                    "expected_effect": {"scene_changed": True},
                 },
                 "before_scene": {
                     "foreground_app_id": "test-app",

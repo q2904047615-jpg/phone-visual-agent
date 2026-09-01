@@ -86,7 +86,7 @@ function externalExecutedSession() {
   return session;
 }
 
-function safeActionSession(decisionStatus = "action") {
+function safeActionSession() {
   const graph = clone(deepSeekFixture.task_graph);
   graph.status = "running";
   graph.current_subgoal = clone(graph.subgoals[0]);
@@ -95,30 +95,19 @@ function safeActionSession(decisionStatus = "action") {
   graph.subgoals[1].status = "pending";
   graph.active_subgoal_id = "locate_target";
   const decision = clone(qwenFixture.decision);
-  if (decisionStatus !== "action") {
-    decision.status = decisionStatus;
-    decision.next_action = null;
-    decision.target_region = null;
-    decision.expected_result = {};
-    decision.reason = decisionStatus === "blocked"
-      ? "没有可靠且唯一的可信候选。"
-      : "当前可见证据已满足目标。";
-  }
   return {
-    session_id: `session-browser-${decisionStatus}`,
-    status: decisionStatus === "action" ? "awaiting_confirmation" : "blocked",
+    session_id: "session-browser-action",
+    status: "awaiting_confirmation",
     task_graph: graph,
     qwen_decision: decision,
     controller_decision: {
-      allowed: decisionStatus === "action",
-      reason: decisionStatus === "action"
-        ? "仅允许当前通用导航动作。"
-        : "当前视觉决策不可执行。",
-      canonical_class: decisionStatus === "action" ? "navigation_open" : "",
+      allowed: true,
+      reason: "同响应动作已绑定当前截图。",
+      canonical_class: "tap_semantic",
       policy_version: "2026-08-12-phase-one-navigation-v1",
     },
-    confirmation_scope: decisionStatus === "action" ? {
-      session_id: `session-browser-${decisionStatus}`,
+    confirmation_scope: {
+      session_id: "session-browser-action",
       task_id: "task-map-001",
       device_id: "phone-01",
       revision: 1,
@@ -128,8 +117,8 @@ function safeActionSession(decisionStatus = "action") {
       fingerprint: "51277d0d9e6f986b00dc",
       decision_node_id: "qwen_visual_revision_1",
       action_digest: "a".repeat(64),
-    } : null,
-    confirmation_ready: decisionStatus === "action",
+    },
+    confirmation_ready: true,
     physical_actions: 0,
     evidence: ["before_step_1_frame_1.jpg"],
     history: [],
@@ -138,11 +127,8 @@ function safeActionSession(decisionStatus = "action") {
 
 function afterActionSession() {
   const session = safeActionSession();
-  session.task_graph.revision = 2;
-  session.qwen_decision.revision = 2;
   session.qwen_decision.observation_id = "obs_after_0123456789abcdef";
   session.qwen_decision.fingerprint = "after-frame-fingerprint";
-  session.confirmation_scope.revision = 2;
   session.confirmation_scope.observation_id = session.qwen_decision.observation_id;
   session.confirmation_scope.fingerprint = session.qwen_decision.fingerprint;
   session.physical_actions = 1;
@@ -334,9 +320,7 @@ function createServer({
         ? externalExecutedSession()
         : body.text.includes("本地确认")
         ? externalSession()
-        : body.text.includes("blocked")
-          ? safeActionSession("blocked")
-          : safeActionSession();
+        : safeActionSession();
       json(response, 200, { session });
       return;
     }
@@ -673,10 +657,10 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /kind=element/);
     assert.match(actionText, /element_id=settings_icon/);
     assert.doesNotMatch(actionText, /bounds=|0\.68|0\.2|0\.86|0\.35/);
-    assert.match(actionText, /scene_changed=true/);
+    assert.doesNotMatch(actionText, /scene_changed/);
     assert.match(actionText, /92%/);
     assert.match(actionText, /可信候选唯一且清晰/);
-    assert.match(actionText, /2026-08-14-qwen-visual-decision-v5/);
+    assert.match(actionText, /2026-09-01-qwen-same-response-action-finish-v9/);
     assert.match(actionText, /status action/);
     assert.match(actionText, /session session-browser-action/);
     assert.match(actionText, /task task-map-001/);
@@ -684,7 +668,7 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /obs_0123456789abcdef0123456789abcdef/);
     assert.match(actionText, /51277d0d9e6f986b00dc/);
     assert.match(actionText, /本地策略/);
-    assert.match(actionText, /仅允许当前通用导航动作/);
+    assert.match(actionText, /同响应动作已绑定当前截图/);
     assert.match(await page.locator("#sessionBadge").innerText(), /等待当前动作确认/);
     assert.match(await page.locator("#safetyText").innerText(), /等待当前动作确认/);
     assert.match(actionText, /需要当前动作确认/);
@@ -834,22 +818,6 @@ test("browser never offers one-confirmation multi-action execution", { timeout: 
     await page.keyboard.press("Escape");
     assert.equal(requests.auto.length, 0);
     assert.equal(requests.confirm.length, 0);
-  } finally {
-    await browser.close();
-    await new Promise(resolve => server.close(resolve));
-  }
-});
-
-test("Qwen blocked state renders without executable controls", { timeout: 30000 }, async () => {
-  Object.values(requests).forEach(items => { items.length = 0; });
-  const server = createServer();
-  const { browser, page } = await launchFixturePage(server);
-  try {
-    await page.locator("#agentText").fill("Qwen blocked");
-    await page.locator("#startSupervisedAgent").click();
-    await page.locator("#actionContent").getByText("已阻止").waitFor({ timeout: 5000 });
-    assert.match(await page.locator("#actionContent").innerText(), /没有可靠且唯一/);
-    assert.equal(await page.locator("#actionControls button").count(), 0);
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

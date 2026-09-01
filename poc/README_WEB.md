@@ -100,9 +100,9 @@ IME**。Companion 只在内存中选出最新 `ACTIVITY_RESUMED` 的包名和事
   App 唯一匹配时才开放 `launch_app`；
 - 用户目标、Qwen 和网页请求都不能传入 package、Shell、Intent、组件或任意命令。能力未配置或目标未登记时，
   不生成直启候选，仍按当前截图寻找 App 图标；
-- 仓库默认注册表保持关闭。启用前应由设备维护者核对 ADB serial 和包名；直启后仍必须重新截图，并以
-  当前画面的结构化 App 身份验证 typed 目标。包名只承担可信 transport 绑定，不能要求视觉模型从像素幻读
-  Android 包名，也不能把 ADB 返回码当作任务成功。
+- 仓库默认注册表保持关闭。启用前应由设备维护者核对 ADB serial 和包名；可信 `launch_app` 只验证
+  注册表绑定和 transport 回执。直启后必须重新截图，页面、下一动作和 `finish` 仍只由下一次 Qwen 响应
+  决定。系统包名不在 Qwen `finish` 后形成第二完成裁决，也不能把 ADB 返回码当作高层任务成功。
 
 ## 当前公开能力
 
@@ -123,15 +123,14 @@ IME**。Companion 只在内存中选出最新 `ACTIVITY_RESUMED` 的包名和事
 每次 Qwen 调用只处理当前新截图，并在同一响应中发布 scene 与一个推进当前目标的 `action`，或以同帧
 证据报告 `finish`。当前没有最终控件、需要中间导航或单步不能完成高层目标时仍必须选择推进动作；
 Qwen 不再拥有普通语义停止状态。
-`action` 必须精确映射同 scene 的一个 canonical candidate；本地不得替模型改选。执行一次后必须取得下一张
+`action` 必须精确绑定同 scene 的当前元素引用或方向；本地不得另建候选目录、排序或替模型改选。执行一次后必须取得下一张
 新截图再调用 Qwen；`matched` 只证明刚才动作符合预期，只有当前截图上的 `finish` 才推进高层目标。
-目标变化后必须按新目标重新截图，禁止预取或复用后继目标上下文。普通只读/导航动作无预期变化时，
-最多依据新截图、新 candidate、新几何和新 scope 自动纠正一次，禁止直接复用旧坐标；纠正仍失败以及
-输入、外部效果、登录、付款动作失败时立即停止。DeepSeek 只在会话开始时生成轻量计划，不参加动作后的
-正常循环。
+目标变化后必须按新目标重新截图，禁止预取后继目标上下文、缓存上一轮 decision 或复用旧坐标。执行前
+画面已变化且尚未产生物理动作时，丢弃旧 scope 并把新截图交给 Qwen；已经执行动作后同样只把新截图交给
+Qwen 决定下一步，不进入本地 corrective selector。DeepSeek 只在会话开始时生成轻量计划，不参加动作后的正常循环。
 受信任包名直启只是可选的单次设备 transport，不绕过同一 canonical、scope、执行回执和动作后新观察；
 App 内部操作继续完全使用当前视觉闭环和机械臂。
-文字输入时，`input_structure.application_inputs[*].text` 是当前应用输入内容的唯一视觉权威；scene 输入元素只提供同帧表面存在与几何重合证明，不重复也不否决正文。
+文字输入时，`input_structure.application_inputs[*].text` 是当前应用输入内容的唯一视觉权威；scene 输入元素只是可选页面上下文，不要求重复正文、标签、状态或几何重合，也不得否决正文。
 配置 Companion IME 的设备只使用该设备唯一的文字 transport；IME ACK 只证明 transport 接受命令，
 仍须通过动作后的新截图验证输入结果。输入失败不得自动改用机械键盘重输。
 只有登录/身份认证和付款/资金交易要求用户确认，其余合法动作按任务授权自动执行。
@@ -142,9 +141,10 @@ App 内部操作继续完全使用当前视觉闭环和机械臂。
 
 项目采用轻量、渐进式 DDD 模块化单体，不拆微服务。正式业务切片已经迁入 `agent/`，根目录只保留受 allowlist 约束的 interfaces/tools/evals：
 
-- `agent/domain/` 定义任务图、会话、设备执行、会话证据、视觉场景、语义动作、确定性文字事务、canonical Controller/选择回执和一次性确认作用域；
-- `agent/application/` 负责任务图规划、Qwen 单步决策、通用 Agent 编排、运行会话聚合以及开始、确认、重观察、自动推进、暂停和取消用例；
+- `agent/domain/` 定义轻量目标、当前 UI scene、canonical action、Controller 硬校验、瞬时 typed 文字事务及设备/会话/风险不变量；
+- `agent/application/` 在会话开始时调用一次 DeepSeek，把同一次 Qwen scene/input/decision 直接绑定为一个 action 或 finish，并编排一次观察、一次执行和下一张截图；
 - `agent/infrastructure/` 提供 DeepSeek/Qwen provider、场景观察、单动作执行 adapter、Robot/Replay 执行、设备独占、文件系统证据持久化、相机/动作协调、OCR/标定/方向门和设备控制器注册表；
 - `web_app.py` 保留 HTTP/Pydantic 转换与组合根职责。
 
-不得为目录整齐增加转发包装、兼容开关或第二套权威。后续新增正式业务能力直接进入对应 DDD 层。
+正式运行不存在 selector、动作后 replan、持久视觉/输入 lineage、decision cache、scene-only decision
+回退或第二完成裁决。不得为目录整齐增加转发包装、兼容开关或第二套权威。

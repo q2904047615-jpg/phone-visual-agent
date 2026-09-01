@@ -65,7 +65,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         self.assertEqual("qwen3.7-plus", payload["model"])
         self.assertFalse(payload["downgrade_allowed"])
 
-    def test_request_tokens_cost_and_cache_hit_are_persisted(self) -> None:
+    def test_request_tokens_cost_and_legacy_cache_counter_remains_zero(self) -> None:
         ledger = VisionSessionUsageLedger(session_id="session-usage")
         local_id = ledger.reserve_request(
             model="qwen3.7-plus",
@@ -87,15 +87,13 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
             finish_reason="stop",
             elapsed_seconds=1.25,
         )
-        ledger.record_cache_hit(stage="same_fingerprint", fingerprint="frame-a")
-
         payload = ledger.to_dict()
         self.assertEqual("qwen3.7-plus", payload["model"])
         self.assertFalse(payload["downgrade_allowed"])
         self.assertEqual(1, payload["totals"]["model_requests"])
         self.assertEqual(1, payload["totals"]["successful_requests"])
         self.assertEqual(1100, payload["totals"]["total_tokens"])
-        self.assertEqual(1, payload["totals"]["observation_cache_hits"])
+        self.assertEqual(0, payload["totals"]["observation_cache_hits"])
         self.assertEqual(0.0028, payload["totals"]["estimated_list_cost_cny"])
         self.assertEqual(
             0.00224,
@@ -109,6 +107,16 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         self.assertEqual(1, payload["totals"]["timed_requests"])
         self.assertEqual(1.25, payload["totals"]["average_elapsed_seconds"])
         self.assertEqual(1.25, payload["totals"]["max_elapsed_seconds"])
+
+    def test_observation_cache_hit_recorders_cannot_return(self) -> None:
+        application_source = Path(vision_usage.__file__).read_text(encoding="utf-8")
+        provider_source = Path(__file__).with_name("agent").joinpath(
+            "infrastructure", "dashscope_vision_provider.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("def record_" + "cache_hit", application_source)
+        self.assertNotIn("def record_observation_" + "cache_hit", provider_source)
+        self.assertNotIn("'event': 'observation_" + "cache_hit'", application_source)
 
     def test_old_request_and_token_thresholds_never_block_next_step(self) -> None:
         ledger = VisionSessionUsageLedger(session_id="unbounded-observation")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -8,7 +8,7 @@ import unittest
 
 from PIL import Image
 
-from agent.application.action_adapter import GenericActionAdapterError
+from agent.application.action_adapter import AppLaunchTarget, GenericActionAdapterError
 from agent.application.universal_agent_orchestrator import (
     ObservationBridge,
     UniversalAgentOrchestrator,
@@ -16,14 +16,14 @@ from agent.application.universal_agent_orchestrator import (
 )
 from agent.domain.canonical_action_protocol import (
     GenericStepProposal,
-    canonical_candidate_expected_result,
-    compile_canonical_action_catalog,
+    bind_same_response_action,
+    normalize_model_step_decision,
 )
-from agent.domain.semantic_action import SemanticAction
 from agent.domain.task_graph import (
     CompletionCondition,
     DynamicTaskGraph,
     GraphGoal,
+    RiskAction,
     Subgoal,
     TargetApp,
 )
@@ -67,6 +67,78 @@ def _scene(
     )
 
 
+def _input_scene(
+    *,
+    fingerprint: str = "input-frame-a",
+    value: str = "",
+    label: str = "消息输入框",
+) -> UIScene:
+    return UIScene(
+        app_id="messenger",
+        screen_id="conversation",
+        summary=f"{label}当前可见",
+        elements=(
+            UIElement(
+                element_id="message-input",
+                role="input",
+                meaning="application_text_input",
+                label=label,
+                bounds=(0.08, 0.78, 0.82, 0.9),
+                confidence=0.97,
+                states={
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "enabled": True,
+                    "focused": True,
+                    "value": value,
+                    "input_field_id": "primary_input",
+                    "primary_input_geometry_verified": True,
+                    "geometry_audit_source": "input_structure_audit",
+                },
+                evidence=(f"{label}边界清晰可见",),
+            ),
+        ),
+        stable=True,
+        confidence=0.96,
+        fingerprint=fingerprint,
+        system_ui=SystemUIFacts(),
+    )
+
+
+def _same_frame_model_decision(scene: UIScene, *, status: str,
+    action_kind: str) -> dict:
+    if status == "finish":
+        return {
+            "status": "finish",
+            "evidence_refs": ["scene.summary"],
+            "confidence": 0.95,
+            "reason": "当前同帧 scene 已证明目标完成。",
+        }
+    if status != "action":
+        return {"status": status}
+    payload = {
+        "status": "action",
+        "action": action_kind,
+        "confidence": 0.95,
+        "reason": "当前同帧 scene 选择一个 canonical 动作。",
+    }
+    if action_kind in {
+        "tap_semantic",
+        "dismiss_overlay",
+        "input_verified_text",
+        "press_enter",
+        "clear_verified_text",
+        "double_tap",
+        "long_press",
+    }:
+        if len(scene.elements) != 1:
+            raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
+        payload["element_id"] = scene.elements[0].element_id
+    elif action_kind == "swipe":
+        payload["direction"] = "up"
+    return payload
+
+
 def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
     graph = DynamicTaskGraph(
         task_id="task-1",
@@ -107,29 +179,64 @@ def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
     return graph
 
 
+def _effect_graph(kind: str, *, device_id: str = "device-1") -> DynamicTaskGraph:
+    graph = DynamicTaskGraph(
+        task_id=f"task-{kind}",
+        device_id=device_id,
+        revision=1,
+        status="awaiting_confirmation",
+        goal=GraphGoal(
+            objective=f"完成一次{kind}目标",
+            target_apps=(TargetApp(app_id="gallery", app_name="图片工具"),),
+            entities={},
+        ),
+        constraints=(),
+        completion_conditions=(
+            CompletionCondition(
+                condition_id="condition-1",
+                description="当前页面显示目标已经完成",
+                evidence_required=("完成状态可见",),
+            ),
+        ),
+        risk_actions=(
+            RiskAction(
+                risk_id="effect-1",
+                subgoal_ids=("subgoal-1",),
+                confirmation_required=True,
+                effect_kind=kind,
+                expected_result_texts=("当前页面显示目标已经完成",),
+            ),
+        ),
+        subgoals=(
+            Subgoal(
+                subgoal_id="subgoal-1",
+                objective=f"执行{kind}动作",
+                status="active",
+                depends_on=(),
+                constraints=(),
+                completion_conditions=("当前页面显示目标已经完成",),
+                completion_evidence=(),
+                risk_action_ids=("effect-1",),
+                external_impact="external_state",
+            ),
+        ),
+        active_subgoal_id="subgoal-1",
+        raw_user_goal=f"完成一次{kind}目标",
+    )
+    graph.validate()
+    return graph
+
+
 class FakeDeepSeekPlanner:
-    def __init__(
-        self,
-        graph: DynamicTaskGraph,
-        *,
-        replan_result: DynamicTaskGraph | None = None,
-        replan_error: Exception | None = None,
-    ) -> None:
+    """DeepSeek is invoked once to define the typed high-level goal."""
+
+    def __init__(self, graph: DynamicTaskGraph) -> None:
         self.graph = graph
-        self.replan_result = replan_result
-        self.replan_error = replan_error
         self.plan_calls: list[tuple] = []
-        self.replan_calls: list[tuple] = []
 
     def plan(self, raw_goal, *, device_id, task_id=None):
         self.plan_calls.append((raw_goal, device_id, task_id))
         return self.graph
-
-    def replan(self, *args, **kwargs):
-        self.replan_calls.append((args, kwargs))
-        if self.replan_error is not None:
-            raise self.replan_error
-        return self.replan_result or self.graph
 
 
 class FakeTrustedObservation:
@@ -139,6 +246,9 @@ class FakeTrustedObservation:
         self.observation_id = observation_id
         self.fingerprint = scene.fingerprint
         self.candidate_conflicts = ()
+
+    def get_candidate(self, element_id: str):
+        return self.scene.get_element(element_id)
 
     def to_dict(self):
         return {
@@ -161,22 +271,51 @@ def _trusted_factory(*, frames, device_id, scene, observation_id=None):
 
 
 class FakeAdapter:
-    def __init__(self, scene: UIScene) -> None:
+    def __init__(
+        self,
+        scene: UIScene,
+        *,
+        launch_target: AppLaunchTarget | None = None,
+    ) -> None:
         self.scene = scene
+        self.launch_target = launch_target
         self.capture_calls = 0
         self.execute_calls = 0
+        self.initial_model_decision = _same_frame_model_decision(
+            scene, status="action", action_kind="tap_semantic"
+        )
+        self.followup_model_decision = dict(self.initial_model_decision)
+
+    def configure_model_decisions(self, *, status: str, after_status: str,
+        action_kind: str) -> None:
+        self.initial_model_decision = _same_frame_model_decision(
+            self.scene, status=status, action_kind=action_kind
+        )
+        followup_scene = getattr(self, "after_scene", self.scene)
+        self.followup_model_decision = _same_frame_model_decision(
+            followup_scene, status=after_status, action_kind=action_kind
+        )
 
     def capture_scene(self, goal, *, evidence_dir, prefix):
         del goal
         self.capture_calls += 1
         frames = [Image.new("RGB", (540, 960), "white") for _ in range(4)]
+        model_decision = (
+            self.initial_model_decision
+            if self.capture_calls == 1
+            else self.followup_model_decision
+        )
         return self.scene, frames, tuple(
             str(evidence_dir / f"{prefix}_{index}.jpg") for index in range(1, 5)
-        )
+        ), dict(model_decision)
 
     def execute(self, **_kwargs):
         self.execute_calls += 1
         raise AssertionError("start must not execute a physical action")
+
+    def resolve_app_launch_target(self, app_id: str, app_name: str):
+        self.launch_resolution = (app_id, app_name)
+        return self.launch_target
 
 
 class FakeExecutingAdapter(FakeAdapter):
@@ -188,8 +327,9 @@ class FakeExecutingAdapter(FakeAdapter):
         execute_error: GenericActionAdapterError | None = None,
         action_outcome: str = "matched",
         verification_errors: tuple[str, ...] = (),
+        launch_target: AppLaunchTarget | None = None,
     ) -> None:
-        super().__init__(scene)
+        super().__init__(scene, launch_target=launch_target)
         self.after_scene = after_scene
         self.execute_error = execute_error
         self.action_outcome = action_outcome
@@ -216,6 +356,7 @@ class FakeExecutingAdapter(FakeAdapter):
             Image.new("RGB", (540, 960), "white") for _ in range(4)
         )
         self.scene = self.after_scene
+        params = requested_action.params
         return GenericActionExecutionResult(
             requested_action=requested_action,
             rebound_action=requested_action,
@@ -223,9 +364,18 @@ class FakeExecutingAdapter(FakeAdapter):
                 node_id=requested_action.node_id,
                 kind=requested_action.action,
                 normalized_point=(0.3, 0.25),
-                target_element_id=str(requested_action.params.get("element_id") or ""),
+                text=params.get("text"),
+                input_fragment=params.get("input_fragment"),
+                text_transport=params.get("text_transport"),
+                input_field_id=params.get("input_field_id"),
+                prior_input_value=params.get("prior_input_value"),
+                expected_input_value=params.get("expected_input_value"),
+                launch_ref=params.get("launch_ref"),
+                expected_package_id=params.get("expected_app_id"),
+                target_app_id=params.get("target_app_id"),
+                target_app_name=params.get("target_app_name"),
+                target_element_id=str(params.get("element_id") or ""),
                 before_fingerprint=planned_scene.fingerprint,
-                expected_effect=dict(requested_action.params.get("expected_effect") or {}),
             ),
             before_scene=planned_scene,
             after_scene=self.after_scene,
@@ -239,6 +389,7 @@ class FakeExecutingAdapter(FakeAdapter):
             robot_result={"ok": True},
             evidence=("before-1.jpg", "after-1.jpg"),
             after_frames=after_frames,
+            after_model_decision=self.followup_model_decision,
             after_frame_paths=(
                 "after-1.jpg",
                 "after-2.jpg",
@@ -246,6 +397,18 @@ class FakeExecutingAdapter(FakeAdapter):
                 "after-4.jpg",
             ),
         )
+
+
+class StaleOnceExecutingAdapter(FakeExecutingAdapter):
+    """Reject one old screenshot before any physical action."""
+
+    def execute(self, **kwargs):
+        if self.execute_error is not None:
+            error = self.execute_error
+            self.execute_error = None
+            self.execute_calls += 1
+            raise error
+        return super().execute(**kwargs)
 
 
 class FakeQwenObserver:
@@ -276,54 +439,34 @@ class FakeQwenObserver:
         available_action_kinds=None,
         text_transport_profile=None,
         launch_target=None,
+        model_decision,
     ):
-        del launch_target
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         self.text_transport_profiles.append(text_transport_profile)
-        current_status = self.status if len(self.calls) == 1 else self.after_status
+        current_status = model_decision.get("status") if isinstance(model_decision, dict) else None
+        if current_status in {"action", "finish"}:
+            payload = normalize_model_step_decision(model_decision)
+        else:
+            payload = dict(model_decision or {})
         completion_evidence = ()
         if current_status == "action":
-            semantic_ir = getattr(task_context, "semantic_ir", None)
-            if semantic_ir is None:
-                raise AssertionError("FakeQwenObserver 缺少 canonical TaskSemanticIR")
-            catalog = compile_canonical_action_catalog(
-                trusted_observation.scene,
-                semantic_ir,
-                available_action_kinds or (),
+            action = bind_same_response_action(
+                payload,
+                context=task_context,
+                observation=trusted_observation,
+                available_action_kinds=available_action_kinds or (),
+                launch_target=launch_target,
+                text_transport_profile=text_transport_profile,
             )
-            matches = [
-                item
-                for item in catalog.candidates
-                if item.action_kind == self.action_kind
-            ]
-            if len(matches) != 1:
-                raise AssertionError(
-                    f"没有唯一 {self.action_kind} canonical candidate"
-                )
-            else:
-                candidate = matches[0]
-                expected = canonical_candidate_expected_result(
-                    candidate, trusted_observation.scene
-                )
-                action = SemanticAction(
-                    node_id=f"qwen-model-{decision_number}",
-                    action=candidate.action_kind,
-                    params={
-                        **candidate.parameters,
-                        "formal_candidate_id": candidate.candidate_id,
-                        "formal_transition": candidate.transition.to_dict(),
-                        "expected_effect": expected,
-                    },
-                )
-                proposal = GenericStepProposal(
-                    status="action",
-                    action=action,
-                    reason="模型在当前截图中明确选择了唯一 canonical candidate。",
-                )
+            proposal = GenericStepProposal(
+                status="action",
+                action=action,
+                reason=payload["reason"],
+            )
         elif current_status == "finish":
             proposal = GenericStepProposal(
                 status="finish",
-                reason="模型根据当前新截图判定当前目标完成。",
+                reason=payload["reason"],
             )
             completion_evidence = (trusted_observation.scene.summary,)
         else:
@@ -365,6 +508,18 @@ class FakeQwenObserver:
         }
         return decision
 
+class FailOnNthQwenObserver(FakeQwenObserver):
+    def __init__(self, fail_on_call: int, *, error: Exception | None = None) -> None:
+        super().__init__(after_status="action")
+        self.fail_on_call = fail_on_call
+        self.error = error or RuntimeError(f"第 {fail_on_call} 次 Qwen 观察失败")
+
+    def decide(self, **kwargs):
+        decision = super().decide(**kwargs)
+        if len(self.calls) == self.fail_on_call:
+            raise self.error
+        return decision
+
 
 def _confirmation(session) -> dict:
     return dict(session.snapshot()["confirmation_scope"])
@@ -373,6 +528,11 @@ def _confirmation(session) -> dict:
 class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
     @staticmethod
     def orchestrator(planner, qwen, adapter):
+        adapter.configure_model_decisions(
+            status=qwen.status,
+            after_status=qwen.after_status,
+            action_kind=qwen.action_kind,
+        )
         return UniversalAgentOrchestrator(
             deepseek_planner=planner,
             qwen_observer=qwen,
@@ -396,14 +556,11 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
 
         self.assertEqual("awaiting_confirmation", session.status)
         self.assertEqual(1, len(planner.plan_calls))
-        self.assertEqual([], planner.replan_calls)
         self.assertEqual(1, len(qwen.calls))
         self.assertEqual(0, adapter.execute_calls)
 
-    def test_action_then_new_screenshot_finish_completes_without_replan(self) -> None:
-        planner = FakeDeepSeekPlanner(
-            _graph(), replan_error=AssertionError("DeepSeek must not replan")
-        )
+    def test_action_then_new_screenshot_finish_completes_in_one_loop(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
         qwen = FakeQwenObserver(after_status="finish")
         adapter = FakeExecutingAdapter(
             _scene(), _scene(fingerprint="frame-after", label="详情页")
@@ -422,7 +579,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(planner.plan_calls))
         self.assertNotEqual(
             qwen.calls[0][2].observation_id, qwen.calls[1][2].observation_id
         )
@@ -447,7 +604,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(1, session.task_graph.revision)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(planner.plan_calls))
 
     def test_finish_on_first_screenshot_uses_zero_actions(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
@@ -464,7 +621,277 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual("succeeded", session.status)
         self.assertEqual(0, session.physical_actions)
         self.assertEqual(1, len(qwen.calls))
-        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(planner.plan_calls))
+
+    def test_authentication_and_payment_wait_for_one_explicit_effect_confirmation(self) -> None:
+        for kind in ("authentication", "financial_transaction"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                planner = FakeDeepSeekPlanner(_effect_graph(kind))
+                qwen = FakeQwenObserver(after_status="finish")
+                adapter = FakeExecutingAdapter(
+                    _scene(),
+                    _scene(fingerprint=f"{kind}-after", label="完成状态"),
+                )
+                orchestrator = self.orchestrator(planner, qwen, adapter)
+                session = orchestrator.start(
+                    session_id=f"session-{kind}",
+                    raw_goal=f"完成一次{kind}目标",
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
+
+                self.assertEqual("awaiting_effect_confirmation", session.status)
+                self.assertEqual(0, adapter.capture_calls)
+                self.assertEqual(0, len(qwen.calls))
+                effect_scope = dict(session.snapshot()["effect_confirmation_scope"])
+                orchestrator.approve_effects(session, effect_scope)
+
+                self.assertEqual("succeeded", session.status)
+                self.assertEqual(1, adapter.execute_calls)
+                self.assertEqual(1, session.physical_actions)
+                self.assertEqual(2, len(qwen.calls))
+                self.assertIsNone(
+                    orchestrator.device_registry.active_session(session.device_id)
+                )
+
+    def test_launch_action_uses_only_trusted_registry_mapping(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="launch_app", after_status="finish")
+        adapter = FakeExecutingAdapter(
+            _scene(app_id="launcher"),
+            _scene(fingerprint="gallery-open", app_id="gallery", label="图片工具首页"),
+            launch_target=AppLaunchTarget(
+                launch_ref="trusted.registry.gallery",
+                expected_app_id="com.example.gallery",
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-launch",
+                raw_goal="打开图片工具",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            action = session.qwen_decision.proposal.action
+            self.assertEqual("launch_app", action.action)
+            self.assertEqual("trusted.registry.gallery", action.params["launch_ref"])
+            self.assertEqual("com.example.gallery", action.params["expected_app_id"])
+            self.assertEqual(("gallery", "图片工具"), adapter.launch_resolution)
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(1, adapter.execute_calls)
+
+    def test_exact_input_uses_typed_current_subgoal(self) -> None:
+        exact_text = "aaazjie？你好"
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(
+            action_kind="input_verified_text",
+            after_status="finish",
+        )
+        adapter = FakeExecutingAdapter(
+            _input_scene(),
+            _input_scene(fingerprint="input-after", value=exact_text),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-exact-input",
+                raw_goal="在当前输入框输入指定文字",
+                exact_input_text=exact_text,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            action = session.qwen_decision.proposal.action
+            self.assertEqual("input_verified_text", action.action)
+            self.assertEqual("primary_input", action.params["input_field_id"])
+            self.assertEqual(exact_text, action.params["text"])
+            self.assertEqual("", action.params["prior_input_value"])
+            self.assertEqual(exact_text, action.params["expected_input_value"])
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(0, len(planner.plan_calls))
+        self.assertEqual(1, session.physical_actions)
+
+    def test_public_snapshot_keeps_compatibility_keys_without_runtime_authority(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-snapshot",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            snapshot = session.snapshot()
+
+        self.assertEqual("awaiting_confirmation", snapshot["status"])
+        self.assertTrue(snapshot["confirmation_ready"])
+        self.assertEqual([], snapshot["corrective_retry_history"])
+        self.assertIsNone(snapshot["corrective_retry_protocol"])
+        self.assertIsNone(snapshot["verified_app_surface_lineage"])
+        self.assertIsNone(snapshot["effect_verification"])
+        self.assertEqual("tap_semantic", snapshot["proposal"]["action"]["action"])
+
+    def test_hard_adapter_error_is_terminal_and_releases_device_lease(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver()
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="unused-after"),
+            execute_error=GenericActionAdapterError(
+                "机械执行后未取得可信回执",
+                physical_actions=1,
+                evidence=("execution-error.json",),
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-hard-adapter-error",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "机械执行后未取得可信回执",
+            ):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("failed", session.status)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("机械执行后未取得可信回执", session.failed_reason)
+        self.assertIsNone(orchestrator.device_registry.active_session(session.device_id))
+
+    def test_autonomous_loop_discards_zero_action_stale_frame_and_reobserves(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(after_status="finish")
+        adapter = StaleOnceExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="unused-after"),
+            execute_error=GenericActionAdapterError(
+                "确认时本地真实画面已变化",
+                physical_actions=0,
+                evidence=("fresh-frame.jpg",),
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-stale-reobserve",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual(0, result["physical_actions"])
+        self.assertEqual(2, adapter.capture_calls)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertIsNot(qwen.calls[0][0][0], qwen.calls[1][0][0])
+        self.assertEqual("finish", session.qwen_decision.proposal.status)
+        self.assertIsNone(session.confirmation_authority)
+
+    def test_autonomous_loop_keeps_physical_action_error_terminal(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(after_status="finish")
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="unused-after"),
+            execute_error=GenericActionAdapterError(
+                "机械执行后未取得可信回执",
+                physical_actions=1,
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-autonomous-hard-error",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(GenericActionAdapterError, "未取得可信回执"):
+                orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", session.status)
+        self.assertEqual(1, session.physical_actions)
+        self.assertIsNone(orchestrator.device_registry.active_session(session.device_id))
+
+    def test_autonomous_loop_keeps_zero_action_non_stale_error_terminal(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(after_status="finish")
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="unused-after"),
+            execute_error=GenericActionAdapterError(
+                "确认前控制器拒绝动作：输入字段硬合同不匹配",
+                physical_actions=0,
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-zero-action-hard-error",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(GenericActionAdapterError, "硬合同不匹配"):
+                orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", session.status)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertIsNone(orchestrator.device_registry.active_session(session.device_id))
+
+    def test_nth_step_failure_is_persisted_and_releases_device_lease(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FailOnNthQwenObserver(3)
+        adapter = FakeExecutingAdapter(
+            _scene(), _scene(fingerprint="frame-after", label="下一入口")
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            session = orchestrator.start(
+                session_id="session-nth-step-failure",
+                raw_goal="连续查看详情",
+                device_id="device-1",
+                run_dir=run_dir,
+            )
+            self.assertEqual(
+                session.session_id,
+                orchestrator.device_registry.active_session(session.device_id),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "第 3 次 Qwen 观察失败"):
+                orchestrator.run_autonomous_safe_loop(
+                    session,
+                    max_physical_actions=12,
+                    max_iterations=24,
+                )
+
+            report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(3, len(qwen.calls))
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual("failed", session.status)
+        self.assertEqual("第 3 次 Qwen 观察失败", session.failed_reason)
+        self.assertFalse(session.automatic_loop_enabled)
+        self.assertIsNone(orchestrator.device_registry.active_session(session.device_id))
+        self.assertEqual("failed", report["session"]["status"])
+        self.assertEqual(
+            "第 3 次 Qwen 观察失败",
+            report["session"]["failed_reason"],
+        )
+        self.assertFalse(report["session"]["automatic_loop_enabled"])
 
     def test_obsolete_model_blocked_status_is_rejected(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())

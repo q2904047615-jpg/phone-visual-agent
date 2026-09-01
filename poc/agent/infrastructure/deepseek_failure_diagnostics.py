@@ -21,12 +21,6 @@ def _redact_deepseek_failure_response(raw: str) -> str:
 
 def _classify_deepseek_error(error: Exception) -> str:
     message = str(error)
-    if '低层动作表达' in message:
-        return "low_level_instruction"
-    if '外部状态变化但未声明' in message:
-        return "execution_class_mismatch"
-    if 'active 子目标' in message or '活动子目标' in message:
-        return "active_frontier"
     if 'JSON' in message or 'json' in message:
         return "invalid_json"
     return "task_graph_validation"
@@ -63,7 +57,7 @@ def _structured_candidate_diff(raw: str, previous_graph: Any) -> dict[str, Any] 
         safe_subgoals = None
         if isinstance(payload.get('subgoals'), list):
             allowed = ('subgoal_id', 'objective', 'status', 'depends_on', 'constraints', 'completion_conditions',
-                'effect_ids', 'execution_class')
+                'effect_ids', 'execution_class', 'input_field_id', 'input_operation')
             safe_subgoals = [{key: item.get(key) for key in allowed if key in item} for item
                 in payload['subgoals'] if isinstance(item, dict)]
         return {'goal_objective': goal.get('objective'), 'target_apps': safe_apps, 'input_fields': safe_fields,
@@ -98,16 +92,6 @@ def persist_deepseek_failure_diagnostic(planner: Any, *, evidence_dir: Path | No
     structured_diff = _structured_candidate_diff(raw, previous_graph)
     if structured_diff is not None:
         payload["structured_candidate_diff"] = structured_diff
-    authority = getattr(planner, "last_semantic_authority", None)
-    if authority is not None:
-        try:
-            authority_json = json.dumps(authority.to_dict(), ensure_ascii=False, sort_keys=True)
-            payload['typed_effect_authority'] = json.loads(_redact_deepseek_failure_response(authority_json))
-        except (AttributeError, TypeError, ValueError):
-            payload['typed_effect_authority_error'] = '正式类型化效果报告无法安全序列化。'
-    authority_error = str(getattr(planner, 'last_semantic_authority_error', '') or '').strip()
-    if authority_error:
-        payload['typed_effect_authority_error'] = _redact_deepseek_failure_response(authority_error)[:1000]
     target = persist_model_failure_payload(
         payload,
         evidence_dir=evidence_dir,

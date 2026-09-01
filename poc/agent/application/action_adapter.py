@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Protocol
 
 
@@ -27,7 +28,8 @@ class GenericActionAdapterError(RuntimeError):
 class GenericSingleActionAdapterPort(Protocol):
     """Minimal application contract implemented by the device adapter."""
 
-    def capture_scene(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]: ...
+    def capture_scene(self, goal: Any, *, evidence_dir: Path | None,
+        prefix: str) -> tuple[Any, list[Any], tuple[str, ...], Mapping[str, Any]]: ...
 
     def resolve_app_launch_target(self, app_id: str, app_name: str) -> AppLaunchTarget | None: ...
 

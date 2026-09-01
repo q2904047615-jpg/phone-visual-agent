@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
-ACTIVE_SESSION_STATUSES = frozenset({'awaiting_effect_confirmation', 'awaiting_confirmation', 'paused_after_action',
-    'needs_reobservation', 'needs_effect_verification'})
+ACTIVE_SESSION_STATUSES = frozenset({'created', 'planning', 'observing', 'awaiting_effect_confirmation',
+    'awaiting_confirmation', 'executing_one_action', 'needs_reobservation'})
 
 
 class AgentSessionNotFoundError(LookupError):

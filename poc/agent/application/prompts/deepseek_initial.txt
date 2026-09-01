@@ -15,10 +15,15 @@
    effect_ids 或其它效果关系副本。把正文写入输入框但尚未发送属于准备步骤，实际发送才属于 send_message
    effect。完成条件只写正向结果，禁止事项只放 constraints。
 6. 发送消息时将收件人逐字写入 entities.recipient、正文逐字写入 entities.input_text；多字段输入使用
-   entities.input_fields，每项包含 field_id、可见 field_label 和逐字 text。
-7. 用户说当前页面/当前应用且不需要 App 名称时，target_apps 可用
+   entities.input_fields，每项包含 field_id、可见 field_label 和逐字 text。只清空而没有新正文时，也使用
+   input_fields，并令对应项 text=""、target_only=true。
+7. 任何需要聚焦、输入、清空或换行的子目标，都必须直接填写 input_field_id 和 input_operation，不能让
+   后续代码从 objective 猜。单字段 entities.input_text 固定使用 input_field_id="primary_input"；多字段必须
+   使用对应 entities.input_fields[].field_id。input_operation 只允许 focus、input_verified_text、
+   clear_verified_text、press_enter。其它子目标不要输出这两个字段。
+8. 用户说当前页面/当前应用且不需要 App 名称时，target_apps 可用
    [{"app_id":"current_foreground","app_name":"当前前台应用"}]；系统表面可在 entities.target_surface
    使用 device、system 或 current_surface。
-8. 只有缺少的信息会让任务无法唯一执行时才填写 clarification_questions。不要因可选字段、措辞或
+9. 只有缺少的信息会让任务无法唯一执行时才填写 clarification_questions。不要因可选字段、措辞或
    尚未看到画面而阻塞；画面目标由下一步 Qwen 处理。
-9. 初始计划至少包含一个子目标。一次返回完整 JSON，不要请求第二次采样修复。
+10. 初始计划至少包含一个子目标。一次返回完整 JSON，不要请求第二次采样修复。

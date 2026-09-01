@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from agent.application import (
-    CORRECTIVE_RETRY_PROTOCOL_VERSION,
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     StartUniversalAgentSessionCommand,
     UniversalAgentSessionApplicationService,
@@ -244,6 +243,40 @@ class AgentSessionApplicationTests(unittest.TestCase):
         self.assertEqual(0, orchestrator.refresh_calls)
         self.assertEqual(0, session.physical_actions)
 
+    def test_active_snapshots_include_every_current_runtime_state_only(self) -> None:
+        repository = InMemoryAgentSessionRepository()
+        active_statuses = (
+            "created",
+            "planning",
+            "observing",
+            "awaiting_effect_confirmation",
+            "awaiting_confirmation",
+            "executing_one_action",
+            "needs_reobservation",
+        )
+        terminal_or_retired_statuses = (
+            "succeeded",
+            "blocked",
+            "failed",
+            "paused",
+            "cancelled",
+            "paused_after_action",
+        )
+        for index, status in enumerate((*active_statuses, *terminal_or_retired_statuses)):
+            repository.add(
+                FakeSession(
+                    session_id=f"session-{index}",
+                    device_id=f"phone-{index}",
+                    run_dir=Path("unused"),
+                    status=status,
+                )
+            )
+
+        self.assertEqual(
+            set(active_statuses),
+            {item["status"] for item in repository.active_snapshots()},
+        )
+
 
 class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_rectangle_overlap_has_one_domain_authority(self) -> None:
@@ -324,10 +357,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual(["a.json", "b.json"], snapshot["evidence"])
         self.assertEqual(["back", "home"], snapshot["available_action_kinds"])
         self.assertEqual(
-            CORRECTIVE_RETRY_PROTOCOL_VERSION,
-            snapshot["corrective_retry_protocol"],
-        )
-        self.assertEqual(
             POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             snapshot["post_action_transition_protocol"],
         )
@@ -343,10 +372,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("class UniversalAgentSessionState", orchestrator_source)
         self.assertNotIn(
             '"2026-08-16-universal-post-action-transition-v1"',
-            orchestrator_source,
-        )
-        self.assertNotIn(
-            '"2026-08-24-fresh-observation-corrective-retry-v1"',
             orchestrator_source,
         )
 
@@ -1051,15 +1076,14 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("agent.application", infrastructure_source)
 
     def test_scene_and_semantic_action_have_one_domain_identity(self) -> None:
-        import agent.domain.canonical_action_protocol as canonical_protocol
         from agent.domain.semantic_action import SemanticAction
         from agent.domain.ui_scene import UIScene
 
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "semantic_action.py").exists())
         self.assertFalse((root / "ui_scene.py").exists())
-        self.assertIs(SemanticAction, canonical_protocol.SemanticAction)
-        self.assertIs(UIScene, canonical_protocol.UIScene)
+        self.assertEqual("agent.domain.semantic_action", SemanticAction.__module__)
+        self.assertEqual("agent.domain.ui_scene", UIScene.__module__)
 
         legacy_imports: list[str] = []
         for path in root.rglob("*.py"):
@@ -1103,7 +1127,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], unexpected)
 
     def test_verified_text_planner_has_one_domain_identity(self) -> None:
-        import agent.domain.canonical_action_protocol as canonical_protocol
         from agent.domain.verified_text_transaction import (
             VerifiedTextTransactionError,
         )
@@ -1111,9 +1134,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "text_input_utils.py").exists())
         self.assertFalse((root / "verified_text_transaction.py").exists())
-        self.assertIs(
-            VerifiedTextTransactionError,
-            canonical_protocol.VerifiedTextTransactionError,
+        self.assertEqual(
+            "agent.domain.verified_text_transaction",
+            VerifiedTextTransactionError.__module__,
         )
 
         legacy_imports: list[str] = []
@@ -1167,69 +1190,34 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                         unexpected.append(f"{path.name}: {name}")
         self.assertEqual([], unexpected)
 
-    def test_typed_input_lineage_has_one_layered_runtime_entry(self) -> None:
-        from agent.application.input_value_lineage import (
-            TypedInputLineageStorePort,
-        )
-        from agent.domain.input_value_lineage import TypedInputLineage
-        from agent.infrastructure.file_system_input_lineage_store import (
-            FileSystemTypedInputLineageStore,
-        )
-
+    def test_retired_persistent_input_lineage_cannot_reenter_runtime(self) -> None:
         root = Path(__file__).resolve().parent
-        domain_path = root / "agent" / "domain" / "input_value_lineage.py"
-        application_path = (
-            root / "agent" / "application" / "input_value_lineage.py"
+        retired_paths = (
+            root / "input_value_lineage.py",
+            root / "agent" / "domain" / "input_value_lineage.py",
+            root / "agent" / "application" / "input_value_lineage.py",
+            root / "agent" / "infrastructure" / "file_system_input_lineage_store.py",
         )
-        infrastructure_path = (
-            root
-            / "agent"
-            / "infrastructure"
-            / "file_system_input_lineage_store.py"
-        )
-        self.assertFalse((root / "input_value_lineage.py").exists())
-        self.assertTrue(domain_path.is_file())
-        self.assertTrue(application_path.is_file())
-        self.assertTrue(infrastructure_path.is_file())
-        self.assertTrue(issubclass(FileSystemTypedInputLineageStore, object))
-        self.assertTrue(hasattr(TypedInputLineage, "matches_typed_context"))
-        self.assertTrue(hasattr(TypedInputLineageStorePort, "load"))
+        for retired_path in retired_paths:
+            self.assertFalse(retired_path.exists())
 
-        domain_source = domain_path.read_text(encoding="utf-8")
-        application_source = application_path.read_text(encoding="utf-8")
-        infrastructure_source = infrastructure_path.read_text(encoding="utf-8")
-        for forbidden in (
-            "from PIL",
-            "import PIL",
-            "from pathlib",
-            "import os",
-            "import tempfile",
-            "agent.application",
-            "agent.infrastructure",
-        ):
-            self.assertNotIn(forbidden, domain_source)
-        self.assertNotIn("agent.infrastructure", application_source)
-        self.assertNotIn("class TypedInputLineageStore", domain_source)
-        self.assertEqual(
-            1,
-            infrastructure_source.count("class FileSystemTypedInputLineageStore"),
-        )
-
-        legacy_imports: list[str] = []
+        retired_imports: list[str] = []
         for path in root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.ImportFrom)
-                    and node.level == 0
-                    and node.module == "input_value_lineage"
+                if isinstance(node, ast.ImportFrom) and node.module and (
+                    "input_value_lineage" in node.module
+                    or "file_system_input_lineage_store" in node.module
                 ):
-                    legacy_imports.append(str(path.relative_to(root)))
+                    retired_imports.append(str(path.relative_to(root)))
                 if isinstance(node, ast.Import):
                     for item in node.names:
-                        if item.name == "input_value_lineage":
-                            legacy_imports.append(str(path.relative_to(root)))
-        self.assertEqual([], legacy_imports)
+                        if (
+                            "input_value_lineage" in item.name
+                            or "file_system_input_lineage_store" in item.name
+                        ):
+                            retired_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], retired_imports)
 
     def test_root_production_modules_are_only_interfaces_and_tools(self) -> None:
         root = Path(__file__).resolve().parent
@@ -1475,62 +1463,23 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
             )
 
-    def test_task_semantic_ir_has_one_domain_identity_and_fixed_risk_boundary(self) -> None:
-        import agent.domain.canonical_action_protocol as canonical_protocol
-        import agent.application.deepseek_task_graph as deepseek_task_graph
-        from agent.domain.task_semantic_ir import (
-            TaskSemanticIR,
-            compile_formal_semantic_authority,
-        )
-
+    def test_typed_task_graph_owns_fixed_risk_boundary_and_planner_runs_once(self) -> None:
         root = Path(__file__).resolve().parent
-        domain_path = root / "agent" / "domain" / "task_semantic_ir.py"
-        retired_loader = root / "agent" / "infrastructure" / "file_system_risk_policy.py"
-        retired_config = root / "config" / "local_risk_policy.v1.json"
-        self.assertFalse((root / "task_semantic_ir.py").exists())
-        self.assertTrue(domain_path.is_file())
-        self.assertFalse(retired_loader.exists())
-        self.assertFalse(retired_config.exists())
-        self.assertIs(TaskSemanticIR, canonical_protocol.TaskSemanticIR)
-        self.assertIs(
-            compile_formal_semantic_authority,
-            deepseek_task_graph.compile_formal_semantic_authority,
+        graph_source = (root / "agent" / "domain" / "task_graph.py").read_text(encoding="utf-8")
+        planner_source = (root / "agent" / "application" / "deepseek_task_graph.py").read_text(
+            encoding="utf-8")
+
+        self.assertIn(
+            "CONFIRMATION_EFFECT_KINDS = frozenset({'authentication', 'financial_transaction'})",
+            graph_source,
         )
+        self.assertNotIn("def replan(", planner_source)
 
-        domain_source = domain_path.read_text(encoding="utf-8")
-        for forbidden in (
-            "from pathlib",
-            "Path(",
-            ".read_text(",
-            "def load_local_risk_policy(",
-            "LocalRiskPolicyConfig",
-            "effect_id_override",
-            "agent.infrastructure",
-        ):
-            self.assertNotIn(forbidden, domain_source)
-        self.assertIn('DEFAULT_CONFIRMATION_EFFECT_KINDS = frozenset({"authentication", "financial_transaction"})', domain_source)
-
-        legacy_imports: list[str] = []
-        for path in root.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.ImportFrom)
-                    and node.level == 0
-                    and node.module == "task_semantic_ir"
-                ):
-                    legacy_imports.append(str(path.relative_to(root)))
-                if isinstance(node, ast.Import):
-                    for item in node.names:
-                        if item.name == "task_semantic_ir":
-                            legacy_imports.append(str(path.relative_to(root)))
-        self.assertEqual([], legacy_imports)
-
-    def test_canonical_action_catalog_has_one_domain_identity(self) -> None:
+    def test_current_frame_action_binding_has_one_domain_identity(self) -> None:
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.canonical_action_protocol import (
-            CanonicalActionCandidate,
             GenericStepProposal,
+            bind_same_response_action,
         )
 
         root = Path(__file__).resolve().parent
@@ -1540,7 +1489,10 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse((root / "canonical_action_protocol.py").exists())
         self.assertTrue(domain_path.is_file())
         self.assertIs(GenericStepProposal, qwen_visual_decision.GenericStepProposal)
-        self.assertTrue(hasattr(CanonicalActionCandidate, "to_dict"))
+        self.assertIs(
+            bind_same_response_action,
+            qwen_visual_decision.bind_same_response_action,
+        )
 
         source = domain_path.read_text(encoding="utf-8")
         for forbidden in (
@@ -1781,7 +1733,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 symbol.__module__,
             )
         self.assertEqual(
-            "2026-08-26-universal-action-v17",
+            "2026-09-02-universal-action-v18",
             controller_module.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
         )
 
@@ -1826,9 +1778,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_generic_scene_observer_has_one_infrastructure_entry(self) -> None:
         import agent.infrastructure.generic_scene_observer as observer_module
-        from agent.domain.post_action_observation import (
-            PostActionVisualContext,
-        )
         from agent.infrastructure.generic_scene_observer import (
             SingleStepGenericSceneObserver,
         )
@@ -1837,39 +1786,19 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         infrastructure_path = (
             root / "agent" / "infrastructure" / "generic_scene_observer.py"
         )
-        domain_path = root / "agent" / "domain" / "post_action_observation.py"
         self.assertFalse((root / "generic_scene_observer.py").exists())
         self.assertTrue(infrastructure_path.is_file())
-        self.assertTrue(domain_path.is_file())
         self.assertEqual(
             "agent.infrastructure.generic_scene_observer",
             SingleStepGenericSceneObserver.__module__,
         )
         self.assertEqual(
-            "agent.domain.post_action_observation",
-            PostActionVisualContext.__module__,
-        )
-        self.assertFalse(hasattr(observer_module, "PostActionVisualContext"))
-        self.assertEqual(
-            "2026-09-01-single-step-scene-action-finish-v7",
+            "2026-09-02-single-step-scene-action-finish-v9",
             observer_module.SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
 
         source = infrastructure_path.read_text(encoding="utf-8")
-        domain_source = domain_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class SingleStepGenericSceneObserver("))
-        self.assertNotIn("class PostActionVisualContext:", source)
-        self.assertEqual(1, domain_source.count("class PostActionVisualContext("))
-        for forbidden in (
-            "agent.application",
-            "agent.infrastructure",
-            "from PIL",
-            "fastapi",
-            "pydantic",
-            "web_app",
-            "robot_core",
-        ):
-            self.assertNotIn(forbidden, domain_source)
         for forbidden in (
             "fastapi",
             "pydantic",
@@ -2207,9 +2136,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
-        import agent.application.capability_acceptance_planner as capability_acceptance_planner
         import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
-        from agent.domain.task_graph import DynamicTaskGraph, ObservedState
+        from agent.domain.task_graph import DynamicTaskGraph
 
         root = Path(__file__).resolve().parent
         application_path = (
@@ -2220,10 +2148,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertIs(
             DynamicTaskGraph,
             universal_agent_orchestrator.DynamicTaskGraph,
-        )
-        self.assertIs(
-            ObservedState,
-            capability_acceptance_planner.ObservedState,
         )
         self.assertEqual(
             ("DeepSeekTaskGraphPlanner", "JsonTaskGraphProvider"),
@@ -2272,11 +2196,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_task_graph_aggregate_has_one_domain_identity(self) -> None:
-        import agent.application.capability_acceptance_planner as capability_acceptance_planner
         import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.task_graph import (
             DynamicTaskGraph,
-            ObservedState,
             TaskGraphError,
             _graph_from_payload,
         )
@@ -2285,7 +2207,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         domain_path = root / "agent" / "domain" / "task_graph.py"
         self.assertTrue(domain_path.is_file())
         self.assertIs(DynamicTaskGraph, universal_agent_orchestrator.DynamicTaskGraph)
-        self.assertIs(ObservedState, capability_acceptance_planner.ObservedState)
         self.assertTrue(issubclass(TaskGraphError, ValueError))
         self.assertTrue(callable(_graph_from_payload))
 
@@ -2441,7 +2362,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertTrue(domain_path.is_file())
         self.assertTrue(infrastructure_path.is_file())
         self.assertFalse(hasattr(qwen_visual_decision, "LocalFrameStability"))
-        self.assertIs(VisualObstruction, generic_scene_observer.VisualObstruction)
         self.assertIs(
             LocalFrameStability,
             observation_images.LocalFrameStability,

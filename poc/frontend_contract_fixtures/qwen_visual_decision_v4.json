@@ -7,7 +7,7 @@
     "generated_from": "test_qwen_visual_decision.task_context() / launcher_stable"
   },
   "decision": {
-    "protocol_version": "2026-08-14-qwen-visual-decision-v5",
+    "protocol_version": "2026-09-01-qwen-same-response-action-finish-v9",
     "task_id": "task-map-001",
     "device_id": "phone-01",
     "revision": 1,
@@ -78,8 +78,7 @@
         "element_id": "settings_icon",
         "target": "open_settings",
         "label": "设置",
-        "states": { "goal_relevant": true },
-        "expected_effect": { "scene_changed": true }
+        "states": { "goal_relevant": true }
       }
     },
     "target_region": {
@@ -88,10 +87,8 @@
       "bounds": [0.68, 0.2, 0.86, 0.35],
       "description": "设置"
     },
-    "expected_result": { "scene_changed": true },
     "confidence": 0.92,
     "reason": "可信候选唯一且清晰。",
-    "completion_evidence_element_ids": [],
     "completion_evidence": []
   }
 }

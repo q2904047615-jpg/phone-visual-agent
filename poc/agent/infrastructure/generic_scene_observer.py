@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedBounds, canonical_digest, reject_if
+from agent.domain.validation import NormalizedBounds, reject_if
 import json
 from functools import lru_cache
 from importlib.resources import files
@@ -11,27 +11,29 @@ import re
 import statistics
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from PIL import Image
-import agent.domain.post_action_observation as post_action_contract
 from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
     local_frame_fingerprint,
     measure_frame_sharpness,
     measure_local_stability,
 )
-from agent.domain.visual_evidence import VisualObstruction
 from agent.domain.foreground_app_identity import ForegroundAppIdentity
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.canonical_action_protocol import (
+    CanonicalActionProtocolError,
+    normalize_model_step_decision,
+)
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
 from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from agent.domain.ui_scene import (
     UI_SCENE_PROTOCOL_VERSION,
+    UIElement,
     UIScene,
     UISceneError,
     camera_alignment_evidence_is_safe,
@@ -45,16 +47,9 @@ from agent.domain.verified_text_transaction import (
     preferred_keyboard_layout,
     required_keyboard_input_mode_for_step,
 )
-from agent.application.input_value_lineage import (
-    TypedInputLineageStorePort,
-    lineage_matches_persisted_surface_cue,
-    lineage_matches_trailing_newline_cue,
-    lineage_matches_visual,
-)
-from agent.domain.input_value_lineage import TypedInputLineage
 import agent.domain.generic_goal as generic_goal_domain
 
-SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-01-single-step-scene-action-finish-v7"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-01-single-step-qwen-action-finish-v6"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-01-input-structure-audit-v12"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
@@ -75,15 +70,11 @@ AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘
 
 _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe',
     'command', 'shell', 'coordinates', 'next_action', 'execution_plan'})
-_MODEL_DECISION_FIELDS = frozenset({'status', 'action', 'element_id', 'source_element_id',
-    'destination_element_id', 'direction', 'evidence_refs', 'confidence', 'reason'})
-_MODEL_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
-    'clear_verified_text', 'double_tap', 'long_press'})
 
 _KEYBOARD_REQUIRED_FIELDS = frozenset({"visible", "bounds", "layout", "input_mode", "mode_switch"})
 _KEYBOARD_OPTIONAL_FIELDS = frozenset({'qwerty_anchors', 'backspace_key', 'enter_key', 'case_mode', 'case_switch',
     'literal_keys', 'layout_switches'})
-_INPUT_AUDIT_FIELDS = frozenset({'structure_id', 'bounds', 'fully_visible', 'text', 'placeholder',
+_INPUT_AUDIT_FIELDS = frozenset({'element_id', 'structure_id', 'bounds', 'fully_visible', 'text', 'placeholder',
     'visible_editable_cues', 'caret_line_index', 'confidence', 'right_button'})
 
 
@@ -177,34 +168,18 @@ STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查画面稳定性',
 class _SingleStepObserverBase:
     """Shared state and transport for the sole production scene observer."""
 
-    def __init__(self, provider: Any, *, input_lineage_store: TypedInputLineageStorePort | None=None,
+    def __init__(self, provider: Any, *,
         qwerty_row_snapper: Callable[[list[Image.Image] | tuple[Image.Image, ...], dict[str, Any]], dict[str,
         list[int]] | None] | None=None) -> None:
         self.provider = provider
-        self.input_lineage_store = input_lineage_store
         self.qwerty_row_snapper = qwerty_row_snapper
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
-        self.last_model_decision: dict[str, Any] | None = None
-        self.last_model_decision_fingerprint = ""
         self._stage_lock = threading.RLock()
         self._current_stage = "idle"
         self._last_stage = "idle"
-        self.supports_post_action_visual_context = True
         self.supports_runtime_action_contract = True
         self.supports_trusted_foreground_identity = True
-        self._observation_cache_lock = threading.RLock()
-        self._observation_cache: OrderedDict[str, tuple[UIScene, dict[str, Any]]] = OrderedDict()
-        self._observation_cache_limit = 32
-
-    def decision_for(self, fingerprint: str) -> dict[str, Any]:
-        """Return the action/finish decision emitted with this exact scene response."""
-
-        expected = str(fingerprint or "").strip()
-        reject_if(not expected or expected != self.last_model_decision_fingerprint
-            or self.last_model_decision is None,
-            VisionAgentError("当前可信画面没有同一Qwen响应绑定的action/finish决策。"))
-        return dict(self.last_model_decision)
 
     def _set_stage(self, stage: str) -> None:
         with self._stage_lock:
@@ -240,17 +215,17 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         return value
 
     def observe(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
-        device_id: str | None=None, input_lineage_override: TypedInputLineage | None=None,
-        post_action_context: post_action_contract.PostActionVisualContext | dict[str, Any] | None=None,
-        available_action_kinds: Iterable[str] | None=None,
+        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None,
         trusted_foreground_identity: ForegroundAppIdentity | None=None) -> UIScene:
-        if isinstance(post_action_context, dict):
-            post_action_context = post_action_contract.PostActionVisualContext.from_dict(post_action_context)
-        elif post_action_context is not None:
-            post_action_context.validate()
+        scene, _ = self.observe_with_decision(frames=frames, goal_context=goal_context, device_id=device_id,
+            available_action_kinds=available_action_kinds,
+            trusted_foreground_identity=trusted_foreground_identity)
+        return scene
+
+    def observe_with_decision(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
+        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None,
+        trusted_foreground_identity: ForegroundAppIdentity | None=None) -> tuple[UIScene, dict[str, Any]]:
         self.last_raw_response = ""
-        self.last_model_decision = None
-        self.last_model_decision_fingerprint = ""
         model_identity = public_model_identity(self.provider.status())
         if trusted_foreground_identity is not None:
             trusted_foreground_identity.validate()
@@ -279,40 +254,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             context = generic_goal_domain.safe_goal_context(goal_context or {})
             goal = _goal_view(context)
             runtime_actions = _normalize_runtime_action_kinds(available_action_kinds)
-            cache_key = _observation_cache_key(device_id=device_id, fingerprint=fingerprint, goal_context=context,
-                input_lineage=input_lineage_override, post_action_context=post_action_context,
-                available_action_kinds=runtime_actions, trusted_foreground_identity=trusted_foreground_identity)
-            if cache_key is not None:
-                with self._observation_cache_lock:
-                    cached_entry = self._observation_cache.get(cache_key)
-                    if cached_entry is not None:
-                        self._observation_cache.move_to_end(cache_key)
-                if cached_entry is not None:
-                    cached, cached_decision = cached_entry
-                    self.last_model_decision = dict(cached_decision)
-                    self.last_model_decision_fingerprint = cached.fingerprint
-                    recorder = getattr(self.provider, 'record_observation_cache_hit', None)
-                    if callable(recorder):
-                        recorder(stage='same_fingerprint_single_step_observation', fingerprint=fingerprint)
-                    self.last_diagnostics = {'observer_version': SINGLE_STEP_SCENE_OBSERVER_VERSION,
-                        'vision_model': model_identity, 'strategy': 'single_step_exact_fingerprint_cache',
-                        'model_calls': 0, 'observation_cache_hit': True,
-                        'foreground_identity_source': trusted_foreground_identity.source
-                        if trusted_foreground_identity else 'qwen_visual',
-                        'trusted_foreground_app_id': trusted_foreground_identity.package_name
-                        if trusted_foreground_identity else None,
-                        'post_action_visual_context': post_action_context.to_dict() if post_action_context
-                        is not None else None, 'fingerprint': fingerprint, 'element_count': len(cached.elements),
-                        'elapsed_seconds': round(time.perf_counter() - started, 3)}
-                    self._set_stage("completed")
-                    return cached
-
             input_structure_required = goal.input_requested
-            active_field_id = goal.field[0]
-            verified_lineage: TypedInputLineage | None = None
-            if input_lineage_override is not None:
-                verified_lineage = input_lineage_override
-            ledger_value_hint = verified_lineage.exact_value if verified_lineage is not None else None
             model_frames = tuple(frames[stable_tail_start:]) if input_structure_required else (frame,)
 
             request_image_sizes = {_image_request_size(item) for item in model_frames}
@@ -320,8 +262,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             request_image_size = next(iter(request_image_sizes))
 
             prompt = _single_step_observation_prompt(context, include_input_structure=input_structure_required,
-                current_input_text=ledger_value_hint, image_count=len(model_frames),
-                request_image_size=request_image_size, post_action_context=post_action_context,
+                image_count=len(model_frames), request_image_size=request_image_size,
                 available_action_kinds=runtime_actions,
                 trusted_foreground_identity=trusted_foreground_identity)
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -350,50 +291,27 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 scene_payload["foreground_app_id"] = trusted_foreground_identity.package_name
                 scene_payload["app_id"] = trusted_foreground_identity.package_name
             single_step_input_surface = _single_step_input_surface_attestation(scene_payload,
-                goal_context=context) if input_structure_required else None
-            if input_structure_required:
-                _strip_preliminary_input_elements(scene_payload, context)
+                input_structure=envelope["input_structure"], goal_context=context) if input_structure_required else None
             obstructions = consensus_top_edge_obstructions(frames[stable_tail_start:])
-            scene = _suppress_obscured_input_evidence(_parse_scene(json.dumps(scene_payload, ensure_ascii=False,
-                separators=(',', ':')), fingerprint=fingerprint,
-                camera_layout_orientation=_camera_layout_orientation(frame)), obstructions, fingerprint=fingerprint)
+            referenced_element_ids = _decision_element_ids(model_decision)
+            scene = _parse_scene(json.dumps(scene_payload, ensure_ascii=False, separators=(',', ':')),
+                fingerprint=fingerprint, camera_layout_orientation=_camera_layout_orientation(frame),
+                strict_element_ids=referenced_element_ids)
 
             if input_structure_required:
-                # Trust lineage only after this response establishes foreground App/screen identity.
-                if (verified_lineage is not None and (not (isinstance(device_id,
-                    str) and verified_lineage.matches_typed_context(device_id=device_id, app_id=scene.app_id,
-                    screen_id=scene.screen_id, input_field_id=active_field_id)))):
-                    verified_lineage = None
-                if (verified_lineage is None and self.input_lineage_store is not None and isinstance(device_id,
-                    str) and device_id.strip()):
-                    stored = self.input_lineage_store.load(device_id)
-                    if (stored is not None and stored.matches_typed_context(device_id=device_id, app_id=scene.app_id,
-                        screen_id=scene.screen_id, input_field_id=active_field_id,
-                        now_epoch=float(self.input_lineage_store.clock()),
-                        ttl_seconds=self.input_lineage_store.ttl_seconds)):
-                        verified_lineage = stored
-                ledger_value_hint = verified_lineage.exact_value if verified_lineage is not None else None
                 input_payload = envelope["input_structure"]
                 assert isinstance(input_payload, dict)
-                scene = _suppress_obscured_input_evidence(_apply_input_structure_audit(scene, json.dumps(input_payload,
+                scene = _apply_input_structure_audit(scene, json.dumps(input_payload,
                     ensure_ascii=False, separators=(',', ':')), fingerprint=fingerprint, goal_context=context,
-                    verified_input_lineage=verified_lineage, device_id=device_id, lineage_frame=frame,
                     qwerty_row_snapper=self.qwerty_row_snapper, qwerty_row_frames=frames[stable_tail_start:],
-                    single_step_input_surface=single_step_input_surface), obstructions, fingerprint=fingerprint)
+                    single_step_input_surface=single_step_input_surface)
 
             reject_if(not scene.stable, VisionAgentError("页面仍在变化，不能建立可信候选。"))
 
-            if model_decision.get('status') == 'action':
-                selected_refs = [str(model_decision.get(name) or '').strip() for name in (
-                    'element_id', 'source_element_id', 'destination_element_id')
-                    if model_decision.get(name)]
-                for selected_ref in selected_refs:
-                    matches = [item for item in scene.elements if item.element_id == selected_ref]
-                    reject_if(len(matches) != 1,
-                        VisionAgentError(f"当前Qwen决策引用的元素不唯一或不可执行：{selected_ref}"))
-
-            self.last_model_decision = model_decision
-            self.last_model_decision_fingerprint = scene.fingerprint
+            for selected_ref in referenced_element_ids:
+                matches = [item for item in scene.elements if item.element_id == selected_ref]
+                reject_if(len(matches) != 1,
+                    VisionAgentError(f"当前Qwen决策引用的元素不唯一或不可执行：{selected_ref}"))
 
             self.last_diagnostics = {'observer_version': SINGLE_STEP_SCENE_OBSERVER_VERSION,
                 'vision_model': public_model_identity(self.provider.status()),
@@ -401,8 +319,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, 'model_calls': 1,
                 'online_stages': ['single_step_observation'],
                 'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
-                'observation_cache_hit': False, 'post_action_visual_context': post_action_context.to_dict(
-                ) if post_action_context is not None else None, 'selected_frame_index': selected_frame_index,
+                'selected_frame_index': selected_frame_index,
                 'stable_tail_start_index': stable_tail_start, 'local_stability': stability.to_dict(),
                 'frame_sharpness_scores': [round(value, 3) for value in sharpness_scores],
                 'frame_size': list(frame.size), 'request_image_size': list(request_image_size),
@@ -414,17 +331,12 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 if trusted_foreground_identity else None,
                 'model_foreground_app_id': model_foreground_app_id,
                 'available_action_kinds': list(runtime_actions),
+                'local_visual_obstructions': [item.to_dict() for item in obstructions],
                 'model_call_elapsed_seconds': [call_elapsed],
                 'model_call_token_budgets': [SINGLE_STEP_OUTPUT_TOKENS],
                 'elapsed_seconds': round(time.perf_counter() - started, 3)}
-            if cache_key is not None:
-                with self._observation_cache_lock:
-                    self._observation_cache[cache_key] = (scene, model_decision)
-                    self._observation_cache.move_to_end(cache_key)
-                    while len(self._observation_cache) > self._observation_cache_limit:
-                        self._observation_cache.popitem(last=False)
             self._set_stage("completed")
-            return scene
+            return scene, model_decision
         except Exception as exc:
             failed_stage = self.status()["last_stage"]
             self._set_stage("failed")
@@ -434,8 +346,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, 'model_calls': model_calls,
                 'online_stages': ['single_step_observation'] if model_calls else [],
                 'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
-                'failed_stage': failed_stage, 'post_action_visual_context': post_action_context.to_dict(
-                ) if post_action_context is not None else None, 'fingerprint': fingerprint, 'error': str(exc),
+                'failed_stage': failed_stage, 'fingerprint': fingerprint, 'error': str(exc),
                 'foreground_identity_source': trusted_foreground_identity.source
                 if trusted_foreground_identity else 'qwen_visual',
                 'trusted_foreground_app_id': trusted_foreground_identity.package_name
@@ -448,58 +359,6 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             raise
         finally:
             self._set_stage("idle")
-
-
-def _horizontal_overlap_ratio(first: NormalizedBounds, second: tuple[int, int, int, int]) -> float:
-    overlap = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
-    return overlap / max(1.0, first[2] - first[0])
-
-
-def _input_evidence_is_obscured(bounds: NormalizedBounds, obstruction: VisualObstruction) -> bool:
-    if obstruction.kind != 'top_edge_opaque_band':
-        return False
-    horizontal_overlap = _horizontal_overlap_ratio(bounds, obstruction.bounds)
-    vertical_gap = bounds[1] - obstruction.bounds[3]
-    obstruction_height = obstruction.bounds[3] - obstruction.bounds[1]
-    return horizontal_overlap >= 0.15 and vertical_gap <= max(20.0, obstruction_height * 0.5)
-
-
-def _suppress_obscured_input_evidence(scene: UIScene, obstructions: tuple[VisualObstruction, ...], *,
-    fingerprint: str) -> UIScene:
-    """Prevent a crop/model claim from restoring pixels hidden in the full frame."""
-
-    if not obstructions:
-        return scene
-    value = scene.to_dict()
-    changed = False
-    for element in value.get('elements') or []:
-        if not isinstance(element, dict) or element.get('role') != 'input':
-            continue
-        raw_bounds = element.get("bounds")
-        if not isinstance(raw_bounds, list) or len(raw_bounds) != 4:
-            continue
-        bounds = tuple(float(part) * 1000 for part in raw_bounds)
-        matched = next((obstruction for obstruction in obstructions if _input_evidence_is_obscured(bounds,
-            obstruction)), None)
-        if matched is None:
-            continue
-        states = dict(element.get("states") or {})
-        states["fully_visible"] = False
-        states["goal_relevant"] = False
-        states.pop("focused", None)
-        element["states"] = states
-        evidence = [str(item) for item in (element.get("evidence") or [])]
-        evidence.append("本地检测到顶部不透明遮挡，输入框完整边界不可审计")
-        element["evidence"] = evidence[:6]
-        changed = True
-    if not changed:
-        return scene
-    overlays = [str(item) for item in (value.get("overlays") or [])]
-    note = "本地检测到顶部不透明视觉遮挡；交叠输入证据已失败关闭"
-    if note not in overlays:
-        overlays.append(note)
-    value["overlays"] = overlays
-    return UIScene.from_dict(value, coordinate_scale=1.0, stable_override=True, fingerprint_override=fingerprint)
 
 
 def _json_only_system_message() -> dict[str, str]:
@@ -533,8 +392,7 @@ LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
 )
 
 def _single_step_observation_prompt(context: dict[str, Any], *, include_input_structure: bool,
-    current_input_text: str | None, image_count: int, request_image_size: tuple[int, int],
-    post_action_context: post_action_contract.PostActionVisualContext | None,
+    image_count: int, request_image_size: tuple[int, int],
     available_action_kinds: tuple[str, ...],
     trusted_foreground_identity: ForegroundAppIdentity | None=None) -> str:
     request_width, request_height = request_image_size
@@ -542,8 +400,7 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
         input_structure_is_value_authority=include_input_structure,
         trusted_foreground_identity=trusted_foreground_identity)
     if include_input_structure:
-        input_contract = _input_structure_audit_prompt(context, current_input_text=current_input_text,
-            wire_height=request_height)
+        input_contract = _input_structure_audit_prompt(context, wire_height=request_height)
         input_rule = ("input_structure报告下面INPUT CONTRACT中当前可见的最小事实；空输入只需合法bounds和"
             "text=\"\"，无关可选字段、整套键盘几何和另一个scene输入框均不必补齐。")
     else:
@@ -551,18 +408,8 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
         input_rule = "input_structure必须为null，不得额外枚举键盘或输入结构。"
     temporal_rule = (f"共有{image_count}张同一稳定手机画面的时间对齐帧。只把它们合并为一个当前状态；"
         "闪烁光标可从任一帧读取，其他瞬态不得合并。" if image_count > 1 else "只有一张当前稳定手机画面。")
-    if post_action_context is None:
-        post_action_rule = "本轮不是本地已签发的动作后观察；不得猜测此前执行过任何动作。"
-    else:
-        payload = json.dumps(post_action_context.to_dict(), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        post_action_rule = ("本轮是一个物理动作后的首次观察。本地只读typed摘要如下：\n" + payload
-            + "\n它只证明该canonical动作已到达物理执行层，并说明需要核对的typed后置条件；\n"
-            "outcome=pending_visual_verification，绝不等于matched，也不能迫使你把预期写成事实。\n"
-            "当前JPEG仍是当前画面的唯一权威：符合时报告可见结果，不符合时如实报告矛盾。\n"
-            "识别时先判断最外层系统/App表面，再判断其中嵌入的卡片、预览或子内容；嵌入内容\n"
-            "所属App不能替代承载它的最外层系统表面。该摘要只帮助选择核对重点，不授权动作。\n")
     return _render_prompt("single_step_observation.txt", SCENE_CONTRACT=scene_contract,
-        INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule, POST_ACTION_RULE=post_action_rule,
+        INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule,
         INPUT_RULE=input_rule, REQUEST_WIDTH=str(request_width), REQUEST_HEIGHT=str(request_height),
         OBSERVATION_PROTOCOL=SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION,
         AVAILABLE_ACTIONS_JSON=json.dumps(list(available_action_kinds), ensure_ascii=False, separators=(',', ':')))
@@ -578,6 +425,16 @@ def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, .
     reject_if(not normalized or '' in normalized or normalized - CANONICAL_ACTION_KINDS,
         VisionAgentError("本轮可用动作集合为空或包含协议外动作。"))
     return tuple(sorted(normalized))
+
+
+def _decision_element_ids(decision: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return every scene element that this same-envelope decision makes authoritative."""
+
+    values = [str(decision.get(name) or '').strip() for name in (
+        'element_id', 'source_element_id', 'destination_element_id') if decision.get(name)]
+    values.extend(str(item).split(':', 1)[1].strip() for item in decision.get('evidence_refs', ())
+        if isinstance(item, str) and item.startswith('element:') and str(item).split(':', 1)[1].strip())
+    return tuple(dict.fromkeys(values))
 
 
 def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_image_size: tuple[int,
@@ -620,10 +477,7 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
 
     scene = payload.get('scene')
     reject_if(_contains_action_like_wire_key(scene), UISceneError("单步观察scene包含动作或计划字段。"))
-    selected_ids = {str(decision.get(name) or '').strip() for name in (
-        'element_id', 'source_element_id', 'destination_element_id') if decision.get(name)}
-    selected_ids.update(str(item).split(':', 1)[1].strip() for item in decision.get('evidence_refs', ())
-        if isinstance(item, str) and item.startswith('element:') and str(item).split(':', 1)[1].strip())
+    selected_ids = set(_decision_element_ids(decision))
     if isinstance(scene, dict):
         raw_elements = scene.get('elements')
         normalized_elements: list[dict[str, Any]] = []
@@ -667,8 +521,14 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
                 right_button = normalize_optional_control(normalized.get('right_button'))
                 normalized['right_button'] = right_button
                 normalized_inputs.append(normalized)
-        selected_input = bool(decision.get('status') == 'action'
-            and str(decision.get('element_id') or '').strip() == 'local_audited_input_1')
+        selected_element_id = str(decision.get('element_id') or '').strip()
+        selected_scene_input = any(isinstance(item, dict)
+            and str(item.get('element_id') or '').strip() == selected_element_id
+            and str(item.get('role') or '').strip() == 'input' for item in raw_elements or [])
+        selected_audit_input = any(isinstance(item, dict)
+            and str(item.get('element_id') or '').strip() == selected_element_id for item in raw_inputs or [])
+        selected_input = bool(decision.get('status') == 'action' and selected_element_id
+            and (selected_element_id == 'local_audited_input_1' or selected_scene_input or selected_audit_input))
         reject_if(selected_input and not normalized_inputs and invalid_inputs > 0,
             UISceneError("已选输入框的bounds无效。"))
         input_structure['application_inputs'] = normalized_inputs
@@ -745,69 +605,13 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
         else:
             # Irrelevant optional input facts cannot veto a non-input action.
             payload['input_structure'] = None
-        decision = _parse_model_step_decision(payload['decision'])
+        decision = normalize_model_step_decision(payload['decision'])
         coordinate_normalization = _normalize_single_step_wire_coordinates(payload,
             request_image_size=request_image_size, decision=decision)
         return {'scene': payload['scene'], 'input_structure': payload['input_structure'],
             'decision': decision, 'coordinate_normalization': coordinate_normalization}
-    except (UISceneError, ValueError, TypeError) as exc:
+    except (CanonicalActionProtocolError, UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
-
-
-def _parse_model_step_decision(value: Any) -> dict[str, Any]:
-    """Parse the minimal action/finish tagged union emitted with the current scene."""
-
-    reject_if(not isinstance(value, dict), UISceneError("decision必须是对象。"))
-    reject_if(_contains_action_like_extra(value, _MODEL_DECISION_FIELDS),
-        UISceneError("decision包含动作、计划或裸坐标字段。"))
-    status = value.get('status')
-    reject_if(status not in {'action', 'finish'}, UISceneError("decision.status只允许action或finish。"))
-    confidence = value.get('confidence', 1.0)
-    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-        or not 0.0 <= float(confidence) <= 1.0):
-        confidence = 1.0
-    reason = value.get('reason', '')
-    if not isinstance(reason, str):
-        reason = ''
-    raw_refs = value.get('evidence_refs', [])
-    refs = list(dict.fromkeys(item.strip() for item in raw_refs
-        if isinstance(item, str) and item.strip()))[:8] if isinstance(raw_refs, list) else []
-
-    text_fields = ('action', 'element_id', 'source_element_id', 'destination_element_id', 'direction')
-    for name in text_fields:
-        part = value.get(name)
-        reject_if(part is not None and (not isinstance(part, str) or not part.strip()),
-            UISceneError(f"decision.{name}必须为非空字符串或null。"))
-
-    action = value.get('action')
-    element_id = value.get('element_id')
-    source_id = value.get('source_element_id')
-    destination_id = value.get('destination_element_id')
-    direction = value.get('direction')
-    if status == 'finish':
-        reject_if(any(item is not None for item in (action, element_id, source_id, destination_id, direction)),
-            UISceneError("finish不得携带动作引用。"))
-        reject_if(not refs, UISceneError("finish必须引用同一scene中的可见证据。"))
-    else:
-        reject_if(action not in CANONICAL_ACTION_KINDS, UISceneError("decision.action不在canonical动作集合。"))
-        reject_if(refs, UISceneError("action决策不得携带完成证据。"))
-        if action in _MODEL_ELEMENT_ACTIONS:
-            reject_if(element_id is None or any(item is not None for item in (source_id, destination_id, direction)),
-                UISceneError("元素动作必须且只能引用一个element_id。"))
-        elif action == 'drag':
-            reject_if(element_id is not None or direction is not None or source_id is None or destination_id is None
-                or source_id == destination_id, UISceneError("drag必须且只能引用不同的起点和终点元素。"))
-        elif action == 'swipe':
-            reject_if(source_id is not None or destination_id is not None
-                or direction not in {'up', 'down', 'left', 'right'}, UISceneError("swipe必须声明唯一方向。"))
-        else:
-            reject_if(any(item is not None for item in (element_id, source_id, destination_id, direction)),
-                UISceneError("系统或容器动作不得携带元素或方向字段。"))
-    normalized_reason = reason.strip()[:500] or ("当前截图同帧证据证明目标完成" if status == 'finish'
-        else "当前截图选择一个推进目标的动作")
-    return {'status': status, 'action': action, 'element_id': element_id,
-        'source_element_id': source_id, 'destination_element_id': destination_id, 'direction': direction,
-        'reason': normalized_reason, 'confidence': float(confidence), 'evidence_refs': list(refs)}
 
 
 def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
@@ -878,12 +682,11 @@ def _input_audit_literal_key_targets(context: dict[str, Any], *, current_input_t
     return tuple(targets)
 
 
-def _input_structure_audit_prompt(context: dict[str, Any], *, current_input_text: str | None=None,
-    wire_height: int=1000) -> str:
+def _input_structure_audit_prompt(context: dict[str, Any], *, wire_height: int=1000) -> str:
     context = _goal_view(context).observation_context
     goal = _goal_view(context)
     keyboard_min_height = max(1, round(180 * wire_height / 1000))
-    literal_targets = _input_audit_literal_key_targets(context, current_input_text=current_input_text)
+    literal_targets = _input_audit_literal_key_targets(context)
     literal_example = []
     if literal_targets:
         value = literal_targets[0]
@@ -891,25 +694,26 @@ def _input_structure_audit_prompt(context: dict[str, Any], *, current_input_text
             'key_kind': 'space' if value == ' ' else 'character', 'bounds': [0, 0, 1000, wire_height],
             'confidence': 0.0, 'fully_visible': True}]
     field_id, field_label, multiline = goal.field
-    target_text = goal.transaction_text or goal.explicit_text
-    enter_required = False
-    if target_text and current_input_text is not None and multiline:
-        try:
-            step = plan_next_verified_input(target_text, current_input_text)
-        except (ValueError, VerifiedTextTransactionError):
-            step = None
-        enter_required = bool(step is not None and step.kind == 'literal_key' and step.segment == '\n')
     return _render_prompt("input_structure_audit.txt",
         CONTEXT=json.dumps(context, ensure_ascii=False, separators=(',', ':')),
         FIELD_ID=json.dumps(field_id, ensure_ascii=False), FIELD_LABEL=json.dumps(field_label, ensure_ascii=False),
-        TARGET_ONLY_CLEAR=str(goal.target_only).lower(), ENTER_REQUIRED=str(enter_required).lower(),
+        TARGET_ONLY_CLEAR=str(goal.target_only).lower(), ENTER_REQUIRED='false',
         MULTILINE=str(multiline).lower(), LITERAL_TARGETS=json.dumps(literal_targets, ensure_ascii=False,
         separators=(',', ':')), LITERAL_KEYS_EXAMPLE=json.dumps(literal_example, ensure_ascii=False,
         separators=(',', ':')), WIRE_HEIGHT=str(wire_height), KEYBOARD_MIN_HEIGHT=str(keyboard_min_height),
         AUDIT_VERSION=INPUT_STRUCTURE_AUDIT_VERSION)
 
 
-def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None) -> UIScene:
+def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None,
+    strict_element_ids: Iterable[str]=()) -> UIScene:
+    """Parse the current scene, revoking only malformed optional model facts.
+
+    The same-envelope decision makes its referenced elements required facts.  A
+    malformed referenced element is therefore a contract error, while an
+    unrelated malformed hint is simply omitted and cannot veto the selected
+    action or finish evidence.
+    """
+
     try:
         payload = _extract_json_object(raw)
         if 'system_ui' not in payload:
@@ -924,10 +728,60 @@ def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str |
         payload['camera_alignment'] = alignment
         _drop_forbidden_camera_alignment_evidence(payload)
         _strip_model_authored_local_attestations(payload)
+        required = frozenset(str(item or '').strip() for item in strict_element_ids if str(item or '').strip())
+        raw_elements = payload.get('elements')
+        if isinstance(raw_elements, list):
+            retained: list[dict[str, Any]] = []
+            required_counts: dict[str, int] = {}
+            for raw_element in raw_elements:
+                if not isinstance(raw_element, dict):
+                    continue
+                element_id = str(raw_element.get('element_id') or '').strip()
+                if element_id in required:
+                    required_counts[element_id] = required_counts.get(element_id, 0) + 1
+                    reject_if(required_counts[element_id] > 1,
+                        UISceneError(f"Qwen决策引用的element_id不唯一：{element_id}"))
+                    retained.append(_required_scene_element(raw_element))
+                    continue
+                try:
+                    UIElement.from_dict(raw_element, coordinate_scale=1000.0)
+                except (UISceneError, TypeError, ValueError):
+                    continue
+                retained.append(raw_element)
+            payload['elements'] = retained
         return UIScene.from_dict(payload, coordinate_scale=1000.0, stable_override=True,
             fingerprint_override=fingerprint)
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"通用页面观察结果不符合协议：{exc}") from exc
+
+
+def _required_scene_element(raw_element: dict[str, Any]) -> dict[str, Any]:
+    """Keep a selected element's hard identity and revoke malformed optional facts."""
+
+    core = {
+        'element_id': str(raw_element.get('element_id') or '').strip(),
+        'role': str(raw_element.get('role') or 'unknown').strip(),
+        'meaning': str(raw_element.get('meaning') or '').strip(),
+        'bounds': raw_element.get('bounds'),
+        'confidence': _diagnostic_confidence(raw_element.get('confidence')),
+        'label': str(raw_element.get('label') or '').strip()[:200],
+        'states': {},
+        'evidence': [item.strip()[:200] for item in raw_element.get('evidence', [])
+            if isinstance(item, str) and item.strip()]
+            if isinstance(raw_element.get('evidence'), (list, tuple)) else [],
+    }
+    # The selected element must always have a legal id/role/meaning/bounds.
+    UIElement.from_dict(core, coordinate_scale=1000.0)
+    states = raw_element.get('states')
+    if isinstance(states, dict):
+        enriched = dict(core)
+        enriched['states'] = dict(states)
+        try:
+            UIElement.from_dict(enriched, coordinate_scale=1000.0)
+        except (UISceneError, TypeError, ValueError):
+            return core
+        return enriched
+    return core
 
 
 def _camera_layout_orientation(frame: Image.Image) -> str:
@@ -969,36 +823,8 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
-def _strip_preliminary_input_elements(payload: dict[str, Any], goal_context: dict[str, Any]) -> bool:
-    goal = _goal_view(goal_context)
-    if not goal.input_requested:
-        return False
-    elements = payload.get("elements")
-    if not isinstance(elements, list):
-        return False
-    mode_only = goal.mode_switch_requested
-    text_input = goal.has_explicit_text
-    keyboard_meanings = {'input_exact_enter_key', 'input_exact_literal_key', 'switch_keyboard_case',
-        'switch_keyboard_input_mode', 'switch_keyboard_layout'}
-    retained: list[Any] = []
-    removed = False
-    for item in elements:
-        passive = bool(isinstance(item, dict) and not _contains_action_like_wire_key(item))
-        role = str(item.get("role") or "").strip() if passive else ""
-        meaning = str(item.get("meaning") or "").strip().casefold() if passive else ""
-        dedicated = bool(mode_only or role == 'input' or (text_input and (role == 'container' and 'keyboard' in meaning
-            or (role in {'button', 'key'} and meaning in keyboard_meanings))))
-        if passive and dedicated:
-            removed = True
-        else:
-            retained.append(item)
-    if removed:
-        payload["elements"] = retained
-    return removed
-
-
-def _single_step_input_surface_attestation(payload: dict[str, Any], *, goal_context: dict[str, Any]) -> dict[str,
-    Any] | None:
+def _single_step_input_surface_attestation(payload: dict[str, Any], *, input_structure: Any,
+    goal_context: dict[str, Any]) -> dict[str, Any] | None:
     """Keep one same-envelope input-surface fact without text or executable geometry authority."""
 
     goal = _goal_view(goal_context)
@@ -1027,6 +853,15 @@ def _single_step_input_surface_attestation(payload: dict[str, Any], *, goal_cont
             'label': str(item.get('label') or '').strip()[:200], 'bounds': bounds,
             'confidence': 1.0, 'evidence': tuple(str(value).strip()[:200] for value in evidence
             if isinstance(value, str) and value.strip()) if isinstance(evidence, list) else ()})
+    requested_ids: set[str] = set()
+    if isinstance(input_structure, Mapping):
+        application_inputs = input_structure.get('application_inputs')
+        if isinstance(application_inputs, list):
+            requested_ids = {str(item.get('element_id') or '').strip() for item in application_inputs
+                if isinstance(item, Mapping) and str(item.get('element_id') or '').strip()}
+    explicitly_bound = [item for item in candidates if item['element_id'] in requested_ids]
+    if len(explicitly_bound) == 1:
+        return explicitly_bound[0]
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -1052,106 +887,14 @@ def _focus_only_compact_input_surface(attestation: dict[str, Any] | None, *, key
         and item.strip()] if isinstance(evidence, (list, tuple)) else []}
 
 
-def _adjacent_exact_preedit_cue(trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]],
-    exact_text: str) -> bool:
-    """Accept one exact non-authoritative cue beside the same input surface."""
+def _projected_input_element_id(attestation: dict[str, Any] | None) -> str:
+    """Reuse the one same-response scene identity; mint locally only when scene omitted it."""
 
-    if (not exact_text or len(trusted_preedits) != 1 or trusted_preedits[0].get('text') != exact_text
-        or trusted_preedits[0].get('candidates')):
-        return False
-    input_box = tuple(float(value) for value in trusted_input["input_bounds"])
-    preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
-    return _horizontally_adjacent(input_box, preedit_box)
-
-
-def _horizontally_adjacent(first: tuple[float, ...], second: tuple[float, ...]) -> bool:
-    overlap = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
-    smaller_width = min(first[2] - first[0], second[2] - second[0])
-    vertical_gap = max(0.0, second[1] - first[3], first[1] - second[3])
-    return bool(smaller_width > 0 and overlap / smaller_width >= 0.6 and vertical_gap <= 100)
-
-
-def _resolve_pending_ime_candidate_input_state(trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]], *,
-    application_input_count: int, verified_input_lineage: TypedInputLineage | None, device_id: str, app_id: str,
-    screen_id: str, input_field_id: str, authorized_text: str, keyboard_input_mode: str) -> dict[str, Any] | None:
-    """Resolve one receipt-bound IME candidate using only lineage and the dedicated input audit."""
-
-    if (application_input_count != 1 or verified_input_lineage is None
-        or verified_input_lineage.source != 'pending_verified_ime_candidate_action' or (keyboard_input_mode not
-        in {'direct_latin', 'chinese_pinyin'}) or (not input_field_id) or (input_field_id == 'unknown')
-        or (input_field_id != verified_input_lineage.input_field_id) or (not isinstance(authorized_text,
-        str)) or (not authorized_text.startswith(verified_input_lineage.exact_value))
-        or (not isinstance(trusted_input.get('caret_line_index'), int)) or (len(trusted_preedits) != 1)):
-        return None
-    exact_value = verified_input_lineage.exact_value
-    raw_text = trusted_input.get("text")
-    if not isinstance(raw_text, str) or raw_text not in {'', exact_value}:
-        return None
-    preedit = trusted_preedits[0]
-    preedit_text = preedit.get("text")
-    candidates = preedit.get("candidates")
-    if (not isinstance(preedit_text, str) or not preedit_text or '\r' in preedit_text or ('\n' in preedit_text)
-        or (not exact_value.endswith(preedit_text)) or (not isinstance(candidates, list)) or (sum((isinstance(candidate,
-        dict) and candidate.get('text') == preedit_text for candidate in candidates)) != 1)):
-        return None
-    input_box = tuple(float(value) for value in trusted_input["input_bounds"])
-    preedit_box = tuple(float(value) for value in preedit["bounds"])
-    if _bounds_overlap_ratio(input_box, preedit_box) < 0.9 or _bounds_overlap_ratio(preedit_box, input_box) < 0.9:
-        return None
-    normalized_bounds = tuple(value / 1000.0 for value in input_box)
-    if (not verified_input_lineage.matches_pending_input_state_surface(device_id=device_id, app_id=app_id,
-        screen_id=screen_id, input_bounds=normalized_bounds, input_field_id=input_field_id)):
-        return None
-    return {'committed_value': exact_value, 'consumed_preedit': preedit}
-
-
-def _authorized_exact_committed_prefix_cue(trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]], *,
-    goal: generic_goal_domain.ActiveVisualGoal, keyboard_input_mode: str) -> str:
-    """Recover one committed authorized prefix inside the typed field."""
-
-    field_id, _field_label, _multiline = goal.field
-    authorized = goal.transaction_text
-    cues = trusted_input.get("visible_editable_cues")
-    if (not field_id or field_id == 'unknown' or (not isinstance(authorized,
-        str)) or (not authorized) or (keyboard_input_mode != 'direct_latin') or (trusted_input.get('text') != '')
-        or (not isinstance(cues, list))):
-        return ""
-    non_text_cues = {'border', 'caret', 'cursor', 'focus border', 'focus ring', 'outline'}
-    literal_cues = tuple((item.strip() for item in cues if isinstance(item,
-        str) and item.strip() and (item.strip().casefold() not in non_text_cues)))
-    if len(literal_cues) != 1:
-        return ""
-    cue = literal_cues[0]
-    if (not authorized.startswith(cue) or cue == trusted_input.get('placeholder') or cue
-        in trusted_input.get('field_labels', ()) or ('\r' in cue) or ('\n' in cue)):
-        return ""
-    if trusted_preedits and (not _adjacent_exact_preedit_cue(trusted_input, trusted_preedits, cue)):
-        return ""
-    return cue
-
-
-def _clear_goal_unique_committed_cue(trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]], *,
-    keyboard_input_mode: str) -> tuple[str, int]:
-    """Recover committed glyphs for clear-all while treating extra visual rows only as delete units."""
-
-    cues = trusted_input.get("visible_editable_cues")
-    if (keyboard_input_mode != 'direct_latin' or trusted_input.get('text') != '' or trusted_preedits
-        or (not isinstance(cues, list))):
-        return "", 0
-    decorative = {'border', 'caret', 'cursor', 'focus border', 'focus ring', 'outline', '|'}
-    literals = tuple((item for item in cues if isinstance(item,
-        str) and item.strip() and (item.strip().casefold() not in decorative) and ('caret' not in item.casefold())
-        and ('cursor' not in item.casefold()) and ('光标' not in item) and ('插入符' not in item)))
-    if len(literals) != 1:
-        return "", 0
-    cue = literals[0]
-    if (cue == trusted_input.get('placeholder') or cue in trusted_input.get('field_labels',
-        ()) or '\r' in cue or ('\n' in cue)):
-        return "", 0
-    caret_line_index = trusted_input.get("caret_line_index")
-    extra_rows = caret_line_index if isinstance(caret_line_index, int) and (not isinstance(caret_line_index,
-        bool)) and (caret_line_index > 0) else 0
-    return cue, extra_rows
+    if isinstance(attestation, dict):
+        element_id = str(attestation.get('element_id') or '').strip()
+        if element_id and not element_id.startswith('local_audited_'):
+            return element_id
+    return 'local_audited_input_1'
 
 
 def _locally_detect_caret_visual_row(trusted_input: dict[str, Any], *, frames: tuple[Image.Image, ...] | None,
@@ -1312,11 +1055,11 @@ def _unique_inline_ime_preedit_cue(trusted_input: dict[str, Any], trusted_preedi
 
 
 def _next_field_key_element(key: dict[str, Any], *, source_field_id: str, target_field_id: str,
-    target_field_label: str) -> dict[str, Any]:
+    target_field_label: str, input_element_id: str) -> dict[str, Any]:
     return _audited_element('next_field_key', 'input_next_field_key', key, states={'goal_relevant': True,
         'input_next_field_key': True, 'key_action': 'next', 'source_input_field_id': source_field_id,
         'target_input_field_id': target_field_id, 'target_input_field_label': target_field_label,
-        'input_element_id': 'local_audited_input_1'}, evidence='唯一聚焦typed字段与完整Next键绑定下一依赖字段')
+        'input_element_id': input_element_id}, evidence='唯一聚焦typed字段与完整Next键绑定下一依赖字段')
 
 
 def _audited_element(suffix: str, meaning: str, source: Mapping[str, Any], *, states: Mapping[str, Any],
@@ -1458,12 +1201,7 @@ def _label_count(labels: Iterable[str], expected: str) -> int:
     return sum(label.casefold() == folded for label in labels)
 
 
-def _collect_audited_input_matches(application_inputs: list[Any], *, active_field_id: str, active_field_label: str,
-    active_transaction_text: str, multiline_contract: bool, unique_typed_active_field: bool,
-    application_keyboard_bounds: NormalizedBounds | None, trusted_preedits: list[dict[str, Any]],
-    verified_input_lineage: TypedInputLineage | None, device_id: str, scene: UIScene, keyboard_input_mode: str,
-) -> list[dict[str, Any]]:
-    del active_field_label, multiline_contract, unique_typed_active_field, application_keyboard_bounds
+def _collect_audited_input_matches(application_inputs: list[Any]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for item in application_inputs:
         if not isinstance(item, dict):
@@ -1484,6 +1222,8 @@ def _collect_audited_input_matches(application_inputs: list[Any], *, active_fiel
             caret = None
         placeholder = item.get("placeholder")
         placeholder = placeholder.strip()[:200] if isinstance(placeholder, str) else ""
+        element_id = item.get('element_id')
+        element_id = element_id.strip()[:200] if isinstance(element_id, str) else ''
         bounds = tuple(float(part) for part in item["bounds"])
         button = _optional_right_button(item.get("right_button"), input_bounds=bounds)
         input_bounds = [round(part) for part in bounds]
@@ -1491,15 +1231,11 @@ def _collect_audited_input_matches(application_inputs: list[Any], *, active_fiel
             input_bounds[2] = button["bounds"][0]
         if input_bounds[2] <= input_bounds[0]:
             continue
-        match = {'text': text, 'placeholder': placeholder, 'visible_editable_cues': cues, 'caret_line_index': caret,
+        match = {'element_id': element_id, 'text': text, 'placeholder': placeholder,
+            'visible_editable_cues': cues, 'caret_line_index': caret,
             'field_labels': labels, 'input_bounds': input_bounds, 'right_button': button,
             'confidence': 1.0}
         matches.append(match)
-    for match in matches:
-        match['pending_ime_candidate_state'] = _resolve_pending_ime_candidate_input_state(match, trusted_preedits,
-            application_input_count=len(matches), verified_input_lineage=verified_input_lineage,
-            device_id=device_id, app_id=scene.app_id, screen_id=scene.screen_id, input_field_id=active_field_id,
-            authorized_text=active_transaction_text, keyboard_input_mode=keyboard_input_mode)
     return matches
 
 
@@ -1517,11 +1253,12 @@ def _unique_audited_input(matches: Iterable[dict[str, Any]], *, label: str='', t
 
 def _append_audited_input_element(elements: list[dict[str, Any]], audited_input: dict[str, Any], *, field_id: str,
     field_label: str, multiline: bool, active_clear_goal: bool, keyboard: _AuditedKeyboard,
-    controls: _AuditedInputControls) -> None:
+    controls: _AuditedInputControls, input_element_id: str='local_audited_input_1') -> None:
     step = controls.step
     auxiliary = any(getattr(controls, key) is not None for key in ("candidate", "literal", "enter", "layout", "case"))
-    states: dict[str, Any] = {'goal_relevant': bool(not controls.switch_is_goal and controls.next_field is None
-        and (not auxiliary)), 'fully_visible': True,
+    derived_goal_relevant = bool(not controls.switch_is_goal and controls.next_field is None and (not auxiliary))
+    states: dict[str, Any] = {'goal_relevant': derived_goal_relevant,
+        'fully_visible': True,
         'value': audited_input['text']}
     if field_id:
         states["input_field_id"] = field_id
@@ -1529,7 +1266,7 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
             states["input_multiline"] = multiline
     if field_label:
         states["input_field_label"] = field_label
-    for key in ('verified_trailing_newline', 'local_caret_line_index', 'clear_extra_delete_units'):
+    for key in ('local_caret_line_index', 'clear_extra_delete_units'):
         value = audited_input.get(key)
         if value is True or (isinstance(value, int) and (not isinstance(value, bool)) and (value > 0)):
             states[key] = value
@@ -1554,17 +1291,6 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
     text = audited_input["text"]
     if text:
         evidence.insert(0, f"应用输入框当前文字：{text}")
-        templates = {'lineage_visual_text': '视觉折行转写：{}；本地逐键连续性逐字核对通过',
-            'lineage_visible_cue_text': '输入状态切换后同一应用输入区域仍逐字可见：{}；本地同值连续性核对通过',
-            'lineage_persisted_visible_cue_text': '跨会话同一应用输入区域仍逐字可见：{}；持久回执连续性核对通过',
-            'lineage_pending_text_prefix': 'pending typed连续性、授权payload与唯一预编辑后缀共同确认已提交前缀：{}',
-            'lineage_ime_candidate_committed_value': '候选点击回执、typed字段、授权payload与动作后同字段精确片段共同确认已提交中文：{}；残留预测栏未作为预编辑',
-            'authorized_prefix_visible_cue_text': 'typed字段内唯一可见文字逐字匹配授权payload前缀：{}；同帧无IME预编辑',
-            'clear_goal_visible_cue_text': '清空目标的同帧唯一已提交可见文字：{}；额外视觉行仅作为保守退格单位'}
-        evidence.extend((template.format(audited_input[key]) for key,
-            template in templates.items() if isinstance(audited_input.get(key), str)))
-        if audited_input.get('verified_trailing_newline') is True:
-            evidence.append("已验证换行动作、同一typed输入框、精确可见前缀与下一行光标一致")
         if isinstance(audited_input.get('local_caret_line_index'), int):
             evidence.append(f'模型确认可见光标后，本地校准像素定位光标视觉行：{audited_input['local_caret_line_index']}')
     elif audited_input['placeholder']:
@@ -1573,22 +1299,26 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
         evidence.append("唯一相邻输入法预编辑串已绑定当前typed输入框，可清理文字：" f"{controls.clearable_preedit}")
     if not keyboard.visible:
         evidence.append(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE)
-    elements.append(_audited_element('input', 'application_text_input', audited_input, role='input',
-        label=text or audited_input['placeholder'], bounds_key='input_bounds', states=states, evidence=evidence))
+    audited_element = _audited_element('input', 'application_text_input', audited_input, role='input',
+        label=text or audited_input['placeholder'], bounds_key='input_bounds', states=states, evidence=evidence)
+    audited_element['element_id'] = input_element_id
+    elements.append(audited_element)
     if audited_input['right_button'] is not None:
         elements.append(_audited_element('adjacent_button', 'adjacent_input_utility', audited_input['right_button'],
             states={'goal_relevant': False}, evidence='应用输入结构的相邻独立控件；不具备目标权限'))
 
 
 def _append_audited_input_controls(elements: list[dict[str, Any]], *, controls: _AuditedInputControls,
-    active_field_id: str, predecessor_field_id: str, active_field_label: str) -> None:
+    active_field_id: str, predecessor_field_id: str, active_field_label: str,
+    input_element_id: str='local_audited_input_1') -> None:
     step = controls.step
     next_field = controls.next_field
     if next_field is not None:
         elements.append(_next_field_key_element(next_field, source_field_id=predecessor_field_id,
-            target_field_id=active_field_id, target_field_label=active_field_label))
+            target_field_id=active_field_id, target_field_label=active_field_label,
+            input_element_id=input_element_id))
     if step is not None:
-        common = {'prior_input_value': step.current_text, 'input_element_id': 'local_audited_input_1'}
+        common = {'prior_input_value': step.current_text, 'input_element_id': input_element_id}
         specs = (('candidate', 'ime_candidate', 'ime_exact_candidate', {'ime_candidate': True,
             'expected_input_value': step.expected_value, 'pinyin': controls.preedit},
             '输入结构审计确认当前输入法组合的唯一逐字候选：' + step.segment), ('literal', 'literal_key', 'input_exact_literal_key',
@@ -1615,7 +1345,7 @@ def _append_audited_input_controls(elements: list[dict[str, Any]], *, controls: 
             states={'goal_relevant': controls.switch_is_goal, 'keyboard_input_mode_switch': True,
             'current_mode': mode['current_mode'], 'target_mode': mode['target_mode'],
             'prior_input_value': step.current_text if step else '', 'next_input_value': step.segment if step else '',
-            'input_element_id': 'local_audited_input_1'}, evidence='键盘区域内方向明确的独立输入模式切换键'))
+            'input_element_id': input_element_id}, evidence='键盘区域内方向明确的独立输入模式切换键'))
 
 
 def _optional_right_button(value: Any, *, input_bounds: NormalizedBounds) -> dict[str, Any] | None:
@@ -1631,48 +1361,6 @@ def _optional_right_button(value: Any, *, input_bounds: NormalizedBounds) -> dic
         input_bounds) < 0.8)):
         return None
     return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence}
-
-
-def _reconcile_verified_input_lineage(trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]],
-    lineage: TypedInputLineage, *, device_id: str, scene: UIScene, input_field_id: str, active_text: str,
-    multiline: bool, frame: Image.Image | None, keyboard_input_mode: str) -> dict[str, Any]:
-    raw_text = trusted_input["text"]
-    bounds = tuple(float(part) / 1000.0 for part in trusted_input["input_bounds"])
-    cues = tuple(trusted_input["visible_editable_cues"])
-    if (keyboard_input_mode == 'direct_latin' and lineage.exact_value not in cues
-        and _adjacent_exact_preedit_cue(trusted_input, trusted_preedits, lineage.exact_value)):
-        cues = (*cues, lineage.exact_value)
-    identity = {'device_id': device_id, 'app_id': scene.app_id, 'screen_id': scene.screen_id, 'raw_value': raw_text,
-        'input_bounds': bounds}
-    checks = (('verified_trailing_newline', lambda: lineage_matches_trailing_newline_cue(lineage, **identity,
-        visible_editable_cues=cues, caret_line_index=trusted_input.get('caret_line_index'),
-        input_field_id=input_field_id, current_frame=frame)), ('lineage_visible_cue_text',
-        lambda: lineage.matches_pending_input_state_cue(**identity, visible_editable_cues=cues,
-        input_field_id=input_field_id)), ('lineage_persisted_visible_cue_text',
-        lambda: lineage_matches_persisted_surface_cue(lineage, **identity, visible_editable_cues=cues,
-        current_frame=frame)), ('lineage_visual_text', lambda: not multiline and lineage_matches_visual(lineage,
-        **identity, current_frame=frame)))
-    result = trusted_input
-    for (key, predicate) in checks:
-        if predicate():
-            result = dict(result)
-            result[key] = (
-                True
-                if key == "verified_trailing_newline"
-                else (raw_text if key == "lineage_visual_text" else lineage.exact_value)
-            )
-            result["text"] = lineage.exact_value
-            break
-    if result['text'] == '':
-        prefix = lineage.pending_text_committed_prefix(device_id=device_id, app_id=scene.app_id,
-            screen_id=scene.screen_id, authorized_text=active_text, raw_value='',
-            preedit_text=_unique_clearable_ime_preedit(result, trusted_preedits), input_bounds=bounds,
-            input_field_id=input_field_id)
-        if prefix is not None:
-            result = dict(result)
-            result["lineage_pending_text_prefix"] = prefix
-            result["text"] = prefix
-    return result
 
 
 def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predecessor_input: dict[str, Any] | None,
@@ -1773,10 +1461,9 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
 
 
 def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, goal_context: dict[str, Any],
-    verified_input_lineage: TypedInputLineage | None=None, device_id: str | None=None,
-    lineage_frame: Image.Image | None=None, qwerty_row_snapper: Callable[[list[Image.Image] | tuple[Image.Image, ...],
-    dict[str, Any]], dict[str, list[int]] | None] | None=None, qwerty_row_frames: list[Image.Image] | tuple[Image.Image,
-    ...] | None=None, single_step_input_surface: dict[str, Any] | None=None) -> UIScene:
+    qwerty_row_snapper: Callable[[list[Image.Image] | tuple[Image.Image, ...], dict[str, Any]],
+    dict[str, list[int]] | None] | None=None, qwerty_row_frames: list[Image.Image] | tuple[Image.Image, ...] | None=None,
+    single_step_input_surface: dict[str, Any] | None=None) -> UIScene:
     try:
         goal = _goal_view(goal_context)
         payload = _normalize_input_structure_payload(_extract_json_object(raw))
@@ -1799,27 +1486,11 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
             qwerty_anchors=locally_snapped_qwerty_anchors or raw_audited_qwerty_anchors)
         active_field_id, active_field_label, active_multiline = goal.field
         active_transaction_text = goal.transaction_text
-        explicit_input_text = goal.explicit_text
-        multiline_input_contract = bool(active_multiline or "\n" in explicit_input_text or "\r" in explicit_input_text)
-        unique_typed_active_field = goal.unique_typed_field
-        matches = _collect_audited_input_matches(application_inputs, active_field_id=active_field_id,
-            active_field_label=active_field_label, active_transaction_text=active_transaction_text,
-            multiline_contract=multiline_input_contract, unique_typed_active_field=unique_typed_active_field,
-            application_keyboard_bounds=application_keyboard_bounds, trusted_preedits=trusted_preedits,
-            verified_input_lineage=verified_input_lineage, device_id=str(device_id or ''), scene=scene,
-            keyboard_input_mode=keyboard_input_mode)
+        matches = _collect_audited_input_matches(application_inputs)
 
         switch_is_goal = goal.mode_switch_requested
         active_clear_goal = goal.clear_requested
         trusted_input = _unique_audited_input(matches, label=active_field_label)
-        if (trusted_input is not None and trusted_input.get('pending_ime_candidate_state') is not None
-            and (verified_input_lineage is not None)):
-            resolved_ime_state = trusted_input["pending_ime_candidate_state"]
-            committed_preedit = resolved_ime_state["consumed_preedit"]
-            trusted_input = dict(trusted_input)
-            trusted_input["lineage_ime_candidate_committed_value"] = resolved_ime_state["committed_value"]
-            trusted_input["text"] = resolved_ime_state["committed_value"]
-            trusted_preedits = [item for item in trusted_preedits if item is not committed_preedit]
         predecessor_field_id, predecessor_field_label, predecessor_text = goal.predecessor
         predecessor_input = _unique_audited_input(matches, label=predecessor_field_label,
             text=predecessor_text) if predecessor_field_id else None
@@ -1837,32 +1508,12 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
                 trusted_input = dict(trusted_input)
                 trusted_input["caret_line_index"] = local_caret_line_index
                 trusted_input["local_caret_line_index"] = local_caret_line_index
-        if trusted_input is not None and active_clear_goal and (not trusted_input['text']):
-            clear_cue, extra_clear_units = _clear_goal_unique_committed_cue(trusted_input, trusted_preedits,
-                keyboard_input_mode=keyboard_input_mode)
-            if clear_cue:
-                trusted_input = dict(trusted_input)
-                trusted_input["clear_goal_visible_cue_text"] = clear_cue
-                trusted_input["clear_extra_delete_units"] = extra_clear_units
-                trusted_input["text"] = clear_cue
         if (trusted_input is not None and active_clear_goal and isinstance(trusted_input.get('text'),
             str) and trusted_input['text'] and isinstance(trusted_input.get('caret_line_index'), int)):
             extra_clear_units = max(0, trusted_input['caret_line_index'] - trusted_input['text'].count('\n'))
             if extra_clear_units > 0:
                 trusted_input = dict(trusted_input)
                 trusted_input["clear_extra_delete_units"] = extra_clear_units
-        if trusted_input is not None and (not trusted_input['text']) and (verified_input_lineage is None):
-            authorized_prefix_cue = _authorized_exact_committed_prefix_cue(trusted_input, trusted_preedits, goal=goal,
-                keyboard_input_mode=keyboard_input_mode)
-            if authorized_prefix_cue:
-                trusted_input = dict(trusted_input)
-                trusted_input["authorized_prefix_visible_cue_text"] = authorized_prefix_cue
-                trusted_input["text"] = authorized_prefix_cue
-        if trusted_input is not None and verified_input_lineage is not None:
-            trusted_input = _reconcile_verified_input_lineage(trusted_input, trusted_preedits, verified_input_lineage,
-                device_id=str(device_id or ''), scene=scene, input_field_id=active_field_id,
-                active_text=active_transaction_text, multiline=active_multiline, frame=lineage_frame,
-                keyboard_input_mode=keyboard_input_mode)
         controls = _plan_audited_input_controls(trusted_input=trusted_input, predecessor_input=predecessor_input,
             trusted_preedits=trusted_preedits, goal=goal, active_clear_goal=active_clear_goal,
             active_field_id=active_field_id, active_multiline=active_multiline, keyboard=keyboard,
@@ -1870,6 +1521,7 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
             keyboard_case_mode=keyboard_case_mode, keyboard_bounds=keyboard_bounds,
             snapped_anchors=locally_snapped_qwerty_anchors, switch_is_goal=switch_is_goal)
         rendered_input = trusted_input or (predecessor_input if controls.next_field is not None else None)
+        input_element_id = _projected_input_element_id(single_step_input_surface)
 
         focus_only_input = None
         if (trusted_input is None and controls.next_field is None and (controls.mode is None
@@ -1883,11 +1535,17 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
             if not isinstance(element, dict):
                 continue
             element = dict(element)
-            element["states"] = dict(element.get("states") or {})
-            element["states"]["goal_relevant"] = False
-            # Compact input proposals never survive the typed audit, including its early-return path.
-            if element.get('role') == 'input' or element.get('meaning') == 'application_text_input':
-                continue
+            input_context = bool(element.get('role') == 'input'
+                or element.get('meaning') == 'application_text_input')
+            if input_context:
+                element_states = dict(element.get("states") or {})
+                # Scene keeps response-local identity and passive page context, while input_structure remains the
+                # sole authority for committed text, focus and executable input state.
+                element["states"] = {key: part for key, part in element_states.items()
+                    if key in {'goal_relevant', 'fully_visible', 'visible', 'enabled'}}
+                if (str(element.get('element_id') or '').strip() == input_element_id
+                    and (rendered_input is not None or focus_only_input is not None)):
+                    continue
             elements.append(element)
         if (trusted_input is None and controls.next_field is None and (controls.mode is None
             or not controls.switch_is_goal)):
@@ -1895,9 +1553,9 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
                 elements.append(focus_only_input)
             value["elements"] = elements
             value["summary"] = (
-                "专用typed输入状态账本尚未建立；" "仅保留唯一粗编辑面用于聚焦，不授权文字、清空或发送。"
+                "当前input_structure未建立可执行输入字段；" "仅保留唯一粗编辑面用于聚焦，不授权文字、清空或发送。"
                 if focus_only_input is not None
-                else "typed输入状态账本未建立；compact输入摘要与输入转写不参与判断。"
+                else "当前input_structure未建立可执行输入字段；scene输入摘要不提供正文权威。"
             )
             return UIScene.from_dict(value, coordinate_scale=1.0, stable_override=True,
                 fingerprint_override=fingerprint)
@@ -1906,11 +1564,12 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
                 field_id=predecessor_field_id if controls.next_field is not None else active_field_id,
                 field_label=predecessor_field_label if controls.next_field is not None else active_field_label,
                 multiline=active_multiline, active_clear_goal=active_clear_goal, keyboard=audited_keyboard,
-                controls=controls)
+                controls=controls, input_element_id=input_element_id)
         _append_audited_input_controls(elements, controls=controls, active_field_id=active_field_id,
-            predecessor_field_id=predecessor_field_id, active_field_label=active_field_label)
+            predecessor_field_id=predecessor_field_id, active_field_label=active_field_label,
+            input_element_id=input_element_id)
         value["elements"] = elements
-        value["summary"] = "输入状态仅见typed输入账本；compact输入摘要与输入转写不参与判断。"
+        value["summary"] = "输入正文逐字来自当前input_structure；同响应scene输入元素身份保持不变。"
         return UIScene.from_dict(value, coordinate_scale=1.0, stable_override=True, fingerprint_override=fingerprint)
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
@@ -2259,20 +1918,3 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
                 states.pop("keyboard_input_mode_switch", None)
                 states.pop("current_mode", None)
                 states.pop("target_mode", None)
-
-
-def _observation_cache_key(*, device_id: str | None, fingerprint: str, goal_context: dict[str, Any],
-    input_lineage: TypedInputLineage | None, post_action_context: post_action_contract.PostActionVisualContext |
-    None, available_action_kinds: tuple[str, ...],
-    trusted_foreground_identity: ForegroundAppIdentity | None=None) -> str | None:
-    resolved_device = str(device_id or "").strip()
-    if resolved_device.casefold() in {'', 'unbound', 'unknown', 'none', 'null'}:
-        return None
-    lineage_payload = input_lineage.to_dict() if input_lineage is not None else None
-    payload = {'device_id': resolved_device, 'fingerprint': str(fingerprint or '').strip(),
-        'goal_context': goal_context, 'input_lineage': lineage_payload,
-        'post_action_context': post_action_context.to_dict() if post_action_context is not None else None,
-        'available_action_kinds': list(available_action_kinds),
-        'trusted_foreground_identity': trusted_foreground_identity.to_dict()
-        if trusted_foreground_identity is not None else None}
-    return canonical_digest(payload)

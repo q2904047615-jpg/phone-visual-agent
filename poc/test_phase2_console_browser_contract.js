@@ -16,21 +16,13 @@ function clone(value) {
 function traceSession() {
   const graph = clone(deepSeekFixture.task_graph);
   graph.status = "running";
-  graph.revision = 2;
+  graph.revision = 1;
   graph.active_subgoal_id = "locate_target";
   graph.subgoals[0].status = "active";
   graph.subgoals[1].status = "pending";
   graph.current_subgoal = clone(graph.subgoals[0]);
-  graph.replan_history = [{
-    revision: 2,
-    trigger: "action_result_mismatch",
-    reason: "动作后可见结果与预期不一致，重新规划当前子目标。",
-    scene_id: "obs-after-001",
-    evidence: ["结果仍未满足完成条件"],
-  }];
   const priorDecision = clone(qwenFixture.decision);
   const currentDecision = clone(priorDecision);
-  currentDecision.revision = 2;
   currentDecision.observation_id = "obs-after-001";
   currentDecision.fingerprint = "fingerprint-after-001";
   currentDecision.trusted_observation.observation_id = "obs-after-001";
@@ -43,11 +35,11 @@ function traceSession() {
     qwen_decision: currentDecision,
     controller_decision: {
       allowed: true,
-      reason: "当前唯一动作通过本地策略。",
-      canonical_class: "navigation_open",
-      policy_version: "policy-v1",
+      reason: "同响应动作已绑定当前截图。",
+      canonical_class: "tap_semantic",
+      policy_version: "2026-08-26-canonical-selection-receipt-v1",
     },
-    // Deliberately stale: the task graph and current Qwen decision are revision 2.
+    // Deliberately stale: the scope still points to the prior observation.
     confirmation_scope: {
       session_id: "phase2-trace-session",
       task_id: "task-map-001",
@@ -71,28 +63,31 @@ function traceSession() {
       qwen_decision: priorDecision,
       controller_decision: {
         allowed: true,
-        reason: "唯一动作通过本地策略。",
-        canonical_class: "navigation_open",
-        policy_version: "policy-v1",
+        reason: "同响应动作已绑定当前截图。",
+        canonical_class: "tap_semantic",
+        policy_version: "2026-08-26-canonical-selection-receipt-v1",
       },
       execution: {
         physical_actions: 1,
-        action_outcome: "mismatched",
+        action_outcome: "matched",
         before_scene: { fingerprint: "51277d0d9e6f986b00dc" },
         after_scene: { fingerprint: "fingerprint-after-001" },
-        verification_errors: ["目标状态没有按预期改变"],
+        verification_errors: [],
         observation_errors: [],
         evidence: ["after-frame.jpg"],
       },
       after_observation_id: "obs-after-001",
       after_fingerprint: "fingerprint-after-001",
+      transition: {
+        transition_kind: "new_screenshot_decision",
+        outcome: "matched",
+      },
     }],
   };
 }
 
 function activeActionSession() {
   const session = traceSession();
-  session.confirmation_scope.revision = 2;
   session.confirmation_scope.observation_id = "obs-after-001";
   session.confirmation_scope.fingerprint = "fingerprint-after-001";
   return session;
@@ -174,7 +169,7 @@ test("offline console renders the full phase-two trace and disables a stale scop
     await page.locator("#traceList [data-trace-phase='current']").waitFor({ timeout: 5000 });
 
     const goalText = await page.locator("#goalSummary").innerText();
-    assert.match(goalText, /revision 2/);
+    assert.match(goalText, /revision 1/);
     assert.match(await page.locator("#planList").innerText(), /确认付款入口可见/);
 
     const traceText = await page.locator("#traceList").innerText();
@@ -183,16 +178,16 @@ test("offline console renders the full phase-two trace and disables a stale scop
     assert.match(traceText, /QWEN 唯一动作/);
     assert.match(traceText, /CONTROLLER GATE/);
     assert.match(traceText, /physical_actions 1/);
-    assert.match(traceText, /不符合预期/);
+    assert.match(traceText, /符合预期/);
     assert.match(traceText, /obs-after-001 \/ fingerprint-after-001/);
-    assert.match(traceText, /重规划/);
-    assert.match(traceText, /action_result_mismatch/);
+    assert.match(traceText, /新截图决策/);
+    assert.doesNotMatch(traceText, /重规划|action_result_mismatch/);
     assert.match(traceText, /记录没有可验证的确认消费回执/);
-    assert.match(traceText, /步骤 2 · revision 2/);
+    assert.match(traceText, /步骤 2 · revision 1/);
     assert.match(traceText, /作用域字段已变化/);
 
     const sceneText = await page.locator("#sceneMeta").innerText();
-    assert.match(sceneText, /r2 · locate_target/);
+    assert.match(sceneText, /r1 · locate_target/);
     assert.match(sceneText, /obs-after-001/);
     assert.match(sceneText, /fingerprint-after-001/);
     assert.match(sceneText, /stale/);
@@ -232,7 +227,7 @@ test("offline confirmation is single-shot even when the dialog button is clicked
       session_id: "phase2-trace-session",
       task_id: "task-map-001",
       device_id: "phone-01",
-      revision: 2,
+      revision: 1,
       subgoal_id: "locate_target",
       effect_ids: [],
       observation_id: "obs-after-001",

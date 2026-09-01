@@ -4,7 +4,6 @@
 只选择一个下一动作或报告当前高层目标已经完成。不得要求第二次精查、App身份
 审计、几何审计、方向审计或动作选择调用；不得输出裸坐标或后续多步计划。
 {{TEMPORAL_RULE}}
-{{POST_ACTION_RULE}}
 
 本轮每张实际发送给你的JPEG均为{{REQUEST_WIDTH}}×{{REQUEST_HEIGHT}}。整份响应的
 scene与input_structure必须共用一个coordinate_space，绝不能各用一把尺子：
@@ -67,9 +66,10 @@ decision规则：
    swipe填写direction，并可在绑定当前滚动/卡片容器时填写element_id；系统动作不填写元素引用。
    不属于当前动作变体的null字段无需输出。本地只把你的明确选择映射到同一scene的canonical candidate，
    不会替你自动改选另一个动作。
-   当input_structure只有一个合法application_inputs项时，本地将它唯一投影为
-   element_id="local_audited_input_1"；本轮若选择该输入字段的聚焦、输入或清空动作，必须引用这个ID。
-   若input_structure没有字段而scene只有一个聚焦前输入表面，则仍引用该scene元素自己的element_id。
+   若scene报告了当前application_inputs对应的输入元素，application_inputs.element_id和decision.element_id
+   必须逐字引用该scene元素原始element_id；本地只补充其正文与输入状态，绝不删除、改名或另建同字段。
+   只有scene完全没有报告输入元素而input_structure只有一个合法application_inputs项时，本地才稳定投影为
+   element_id="local_audited_input_1"，此时该输入字段的聚焦、输入或清空动作才引用这个本地ID。
 3. 当前高层目标已经由本图证明时写status=finish，不填写action或动作引用，并在
    evidence_refs中写一个或多个`scene.summary`或`element:<本响应element_id>`。不要把
    “刚才动作可能成功”当成finish；只看本轮JPEG和本响应scene。

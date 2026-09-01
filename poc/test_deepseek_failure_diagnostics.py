@@ -25,10 +25,7 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
             }
         )
         planner = SimpleNamespace(last_raw_response=raw)
-        error = RuntimeError(
-            "DeepSeek 高层任务图包含低层动作表达："
-            "completion_conditions.evidence_required"
-        )
+        error = RuntimeError("DeepSeek 任务图字段结构无效：completion_conditions")
 
         with tempfile.TemporaryDirectory() as temp:
             paths = persist_deepseek_failure_diagnostic(
@@ -40,7 +37,7 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
             )
             artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
 
-        self.assertEqual("low_level_instruction", artifact["error_type"])
+        self.assertEqual("task_graph_validation", artifact["error_type"])
         self.assertEqual("high_level_task_planner", artifact["model_role"])
         self.assertEqual("deepseek", artifact["provider"])
         self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), artifact["raw_response_sha256"])

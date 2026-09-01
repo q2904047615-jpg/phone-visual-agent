@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedBounds, NormalizedPoint, bounds_overlap, canonical_digest, dataclass_wire, reject_if
+from agent.domain.validation import NormalizedBounds, NormalizedPoint, canonical_digest, dataclass_wire, reject_if
 import math
 import statistics
 import time
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image, ImageChops, ImageStat
 
-from agent.domain.canonical_action_protocol import CanonicalActionProtocolError
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutor
 from agent.domain.confirmation_authority import ConfirmationAuthority
 from agent.domain.foreground_app_identity import ForegroundAppIdentity
@@ -24,22 +24,7 @@ from agent.infrastructure import RobotDeviceExecutor
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.application.action_adapter import GenericActionAdapterError
-from agent.domain.post_action_observation import (
-    POST_ACTION_VISUAL_CONTEXT_VERSION,
-    POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
-    POST_NAVIGATION_RESULT_OBJECTIVE,
-    POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
-    PostActionVisualContext,
-)
-from agent.application.input_value_lineage import TypedInputLineageStorePort
 from agent.domain.action_capabilities import build_device_capability_snapshot
-from agent.domain.input_value_lineage import (
-    InputValueLineageError,
-    TypedInputLineage,
-    build_pending_input_lineage,
-    input_app_identity_compatible,
-    input_screen_identity_compatible,
-)
 from agent.infrastructure.windows_ocr_runtime import find_text, recognize as recognize_ocr
 from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
@@ -57,7 +42,6 @@ from agent.infrastructure.orientation_safety import (
 )
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
 from agent.infrastructure.model_failure_diagnostics import model_failure_payload, persist_model_failure_payload
-from agent.domain.vision_model import VisionAgentError
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import UIElement, UIScene, UISceneError
 from agent.domain.universal_action_controller import (
@@ -71,91 +55,6 @@ from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keybo
 
 
 QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"
-
-_POST_NAVIGATION_RESULT_KINDS = frozenset({'tap_semantic', 'double_tap', 'swipe', 'back', 'home', 'open_recent_apps',
-    'launch_app'})
-_POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset({'scene_changed', 'content_changed', 'current_video_changed',
-    'description', 'app_id', 'screen_id'})
-_VISUAL_FOCUS_KEYS = frozenset({'subgoal_id', 'objective', 'constraints', 'completion_conditions', 'execution_class',
-    'goal_entities'})
-
-
-def _sanitized_visual_focus(value: Any) -> dict[str, Any] | None:
-    """Accept only the bridge-owned shallow visual-focus shape."""
-
-    if not isinstance(value, dict) or set(value) != _VISUAL_FOCUS_KEYS:
-        return None
-    if (not str(value.get('subgoal_id') or '').strip() or not str(value.get('objective') or '').strip()
-        or (not isinstance(value.get('constraints'), list)) or (not isinstance(value.get('completion_conditions'),
-        list)) or (not isinstance(value.get('goal_entities'), dict))):
-        return None
-    focus = dict(value)
-    goal_entities = dict(focus["goal_entities"])
-    # Only this adapter may mint an action-result observation phase after physical execution.
-    goal_entities.pop("observation_phase", None)
-    focus["goal_entities"] = goal_entities
-    return focus
-
-
-def _post_action_observation_context(goal: GenericIntentDraft, resolved: ResolvedSemanticAction, *,
-    physical_action_executed: bool=False) -> dict[str, Any]:
-    """Build an action-result context for the actual active subgoal only."""
-
-    context = goal.to_dict()
-    entities = context.get("entities")
-    if not isinstance(entities, dict):
-        return context
-    focus = _sanitized_visual_focus(entities.get('active_subgoal_visual_context'))
-    sanitized_entities = {key: value for key, value in entities.items() if not (isinstance(key,
-        str) and key.endswith('_subgoal_visual_context') and (key != 'active_subgoal_visual_context'))}
-    if focus is not None:
-        sanitized_entities["active_subgoal_visual_context"] = focus
-    else:
-        sanitized_entities.pop("active_subgoal_visual_context", None)
-    context = dict(context)
-    context["entities"] = sanitized_entities
-    entities = sanitized_entities
-
-    expected = resolved.expected_effect
-    changed_result = isinstance(expected, dict) and (expected.get('scene_changed') is True
-        or expected.get('content_changed') is True)
-    if (not physical_action_executed or focus is None or str(focus.get('execution_class') or '').strip() != 'navigate'
-        or (resolved.kind not in _POST_NAVIGATION_RESULT_KINDS) or (not isinstance(expected,
-        dict)) or (not changed_result) or ('element_state' in expected)
-        or set(expected) - _POST_NAVIGATION_ALLOWED_EFFECT_KEYS):
-        return context
-
-    goal_entities = focus.get("goal_entities")
-    if not isinstance(goal_entities, dict):
-        return context
-    result_entities = dict(goal_entities)
-    result_entities.pop("target_ui_label", None)
-    result_entities['observation_phase'] = POST_NAVIGATION_RESULT_OBSERVATION_PHASE
-    result_focus = dict(focus)
-    result_focus["objective"] = POST_NAVIGATION_RESULT_OBJECTIVE
-    result_focus['completion_conditions'] = list(POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS)
-    result_focus["goal_entities"] = result_entities
-    result_context = dict(context)
-    result_context["entities"] = dict(entities)
-    result_context["entities"]["active_subgoal_visual_context"] = result_focus
-    return result_context
-
-
-def _post_action_visual_context(resolved: ResolvedSemanticAction) -> PostActionVisualContext | None:
-    """Project a typed executed transition without coordinates or a success verdict."""
-
-    raw_expectations = resolved.formal_transition.get("expectations")
-    if not isinstance(raw_expectations, list) or not raw_expectations:
-        return None
-    reject_if(not all((isinstance(item, dict) for item in raw_expectations)), GenericActionAdapterError("canonical动作的typed后置条件结构无效。"))
-    payload = {'protocol_version': POST_ACTION_VISUAL_CONTEXT_VERSION, 'execution_state': 'physical_action_executed',
-        'outcome': 'pending_visual_verification', 'canonical_action_kind': resolved.kind,
-        'expected_postconditions': [dict(item) for item in raw_expectations]}
-    try:
-        return PostActionVisualContext.from_dict(payload)
-    except (CanonicalActionProtocolError, VisionAgentError, TypeError, ValueError) as exc:
-        raise GenericActionAdapterError(f'canonical动作不能建立typed动作后视觉上下文：{exc}') from exc
-
 
 def stable_qwerty_ocr_anchors(frames: tuple[Image.Image, ...] | list[Image.Image], anchors: dict[str, Any], *,
     ocr_recognizer: Any=recognize_ocr) -> dict[str, list[int]] | None:
@@ -439,6 +338,7 @@ class GenericActionExecutionResult:
     confirmation_frame_identity_verified: bool
     confirmation_frame_delta: float | None
     physical_actions: int
+    after_model_decision: dict[str, Any] = field(repr=False, compare=False)
     primary_input_confirmation_reused: bool = False
     action_outcome: str = "matched"
     verification_errors: tuple[str, ...] = ()
@@ -458,11 +358,14 @@ class GenericActionExecutionResult:
         # Freeze sampling lists because a completed result is a live promotion source.
         object.__setattr__(self, "after_frames", tuple(self.after_frames))
         object.__setattr__(self, "before_frames", tuple(self.before_frames))
+        reject_if(not isinstance(self.after_model_decision, Mapping),
+            ValueError("动作结果缺少同一动作后截图的 Qwen decision。"))
+        object.__setattr__(self, "after_model_decision", dict(self.after_model_decision))
         object.__setattr__(self, 'controller_transition_evidence', tuple(self.controller_transition_evidence))
         object.__setattr__(self, 'execution_metadata', dict(self.execution_metadata))
 
     def to_dict(self) -> dict[str, Any]:
-        value = dataclass_wire(self, omit=('after_frames', 'before_frames'))
+        value = dataclass_wire(self, omit=('after_frames', 'before_frames', 'after_model_decision'))
         value.update(after_frame_count=len(self.after_frames), before_frame_count=len(self.before_frames),
             robot_result=self.robot_result)
         return value
@@ -480,38 +383,6 @@ class GenericSingleActionAdapter:
     INDEPENDENT_GEOMETRY_AUDIT_KINDS = GEOMETRY_BOUND_KINDS
     LOCAL_INPUT_AUXILIARY_MEANINGS = frozenset({'ime_exact_candidate', 'input_exact_literal_key',
         'input_exact_enter_key', 'switch_keyboard_layout', 'switch_keyboard_case', 'switch_keyboard_input_mode'})
-
-    @classmethod
-    def _primary_input_confirmation_reusable(cls, requested: SemanticAction, scene: UIScene) -> bool:
-        """Allow recapture reuse only for the canonical element minted by the strict input audit."""
-
-        if (requested.action not in {'tap_semantic', 'press_enter', 'input_verified_text',
-            'clear_verified_text'} or not str(requested.params.get('formal_candidate_id') or '').strip()):
-            return False
-        element_id = str(requested.params.get("element_id") or "").strip()
-        try:
-            element = scene.get_element(element_id)
-            unique = scene.unique_trusted_goal_element()
-        except UISceneError:
-            return False
-        if unique is None or unique.element_id != element_id:
-            return False
-        states = element.states
-        if (not element_id.startswith('local_audited_') or states.get('primary_input_geometry_verified') is not True
-            or states.get('geometry_audit_source') != 'input_structure_audit' or (states.get('goal_relevant')
-            is not True) or (states.get('fully_visible') is not True) or (not any((str(item).strip() for item
-            in element.evidence))) or (requested.params.get('target') != element.meaning)
-            or (requested.params.get('role') != element.role) or (requested.params.get('label') != element.label)
-            or (requested.params.get('states') != states)):
-            return False
-        if requested.action in {'input_verified_text', 'clear_verified_text'}:
-            return bool(element.role == 'input' and element.meaning == 'application_text_input'
-                and (str(states.get('input_field_id') or '').strip() not in {'', 'unknown'}))
-        if requested.action == 'press_enter':
-            return bool(element.meaning == 'input_exact_enter_key' and states.get('input_enter_key') is True
-                and (states.get('key_action') == 'newline'))
-        return bool(element.meaning == 'application_text_input' or element.meaning
-            in cls.LOCAL_INPUT_AUXILIARY_MEANINGS or element.meaning == 'input_next_field_key')
 
     def _local_qwerty_orientation_credential(self, *, requested: SemanticAction, scene: UIScene,
         frames: list[Image.Image]) -> OrientationCredential | None:
@@ -603,22 +474,19 @@ class GenericSingleActionAdapter:
         return build_device_capability_snapshot(device_id=str(getattr(self.robot, 'device_id', '') or 'unknown-device'),
             supported_actions=self.supported_action_kinds(), raw_profile=raw_profile)
 
-    def capability_gap(self, requested_action: str, *, required_parameters: tuple[str, ...]=()) -> Any:
-        return self.capability_snapshot().gap(requested_action, required_parameters=required_parameters)
-
     def __init__(self, *, capture: Callable[[], Image.Image], observer: SingleStepGenericSceneObserver, robot: Any,
         device_executor: DeviceExecutor | None=None, app_launcher: Any=None,
         text_transport: TrustedTextTransportPort | None=None,
         foreground_identity_provider: Callable[[], ForegroundAppIdentity | None] | None=None,
         controller: UniversalActionController | None=None,
         frame_interval: float=0.37, post_action_settle: float=1.5, post_action_timeout: float | None=None,
-        post_action_continuous_timeout: float | None=None, post_action_max_observations: int=2,
+        post_action_continuous_timeout: float | None=None,
         post_action_min_relative_sharpness: float=0.8, post_action_min_reference_sharpness: float=2.0,
         post_action_phone_view_delta_max: float=45.0, confirmation_frame_delta_max: float=6.0,
         qwerty_row_snapper: Callable[[tuple[Image.Image, ...] | list[Image.Image], dict[str, Any]], dict[str,
         Any] | None] | None=None, text_point_grounder: Callable[[tuple[Image.Image, ...] | list[Image.Image], UIScene,
         SemanticAction], LocalPointGrounding | None] | None=None, require_local_qwerty_row_snap: bool=False,
-        device_id: str, input_lineage_store: TypedInputLineageStorePort | None=None) -> None:
+        device_id: str) -> None:
         self.capture = capture
         self.observer = observer
         self.robot = robot
@@ -639,7 +507,6 @@ class GenericSingleActionAdapter:
             45.0 if post_action_continuous_timeout is None and post_action_timeout
             is None else self.post_action_timeout if post_action_continuous_timeout
             is None else float(post_action_continuous_timeout))
-        self.post_action_max_observations = min(2, max(1, int(post_action_max_observations)))
         self.post_action_min_relative_sharpness = max(0.0, min(1.0, float(post_action_min_relative_sharpness)))
         self.post_action_min_reference_sharpness = max(0.0, float(post_action_min_reference_sharpness))
         self.post_action_phone_view_delta_max = max(0.0, float(post_action_phone_view_delta_max))
@@ -647,7 +514,6 @@ class GenericSingleActionAdapter:
         self.qwerty_row_snapper = qwerty_row_snapper
         self.text_point_grounder = text_point_grounder
         self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
-        self.input_lineage_store = input_lineage_store
         try:
             self.device_id = validate_device_id(device_id)
         except OrientationSafetyError as exc:
@@ -693,28 +559,24 @@ class GenericSingleActionAdapter:
         return frames, paths
 
     def _capture_scene_once(self, goal: GenericIntentDraft, *, evidence_dir: Path | None=None,
-        prefix: str) -> tuple[UIScene, list[Image.Image], tuple[str, ...]]:
+        prefix: str) -> tuple[UIScene, list[Image.Image], tuple[str, ...], dict[str, Any]]:
         frames = self._capture_frame_burst()
         paths = self._save_frames(frames, evidence_dir, prefix)
         try:
-            scene = self._observe_scene(frames, goal.to_dict())
+            scene, model_decision = self._observe_scene(frames, goal.to_dict())
         except RuntimeError as exc:
             diagnostic_paths = persist_observer_failure_diagnostic(self.observer, evidence_dir=evidence_dir,
                 prefix=prefix, error=exc)
             raise GenericActionAdapterError(f'通用页面观察失败：{exc}', evidence=paths + diagnostic_paths) from exc
-        return scene, frames, paths
+        return scene, frames, paths, model_decision
 
-    def _observe_scene(self, frames: list[Image.Image] | tuple[Image.Image, ...], goal_context: dict[str, Any], *,
-        input_lineage_override: TypedInputLineage | None=None,
-        post_action_context: PostActionVisualContext | None=None) -> UIScene:
+    def _observe_scene(self, frames: list[Image.Image] | tuple[Image.Image, ...], goal_context: dict[str, Any]
+        ) -> tuple[UIScene, dict[str, Any]]:
         kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
         if getattr(self.observer, 'supports_runtime_action_contract', False) is True:
             kwargs['available_action_kinds'] = self.supported_action_kinds()
-        if (getattr(self.observer, 'input_lineage_store', None) is not None
-            or getattr(self.observer, 'supports_trusted_foreground_identity', False) is True):
+        if getattr(self.observer, 'supports_trusted_foreground_identity', False) is True:
             kwargs["device_id"] = self.device_id
-        if getattr(self.observer, 'input_lineage_store', None) is not None:
-            kwargs["input_lineage_override"] = input_lineage_override
         if (self.foreground_identity_provider is not None
             and getattr(self.observer, 'supports_trusted_foreground_identity', False) is True):
             identity = self.foreground_identity_provider()
@@ -723,10 +585,13 @@ class GenericSingleActionAdapter:
                 reject_if(identity.device_id != self.device_id,
                     GenericActionAdapterError("Companion 前台 App 身份与当前设备不一致。"))
                 kwargs["trusted_foreground_identity"] = identity
-        if (post_action_context is not None and getattr(self.observer, 'supports_post_action_visual_context',
-            False) is True):
-            kwargs["post_action_context"] = post_action_context
-        return self.observer.observe(**kwargs)
+        observe_with_decision = getattr(self.observer, "observe_with_decision", None)
+        reject_if(not callable(observe_with_decision),
+            GenericActionAdapterError("当前观察器不支持同一截图响应中的 scene + decision 合同。"))
+        scene, model_decision = observe_with_decision(**kwargs)
+        reject_if(not isinstance(model_decision, Mapping),
+            GenericActionAdapterError("当前观察缺少同一截图响应中的 Qwen decision。"))
+        return scene, dict(model_decision)
 
     def capture_scene(
         self,
@@ -734,7 +599,7 @@ class GenericSingleActionAdapter:
         *,
         evidence_dir: Path | None,
         prefix: str,
-    ) -> tuple[UIScene, list[Image.Image], tuple[str, ...]]:
+    ) -> tuple[UIScene, list[Image.Image], tuple[str, ...], dict[str, Any]]:
         # One step permits one Qwen request; stability sampling never triggers model resampling.
         try:
             return self._capture_scene_once(goal, evidence_dir=evidence_dir, prefix=f'{prefix}_attempt_1')
@@ -816,15 +681,12 @@ class GenericSingleActionAdapter:
 
     def _observe_stable_post_action_scene(self, goal: GenericIntentDraft, *, before: UIScene,
         before_frames: tuple[Image.Image, ...], resolved: ResolvedSemanticAction,
-        input_lineage_override: TypedInputLineage | None, evidence_dir: Path | None,
-        evidence_prefix: str) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str,
-        ...], tuple[str, ...], tuple[str, ...]]:
+        evidence_dir: Path | None, evidence_prefix: str) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str,
+        ...], tuple[str, ...], dict[str, Any]]:
         action_timeout = self._post_action_timeout_for(resolved)
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, action_timeout))
 
-        observation_context = _post_action_observation_context(goal, resolved, physical_action_executed=True)
-        post_action_visual_context = _post_action_visual_context(resolved)
         prefix = f"{evidence_prefix}_after_attempt_1"
         try:
             frames, paths = self._capture_stable_post_action_frames(deadline=time.monotonic() + action_timeout,
@@ -835,8 +697,7 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'动作后画面采集失败：{exc}', evidence=tuple(exc.evidence)) from exc
         all_paths = paths
         try:
-            after = self._observe_scene(frames, observation_context, input_lineage_override=input_lineage_override,
-                post_action_context=post_action_visual_context)
+            after, model_decision = self._observe_scene(frames, goal.to_dict())
         except RuntimeError as exc:
             all_paths += persist_observer_failure_diagnostic(self.observer, evidence_dir=evidence_dir, prefix=prefix,
                 error=exc)
@@ -844,116 +705,12 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError('通用页面观察失败：' + observation_errors[0], evidence=all_paths,
                 observation_errors=observation_errors) from exc
 
-        after = self._reconcile_literal_key_visual_wrap(resolved, before, after)
-        after = self._reconcile_verified_text_horizontal_suffix(resolved, before, after)
         try:
             controller_evidence = self.controller.verify_after_action(resolved, before, after)
-            verification_errors: tuple[str, ...] = ()
         except UniversalActionError as exc:
-            controller_evidence = ()
-            verification_errors = (f"第1轮动作结果不匹配：{exc}",)
-        return (after, tuple(frames), paths, all_paths, (), verification_errors, controller_evidence)
-
-    @staticmethod
-    def _reconcile_literal_key_visual_wrap(resolved: ResolvedSemanticAction, before: UIScene,
-        after: UIScene) -> UIScene:
-        """Remove presentation-only line wraps under one exact key receipt."""
-
-        if resolved.kind != 'tap_semantic' or not resolved.target_element_id:
-            return after
-        try:
-            key = before.get_element(resolved.target_element_id)
-        except UISceneError:
-            return after
-        if key.meaning != 'input_exact_literal_key':
-            return after
-        states = key.states
-        prior = states.get("prior_input_value")
-        key_value = states.get("key_value")
-        expected = states.get("expected_input_value")
-        input_id = str(states.get("input_element_id") or "").strip()
-        expected_state = resolved.expected_effect.get("element_state")
-        expected_states = expected_state.get("states") if isinstance(expected_state, dict) else None
-        if (not isinstance(prior, str) or not isinstance(key_value, str) or len(key_value) != 1 or (key_value in {'\r',
-            '\n'}) or ('\r' in prior) or ('\n' in prior) or (expected != prior + key_value) or (not isinstance(expected,
-            str)) or ('\r' in expected) or ('\n' in expected) or (expected_states != {'value': expected})
-            or (not input_id)):
-            return after
-        candidates = tuple((element for element in after.elements if element.element_id == input_id
-            and element.role == 'input' and (element.meaning == 'application_text_input')
-            and (element.states.get('fully_visible') is True)
-            and (element.states.get('focused') is True)))
-        if len(candidates) != 1:
-            return after
-        candidate = candidates[0]
-        observed = candidate.states.get("value")
-        if (not isinstance(observed, str) or not {'\r', '\n'} & set(observed)
-            or observed.count('\r') + observed.count('\n') > 3 or (observed.replace('\r', '').replace('\n',
-            '') != expected)):
-            return after
-        replacement = replace(candidate, label=expected if candidate.label == observed else candidate.label,
-            states={**candidate.states, 'value': expected}, evidence=candidate.evidence + ('本地逐键回执确认该换行为控件视觉软折行',))
-        reconciled = replace(after, elements=tuple((replacement if element.element_id ==
-            input_id else element for element in after.elements)))
-        reconciled.validate()
-        return reconciled
-
-    @staticmethod
-    def _reconcile_verified_text_horizontal_suffix(resolved: ResolvedSemanticAction, before: UIScene,
-        after: UIScene) -> UIScene:
-        """Recover a clipped single-line suffix only from an exact typed transaction."""
-
-        if (resolved.kind != 'input_verified_text' or resolved.input_method != 'direct_latin'
-            or (not resolved.formal_candidate_id) or (not resolved.target_element_id)):
-            return after
-        prior = resolved.prior_input_value
-        fragment = resolved.input_fragment
-        expected = resolved.expected_input_value
-        expected_state = resolved.expected_effect.get("element_state")
-        expected_states = expected_state.get("states") if isinstance(expected_state, dict) else None
-        if (not isinstance(prior, str) or not prior or (not isinstance(fragment,
-            str)) or (not fragment) or (not isinstance(expected,
-            str)) or (expected != prior + fragment) or any((marker in expected for marker in ('\r',
-            '\n'))) or (expected_states != {'value': expected})):
-            return after
-        try:
-            before_input = before.get_element(resolved.target_element_id)
-        except UISceneError:
-            return after
-        before_states = before_input.states
-        typed_field_id = str(before_states.get("input_field_id") or "").strip()
-        if (before_input.role != 'input' or before_input.meaning != 'application_text_input'
-            or before_states.get('focused') is not True or (before_states.get('input_multiline') is not False)
-            or (before_states.get('value') != prior) or (before_states.get('keyboard_layout') != 'qwerty')
-            or (before_states.get('keyboard_input_mode') != 'direct_latin') or (not typed_field_id)
-            or (typed_field_id == 'unknown')):
-            return after
-        candidates = tuple((element for element in after.elements if element.element_id == resolved.target_element_id
-            and element.role == 'input' and (element.meaning == 'application_text_input')
-            and (element.states.get('fully_visible') is True)
-            and (element.states.get('focused') is True) and (element.states.get('input_multiline') is False)
-            and (str(element.states.get('input_field_id') or '').strip() == typed_field_id)
-            and (element.states.get('keyboard_layout') == 'qwerty')
-            and (element.states.get('keyboard_input_mode') == 'direct_latin')))
-        if len(candidates) != 1:
-            return after
-        candidate = candidates[0]
-        observed = candidate.states.get("value")
-        visible_prior_suffix = observed[:-len(fragment)] if isinstance(observed,
-            str) and len(observed) > len(fragment) else ''
-        required_overlap = min(4, len(prior))
-        if (not isinstance(observed, str) or not observed or observed == expected or (not expected.endswith(observed))
-            or (not observed.endswith(fragment)) or (len(visible_prior_suffix) < required_overlap)
-            or (not prior.endswith(visible_prior_suffix)) or (not input_app_identity_compatible(before.foreground_app_id,
-            after.foreground_app_id)) or (not input_screen_identity_compatible(before.screen_id, after.screen_id))):
-            return after
-        replacement = replace(candidate, states={**candidate.states, 'visible_value_suffix': observed,
-            'value_visibility': 'horizontal_suffix', 'value': expected},
-            evidence=candidate.evidence + ('本地精确分段交易确认完整值：' + expected, '画面仅显示横向滚动尾段：' + observed))
-        reconciled = replace(after, elements=tuple((replacement if element.element_id ==
-            resolved.target_element_id else element for element in after.elements)))
-        reconciled.validate()
-        return reconciled
+            raise GenericActionAdapterError(f"必要动作后硬校验失败：{exc}", evidence=all_paths,
+                verification_errors=(str(exc),)) from exc
+        return (after, tuple(frames), paths, all_paths, (), controller_evidence, model_decision)
 
     def _prepare_keyboard_geometry(self, resolved: ResolvedSemanticAction, scene: UIScene, frames: tuple[Image.Image,
         ...] | list[Image.Image]) -> dict[str, Any] | None:
@@ -1043,35 +800,6 @@ class GenericSingleActionAdapter:
             clear()
             raise GenericActionAdapterError(f'动作前单步画面方向凭据校验失败：{exc}', evidence=paths) from exc
 
-    @staticmethod
-    def _pending_input_lineage(resolved: ResolvedSemanticAction, device_id: str, before: UIScene,
-        hardware_receipt: dict[str, Any] | None) -> TypedInputLineage | None:
-        if hardware_receipt is None and resolved.kind != 'input_verified_text':
-            return None
-        try:
-            return build_pending_input_lineage(device_id=device_id, resolved_action=resolved.to_dict(),
-                before_scene=before.to_dict(), hardware_receipt=hardware_receipt)
-        except (InputValueLineageError, TypeError, ValueError):
-            return None
-
-    def _record_verified_input_lineage(self, resolved: ResolvedSemanticAction, before: UIScene, after: UIScene,
-        after_frames: tuple[Image.Image, ...], hardware_receipt: dict[str, Any] | None) -> None:
-        store = self.input_lineage_store
-        if store is None:
-            return
-        values = {'device_id': self.device_id, 'resolved_action': resolved.to_dict(), 'before_scene': before.to_dict(),
-            'after_scene': after.to_dict(), 'after_frames': after_frames}
-        try:
-            if resolved.kind == 'clear_verified_text':
-                store.discard(self.device_id)
-                return
-            action_type = 'text' if resolved.kind == 'input_verified_text' else 'newline' if resolved.kind == (
-                'press_enter') else 'literal' if hardware_receipt is not None else None
-            if action_type is not None:
-                store.record_verified_action(**values, action_type=action_type, hardware_receipt=hardware_receipt)
-        except (InputValueLineageError, OSError, TypeError, ValueError):
-            pass
-
     def execute(self, *, requested_action: SemanticAction, planned_scene: UIScene, goal: GenericIntentDraft,
         confirmed: bool, evidence_dir: Path | None=None, planned_frames: tuple[Image.Image,
         ...] | list[Image.Image]=(), action_authority: ConfirmationAuthority | None=None
@@ -1080,45 +808,24 @@ class GenericSingleActionAdapter:
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
-        primary_input_confirmation_reused = False
         confirmation_frame_delta: float | None = None
-        if planned_frames:
-            before_frames, before_paths = self._capture_confirmation_frames(evidence_dir=evidence_dir, prefix=f'{
-                evidence_prefix}_before')
-            frame_delta = self._confirmation_frame_delta(planned_frames, before_frames)
-            confirmation_frame_delta = frame_delta
-            if frame_delta > self.confirmation_frame_delta_max:
-                raise GenericActionAdapterError(
-                    "确认时本地真实画面已变化："
-                    f"差异{frame_delta:.2f}超过阈值{self.confirmation_frame_delta_max:.2f}",
-                    evidence=before_paths,
-                )
-            local_frame_identity_verified = True
-            before = planned_scene
-            primary_input_confirmation_reused = self._primary_input_confirmation_reusable(requested_action,
-                planned_scene)
-        else:
-            before, before_frames, before_paths = self.capture_scene(goal, evidence_dir=evidence_dir, prefix=f'{
-                evidence_prefix}_before')
-        try:
-            rebind_planned_scene = planned_scene
-            # Rebind the canonical candidate after four-frame identity; another Qwen read adds no authority.
-            rebound = self._rebind_action(
-                requested_action,
-                rebind_planned_scene,
-                before,
-                local_frame_identity_verified=local_frame_identity_verified,
-                # Verified text uses fresh keyboard geometry; other actions retain planned/fresh overlap checks.
-                require_geometry_overlap=not (
-                    local_frame_identity_verified
-                    and requested_action.action == "input_verified_text"
-                ),
+        reject_if(not planned_frames, GenericActionAdapterError(
+            "执行动作必须携带产生该 Qwen 动作的当前截图帧。"))
+        before_frames, before_paths = self._capture_confirmation_frames(evidence_dir=evidence_dir, prefix=f'{
+            evidence_prefix}_before')
+        frame_delta = self._confirmation_frame_delta(planned_frames, before_frames)
+        confirmation_frame_delta = frame_delta
+        if frame_delta > self.confirmation_frame_delta_max:
+            raise GenericActionAdapterError(
+                "确认时本地真实画面已变化："
+                f"差异{frame_delta:.2f}超过阈值{self.confirmation_frame_delta_max:.2f}",
+                evidence=before_paths,
             )
-        except GenericActionAdapterError as exc:
-            raise GenericActionAdapterError(str(exc), evidence=before_paths + tuple(getattr(exc, 'evidence',
-                ()))) from exc
-        except RuntimeError as exc:
-            raise GenericActionAdapterError(f'确认前独立目标几何审计失败：{exc}', evidence=before_paths) from exc
+        local_frame_identity_verified = True
+        before = planned_scene
+        # Qwen's action is immutable after selection.  Local code may validate
+        # device/scope/geometry, but it may not rewrite its semantic fields.
+        rebound = requested_action
         local_point_grounding: LocalPointGrounding | None = None
         if callable(self.text_point_grounder):
             try:
@@ -1210,8 +917,6 @@ class GenericSingleActionAdapter:
             if callable(clear_authorization):
                 clear_authorization()
 
-        pending_input_lineage = self._pending_input_lineage(resolved, self.device_id, before, hardware_receipt)
-
         try:
             (
                 after,
@@ -1219,14 +924,13 @@ class GenericSingleActionAdapter:
                 after_frame_paths,
                 all_after_paths,
                 observation_errors,
-                verification_errors,
                 controller_transition_evidence,
+                after_model_decision,
             ) = self._observe_stable_post_action_scene(
                 goal,
                 before=before,
                 before_frames=tuple(before_frames),
                 resolved=resolved,
-                input_lineage_override=pending_input_lineage,
                 evidence_dir=evidence_dir,
                 evidence_prefix=evidence_prefix,
             )
@@ -1235,101 +939,20 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
                 observation_errors=tuple(getattr(exc, 'observation_errors', ())), verification_errors=tuple(getattr(exc,
                 'verification_errors', ())), execution_metadata=execution_metadata) from exc
-
-        if not verification_errors:
-            self._record_verified_input_lineage(resolved, before, after, after_frames, hardware_receipt)
-
         return GenericActionExecutionResult(requested_action=requested_action, rebound_action=rebound,
             resolved_action=resolved, before_scene=before, after_scene=after,
             planned_scene_fingerprint=planned_scene.fingerprint,
             confirmation_frame_identity_verified=local_frame_identity_verified,
             confirmation_frame_delta=confirmation_frame_delta, physical_actions=physical_actions,
-            primary_input_confirmation_reused=primary_input_confirmation_reused,
-            action_outcome='mismatched' if verification_errors else 'matched', verification_errors=verification_errors,
+            primary_input_confirmation_reused=False,
+            action_outcome='matched', verification_errors=(),
             robot_result=robot_result, hardware_receipt=hardware_receipt, execution_metadata=execution_metadata,
             evidence=before_paths + all_after_paths,
             after_frames=after_frames, after_frame_paths=after_frame_paths, observation_errors=observation_errors,
-            controller_transition_evidence=controller_transition_evidence, before_frames=before_frames,
+            controller_transition_evidence=controller_transition_evidence,
+            after_model_decision=after_model_decision, before_frames=before_frames,
             before_frame_paths=before_paths, orientation_credential=orientation_credential)
 
-    def _rebind_action(self, requested: SemanticAction, planned_scene: UIScene, fresh_scene: UIScene, *,
-        local_frame_identity_verified: bool=False, require_geometry_overlap: bool=True) -> SemanticAction:
-        planned_app = planned_scene.foreground_app_id
-        fresh_app = fresh_scene.foreground_app_id
-        reject_if(
-            not local_frame_identity_verified and planned_app != 'unknown' and (fresh_app != 'unknown')
-            and (planned_app != fresh_app),
-            GenericActionAdapterError(f"确认时前台 App 已变化：{planned_app} -> {fresh_app}"),
-        )
-        reject_if(
-            not local_frame_identity_verified and planned_scene.screen_id != 'unknown'
-            and (planned_scene.screen_id != fresh_scene.screen_id),
-            GenericActionAdapterError(f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}"),
-        )
-        single_element_actions = {'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
-            'clear_verified_text', 'double_tap', 'long_press'}
-        if requested.action not in single_element_actions | {'drag'}:
-            return requested
-
-        def stable_rebind_states(states: dict[str, Any]) -> dict[str, Any]:
-            return {key: value for key, value in states.items() if key not in {'goal_relevant',
-                'keyboard_geometry'} and (not (key == 'keyboard_case_mode' and str(value
-                or '').strip().casefold() == 'unknown'))}
-
-        def rebind_element(prefix: str='') -> UIElement:
-            original_id = str(requested.params.get(f"{prefix}element_id") or "").strip()
-            try:
-                original = planned_scene.get_element(original_id)
-            except UISceneError as exc:
-                raise GenericActionAdapterError(f"原始场景目标无效：{exc}") from exc
-            matches = fresh_scene.find_elements(label=original.label or None, role=original.role,
-                states=stable_rebind_states(dict(original.states)))
-            selector_roles = {"button", "tab", "list_item", "text"}
-            if not matches and requested.action in {'tap_semantic', 'dismiss_overlay', 'double_tap'} and (prefix == ''):
-                stable_states = stable_rebind_states(dict(original.states))
-                if original.label and original.role in selector_roles:
-                    aliases = tuple((element for element in fresh_scene.find_elements(label=original.label,
-                        states=stable_states) if element.role in selector_roles))
-                elif not original.label and original.role in {'icon', 'button'}:
-                    aliases = tuple((element for element in fresh_scene.find_elements(meaning=original.meaning,
-                        states=stable_states) if element.role in {'icon', 'button'} and (not element.label)))
-                else:
-                    aliases = ()
-                if len(aliases) == 1:
-                    matches = aliases
-            reject_if(len(matches) != 1, GenericActionAdapterError(f'确认时目标语义不再严格唯一：{original.meaning}，匹配{len(matches)}个'))
-            current = matches[0]
-            original_stable_states = stable_rebind_states(dict(original.states))
-            current_stable_states = stable_rebind_states(dict(current.states))
-            if str(original.states.get('keyboard_case_mode') or '').strip().casefold() == 'unknown':
-                current_stable_states.pop("keyboard_case_mode", None)
-            states_match = current_stable_states == original_stable_states
-            if (not states_match and 'fully_visible' not in original_stable_states
-                and (current_stable_states.get('fully_visible') is True)):
-                states_match = {key: value for key, value in current_stable_states.items() if key !=
-                    'fully_visible'} == original_stable_states
-            reject_if(current.label != original.label or not states_match, GenericActionAdapterError('确认时目标标签或状态已经变化，旧确认失效。'))
-            overlap = bounds_overlap(original.bounds, current.bounds)
-            widths = (original.bounds[2] - original.bounds[0], current.bounds[2] - current.bounds[0])
-            heights = (original.bounds[3] - original.bounds[1], current.bounds[3] - current.bounds[1])
-            center_delta = tuple(abs(left - right) for left, right in zip(original.center, current.center))
-            tight_loose_same_target = overlap['intersection_over_smaller'] >= 0.5 and center_delta[0] <= max(0.03,
-                0.25 * max(widths)) and (center_delta[1] <= max(0.02, 0.5 * max(heights)))
-            if require_geometry_overlap and overlap['iou'] < 0.6 and (not tight_loose_same_target):
-                raise GenericActionAdapterError(
-                    "确认时目标区域已明显移动，旧确认失效："
-                    f"iou={overlap['iou']:.3f}, smaller_coverage={overlap['intersection_over_smaller']:.3f}, "
-                    f"center_delta=({center_delta[0]:.3f},{center_delta[1]:.3f})。"
-                )
-            return current
-
-        prefixes = ("source_", "destination_") if requested.action == "drag" else ("",)
-        params = dict(requested.params)
-        for prefix in prefixes:
-            current = rebind_element(prefix)
-            params.update({f'{prefix}element_id': current.element_id, f'{prefix}target': current.meaning, f'{
-                prefix}role': current.role, f'{prefix}label': current.label, f'{prefix}states': dict(current.states)})
-        return SemanticAction(node_id=requested.node_id, action=requested.action, params=params)
 
     @staticmethod
     def _save_frames(frames: list[Image.Image], evidence_dir: Path | None, prefix: str) -> tuple[str, ...]:

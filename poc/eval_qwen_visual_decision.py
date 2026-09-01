@@ -8,7 +8,6 @@ import os
 import queue
 import time
 import uuid
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,14 +21,6 @@ from agent.infrastructure.qwen_runtime_errors import (
 )
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.qwen_task_context import QwenTaskContext
-from agent.domain.task_graph import (
-    CompletionCondition,
-    DynamicTaskGraph,
-    GraphGoal,
-    Subgoal,
-    TargetApp,
-)
-from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from agent.domain.trusted_observation import TrustedObservation
 from agent.infrastructure.trusted_observation_frames import (
     build_trusted_observation,
@@ -119,11 +110,14 @@ def _materialize_case(raw_case: Any, *, index: int) -> dict[str, Any]:
             "current_subgoal": {"subgoal_id": subgoal_id,
                 "objective": str(task.get("subgoal_objective") or objective).strip(), "status": "active",
                 "depends_on": [], "constraints": constraints,
-                "completion_conditions": completion_conditions, "completion_evidence": [], "effect_ids": [],
-                "execution_class": execution_class},
+                "completion_conditions": completion_conditions, "completion_evidence": [],
+                "execution_class": execution_class,
+                **({"input_field_id": str(task.get('input_field_id') or 'primary_input'),
+                    "input_operation": str(task.get('input_operation') or 'input_verified_text')}
+                    if 'input_text' in entities else {})},
             "current_execution_class": execution_class,
             "effect_intents": [],
-            "effect_gate": {"required": False, "state": "not_required", "effect_ids": [],
+            "effect_gate": {"state": "not_required",
                 "scope": {"task_id": task_id, "device_id": device_id, "revision": revision,
                     "subgoal_id": subgoal_id}, "effect_action_allowed": False},
         }
@@ -141,63 +135,7 @@ def _materialize_case(raw_case: Any, *, index: int) -> dict[str, Any]:
     context = QwenTaskContext.from_dict(dict(case["task_context"]))
     if context.current_execution_class not in {"navigate", "observe"} or context.effect_intents:
         raise ValueError(f"离线视觉用例 {case_id or index} 只允许只读或导航任务。")
-    case["_semantic_ir"] = _semantic_ir_for_context(context)
     return case
-
-
-def _semantic_ir_for_context(context: QwenTaskContext) -> Any:
-    target_apps = tuple(
-        TargetApp(
-            app_id=str(item.get("app_id") or "").strip(),
-            app_name=str(item.get("app_name") or "").strip(),
-        )
-        for item in context.goal.get("target_apps") or []
-        if isinstance(item, dict)
-    )
-    goal_entities = dict(context.goal.get("entities") or {})
-    goal_entities.setdefault("target_surface", "current_surface")
-    conditions = tuple(
-        CompletionCondition(
-            condition_id=str(item.get("condition_id") or "").strip(),
-            description=str(item.get("description") or "").strip(),
-            evidence_required=tuple(str(value).strip() for value in item.get("evidence_required") or []),
-        )
-        for item in context.goal_completion_conditions
-    )
-    current = context.current_subgoal
-    impact = "navigation_only" if context.current_execution_class == "navigate" else "read_only"
-    subgoal = Subgoal(
-        subgoal_id=str(current.get("subgoal_id") or "").strip(),
-        objective=str(current.get("objective") or "").strip(),
-        status="active",
-        depends_on=tuple(str(item).strip() for item in current.get("depends_on") or []),
-        constraints=tuple(str(item).strip() for item in current.get("constraints") or []),
-        completion_conditions=tuple(
-            str(item).strip() for item in current.get("completion_conditions") or []
-        ),
-        completion_evidence=(),
-        risk_action_ids=(),
-        external_impact=impact,
-    )
-    graph = DynamicTaskGraph(
-        task_id=context.task_id,
-        device_id=context.device_id,
-        revision=context.revision,
-        status="running",
-        goal=GraphGoal(
-            objective=str(context.goal.get("objective") or "").strip(),
-            target_apps=target_apps,
-            entities=goal_entities,
-        ),
-        constraints=tuple(context.global_constraints),
-        completion_conditions=conditions,
-        risk_actions=(),
-        subgoals=(subgoal,),
-        active_subgoal_id=subgoal.subgoal_id,
-        raw_user_goal=str(context.goal.get("objective") or "").strip(),
-    )
-    graph.validate()
-    return compile_formal_semantic_authority(graph).semantic_ir
 
 
 def _load_frames(case: dict[str, Any], manifest_path: Path) -> tuple[list[Image.Image], list[str]]:
@@ -425,7 +363,6 @@ def _evaluate_case(
     scene_observer = SingleStepGenericSceneObserver(provider)
     decision_observer = QwenVisualDecisionObserver(
         provider,
-        decision_source=scene_observer,
         trusted_observation_frame_validator=(
             validate_trusted_observation_against_frames
         ),
@@ -437,12 +374,9 @@ def _evaluate_case(
     try:
         frames, frame_paths = _load_frames(case, path)
         base_context = QwenTaskContext.from_dict(dict(case["task_context"]))
-        context = replace(
-            base_context,
-            semantic_ir=case.get("_semantic_ir") or _semantic_ir_for_context(base_context),
-        )
+        context = base_context
         context.validate()
-        scene = scene_observer.observe(
+        scene, model_decision = scene_observer.observe_with_decision(
             frames=frames,
             goal_context={'device_id': context.device_id,
                 'objective': str(context.current_subgoal.get('objective') or ''),
@@ -462,6 +396,7 @@ def _evaluate_case(
             task_context=context,
             trusted_observation=observation,
             decision_number=decision_number,
+            model_decision=model_decision,
         )
         value = decision.to_dict()
         status = decision.proposal.status

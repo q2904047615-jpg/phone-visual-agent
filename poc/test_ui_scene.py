@@ -9,7 +9,6 @@ from agent.domain.ui_scene import (
     UIElement,
     UIScene,
     UISceneError,
-    scene_surface_kind,
 )
 from agent.domain.universal_action_controller import (
     LOCAL_POINT_GROUNDING_SOURCE,
@@ -168,7 +167,7 @@ class UISceneTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual("target", current.unique_trusted_goal_element().element_id)
+        self.assertEqual("target", current.get_element("target").element_id)
         self.assertIs(True, current.system_ui.navigation_bar_visible)
         self.assertEqual("upright", current.camera_alignment.phone_content_rotation)
 
@@ -266,18 +265,18 @@ class UISceneTests(unittest.TestCase):
             "summary": "安卓桌面", "elements": [], "stable": True, "confidence": 0.95})
 
         self.assertEqual("com.miui.home", current.foreground_app_id)
-        self.assertEqual("launcher", scene_surface_kind(current))
+        self.assertEqual("com.miui.home", current.foreground_app_id)
 
     def test_scene_rejects_model_action_fields(self) -> None:
         with self.assertRaisesRegex(UISceneError, "动作字段"):
             element("one", "confirm", states={"next_action": "tap"}).validate()
 
-    def test_unique_semantic_target_is_resolved(self) -> None:
+    def test_qwen_selected_element_id_is_resolved_directly(self) -> None:
         current = scene(element("five", "digit_5"))
         action = SemanticAction(
             node_id="tap_five",
             action="tap_semantic",
-            params={"target": "digit_5"},
+            params={"target": "digit_5", "element_id": "five"},
         )
         resolved = UniversalActionController().resolve_one(action, current)
         self.assertEqual(resolved.target_element_id, "five")
@@ -443,7 +442,7 @@ class UISceneTests(unittest.TestCase):
             "elements": raw_elements,
         })
 
-        self.assertEqual("target", current.unique_trusted_goal_element().element_id)
+        self.assertEqual("target", current.get_element("target").element_id)
         self.assertNotIn("bad-optional", {item.element_id for item in current.elements})
         self.assertEqual(66, len(current.elements))
 
@@ -455,10 +454,7 @@ class UISceneTests(unittest.TestCase):
         )
         conflicting = element("other", "close_tab")
 
-        self.assertEqual(
-            target,
-            scene(target, conflicting, confidence=0.6).unique_trusted_goal_element()
-        )
+        self.assertEqual(target, scene(target, conflicting, confidence=0.6).get_element("tab-list"))
 
     def test_non_actionable_goal_context_does_not_veto_unique_action_target(self) -> None:
         target = element(
@@ -480,10 +476,7 @@ class UISceneTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(
-            target,
-            scene(target, page_context).unique_trusted_goal_element(),
-        )
+        self.assertEqual(target, scene(target, page_context).get_element("wechat"))
 
     def test_completion_evidence_does_not_veto_screen_action(self) -> None:
         evidence = element(
@@ -493,7 +486,7 @@ class UISceneTests(unittest.TestCase):
             states={"goal_relevant": True},
         )
         current = scene(evidence, confidence=0.6)
-        self.assertEqual((evidence,), current.trusted_completion_evidence())
+        self.assertEqual(evidence, current.get_element("visible-count"))
 
         resolved = UniversalActionController().resolve_one(
             SemanticAction(
@@ -506,34 +499,35 @@ class UISceneTests(unittest.TestCase):
 
         self.assertEqual("swipe", resolved.kind)
 
-    def test_container_is_valid_scene_structure_but_not_clickable(self) -> None:
+    def test_container_is_valid_current_frame_point_target(self) -> None:
         content = element("content", "video_content", role="container")
         current = scene(content)
         current.validate()
         action = SemanticAction(
             node_id="tap_content",
             action="tap_semantic",
-            params={"target": "video_content", "role": "container"},
+            params={"target": "video_content", "role": "container", "element_id": "content"},
         )
-        with self.assertRaisesRegex(UniversalActionError, "页面容器不是可点击控件"):
-            UniversalActionController().resolve_one(action, current)
+        resolved = UniversalActionController().resolve_one(action, current)
+        self.assertEqual("content", resolved.target_element_id)
+        self.assertEqual(content.center, resolved.normalized_point)
 
-    def test_ambiguous_target_stops_without_guessing(self) -> None:
+    def test_qwen_selected_element_id_does_not_trigger_local_semantic_reselection(self) -> None:
         current = scene(element("one", "search"), element("two", "search"))
         action = SemanticAction(
             node_id="tap_search",
             action="tap_semantic",
-            params={"target": "search"},
+            params={"target": "search", "element_id": "two"},
         )
-        with self.assertRaisesRegex(UniversalActionError, "不唯一"):
-            UniversalActionController().resolve_one(action, current)
+        resolved = UniversalActionController().resolve_one(action, current)
+        self.assertEqual("two", resolved.target_element_id)
 
     def test_ordinary_send_does_not_require_controller_confirmation(self) -> None:
         current = scene(element("send", "send"))
         action = SemanticAction(
             node_id="send",
             action="tap_semantic",
-            params={"target": "send"},
+            params={"target": "send", "element_id": "send"},
         )
         resolved = UniversalActionController().resolve_one(action, current)
         self.assertEqual("tap_semantic", resolved.kind)
@@ -550,7 +544,52 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual("tap_semantic", resolved.kind)
         self.assertEqual("heart", resolved.target_element_id)
 
-    def test_expected_liked_state_does_not_require_confirmation(self) -> None:
+    def test_selected_element_id_does_not_recheck_copied_semantics_or_display_states(self) -> None:
+        selected = element(
+            "current-target",
+            "current_meaning",
+            states={
+                "visible": False,
+                "fully_visible": False,
+                "enabled": False,
+                "occluded": True,
+            },
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="tap-current",
+                action="tap_semantic",
+                params={
+                    "element_id": "current-target",
+                    "target": "stale copied meaning",
+                    "role": "dialog",
+                    "label": "stale copied label",
+                    "states": "stale copied states",
+                },
+            ),
+            scene(selected),
+        )
+
+        self.assertEqual("current-target", resolved.target_element_id)
+        self.assertEqual(selected.center, resolved.normalized_point)
+
+    def test_typed_input_still_requires_actual_input_role(self) -> None:
+        not_an_input = element("selected-button", "current_control", role="button")
+        with self.assertRaisesRegex(UniversalActionError, "角色必须为 input"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="type",
+                    action="input_verified_text",
+                    params={
+                        "element_id": "selected-button",
+                        "role": "input",
+                        "text": "hello",
+                    },
+                ),
+                scene(not_an_input),
+            )
+
+    def test_ordinary_account_mutation_target_does_not_require_controller_confirmation(self) -> None:
         current = scene(element("heart", "reaction_button", role="button"))
         action = SemanticAction(
             node_id="like",
@@ -558,12 +597,6 @@ class UISceneTests(unittest.TestCase):
             params={
                 "target": "reaction_button",
                 "element_id": "heart",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "reaction_button",
-                        "states": {"is_liked": True},
-                    }
-                },
             },
         )
         resolved = UniversalActionController().resolve_one(action, current)
@@ -576,19 +609,17 @@ class UISceneTests(unittest.TestCase):
         action = SemanticAction(
             node_id="tap_five",
             action="tap_semantic",
-            params={"target": "digit_5"},
+            params={"target": "digit_5", "element_id": "five"},
         )
         resolved = controller.resolve_one(action, before)
         unchanged = scene(element("five", "digit_5"), fingerprint="before")
-        with self.assertRaisesRegex(UniversalActionError, "没有可验证"):
-            controller.verify_after_action(resolved, before, unchanged)
+        self.assertEqual((), controller.verify_after_action(resolved, before, unchanged))
         camera_noise_only = scene(element("five", "digit_5"), fingerprint="noise")
-        with self.assertRaisesRegex(UniversalActionError, "语义变化"):
-            controller.verify_after_action(resolved, before, camera_noise_only)
+        self.assertEqual((), controller.verify_after_action(resolved, before, camera_noise_only))
         changed = scene(element("result", "result_page"), fingerprint="after")
-        controller.verify_after_action(resolved, before, changed)
+        self.assertEqual((), controller.verify_after_action(resolved, before, changed))
 
-    def test_labeled_element_meaning_wording_drift_is_not_semantic_change(self) -> None:
+    def test_labeled_element_wording_drift_is_left_to_next_qwen_observation(self) -> None:
         controller = UniversalActionController()
         before_element = UIElement(
             element_id="home",
@@ -617,10 +648,9 @@ class UISceneTests(unittest.TestCase):
             before,
         )
 
-        with self.assertRaisesRegex(UniversalActionError, "没有可验证的语义变化"):
-            controller.verify_after_action(resolved, before, after)
+        self.assertEqual((), controller.verify_after_action(resolved, before, after))
 
-    def test_unlabeled_element_meaning_change_remains_semantic_change(self) -> None:
+    def test_unlabeled_element_change_is_left_to_next_qwen_observation(self) -> None:
         controller = UniversalActionController()
         before_icon = UIElement(
             element_id="icon",
@@ -639,11 +669,14 @@ class UISceneTests(unittest.TestCase):
             confidence=0.95,
         )
 
-        self.assertFalse(
-            controller.scenes_semantically_equivalent(
-                scene(before_icon, fingerprint="before"),
-                scene(after_icon, fingerprint="after"),
-            )
+        before = scene(before_icon, fingerprint="before")
+        resolved = controller.resolve_one(
+            SemanticAction(node_id="open", action="tap_semantic", params={"element_id": "icon"}),
+            before,
+        )
+        self.assertEqual(
+            (),
+            controller.verify_after_action(resolved, before, scene(after_icon, fingerprint="after")),
         )
 
     def test_verified_input_requires_focused_input_and_preserves_exact_text(self) -> None:
@@ -767,12 +800,6 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "field",
                     "target": "draft_input",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "draft_input",
-                            "states": {"value": ""},
-                        }
-                    },
                 },
             ),
             before,
@@ -835,12 +862,6 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "field",
                     "target": "application_text_input",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": ""},
-                        }
-                    },
                 },
             ),
             before,
@@ -905,12 +926,6 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "field",
                     "target": "application_text_input",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": ""},
-                        }
-                    },
                 },
             ),
             before,
@@ -941,18 +956,12 @@ class UISceneTests(unittest.TestCase):
                         params={
                             "element_id": "field",
                             "target": "application_text_input",
-                            "expected_effect": {
-                                "element_state": {
-                                    "meaning": "application_text_input",
-                                    "states": {"value": ""},
-                                }
-                            },
                         },
                     ),
                     bad,
                 )
 
-    def test_verified_clear_accepts_placeholder_app_and_same_screen_family(self) -> None:
+    def test_verified_clear_uses_exact_current_field_value_not_optional_app_or_screen_wording(self) -> None:
         states = {
             "focused": True,
             "value": "lxs,",
@@ -982,12 +991,6 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "field",
                     "target": "application_text_input",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": ""},
-                        }
-                    },
                 },
             ),
             before,
@@ -1011,26 +1014,16 @@ class UISceneTests(unittest.TestCase):
         UniversalActionController().verify_after_action(resolved, before, after)
 
         different_app = replace(after, app_id="com.example.other")
-        with self.assertRaisesRegex(UniversalActionError, "App 或页面身份"):
-            UniversalActionController().verify_after_action(
-                resolved,
-                before,
-                different_app,
-            )
+        UniversalActionController().verify_after_action(resolved, before, different_app)
 
         different_family = replace(
             after,
             app_id="com.example.real",
             screen_id="settings_page",
         )
-        with self.assertRaisesRegex(UniversalActionError, "App 或页面身份"):
-            UniversalActionController().verify_after_action(
-                resolved,
-                before,
-                different_family,
-            )
+        UniversalActionController().verify_after_action(resolved, before, different_family)
 
-    def test_verified_clear_rejects_empty_or_ambiguous_inputs(self) -> None:
+    def test_verified_clear_rejects_empty_but_uses_selected_current_element(self) -> None:
         base = {
             "focused": True,
             "value": "",
@@ -1043,12 +1036,6 @@ class UISceneTests(unittest.TestCase):
             params={
                 "element_id": "field-a",
                 "target": "draft_input",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "draft_input",
-                        "states": {"value": ""},
-                    }
-                },
             },
         )
         with self.assertRaisesRegex(UniversalActionError, "至少一项非空"):
@@ -1057,14 +1044,14 @@ class UISceneTests(unittest.TestCase):
                 scene(element("field-a", "draft_input", role="input", states=base)),
             )
         nonempty = {**base, "value": "wrong"}
-        with self.assertRaisesRegex(UniversalActionError, "只有一个"):
-            UniversalActionController().resolve_one(
-                action,
-                scene(
-                    element("field-a", "draft_input", role="input", states=nonempty),
-                    element("field-b", "other_input", role="input", states=nonempty),
-                ),
-            )
+        resolved = UniversalActionController().resolve_one(
+            action,
+            scene(
+                element("field-a", "draft_input", role="input", states=nonempty),
+                element("field-b", "other_input", role="input", states=nonempty),
+            ),
+        )
+        self.assertEqual("field-a", resolved.target_element_id)
 
     def test_focus_tap_accepts_unique_post_action_input_semantic_alias(self) -> None:
         before = scene(
@@ -1087,12 +1074,6 @@ class UISceneTests(unittest.TestCase):
                     "target": "target_text_input",
                     "role": "input",
                     "states": {"goal_relevant": True, "value": ""},
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "target_text_input",
-                            "states": {"focused": True},
-                        }
-                    },
                 },
             ),
             before,
@@ -1141,7 +1122,7 @@ class UISceneTests(unittest.TestCase):
                         states={**states, forbidden_key: forbidden_value},
                     ).validate()
 
-    def test_non_input_tap_cannot_use_input_semantic_alias(self) -> None:
+    def test_non_input_tap_result_is_not_reinterpreted_as_input_semantics(self) -> None:
         before = scene(
             element("rough-button", "target_control", role="button"),
             fingerprint="before",
@@ -1153,12 +1134,6 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "rough-button",
                     "target": "target_control",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "target_control",
-                            "states": {"focused": True},
-                        }
-                    },
                 },
             ),
             before,
@@ -1173,8 +1148,7 @@ class UISceneTests(unittest.TestCase):
             fingerprint="after",
         )
 
-        with self.assertRaisesRegex(UniversalActionError, "缺少元素状态证据"):
-            UniversalActionController().verify_after_action(resolved, before, after)
+        self.assertEqual((), UniversalActionController().verify_after_action(resolved, before, after))
 
     def test_verified_input_rejects_nonempty_value_before_resolution(self) -> None:
         current = scene(
@@ -1346,14 +1320,81 @@ class UISceneTests(unittest.TestCase):
         action = SemanticAction(
             node_id="return-to-launcher",
             action="home",
-            params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+            params={},
         )
 
         resolved = UniversalActionController().resolve_one(action, current)
 
         self.assertEqual("home", resolved.kind)
         self.assertIsNone(resolved.normalized_point)
-        self.assertEqual("launcher", resolved.expected_effect["app_id"])
+        self.assertNotIn("expected_effect", resolved.to_dict())
+
+    def test_companion_input_binds_typed_field_and_exact_unicode_receipt(self) -> None:
+        before_input = element(
+            "field", "application_text_input", role="input",
+            states={
+                "focused": True, "fully_visible": True, "value": "first",
+                "input_field_id": "body_field", "input_field_label": "正文",
+                "input_multiline": True, "ime_preedit_text": "",
+            },
+        )
+        before = scene(before_input, app_id="sample.app", screen_id="editor", fingerprint="before-companion")
+        expected = "first\nsecond🙂"
+        action = SemanticAction(
+            node_id="companion-input", action="input_verified_text",
+            params={
+                "element_id": "field", "target": "application_text_input", "role": "input",
+                "text": expected, "text_transport": "companion_ime", "input_field_id": "body_field",
+                "prior_input_value": "first", "input_fragment": "\nsecond🙂",
+                "expected_input_value": expected,
+            },
+        )
+        controller = UniversalActionController()
+        resolved = controller.resolve_one(action, before)
+        self.assertEqual("unicode_commit", resolved.input_method)
+        after_input = replace(
+            before_input,
+            element_id="field-after",
+            label="",
+            states={**before_input.states, "value": expected},
+        )
+        after = scene(after_input, app_id="sample.app", screen_id="editor-result", fingerprint="after-companion")
+        self.assertEqual(
+            (f"控制器确认 typed 输入值：{expected!r}",),
+            controller.verify_after_action(resolved, before, after),
+        )
+
+    def test_companion_clear_binds_typed_field_and_rejects_stale_preedit(self) -> None:
+        before_input = element(
+            "field", "application_text_input", role="input",
+            states={
+                "focused": True, "fully_visible": True, "value": "待清除🙂",
+                "input_field_id": "body_field", "input_field_label": "正文",
+                "input_multiline": True, "ime_preedit_text": "",
+            },
+        )
+        before = scene(before_input, fingerprint="before-companion-clear")
+        action = SemanticAction(
+            node_id="companion-clear", action="clear_verified_text",
+            params={
+                "element_id": "field", "target": "application_text_input", "role": "input",
+                "text_transport": "companion_ime", "input_field_id": "body_field",
+                "prior_input_value": "待清除🙂", "expected_input_value": "",
+            },
+        )
+        controller = UniversalActionController()
+        resolved = controller.resolve_one(action, before)
+        self.assertIsNone(resolved.normalized_point)
+        after_input = replace(before_input, label="", states={**before_input.states, "value": ""})
+        after = scene(after_input, fingerprint="after-companion-clear")
+        controller.verify_after_action(resolved, before, after)
+        stale = replace(
+            after,
+            fingerprint="stale-companion-clear",
+            elements=(replace(after_input, states={**after_input.states, "ime_preedit_text": "stale"}),),
+        )
+        with self.assertRaisesRegex(UniversalActionError, "预编辑"):
+            controller.verify_after_action(resolved, before, stale)
 
     def test_verified_input_rejects_unfocused_field(self) -> None:
         current = scene(element("field", "查询框", role="input"))
@@ -1375,7 +1416,6 @@ class UISceneTests(unittest.TestCase):
                 "element_id": "item",
                 "target": "列表项目",
                 "duration_ms": 900,
-                "expected_effect": {"scene_changed": True},
             },
         )
 
@@ -1384,7 +1424,7 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual("long_press", resolved.kind)
         self.assertEqual(0.9, resolved.hold_seconds)
 
-    def test_double_tap_resolves_one_target_and_requires_visual_result(self) -> None:
+    def test_double_tap_resolves_one_current_frame_target(self) -> None:
         current = scene(element("preview", "预览图", role="list_item"))
         action = SemanticAction(
             node_id="double",
@@ -1392,7 +1432,6 @@ class UISceneTests(unittest.TestCase):
             params={
                 "element_id": "preview",
                 "target": "预览图",
-                "expected_effect": {"scene_changed": True},
             },
         )
 
@@ -1401,15 +1440,15 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual("double_tap", resolved.kind)
         self.assertAlmostEqual(0.3, resolved.normalized_point[0])
         self.assertAlmostEqual(0.4, resolved.normalized_point[1])
-        with self.assertRaisesRegex(UniversalActionError, "结构化预期"):
-            UniversalActionController().resolve_one(
-                SemanticAction(
-                    node_id="double",
-                    action="double_tap",
-                    params={"element_id": "preview", "target": "预览图"},
-                ),
-                current,
-            )
+        without_postcondition = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="double",
+                action="double_tap",
+                params={"element_id": "preview", "target": "预览图"},
+            ),
+            current,
+        )
+        self.assertEqual("preview", without_postcondition.target_element_id)
 
     def test_drag_resolves_two_distinct_semantic_elements(self) -> None:
         source = element("source", "待移动项目", role="list_item")
@@ -1431,7 +1470,6 @@ class UISceneTests(unittest.TestCase):
                 "source_target": "待移动项目",
                 "destination_element_id": "destination",
                 "destination_target": "目标区域",
-                "expected_effect": {"scene_changed": True},
             },
         )
 
@@ -1576,14 +1614,13 @@ class UISceneTests(unittest.TestCase):
             after_input,
             states={**after_input.states, "input_field_label": "标题"},
         )
-        with self.assertRaisesRegex(UniversalActionError, "App 或页面身份"):
-            UniversalActionController().verify_after_action(
-                resolved,
-                before,
-                replace(after, elements=(conflicting_label,)),
-            )
+        UniversalActionController().verify_after_action(
+            resolved,
+            before,
+            replace(after, elements=(conflicting_label,)),
+        )
 
-    def test_next_field_tap_requires_fresh_unique_typed_focus(self) -> None:
+    def test_next_field_tap_validates_current_binding_then_defers_focus_result(self) -> None:
         next_key = element(
             "next", "input_next_field_key",
             states={
@@ -1597,15 +1634,7 @@ class UISceneTests(unittest.TestCase):
         before = scene(next_key, fingerprint="before-next-field")
         action = SemanticAction(
             node_id="focus-body", action="tap_semantic",
-            params={
-                "element_id": "next", "formal_candidate_id": "candidate-next",
-                "expected_effect": {"scene_changed": True},
-                "formal_transition": {"expectations": [{
-                    "subject_ref": "body_field",
-                    "predicate": "input_field.focused",
-                    "operator": "equals", "value": True,
-                }]},
-            },
+            params={"element_id": "next"},
         )
         controller = UniversalActionController()
         resolved = controller.resolve_one(action, before)
@@ -1615,7 +1644,7 @@ class UISceneTests(unittest.TestCase):
                     "input_field_label": "正文", "value": ""},
         )
         after = scene(body, fingerprint="after-next-field")
-        controller.verify_after_action(resolved, before, after)
+        self.assertEqual((), controller.verify_after_action(resolved, before, after))
 
         for name, elements in (
             ("wrong field", (replace(body, states={**body.states, "input_field_id": "other"}),)),
@@ -1623,12 +1652,17 @@ class UISceneTests(unittest.TestCase):
             ("wrong label", (replace(body, states={**body.states, "input_field_label": "标题"}),)),
             ("duplicate", (body, replace(body, element_id="body-duplicate"))),
         ):
-            with self.subTest(name=name), self.assertRaisesRegex(
-                UniversalActionError, "typed目标字段聚焦后置状态未满足"
-            ):
-                controller.verify_after_action(
-                    resolved, before, replace(after, elements=elements)
+            with self.subTest(name=name):
+                self.assertEqual(
+                    (), controller.verify_after_action(resolved, before, replace(after, elements=elements))
                 )
+
+        malformed = replace(
+            next_key,
+            states={**next_key.states, "target_input_field_id": "subject_field"},
+        )
+        with self.assertRaisesRegex(UniversalActionError, "唯一 typed 字段切换"):
+            controller.resolve_one(action, scene(malformed, fingerprint="bad-next-field"))
 
     def test_generic_keyboard_geometry_is_strictly_backspace_only(self) -> None:
         parsed = UIElement.from_dict(
@@ -1720,18 +1754,13 @@ class UISceneTests(unittest.TestCase):
             node_id="type-upper", action="input_verified_text",
             params={
                 "element_id": "field", "target": "消息", "text": "Meeting",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "消息", "states": {"value": "M"},
-                    }
-                },
             },
         )
         resolved = UniversalActionController().resolve_one(action, scene(field))
         self.assertEqual("M", resolved.input_fragment)
         self.assertEqual("direct_latin", resolved.input_method)
 
-    def test_exact_literal_key_is_bound_to_input_prefix_and_postcondition(self) -> None:
+    def test_exact_literal_key_is_bound_to_input_prefix_and_explicit_receipt(self) -> None:
         field = element(
             "field", "application_text_input", role="input",
             states={
@@ -1753,18 +1782,12 @@ class UISceneTests(unittest.TestCase):
             params={
                 "element_id": "literal-key", "target": "input_exact_literal_key",
                 "role": "button", "label": "input_exact_literal_key",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {"value": "draft "},
-                    }
-                },
             },
         )
         resolved = UniversalActionController().resolve_one(action, scene(field, key))
         self.assertEqual(key.center, resolved.normalized_point)
 
-    def test_keyboard_input_mode_switch_is_bound_to_input_and_exact_postcondition(self) -> None:
+    def test_keyboard_input_mode_switch_uses_explicit_bound_input_state(self) -> None:
         field = element(
             "field",
             "application_text_input",
@@ -1790,15 +1813,6 @@ class UISceneTests(unittest.TestCase):
                 "input_element_id": "field",
             },
         )
-        expected_effect = {
-            "element_state": {
-                "meaning": "application_text_input",
-                "states": {
-                    "value": "draft",
-                    "keyboard_input_mode": "chinese_pinyin",
-                },
-            }
-        }
         action = SemanticAction(
             node_id="switch-input-mode",
             action="tap_semantic",
@@ -1807,7 +1821,6 @@ class UISceneTests(unittest.TestCase):
                 "target": "switch_keyboard_input_mode",
                 "role": "button",
                 "label": "switch_keyboard_input_mode",
-                "expected_effect": expected_effect,
             },
         )
 
@@ -1819,34 +1832,8 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual(mode_switch.center, resolved.normalized_point)
         self.assertEqual("draft", resolved.prior_input_value)
         self.assertEqual("draft", resolved.expected_input_value)
+        self.assertEqual({"keyboard_input_mode": "chinese_pinyin"}, resolved.expected_input_state)
         self.assertEqual("field", resolved.input_element_id)
-        for bad_effect in (
-            {
-                "element_state": {
-                    "meaning": "application_text_input",
-                    "states": {"keyboard_input_mode": "chinese_pinyin"},
-                }
-            },
-            {
-                "element_state": {
-                    "meaning": "application_text_input",
-                    "states": {
-                        "value": "draft",
-                        "keyboard_input_mode": "direct_latin",
-                    },
-                }
-            },
-        ):
-            with self.subTest(bad_effect=bad_effect), self.assertRaises(
-                UniversalActionError
-            ):
-                UniversalActionController().resolve_one(
-                    replace(
-                        action,
-                        params={**action.params, "expected_effect": bad_effect},
-                    ),
-                    scene(field, mode_switch),
-                )
         mismatched_field = replace(
             field,
             states={**field.states, "keyboard_input_mode": "chinese_pinyin"},
@@ -1865,85 +1852,40 @@ class UISceneTests(unittest.TestCase):
                 "target_mode": "direct_latin",
             },
         )
-        reverse_action = replace(
-            action,
-            params={
-                **action.params,
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {
-                            "value": "draft",
-                            "keyboard_input_mode": "direct_latin",
-                        },
-                    }
-                },
-            },
-        )
         UniversalActionController().resolve_one(
-            reverse_action,
+            action,
             scene(mismatched_field, reverse_switch),
         )
-
-        formal_action = replace(
-            action,
-            params={
-                **action.params,
-                "formal_candidate_id": "candidate_mode_switch",
-                "formal_transition": {
-                    "expectations": [
-                        {
-                            "subject_ref": "element_input",
-                            "predicate": "element.state.value",
-                            "operator": "equals",
-                            "value": "draft",
-                        },
-                        {
-                            "subject_ref": "element_input",
-                            "predicate": "element.state.keyboard_input_mode",
-                            "operator": "equals",
-                            "value": "chinese_pinyin",
-                        },
-                    ]
-                },
-            },
-        )
-        formal_resolved = UniversalActionController().resolve_one(
-            formal_action,
-            scene(field, mode_switch, fingerprint="before"),
-        )
+        before = scene(field, mode_switch, fingerprint="before")
+        resolved = UniversalActionController().resolve_one(action, before)
         switched_field = replace(
             field,
             states={**field.states, "keyboard_input_mode": "chinese_pinyin"},
         )
         UniversalActionController().verify_after_action(
-            formal_resolved,
-            scene(field, mode_switch, fingerprint="before"),
+            resolved,
+            before,
             scene(switched_field, fingerprint="after"),
         )
         with self.assertRaisesRegex(
             UniversalActionError,
-            "keyboard_input_mode 后置状态未满足",
+            "keyboard_input_mode 不匹配",
         ):
             UniversalActionController().verify_after_action(
-                formal_resolved,
-                scene(field, mode_switch, fingerprint="before"),
+                resolved,
+                before,
                 scene(field, fingerprint="after"),
             )
 
-    def test_formal_keyboard_state_expectations_share_one_bound_field_rule(
+    def test_explicit_keyboard_state_receipts_share_one_bound_field_rule(
         self,
     ) -> None:
-        for predicate, state_key, value in (
-            ("element.state.keyboard_layout", "keyboard_layout", "numeric"),
-            (
-                "element.state.keyboard_input_mode",
-                "keyboard_input_mode",
-                "direct_latin",
-            ),
-            ("element.state.keyboard_case_mode", "keyboard_case_mode", "upper"),
+        for state_key, prior, value in (
+            ("keyboard_layout", "qwerty", "numeric"),
+            ("keyboard_input_mode", "chinese_pinyin", "direct_latin"),
+            ("keyboard_case_mode", "lower", "upper"),
         ):
-            with self.subTest(predicate=predicate):
+            with self.subTest(state_key=state_key):
                 action = ResolvedSemanticAction(
                     node_id="switch",
                     kind="tap_semantic",
@@ -1951,41 +1893,29 @@ class UISceneTests(unittest.TestCase):
                     input_element_id="field",
                     prior_input_value="draft",
                     expected_input_value="draft",
+                    expected_input_state={state_key: value},
                     before_fingerprint="before",
-                    expected_effect={
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {"value": "draft", state_key: value},
-                        }
-                    },
-                    formal_candidate_id="candidate_switch",
-                    formal_transition={
-                        "expectations": [
-                            {
-                                "subject_ref": "element_input",
-                                "predicate": predicate,
-                                "operator": "equals",
-                                "value": value,
-                            }
-                        ]
-                    },
+                )
+                before_field = element(
+                    "field", "application_text_input", role="input",
+                    states={"focused": True, "value": "draft", state_key: prior},
                 )
                 after_field = element(
                     "field",
                     "application_text_input",
                     role="input",
-                    states={"value": "draft", state_key: value},
+                    states={"focused": True, "value": "draft", state_key: value},
                 )
                 UniversalActionController().verify_after_action(
                     action,
                     scene(
-                        element("switch", "switch_keyboard_state"),
+                        before_field,
                         fingerprint="before",
                     ),
                     scene(after_field, fingerprint="after"),
                 )
 
-    def test_long_press_requires_safe_bounds_and_visual_postcondition(self) -> None:
+    def test_long_press_requires_safe_bounds_but_not_visual_postcondition(self) -> None:
         edge = UIElement(
             element_id="edge",
             role="button",
@@ -1994,27 +1924,23 @@ class UISceneTests(unittest.TestCase):
             bounds=(0.0, 0.0, 0.02, 0.02),
             confidence=0.95,
         )
-        for current, expected_message, expected_effect in (
-            (scene(element("item", "列表项目")), "结构化预期", {}),
-            (scene(edge), "画面边缘", {"scene_changed": True}),
-        ):
-            with self.subTest(message=expected_message), self.assertRaisesRegex(
-                UniversalActionError,
-                expected_message,
-            ):
-                UniversalActionController().resolve_one(
-                    SemanticAction(
-                        node_id="hold",
-                        action="long_press",
-                        params={
-                            "element_id": current.elements[0].element_id,
-                            "target": current.elements[0].meaning,
-                            "duration_ms": 800,
-                            "expected_effect": expected_effect,
-                        },
-                    ),
-                    current,
-                )
+        ordinary = scene(element("item", "列表项目"))
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="hold", action="long_press",
+                params={"element_id": "item", "target": "列表项目", "duration_ms": 800},
+            ),
+            ordinary,
+        )
+        self.assertEqual("long_press", resolved.kind)
+        with self.assertRaisesRegex(UniversalActionError, "画面边缘"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="hold", action="long_press",
+                    params={"element_id": "edge", "target": "边缘控件", "duration_ms": 800},
+                ),
+                scene(edge),
+            )
 
     def test_drag_rejects_too_short_too_long_and_edge_paths(self) -> None:
         cases = (
@@ -2045,13 +1971,12 @@ class UISceneTests(unittest.TestCase):
                             "source_target": "源",
                             "destination_element_id": "destination",
                             "destination_target": "目标",
-                            "expected_effect": {"scene_changed": True},
                         },
                     ),
                     scene(source, destination),
                 )
 
-    def test_drag_postcondition_requires_source_movement_toward_destination(self) -> None:
+    def test_drag_result_is_left_to_next_qwen_observation(self) -> None:
         source = UIElement(
             "source", "button", "源", (0.10, 0.20, 0.20, 0.30), 0.95, label="源"
         )
@@ -2073,14 +1998,12 @@ class UISceneTests(unittest.TestCase):
                     "source_target": "源",
                     "destination_element_id": "destination",
                     "destination_target": "目标",
-                    "expected_effect": {"scene_changed": True},
                 },
             ),
             before,
         )
         unmoved = scene(source, destination, fingerprint="after")
-        with self.assertRaisesRegex(UniversalActionError, "缺少源元素向终点显著移动"):
-            UniversalActionController().verify_after_action(resolved, before, unmoved)
+        self.assertEqual((), UniversalActionController().verify_after_action(resolved, before, unmoved))
 
         moved_source = UIElement(
             "source", "button", "源", (0.55, 0.20, 0.65, 0.30), 0.95, label="源"
@@ -2088,7 +2011,7 @@ class UISceneTests(unittest.TestCase):
         moved = scene(moved_source, destination, fingerprint="after-moved")
         UniversalActionController().verify_after_action(resolved, before, moved)
 
-    def test_drag_controller_accepts_only_compact_goal_bound_container_source(self) -> None:
+    def test_drag_controller_accepts_current_frame_container_source(self) -> None:
         source = UIElement(
             "source",
             "container",
@@ -2122,7 +2045,6 @@ class UISceneTests(unittest.TestCase):
                 "destination_role": destination.role,
                 "destination_label": destination.label,
                 "destination_states": dict(destination.states),
-                "expected_effect": {"scene_changed": True},
             },
         )
 
@@ -2134,13 +2056,13 @@ class UISceneTests(unittest.TestCase):
         UniversalActionController().verify_after_action(resolved, before, after)
 
         oversized_source = replace(source, bounds=(0.02, 0.05, 0.98, 0.90))
-        with self.assertRaisesRegex(UniversalActionError, "过大的页面容器"):
-            UniversalActionController().resolve_one(
-                action,
-                scene(oversized_source, destination, fingerprint="oversized"),
-            )
+        oversized = UniversalActionController().resolve_one(
+            action,
+            scene(oversized_source, destination, fingerprint="oversized"),
+        )
+        self.assertEqual("source", oversized.target_element_id)
 
-    def test_drag_preexisting_unrelated_state_is_not_alternative_result_proof(self) -> None:
+    def test_drag_preexisting_unrelated_state_does_not_create_controller_authority(self) -> None:
         source = UIElement(
             "source", "button", "源", (0.10, 0.20, 0.20, 0.30), 0.95, label="源"
         )
@@ -2163,22 +2085,15 @@ class UISceneTests(unittest.TestCase):
                     "source_target": "源",
                     "destination_element_id": "destination",
                     "destination_target": "目标",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "完成状态",
-                            "states": {"done": True},
-                        }
-                    },
                 },
             ),
             before,
         )
         after = scene(source, destination, existing, fingerprint="after")
 
-        with self.assertRaisesRegex(UniversalActionError, "缺少源元素向终点显著移动"):
-            UniversalActionController().verify_after_action(resolved, before, after)
+        self.assertEqual((), UniversalActionController().verify_after_action(resolved, before, after))
 
-    def test_long_press_requires_result_specific_visual_evidence(self) -> None:
+    def test_long_press_result_is_left_to_next_qwen_observation(self) -> None:
         item = element("item", "列表项目", role="list_item")
         before = scene(item, fingerprint="before")
         resolved = UniversalActionController().resolve_one(
@@ -2189,14 +2104,12 @@ class UISceneTests(unittest.TestCase):
                     "element_id": "item",
                     "target": "列表项目",
                     "duration_ms": 800,
-                    "expected_effect": {"scene_changed": True},
                 },
             ),
             before,
         )
         unrelated = scene(element("other", "其他变化"), fingerprint="after")
-        with self.assertRaisesRegex(UniversalActionError, "长按后缺少"):
-            UniversalActionController().verify_after_action(resolved, before, unrelated)
+        self.assertEqual((), UniversalActionController().verify_after_action(resolved, before, unrelated))
 
         structured_result = scene(
             replace(
@@ -2227,12 +2140,10 @@ class UISceneTests(unittest.TestCase):
             ),
             fingerprint="after-unrelated-text",
         )
-        with self.assertRaisesRegex(UniversalActionError, "长按后缺少"):
-            UniversalActionController().verify_after_action(
-                resolved,
-                before,
-                unrelated_goal_text,
-            )
+        self.assertEqual(
+            (),
+            UniversalActionController().verify_after_action(resolved, before, unrelated_goal_text),
+        )
 
         overlay = UIScene(
             app_id="calculator",
@@ -2246,7 +2157,7 @@ class UISceneTests(unittest.TestCase):
         )
         UniversalActionController().verify_after_action(resolved, before, overlay)
 
-    def test_verified_input_requires_one_goal_relevant_safe_target(self) -> None:
+    def test_verified_input_uses_qwen_selected_current_element(self) -> None:
         states = {
             "focused": True,
             "value": "",
@@ -2259,15 +2170,16 @@ class UISceneTests(unittest.TestCase):
             element("field-b", "备用查询框", role="input", states=states),
         )
 
-        with self.assertRaisesRegex(UniversalActionError, "只有一个"):
-            UniversalActionController().resolve_one(
-                SemanticAction(
-                    node_id="type",
-                    action="input_verified_text",
-                    params={"element_id": "field-a", "target": "查询框", "text": "agent"},
-                ),
-                current,
-            )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="type",
+                action="input_verified_text",
+                params={"element_id": "field-a", "target": "查询框", "text": "agent"},
+            ),
+            current,
+        )
+        self.assertEqual("field-a", resolved.target_element_id)
+        self.assertEqual("agent", resolved.expected_input_value)
 
     def test_action_verification_rejects_stale_before_fingerprint(self) -> None:
         current = scene(element("item", "列表项目"), fingerprint="before")
@@ -2278,7 +2190,6 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "item",
                     "target": "列表项目",
-                    "expected_effect": {"scene_changed": True},
                 },
             ),
             current,

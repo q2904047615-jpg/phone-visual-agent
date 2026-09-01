@@ -1557,10 +1557,7 @@ class ApiEndToEndTests(unittest.TestCase):
         )
 
         initial = graph or _graph(device_id=device_id)
-        planner = FakeDeepSeekPlanner(
-            initial,
-            replan_result=replace(initial, revision=initial.revision + 1),
-        )
+        planner = FakeDeepSeekPlanner(initial)
         qwen = FakeQwenObserver()
         target_app_id = (
             initial.goal.target_apps[0].app_id
@@ -1742,7 +1739,7 @@ class ApiEndToEndTests(unittest.TestCase):
         semantic_authority = universal["typed_effect_authority"]
         self.assertEqual(
             semantic_authority["authority_scope"],
-            "typed_task_and_effect_policy",
+            "deepseek_typed_effect_kind",
         )
         self.assertFalse(
             semantic_authority["retired_remote_risk_diagnostics_enabled"]
@@ -2150,7 +2147,9 @@ class ApiEndToEndTests(unittest.TestCase):
 
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["execution"]["physical_actions"], 1)
-        self.assertEqual(first.json()["session"]["task_graph"]["revision"], 2)
+        # Executing one action no longer invokes DeepSeek replan or mutates the
+        # high-level graph; only a later same-frame Qwen finish advances it.
+        self.assertEqual(first.json()["session"]["task_graph"]["revision"], 1)
         self.assertEqual(len(first.json()["execution"]["after_frame_paths"]), 4)
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(replay.json()["detail"]["physical_actions"], 0)
@@ -2464,6 +2463,46 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(
             len(web_app.runtime.controller.executions),
             before_executions,
+        )
+
+    def test_start_auto_loop_failure_returns_persisted_failed_session(self) -> None:
+        from test_universal_agent_orchestrator import FailOnNthQwenObserver
+
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        qwen = FailOnNthQwenObserver(
+            2,
+            error=VisionAgentError("第二步 Qwen 当前截图解析失败"),
+        )
+        orchestrator.qwen_observer = qwen
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "连续查看当前页面", "device_id": "phone-01"},
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        failure = response.json()["detail"]
+        session = failure["session"]
+        self.assertEqual("failed", session["status"])
+        self.assertEqual(
+            "第二步 Qwen 当前截图解析失败",
+            session["failed_reason"],
+        )
+        self.assertFalse(session["automatic_loop_enabled"])
+        self.assertEqual(1, session["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertIsNotNone(failure["report"])
+        self.assertTrue(Path(failure["report"]).is_file())
+        self.assertIsNone(
+            orchestrator.device_registry.active_session(session["device_id"])
         )
 
     def test_generic_supervised_evidence_failure_remains_http_409(self) -> None:
@@ -2864,6 +2903,60 @@ class ApiEndToEndTests(unittest.TestCase):
                 ("session-phone-b", "phone-b"),
             },
         )
+
+    def test_device_status_and_doctor_share_observing_session_lease_state(self) -> None:
+        device_id = web_app.runtime.device_controllers.default_device_id
+        payload = {
+            "session_id": "session-observing",
+            "device_id": device_id,
+            "status": "observing",
+            "step_number": 2,
+            "proposal": None,
+        }
+        session = SimpleNamespace(
+            session_id=payload["session_id"],
+            device_id=device_id,
+            status="observing",
+            snapshot=lambda: dict(payload, status=session.status),
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        web_app.runtime.device_task_registry.reserve(device_id, session.session_id)
+
+        with patch.object(
+            web_app.runtime,
+            "serial_camera_session",
+            return_value=nullcontext(),
+        ), patch.object(
+            web_app,
+            "run_runtime_doctor",
+            side_effect=lambda **kwargs: {
+                "device": {"active_session": kwargs["active_session"]}
+            },
+        ):
+            active_device = self.client.get("/api/device").json()
+            active_doctor = self.client.get(f"/api/doctor/{device_id}").json()
+
+            active_sessions = active_device["generic_supervised_execution"][
+                "active_sessions"
+            ]
+            self.assertEqual(active_sessions, active_device["active_tasks"])
+            self.assertEqual("observing", active_sessions[0]["status"])
+            self.assertEqual(
+                session.session_id,
+                active_doctor["device"]["active_session"],
+            )
+
+            session.status = "failed"
+            web_app.runtime.device_task_registry.release(device_id, session.session_id)
+            failed_device = self.client.get("/api/device").json()
+            failed_doctor = self.client.get(f"/api/doctor/{device_id}").json()
+
+        self.assertEqual([], failed_device["active_tasks"])
+        self.assertEqual(
+            [],
+            failed_device["generic_supervised_execution"]["active_sessions"],
+        )
+        self.assertIsNone(failed_doctor["device"]["active_session"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

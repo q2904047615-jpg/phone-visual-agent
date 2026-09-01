@@ -1,93 +1,209 @@
 {
-  "protocol_version": "2026-09-01-qwen-action-finish-offline-eval-v4",
+  "protocol_version": "2026-09-01-qwen-visual-capability-benchmark-v5",
   "cases": [
     {
-      "id": "launcher_text_icon_single_action",
+      "id": "launcher_settings_action",
       "page_type": "launcher_grid",
-      "frames": [
-        "images/launcher_stable/frame_1.jpg",
-        "images/launcher_stable/frame_2.jpg",
-        "images/launcher_stable/frame_3.jpg",
-        "images/launcher_stable/frame_4.jpg"
-      ],
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_launcher_text_icon",
-        "device_id": "offline_phone_01",
-        "revision": 1,
-        "task_status": "running",
-        "goal": {"objective": "打开当前画面中的设置入口", "target_apps": [], "entities": {}},
-        "global_constraints": ["每轮只允许一个动作", "看不清或目标不唯一时停止"],
-        "goal_completion_conditions": [{"condition_id": "settings_visible", "description": "设置页面清晰可见", "evidence_required": ["当前画面"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "open_visible_settings", "objective": "选择当前画面中清晰且唯一的设置入口", "status": "active", "depends_on": [], "constraints": ["只使用可信候选"], "completion_conditions": ["设置页面可见"], "completion_evidence": [], "effect_ids": [], "execution_class": "navigate"},
-        "current_execution_class": "navigate",
-        "effect_intents": [],
-        "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_launcher_text_icon", "device_id": "offline_phone_01", "revision": 1, "subgoal_id": "open_visible_settings"}, "effect_action_allowed": false}
-      },
+      "frames": ["images/launcher_stable/frame_1.jpg", "images/launcher_stable/frame_2.jpg", "images/launcher_stable/frame_3.jpg", "images/launcher_stable/frame_4.jpg"],
+      "task": {"objective": "打开当前画面中的设置", "subgoal_id": "open_settings", "execution_class": "navigate", "completion_conditions": ["设置页面可见"], "constraints": ["只选择当前画面中清晰可见的设置入口"], "entities": {"target_label": "设置"}},
       "accepted_statuses": ["action"],
-      "accepted_actions": ["tap_semantic"]
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "target": {"label_any": ["设置", "Settings"], "role_any": ["button", "icon"], "meaning_contains_any": ["settings", "设置", "app_icon"]}}
     },
     {
-      "id": "settings_list_scroll_single_action",
-      "page_type": "scrollable_list",
+      "id": "launcher_browser_action",
+      "page_type": "launcher_grid",
+      "frames": ["images/launcher_stable/frame_1.jpg", "images/launcher_stable/frame_2.jpg", "images/launcher_stable/frame_3.jpg", "images/launcher_stable/frame_4.jpg"],
+      "task": {"objective": "打开当前画面中的浏览器", "subgoal_id": "open_browser", "execution_class": "navigate", "completion_conditions": ["浏览器页面可见"], "entities": {"target_label": "浏览器"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "target": {"label_any": ["浏览器", "Browser"], "role_any": ["button", "icon"], "meaning_contains_any": ["browser", "浏览器", "app_icon"]}}
+    },
+    {
+      "id": "launcher_wechat_action",
+      "page_type": "launcher_grid",
+      "frames": ["images/launcher_stable/frame_1.jpg", "images/launcher_stable/frame_2.jpg", "images/launcher_stable/frame_3.jpg", "images/launcher_stable/frame_4.jpg"],
+      "task": {"objective": "打开当前画面中的微信", "subgoal_id": "open_wechat", "execution_class": "navigate", "completion_conditions": ["微信页面可见"], "entities": {"target_label": "微信"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "target": {"label_any": ["微信", "WeChat"], "role_any": ["button", "icon"], "meaning_contains_any": ["wechat", "微信", "app_icon"]}}
+    },
+    {
+      "id": "launcher_douyin_action",
+      "page_type": "launcher_grid",
+      "frames": ["images/launcher_stable/frame_1.jpg", "images/launcher_stable/frame_2.jpg", "images/launcher_stable/frame_3.jpg", "images/launcher_stable/frame_4.jpg"],
+      "task": {"objective": "打开当前画面中的抖音", "subgoal_id": "open_douyin", "execution_class": "navigate", "completion_conditions": ["抖音页面可见"], "entities": {"target_label": "抖音"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "target": {"label_any": ["抖音", "Douyin"], "role_any": ["button", "icon"], "meaning_contains_any": ["douyin", "抖音", "app_icon"]}}
+    },
+    {
+      "id": "launcher_alipay_action",
+      "page_type": "launcher_grid",
+      "frames": ["images/launcher_stable/frame_1.jpg", "images/launcher_stable/frame_2.jpg", "images/launcher_stable/frame_3.jpg", "images/launcher_stable/frame_4.jpg"],
+      "task": {"objective": "打开当前画面中的支付宝", "subgoal_id": "open_alipay", "execution_class": "navigate", "completion_conditions": ["支付宝页面可见"], "entities": {"target_label": "支付宝"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "target": {"label_any": ["支付宝", "Alipay"], "role_any": ["button", "icon"], "meaning_contains_any": ["alipay", "支付宝", "app_icon"]}}
+    },
+    {
+      "id": "launcher_store_action",
+      "page_type": "launcher_glare",
+      "frames": ["images/launcher_changed/frame_1.jpg", "images/launcher_changed/frame_2.jpg", "images/launcher_changed/frame_3.jpg", "images/launcher_changed/frame_4.jpg"],
+      "task": {"objective": "打开当前画面中的应用商店", "subgoal_id": "open_store", "execution_class": "navigate", "completion_conditions": ["应用商店页面可见"], "entities": {"target_label": "应用商店"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "target": {"label_any": ["应用商店", "App Store"], "role_any": ["button", "icon"], "meaning_contains_any": ["store", "商店", "app_icon"]}}
+    },
+    {
+      "id": "launcher_stable_finish",
+      "page_type": "launcher_grid",
+      "frames": ["images/launcher_stable/frame_1.jpg", "images/launcher_stable/frame_2.jpg", "images/launcher_stable/frame_3.jpg", "images/launcher_stable/frame_4.jpg"],
+      "task": {"objective": "确认当前已经位于手机桌面", "subgoal_id": "verify_launcher", "execution_class": "observe", "completion_conditions": ["当前画面明确显示手机桌面"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "launcher_glare_finish",
+      "page_type": "launcher_glare",
+      "frames": ["images/launcher_changed/frame_1.jpg", "images/launcher_changed/frame_2.jpg", "images/launcher_changed/frame_3.jpg", "images/launcher_changed/frame_4.jpg"],
+      "task": {"objective": "确认反光画面仍然是手机桌面", "subgoal_id": "verify_glare_launcher", "execution_class": "observe", "completion_conditions": ["当前画面能够确认是手机桌面"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"foreground_app_ids": ["launcher"], "semantic_contains_any": ["launcher", "home", "desktop", "桌面"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "settings_scroll_action",
+      "page_type": "settings_list",
       "image": "images/settings_list_redacted.png",
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_scroll_list",
-        "device_id": "offline_phone_01",
-        "revision": 2,
-        "task_status": "running",
-        "goal": {"objective": "继续查看当前列表下方的项目", "target_apps": [], "entities": {}},
-        "global_constraints": ["每轮只允许一个动作", "不得选择或修改设置项"],
-        "goal_completion_conditions": [{"condition_id": "lower_items_visible", "description": "列表下方出现新的项目", "evidence_required": ["下一帧画面"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "scroll_current_list", "objective": "在当前列表页面向上滚动一次以查看下方项目", "status": "active", "depends_on": [], "constraints": ["不得点击列表项"], "completion_conditions": ["列表内容发生可验证变化"], "completion_evidence": [], "effect_ids": [], "execution_class": "navigate"},
-        "current_execution_class": "navigate",
-        "effect_intents": [],
-        "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_scroll_list", "device_id": "offline_phone_01", "revision": 2, "subgoal_id": "scroll_current_list"}, "effect_action_allowed": false}
-      },
+      "task": {"objective": "继续查看当前设置列表下方的项目", "subgoal_id": "scroll_settings", "execution_class": "navigate", "completion_conditions": ["列表下方出现新的设置项"], "constraints": ["不要点击或修改设置项"]},
       "accepted_statuses": ["action"],
-      "accepted_actions": ["swipe"]
+      "accepted_actions": ["swipe"],
+      "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}}
     },
     {
-      "id": "overlay_unlabelled_close_single_action",
-      "page_type": "input_overlay",
-      "image": "images/numeric_input_dotcom_failure.jpg",
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_close_overlay",
-        "device_id": "offline_phone_01",
-        "revision": 3,
-        "task_status": "running",
-        "goal": {"objective": "关闭当前最上层输入弹层", "target_apps": [], "entities": {}},
-        "global_constraints": ["每轮只允许一个动作", "不得发送内容"],
-        "goal_completion_conditions": [{"condition_id": "overlay_closed", "description": "输入弹层消失", "evidence_required": ["下一帧画面"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "close_top_overlay", "objective": "选择当前最上层弹层中清晰且唯一的关闭图标", "status": "active", "depends_on": [], "constraints": ["只关闭弹层"], "completion_conditions": ["弹层消失"], "completion_evidence": [], "effect_ids": [], "execution_class": "navigate"},
-        "current_execution_class": "navigate",
-        "effect_intents": [],
-        "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_close_overlay", "device_id": "offline_phone_01", "revision": 3, "subgoal_id": "close_top_overlay"}, "effect_action_allowed": false}
-      },
+      "id": "settings_bluetooth_action",
+      "page_type": "settings_list",
+      "image": "images/settings_list_redacted.png",
+      "task": {"objective": "打开当前设置页中的蓝牙", "subgoal_id": "open_bluetooth", "execution_class": "navigate", "completion_conditions": ["蓝牙设置页面可见"], "entities": {"target_label": "蓝牙"}},
       "accepted_statuses": ["action"],
-      "accepted_actions": ["dismiss_overlay", "tap_semantic"]
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}, "target": {"label_any": ["蓝牙", "Bluetooth"], "role_any": ["button", "list_item"], "meaning_contains_any": ["bluetooth", "蓝牙", "setting"]}}
     },
     {
-      "id": "input_value_already_complete",
+      "id": "settings_wlan_action",
+      "page_type": "settings_list",
+      "image": "images/settings_list_redacted.png",
+      "task": {"objective": "打开当前设置页中的 WLAN", "subgoal_id": "open_wlan", "execution_class": "navigate", "completion_conditions": ["WLAN 设置页面可见"], "entities": {"target_label": "WLAN"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}, "target": {"label_any": ["WLAN", "Wi-Fi", "无线局域网"], "role_any": ["button", "list_item"], "meaning_contains_any": ["wlan", "wi-fi", "wifi", "无线"]}}
+    },
+    {
+      "id": "settings_device_action",
+      "page_type": "settings_list",
+      "image": "images/settings_list_redacted.png",
+      "task": {"objective": "打开当前设置页中的我的设备", "subgoal_id": "open_my_device", "execution_class": "navigate", "completion_conditions": ["我的设备页面可见"], "entities": {"target_label": "我的设备"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}, "target": {"label_any": ["我的设备", "My device"], "role_any": ["button", "list_item"], "meaning_contains_any": ["device", "设备", "setting"]}}
+    },
+    {
+      "id": "settings_mobile_network_action",
+      "page_type": "settings_list",
+      "image": "images/settings_list_redacted.png",
+      "task": {"objective": "打开当前设置页中的移动网络", "subgoal_id": "open_mobile_network", "execution_class": "navigate", "completion_conditions": ["移动网络设置页面可见"], "entities": {"target_label": "移动网络"}},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["tap_semantic"],
+      "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}, "target": {"label_any": ["移动网络", "Mobile network"], "role_any": ["button", "list_item"], "meaning_contains_any": ["mobile", "network", "移动网络", "setting"]}}
+    },
+    {
+      "id": "settings_page_finish",
+      "page_type": "settings_list",
+      "image": "images/settings_list_redacted.png",
+      "task": {"objective": "确认当前已经打开系统设置主页", "subgoal_id": "verify_settings", "execution_class": "observe", "completion_conditions": ["系统设置主页清晰可见"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "overlay_close_action",
       "page_type": "input_overlay",
       "image": "images/numeric_input_dotcom_failure.jpg",
-      "task_context": {
-        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
-        "task_id": "task_input_complete",
-        "device_id": "offline_phone_01",
-        "revision": 4,
-        "task_status": "running",
-        "goal": {"objective": "确认输入框是否准确显示.com", "target_apps": [], "entities": {"expected_text": ".com", "expected_role": "input"}},
-        "global_constraints": ["不要发送", "文字必须逐字一致"],
-        "goal_completion_conditions": [{"condition_id": "exact_text_visible", "description": "输入框清晰显示.com", "evidence_required": ["当前画面文字"], "satisfied": false, "evidence": []}],
-        "current_subgoal": {"subgoal_id": "verify_input_text", "objective": "确认当前输入框是否准确显示.com；若已显示则完成", "status": "active", "depends_on": [], "constraints": ["不要发送"], "completion_conditions": ["输入框逐字显示.com"], "completion_evidence": [], "effect_ids": [], "execution_class": "observe"},
-        "current_execution_class": "observe",
-        "effect_intents": [],
-        "effect_gate": {"required": false, "state": "not_required", "effect_ids": [], "scope": {"task_id": "task_input_complete", "device_id": "offline_phone_01", "revision": 4, "subgoal_id": "verify_input_text"}, "effect_action_allowed": false}
-      },
-      "accepted_statuses": ["finish"]
+      "task": {"objective": "关闭当前最上层输入弹层", "subgoal_id": "close_overlay", "execution_class": "navigate", "completion_conditions": ["输入弹层消失"], "constraints": ["不要发送输入内容"]},
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["dismiss_overlay", "tap_semantic"],
+      "expectations": {"page": {"semantic_contains_any": ["input", "keyboard", "overlay", "输入", "键盘", "弹层"]}, "target": {"label_any": ["×", "X", "x", "关闭", "Close"], "role_any": ["button", "icon"], "meaning_contains_any": ["close", "dismiss", "关闭"]}}
+    },
+    {
+      "id": "dotcom_exact_input_finish",
+      "page_type": "input_overlay",
+      "image": "images/numeric_input_dotcom_failure.jpg",
+      "task": {"objective": "确认当前输入框逐字显示 .com", "subgoal_id": "verify_dotcom", "execution_class": "observe", "completion_conditions": ["应用输入框逐字显示 .com"], "entities": {"expected_text": ".com"}},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["input", "keyboard", "输入", "键盘"]}, "input": {"present": true, "text_exact": ".com", "focused": true, "keyboard_layouts": ["symbol"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "symbol_keyboard_finish",
+      "page_type": "input_overlay",
+      "image": "images/numeric_input_dotcom_failure.jpg",
+      "task": {"objective": "确认当前已展开符号键盘", "subgoal_id": "verify_symbol_keyboard", "execution_class": "observe", "completion_conditions": ["符号键盘和聚焦输入框清晰可见"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["symbol", "keyboard", "符号", "键盘"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["symbol"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "input_overlay_finish",
+      "page_type": "input_overlay",
+      "image": "images/numeric_input_dotcom_failure.jpg",
+      "task": {"objective": "确认当前存在可输入文字的弹层", "subgoal_id": "verify_input_overlay", "execution_class": "observe", "completion_conditions": ["聚焦输入框与软键盘同时可见"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["input", "keyboard", "overlay", "输入", "键盘", "弹层"]}, "input": {"present": true, "focused": true}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "pinyin_preedit_ihao_finish",
+      "page_type": "pinyin_input_overlay",
+      "image": "images/pinyin_ihao_no_candidate.jpg",
+      "task": {"objective": "确认当前输入法预编辑文字是 ihao", "subgoal_id": "verify_ihao_preedit", "execution_class": "observe", "completion_conditions": ["聚焦输入框的拼音预编辑逐字显示 ihao"], "entities": {"expected_preedit": "ihao"}},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["pinyin", "candidate", "keyboard", "拼音", "候选", "键盘"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["qwerty"], "keyboard_input_modes": ["chinese_pinyin"], "preedit_exact": "ihao"}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "pinyin_qwerty_mode_finish",
+      "page_type": "pinyin_input_overlay",
+      "image": "images/pinyin_ihao_no_candidate.jpg",
+      "task": {"objective": "确认当前是中文拼音 QWERTY 输入状态", "subgoal_id": "verify_chinese_qwerty", "execution_class": "observe", "completion_conditions": ["中文拼音 QWERTY 键盘与聚焦输入框可见"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["pinyin", "keyboard", "拼音", "键盘"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["qwerty"], "keyboard_input_modes": ["chinese_pinyin"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "pinyin_candidate_row_finish",
+      "page_type": "pinyin_input_overlay",
+      "image": "images/pinyin_ihao_no_candidate.jpg",
+      "task": {"objective": "确认当前输入框上方的拼音候选栏已经出现", "subgoal_id": "verify_pinyin_candidates", "execution_class": "observe", "completion_conditions": ["输入框、拼音候选栏与候选文字清晰可见"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["哦好", "哦哈哦", "candidate", "候选"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["qwerty"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "partial_pinyin_preedit_finish",
+      "page_type": "partial_pinyin_crop",
+      "image": "images/partial_pinyin_exact_candidate.jpg",
+      "task": {"objective": "确认当前输入框存在三角洲相关的拼音预编辑", "subgoal_id": "verify_partial_preedit", "execution_class": "observe", "completion_conditions": ["聚焦输入框中存在三角洲相关拼音预编辑"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["三角洲", "candidate", "候选"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["qwerty"], "keyboard_input_modes": ["chinese_pinyin"], "preedit_contains_any": ["sanjiaozhou", "san'jiao'zhou"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "partial_pinyin_candidate_finish",
+      "page_type": "partial_pinyin_crop",
+      "image": "images/partial_pinyin_exact_candidate.jpg",
+      "task": {"objective": "确认输入框上方候选栏中出现三角洲行动", "subgoal_id": "verify_exact_candidate", "execution_class": "observe", "completion_conditions": ["输入框上方候选栏清晰显示三角洲行动"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["三角洲行动"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["qwerty"], "keyboard_input_modes": ["chinese_pinyin"]}, "finish": {"evidence_required": true}}
+    },
+    {
+      "id": "partial_pinyin_keyboard_finish",
+      "page_type": "partial_pinyin_crop",
+      "image": "images/partial_pinyin_exact_candidate.jpg",
+      "task": {"objective": "确认裁切画面仍能识别输入框与中文拼音 QWERTY 软键盘", "subgoal_id": "verify_cropped_keyboard", "execution_class": "observe", "completion_conditions": ["裁切画面中的输入框与中文拼音 QWERTY 软键盘可识别"]},
+      "accepted_statuses": ["finish"],
+      "expectations": {"page": {"semantic_contains_any": ["keyboard", "qwerty", "键盘", "拼音"]}, "input": {"present": true, "focused": true, "keyboard_layouts": ["qwerty"], "keyboard_input_modes": ["chinese_pinyin"]}, "finish": {"evidence_required": true}}
     }
   ]
 }

@@ -8,6 +8,7 @@ import os
 import queue
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,14 @@ from agent.infrastructure.qwen_runtime_errors import (
 )
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.qwen_task_context import QwenTaskContext
+from agent.domain.task_graph import (
+    CompletionCondition,
+    DynamicTaskGraph,
+    GraphGoal,
+    Subgoal,
+    TargetApp,
+)
+from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from agent.domain.trusted_observation import TrustedObservation
 from agent.infrastructure.trusted_observation_frames import (
     build_trusted_observation,
@@ -37,17 +46,158 @@ DEFAULT_MANIFEST = ROOT / "evals" / "qwen_visual_decision" / "cases.json"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "offline_qwen_visual_decision"
 DEFAULT_CASE_TIMEOUT_SECONDS = 150.0
 DEFAULT_SUITE_TIMEOUT_SECONDS = 720.0
-EVAL_PROTOCOL_VERSION = "2026-09-01-qwen-action-finish-offline-eval-v4"
+EVAL_PROTOCOL_VERSION = "2026-09-01-qwen-visual-capability-benchmark-v5"
+CAPABILITY_DIMENSIONS = ("page", "target", "input", "finish", "decision")
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("cases"), list):
         raise ValueError("离线用例清单缺少 cases 数组。")
-    case_ids = [str(item.get("id") or "") for item in value["cases"]]
+    if value.get("protocol_version") != EVAL_PROTOCOL_VERSION:
+        raise ValueError("离线用例清单协议版本无效。")
+    materialized = [
+        _materialize_case(item, index=index)
+        for index, item in enumerate(value["cases"], start=1)
+    ]
+    case_ids = [str(item.get("id") or "") for item in materialized]
     if any(not item for item in case_ids) or len(case_ids) != len(set(case_ids)):
         raise ValueError("离线用例 ID 为空或重复。")
-    return value
+    result = dict(value)
+    result["cases"] = materialized
+    return result
+
+
+def _materialize_case(raw_case: Any, *, index: int) -> dict[str, Any]:
+    if not isinstance(raw_case, dict):
+        raise ValueError("离线用例必须是 JSON 对象。")
+    case = copy.deepcopy(raw_case)
+    case_id = str(case.get("id") or "").strip()
+    task = case.get("task")
+    task_context = case.get("task_context")
+    if (task is None) == (task_context is None):
+        raise ValueError(f"离线用例 {case_id or index} 必须且只能提供 task 或 task_context。")
+    if task_context is None:
+        if not isinstance(task, dict):
+            raise ValueError(f"离线用例 {case_id or index} 的 task 必须是对象。")
+        objective = str(task.get("objective") or "").strip()
+        subgoal_id = str(task.get("subgoal_id") or "").strip()
+        execution_class = str(task.get("execution_class") or "").strip()
+        completion_conditions = task.get("completion_conditions")
+        constraints = task.get("constraints") or []
+        entities = task.get("entities") or {}
+        if (not objective or not subgoal_id or execution_class not in {"navigate", "observe"}
+            or not isinstance(completion_conditions, list) or not completion_conditions
+            or any(not isinstance(item, str) or not item.strip() for item in completion_conditions)
+            or not isinstance(constraints, list)
+            or any(not isinstance(item, str) or not item.strip() for item in constraints)
+            or not isinstance(entities, dict)):
+            raise ValueError(f"离线用例 {case_id or index} 的紧凑 task 无效。")
+        entities = dict(entities)
+        entities.setdefault("target_surface", "current_surface")
+        if "target_label" in entities:
+            entities["target_ui_label"] = entities.pop("target_label")
+        if "expected_text" in entities:
+            entities["input_text"] = entities.pop("expected_text")
+        task_id = f"task_{case_id}"
+        device_id = str(task.get("device_id") or "offline_phone_01")
+        revision = task.get("revision", index)
+        task_context = {
+            "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
+            "task_id": task_id,
+            "device_id": device_id,
+            "revision": revision,
+            "task_status": "running",
+            "goal": {"objective": objective, "target_apps": [], "entities": entities},
+            "global_constraints": ["每轮只允许一个动作", *constraints],
+            "goal_completion_conditions": [
+                {"condition_id": f"{subgoal_id}_condition_{condition_index}",
+                 "description": description, "evidence_required": ["当前或下一张真实画面"],
+                 "satisfied": False, "evidence": []}
+                for condition_index, description in enumerate(completion_conditions, start=1)
+            ],
+            "current_subgoal": {"subgoal_id": subgoal_id,
+                "objective": str(task.get("subgoal_objective") or objective).strip(), "status": "active",
+                "depends_on": [], "constraints": constraints,
+                "completion_conditions": completion_conditions, "completion_evidence": [], "effect_ids": [],
+                "execution_class": execution_class},
+            "current_execution_class": execution_class,
+            "effect_intents": [],
+            "effect_gate": {"required": False, "state": "not_required", "effect_ids": [],
+                "scope": {"task_id": task_id, "device_id": device_id, "revision": revision,
+                    "subgoal_id": subgoal_id}, "effect_action_allowed": False},
+        }
+        case["task_context"] = task_context
+    expectations = case.get("expectations")
+    if not isinstance(expectations, dict) or not expectations:
+        raise ValueError(f"离线用例 {case_id or index} 缺少 expectations。")
+    unexpected = set(expectations) - {"page", "target", "input", "finish"}
+    if unexpected or any(not isinstance(item, dict) for item in expectations.values()):
+        raise ValueError(f"离线用例 {case_id or index} 的 expectations 无效。")
+    statuses = case.get("accepted_statuses")
+    if (not isinstance(statuses, list) or not statuses
+        or any(item not in {"action", "finish"} for item in statuses)):
+        raise ValueError(f"离线用例 {case_id or index} 的 accepted_statuses 无效。")
+    context = QwenTaskContext.from_dict(dict(case["task_context"]))
+    if context.current_execution_class not in {"navigate", "observe"} or context.effect_intents:
+        raise ValueError(f"离线视觉用例 {case_id or index} 只允许只读或导航任务。")
+    case["_semantic_ir"] = _semantic_ir_for_context(context)
+    return case
+
+
+def _semantic_ir_for_context(context: QwenTaskContext) -> Any:
+    target_apps = tuple(
+        TargetApp(
+            app_id=str(item.get("app_id") or "").strip(),
+            app_name=str(item.get("app_name") or "").strip(),
+        )
+        for item in context.goal.get("target_apps") or []
+        if isinstance(item, dict)
+    )
+    goal_entities = dict(context.goal.get("entities") or {})
+    goal_entities.setdefault("target_surface", "current_surface")
+    conditions = tuple(
+        CompletionCondition(
+            condition_id=str(item.get("condition_id") or "").strip(),
+            description=str(item.get("description") or "").strip(),
+            evidence_required=tuple(str(value).strip() for value in item.get("evidence_required") or []),
+        )
+        for item in context.goal_completion_conditions
+    )
+    current = context.current_subgoal
+    impact = "navigation_only" if context.current_execution_class == "navigate" else "read_only"
+    subgoal = Subgoal(
+        subgoal_id=str(current.get("subgoal_id") or "").strip(),
+        objective=str(current.get("objective") or "").strip(),
+        status="active",
+        depends_on=tuple(str(item).strip() for item in current.get("depends_on") or []),
+        constraints=tuple(str(item).strip() for item in current.get("constraints") or []),
+        completion_conditions=tuple(
+            str(item).strip() for item in current.get("completion_conditions") or []
+        ),
+        completion_evidence=(),
+        risk_action_ids=(),
+        external_impact=impact,
+    )
+    graph = DynamicTaskGraph(
+        task_id=context.task_id,
+        device_id=context.device_id,
+        revision=context.revision,
+        status="running",
+        goal=GraphGoal(
+            objective=str(context.goal.get("objective") or "").strip(),
+            target_apps=target_apps,
+            entities=goal_entities,
+        ),
+        constraints=tuple(context.global_constraints),
+        completion_conditions=conditions,
+        risk_actions=(),
+        subgoals=(subgoal,),
+        active_subgoal_id=subgoal.subgoal_id,
+        raw_user_goal=str(context.goal.get("objective") or "").strip(),
+    )
+    graph.validate()
+    return compile_formal_semantic_authority(graph).semantic_ir
 
 
 def _load_frames(case: dict[str, Any], manifest_path: Path) -> tuple[list[Image.Image], list[str]]:
@@ -66,24 +216,170 @@ def _load_frames(case: dict[str, Any], manifest_path: Path) -> tuple[list[Image.
     return frames, [str(path) for path in paths]
 
 
-def _score(
-    case: dict[str, Any],
-    *,
-    status: str,
-    decision: dict[str, Any] | None,
-) -> dict[str, Any]:
+def _normalized_text(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _contains_any(value: Any, expected: Any) -> bool:
+    haystack = _normalized_text(value)
+    return bool(isinstance(expected, list) and expected
+        and any(_normalized_text(item) in haystack for item in expected if _normalized_text(item)))
+
+
+def _dimension(*, applicable: bool, reasons: list[str] | None=None) -> dict[str, Any]:
+    resolved = list(reasons or [])
+    return {"applicable": applicable, "passed": not resolved if applicable else True, "reasons": resolved}
+
+
+def _failed_score(case: dict[str, Any], reason: str) -> dict[str, Any]:
+    expectations = case.get("expectations") or {}
+    dimensions = {
+        name: _dimension(applicable=(name == "decision" or name in expectations), reasons=[reason])
+        if name == "decision" or name in expectations else _dimension(applicable=False)
+        for name in CAPABILITY_DIMENSIONS
+    }
+    return {"passed": False, "reasons": [reason], "dimensions": dimensions}
+
+
+def _score(case: dict[str, Any], *, status: str, decision: dict[str, Any] | None,
+    observation: dict[str, Any] | None) -> dict[str, Any]:
+    expectations = case.get("expectations") or {}
+    scene = (observation or {}).get("scene") or {}
+    elements = scene.get("elements") or []
+    if not isinstance(elements, list):
+        elements = []
+    dimensions: dict[str, dict[str, Any]] = {}
+
     accepted_statuses = [str(item) for item in case.get("accepted_statuses") or []]
-    reasons: list[str] = []
+    decision_reasons: list[str] = []
     if accepted_statuses and status not in accepted_statuses:
-        reasons.append(f"status={status!r} 不在 {accepted_statuses!r}")
+        decision_reasons.append(f"status={status!r} 不在 {accepted_statuses!r}")
     accepted_actions = [str(item) for item in case.get("accepted_actions") or []]
     next_action = (decision or {}).get("next_action") or {}
     action = str(next_action.get("action") or "") if isinstance(next_action, dict) else ""
     if status == "action" and accepted_actions and action not in accepted_actions:
-        reasons.append(f"action={action!r} 不在 {accepted_actions!r}")
+        decision_reasons.append(f"action={action!r} 不在 {accepted_actions!r}")
     if status == "action" and isinstance(next_action, list):
-        reasons.append("next_action 不能是动作列表")
-    return {"passed": not reasons, "reasons": reasons}
+        decision_reasons.append("next_action 不能是动作列表")
+    dimensions["decision"] = _dimension(applicable=True, reasons=decision_reasons)
+
+    page_reasons: list[str] = []
+    page = expectations.get("page")
+    if isinstance(page, dict):
+        app_ids = page.get("foreground_app_ids")
+        if isinstance(app_ids, list) and _normalized_text(scene.get("foreground_app_id")) not in {
+            _normalized_text(item) for item in app_ids}:
+            page_reasons.append(f"foreground_app_id={scene.get('foreground_app_id')!r} 不在 {app_ids!r}")
+        semantic = " ".join([
+            str(scene.get("screen_id") or ""),
+            str(scene.get("summary") or ""),
+            *[str(item) for item in scene.get("overlays") or []],
+            *[
+                str(value)
+                for item in elements
+                if isinstance(item, dict)
+                for value in (item.get("label") or "", item.get("meaning") or "")
+            ],
+        ])
+        semantic_terms = page.get("semantic_contains_any")
+        if isinstance(semantic_terms, list) and not _contains_any(semantic, semantic_terms):
+            page_reasons.append(f"页面语义未包含任一预期词：{semantic_terms!r}")
+    dimensions["page"] = _dimension(applicable=isinstance(page, dict), reasons=page_reasons)
+
+    target_reasons: list[str] = []
+    target = expectations.get("target")
+    if isinstance(target, dict):
+        target_element = None
+        params = next_action.get("params") if isinstance(next_action, dict) else None
+        element_id = str((params or {}).get("element_id") or "") if isinstance(params, dict) else ""
+        if not element_id:
+            region = (decision or {}).get("target_region") or {}
+            element_id = str(region.get("element_id") or "") if isinstance(region, dict) else ""
+        if status != "action":
+            target_reasons.append("目标控件期望只适用于 action，模型没有返回 action")
+        elif not element_id:
+            target_reasons.append("动作没有绑定当前 scene 的 element_id")
+        else:
+            target_element = next((item for item in elements
+                if isinstance(item, dict) and str(item.get("element_id") or "") == element_id), None)
+            if target_element is None:
+                target_reasons.append(f"当前 scene 找不到动作绑定元素：{element_id}")
+        if target_element is not None:
+            labels = target.get("label_any")
+            if isinstance(labels, list) and _normalized_text(target_element.get("label")) not in {
+                _normalized_text(item) for item in labels}:
+                target_reasons.append(f"目标标签={target_element.get('label')!r} 不在 {labels!r}")
+            roles = target.get("role_any")
+            if isinstance(roles, list) and _normalized_text(target_element.get("role")) not in {
+                _normalized_text(item) for item in roles}:
+                target_reasons.append(f"目标角色={target_element.get('role')!r} 不在 {roles!r}")
+            meanings = target.get("meaning_contains_any")
+            if isinstance(meanings, list) and not _contains_any(target_element.get("meaning"), meanings):
+                target_reasons.append(f"目标语义={target_element.get('meaning')!r} 未包含 {meanings!r}")
+    dimensions["target"] = _dimension(applicable=isinstance(target, dict), reasons=target_reasons)
+
+    input_reasons: list[str] = []
+    input_expectation = expectations.get("input")
+    if isinstance(input_expectation, dict):
+        inputs = [item for item in elements if isinstance(item, dict) and item.get("role") == "input"]
+        present = input_expectation.get("present", True)
+        expected_count = input_expectation.get("count")
+        if isinstance(expected_count, int) and not isinstance(expected_count, bool) and len(inputs) != expected_count:
+            input_reasons.append(f"输入框数量={len(inputs)}，预期={expected_count}")
+        if present is False:
+            if inputs:
+                input_reasons.append(f"预期没有输入框，但识别到{len(inputs)}个")
+        elif not inputs:
+            input_reasons.append("没有识别到应用输入框")
+        else:
+            matches = []
+            for item in inputs:
+                states = item.get("states") or {}
+                if not isinstance(states, dict):
+                    continue
+                if "text_exact" in input_expectation and states.get("value") != input_expectation["text_exact"]:
+                    continue
+                if "focused" in input_expectation and states.get("focused") is not input_expectation["focused"]:
+                    continue
+                layouts = input_expectation.get("keyboard_layouts")
+                if isinstance(layouts, list) and states.get("keyboard_layout") not in layouts:
+                    continue
+                modes = input_expectation.get("keyboard_input_modes")
+                if isinstance(modes, list) and states.get("keyboard_input_mode") not in modes:
+                    continue
+                if "preedit_exact" in input_expectation and states.get("ime_preedit_text") != input_expectation[
+                    "preedit_exact"]:
+                    continue
+                preedit_terms = input_expectation.get("preedit_contains_any")
+                if isinstance(preedit_terms, list) and not _contains_any(
+                    states.get("ime_preedit_text"), preedit_terms
+                ):
+                    continue
+                matches.append(item)
+            if not matches:
+                observed = [{"value": (item.get("states") or {}).get("value"),
+                    "focused": (item.get("states") or {}).get("focused"),
+                    "keyboard_layout": (item.get("states") or {}).get("keyboard_layout"),
+                    "keyboard_input_mode": (item.get("states") or {}).get("keyboard_input_mode"),
+                    "ime_preedit_text": (item.get("states") or {}).get("ime_preedit_text")}
+                    for item in inputs]
+                input_reasons.append(f"输入状态未匹配预期；observed={observed!r}")
+    dimensions["input"] = _dimension(applicable=isinstance(input_expectation, dict), reasons=input_reasons)
+
+    finish_reasons: list[str] = []
+    finish = expectations.get("finish")
+    if isinstance(finish, dict):
+        if status != "finish":
+            finish_reasons.append(f"预期 finish，但模型返回 {status!r}")
+        if finish.get("evidence_required") is True:
+            evidence = (decision or {}).get("completion_evidence") or []
+            if not evidence:
+                finish_reasons.append("finish 没有引用同一响应中的完成证据")
+    dimensions["finish"] = _dimension(applicable=isinstance(finish, dict), reasons=finish_reasons)
+
+    reasons = [f"{name}: {reason}" for name in CAPABILITY_DIMENSIONS
+        for reason in dimensions[name]["reasons"]]
+    return {"passed": not reasons, "reasons": reasons, "dimensions": dimensions}
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -129,6 +425,7 @@ def _evaluate_case(
     scene_observer = SingleStepGenericSceneObserver(provider)
     decision_observer = QwenVisualDecisionObserver(
         provider,
+        decision_source=scene_observer,
         trusted_observation_frame_validator=(
             validate_trusted_observation_against_frames
         ),
@@ -139,7 +436,12 @@ def _evaluate_case(
     observation: TrustedObservation | None = None
     try:
         frames, frame_paths = _load_frames(case, path)
-        context = QwenTaskContext.from_dict(dict(case["task_context"]))
+        base_context = QwenTaskContext.from_dict(dict(case["task_context"]))
+        context = replace(
+            base_context,
+            semantic_ir=case.get("_semantic_ir") or _semantic_ir_for_context(base_context),
+        )
+        context.validate()
         scene = scene_observer.observe(
             frames=frames,
             goal_context={'device_id': context.device_id,
@@ -179,14 +481,17 @@ def _evaluate_case(
                 "error": decision_diagnostics["local_safety_block"],
                 "safe_stop_reason": decision.reason,
             }
-        score = _score(case, status=status, decision=value)
+        score = _score(
+            case,
+            status=status,
+            decision=value,
+            observation=observation.to_dict(),
+        )
         if failure and failure.get("error_type") != "local_safety_block":
-            score = {
-                "passed": False,
-                "reasons": [
-                    f"运行时失败：{failure.get('error_type')}；{failure.get('error') or ''}"
-                ],
-            }
+            score = _failed_score(
+                case,
+                f"运行时失败：{failure.get('error_type')}；{failure.get('error') or ''}",
+            )
         if not score["passed"] and failure is None:
             failure = {
                 "stage": "scoring",
@@ -236,10 +541,7 @@ def _evaluate_case(
                 elapsed_seconds=time.perf_counter() - started,
                 safe_stop_reason=safe_stop,
             )
-        score = {
-            "passed": False,
-            "reasons": [f"运行时失败：{error_type}；{exc}"],
-        }
+        score = _failed_score(case, f"运行时失败：{error_type}；{exc}")
         return {
             "case_id": case["id"],
             "page_type": case.get("page_type"),
@@ -307,10 +609,7 @@ def _worker_crash_result(
         },
         "elapsed_seconds": 0.0,
         "hardware_actions_enabled": False,
-        "score": {
-            "passed": False,
-            "reasons": [f"用例子进程异常：{error}"],
-        },
+        "score": _failed_score(case, f"用例子进程异常：{error}"),
     }
 
 
@@ -342,10 +641,7 @@ def _timeout_result(
         },
         "elapsed_seconds": round(timeout_seconds, 3),
         "hardware_actions_enabled": False,
-        "score": {
-            "passed": False,
-            "reasons": [f"运行时失败：{error_type}；{label}超时"],
-        },
+        "score": _failed_score(case, f"运行时失败：{error_type}；{label}超时"),
     }
 
 
@@ -357,7 +653,7 @@ def _pending_result(case: dict[str, Any], run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "status": "pending",
         "hardware_actions_enabled": False,
-        "score": {"passed": False, "reasons": ["本轮尚未执行"]},
+        "score": _failed_score(case, "本轮尚未执行"),
     }
 
 
@@ -377,10 +673,10 @@ def _configuration_result(case: dict[str, Any], run_id: str) -> dict[str, Any]:
         "observation_diagnostics": {"model_calls": 0},
         "decision_diagnostics": {"model_calls": 0},
         "hardware_actions_enabled": False,
-        "score": {
-            "passed": False,
-            "reasons": ["运行时失败：configuration_error；未配置 DASHSCOPE_API_KEY"],
-        },
+        "score": _failed_score(
+            case,
+            "运行时失败：configuration_error；未配置 DASHSCOPE_API_KEY",
+        ),
     }
 
 
@@ -491,6 +787,36 @@ def _format_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _format_capability_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    current = [item for item in results if item.get("result_origin") == "current_run"]
+    metrics: dict[str, Any] = {}
+    total_attempted = 0
+    total_passed = 0
+    for name in CAPABILITY_DIMENSIONS:
+        attempted = []
+        for item in current:
+            dimensions = (item.get("score") or {}).get("dimensions") or {}
+            value = dimensions.get(name) if isinstance(dimensions, dict) else None
+            if isinstance(value, dict) and value.get("applicable") is True:
+                attempted.append(value)
+        passed = sum(item.get("passed") is True for item in attempted)
+        metrics[name] = {
+            "attempted_count": len(attempted),
+            "passed_count": passed,
+            "failed_count": len(attempted) - passed,
+            "accuracy": _rate(passed, len(attempted)),
+        }
+        total_attempted += len(attempted)
+        total_passed += passed
+    metrics["combined"] = {
+        "attempted_count": total_attempted,
+        "passed_count": total_passed,
+        "failed_count": total_attempted - total_passed,
+        "accuracy": _rate(total_passed, total_attempted),
+    }
+    return metrics
+
+
 def _format_model_usage(results: list[dict[str, Any]]) -> dict[str, int]:
     current = [item for item in results if item.get("result_origin") == "current_run"]
     keys = (
@@ -579,6 +905,7 @@ def _build_report(
             "failure_rate": _rate(statuses.count("failed"), len(statuses)),
         },
         "format_metrics": _format_metrics(results),
+        "capability_metrics": _format_capability_metrics(results),
         "model_usage": _format_model_usage(results),
         "failures": failures,
         "results": results,
@@ -699,6 +1026,7 @@ def main() -> int:
                     "case_count": report["case_count"],
                     "passed": report["passed"],
                     "failed": report["failed"],
+                    "capability_metrics": report["capability_metrics"],
                     "configuration_error": "未配置 DASHSCOPE_API_KEY",
                     "hardware_actions_enabled": False,
                 },
@@ -742,6 +1070,7 @@ def main() -> int:
                 "passed": report["passed"],
                 "failed": report["failed"],
                 "format_metrics": report["format_metrics"],
+                "capability_metrics": report["capability_metrics"],
                 "failure_rate": report["case_outcome_rates"]["failure_rate"],
                 "hardware_actions_enabled": False,
             },

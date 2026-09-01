@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
-import re
 import time
 from typing import Any, Callable, Iterable
 
@@ -25,12 +24,24 @@ from agent.domain.ui_scene import UIElement
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-01-qwen-same-response-action-finish-v8"
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-01-qwen-same-response-action-finish-v9"
 QWEN_VISUAL_DECISION_MODEL_ROLE = "single_response_scene_action_or_finish"
 SINGLE_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
     'clear_verified_text', 'double_tap', 'long_press'})
 QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
-_ANDROID_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
+_DECISION_FIELDS = frozenset({'status', 'action', 'element_id', 'source_element_id',
+    'destination_element_id', 'direction', 'evidence_refs', 'confidence', 'reason'})
+_ACTION_INJECTION_FIELDS = frozenset({'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe', 'command',
+    'shell', 'coordinates', 'next_action', 'execution_plan'})
+
+
+def _contains_action_injection(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(str(key).strip().casefold() in _ACTION_INJECTION_FIELDS
+            or _contains_action_injection(part) for key, part in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_action_injection(part) for part in value)
+    return False
 
 
 def _targets_single_element(kind: str, params: Mapping[str, Any]) -> bool:
@@ -167,8 +178,7 @@ class QwenVisualDecisionObserver:
             for item in choices], 'device_action_kinds': sorted(available_actions)}
 
         if payload['status'] == 'finish':
-            decision = _finish_decision(payload, context=context, observation=trusted_observation,
-                launch_target=launch_target)
+            decision = _finish_decision(payload, context=context, observation=trusted_observation)
             self._metrics['model_finish_count'] += 1
         else:
             matches = tuple(item for item in choices if _choice_matches_model_decision(item, payload))
@@ -211,13 +221,55 @@ def _selection_choices(context: qwen_task_context_domain.QwenTaskContext,
 
 
 def _normalize_model_decision_payload(value: Any) -> dict[str, Any]:
-    required = {'status', 'action', 'element_id', 'source_element_id', 'destination_element_id', 'direction',
-        'evidence_refs', 'confidence', 'reason'}
-    reject_if(not isinstance(value, Mapping) or set(value) != required,
-        VisionAgentError("同响应decision字段不完整或包含协议外字段。"))
-    reject_if(value.get('status') not in {'action', 'finish'},
+    reject_if(not isinstance(value, Mapping), VisionAgentError("同响应decision必须是对象。"))
+    extras = {key: part for key, part in value.items() if key not in _DECISION_FIELDS}
+    reject_if(_contains_action_injection(extras),
+        VisionAgentError("同响应decision包含多动作、计划或裸坐标字段。"))
+    status = value.get('status')
+    reject_if(status not in {'action', 'finish'},
         VisionAgentError("同响应decision只允许action或finish。"))
-    return dict(value)
+    confidence = value.get('confidence', 1.0)
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0):
+        confidence = 1.0
+    reason = value.get('reason', '')
+    if not isinstance(reason, str):
+        reason = ''
+    raw_refs = value.get('evidence_refs', [])
+    refs = list(dict.fromkeys(item.strip() for item in raw_refs
+        if isinstance(item, str) and item.strip()))[:8] if isinstance(raw_refs, list) else []
+    action = value.get('action')
+    element_id = value.get('element_id')
+    source_id = value.get('source_element_id')
+    destination_id = value.get('destination_element_id')
+    direction = value.get('direction')
+    for name, part in {'action': action, 'element_id': element_id, 'source_element_id': source_id,
+        'destination_element_id': destination_id, 'direction': direction}.items():
+        reject_if(part is not None and (not isinstance(part, str) or not part.strip()),
+            VisionAgentError(f"同响应decision.{name}必须是非空字符串或null。"))
+    if status == 'finish':
+        reject_if(any(part is not None for part in (action, element_id, source_id, destination_id, direction))
+            or not refs, VisionAgentError("finish必须只引用同一scene完成证据。"))
+    else:
+        reject_if(action not in QWEN_PROTOCOL_ACTIONS or refs,
+            VisionAgentError("action必须是canonical动作且不得携带完成证据。"))
+        if action in SINGLE_ELEMENT_ACTIONS:
+            reject_if(element_id is None or any(part is not None for part in (source_id, destination_id, direction)),
+                VisionAgentError("元素动作必须且只能引用一个element_id。"))
+        elif action == 'drag':
+            reject_if(element_id is not None or direction is not None or source_id is None or destination_id is None
+                or source_id == destination_id, VisionAgentError("drag必须且只能引用不同起点和终点。"))
+        elif action == 'swipe':
+            reject_if(source_id is not None or destination_id is not None
+                or direction not in {'up', 'down', 'left', 'right'}, VisionAgentError("swipe必须声明唯一方向。"))
+        else:
+            reject_if(any(part is not None for part in (element_id, source_id, destination_id, direction)),
+                VisionAgentError("系统动作不得携带元素或方向字段。"))
+    normalized_reason = reason.strip()[:500] or ("当前截图同帧证据证明目标完成" if status == 'finish'
+        else "当前截图选择一个推进目标的动作")
+    return {'status': status, 'action': action, 'element_id': element_id,
+        'source_element_id': source_id, 'destination_element_id': destination_id, 'direction': direction,
+        'evidence_refs': list(refs), 'confidence': float(confidence), 'reason': normalized_reason}
 
 
 def _choice_matches_model_decision(choice: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
@@ -283,14 +335,12 @@ def _hydrate_canonical_selection(payload: Mapping[str, Any], *,
 
 
 def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_domain.QwenTaskContext,
-    observation: trusted_observation_domain.TrustedObservation,
-    launch_target: Mapping[str, str] | None=None) -> QwenVisualDecision:
-    expected_app_id = str((launch_target or {}).get('expected_app_id') or '').strip()
-    current_app_id = str(observation.scene.foreground_app_id or '').strip()
-    reject_if(bool(_ANDROID_PACKAGE.fullmatch(expected_app_id) and _ANDROID_PACKAGE.fullmatch(current_app_id)
-        and expected_app_id.casefold() != current_app_id.casefold()),
-        VisionAgentError("当前Android系统前台包名与正式目标App不一致，Qwen不能把本轮判为finish："
-            f"current={current_app_id}，expected={expected_app_id}。"))
+    observation: trusted_observation_domain.TrustedObservation) -> QwenVisualDecision:
+    """Accept finish only from evidence bound to this exact current observation.
+
+    Launch/App lineage remains model context, not a second local completion
+    authority after the same-frame response has selected ``finish``.
+    """
     evidence: list[str] = []
     for ref in payload.get('evidence_refs') or ():
         if ref == 'scene.summary':

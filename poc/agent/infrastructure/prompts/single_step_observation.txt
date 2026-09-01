@@ -24,7 +24,8 @@ scene与input_structure必须共用一个coordinate_space，绝不能各用一�
 --- INPUT CONTRACT ---
 {{INPUT_CONTRACT}}
 
-最终且唯一有效的顶层结构如下，禁止Markdown、重复键和任何额外字段：
+最终顶层结构如下。禁止Markdown、重复键，以及action/actions/plan/step/steps/tap/swipe/
+command/coordinates等动作注入字段；中性的额外诊断字段会被本地忽略，不能改变动作语义：
 {"protocol_version":"{{OBSERVATION_PROTOCOL}}",
 "coordinate_space":{"kind":"axis_grid","width":1000,"height":{{REQUEST_HEIGHT}}},
 "scene":{"protocol_version":"{{SCENE_PROTOCOL}}",
@@ -34,16 +35,11 @@ scene与input_structure必须共用一个coordinate_space，绝不能各用一�
 "phone_content_rotation":"unknown","confidence":0.0,"evidence":[]},
 "elements":[],"overlays":[],"stable":true,"confidence":0.0,"fingerprint":""},
 "input_structure":null,"decision":DECISION_OBJECT}
-上面的DECISION_OBJECT只是结构占位，最终输出必须替换为以下两种完整JSON对象之一：
+上面的DECISION_OBJECT只是结构占位，最终输出必须替换为以下两种最小JSON对象之一：
 - 当前目标尚未由本图证明完成：
-  {"status":"action","action":"本轮实际动作名","element_id":null,
-  "source_element_id":null,"destination_element_id":null,"direction":null,
-  "evidence_refs":[],"confidence":0.0,"reason":"这一个动作如何推进当前目标"}
+  {"status":"action","action":"本轮实际动作名"}
 - 当前目标已经由本图直接证明完成：
-  {"status":"finish","action":null,"element_id":null,
-  "source_element_id":null,"destination_element_id":null,"direction":null,
-  "evidence_refs":["scene.summary"],"confidence":0.0,
-  "reason":"本图中的哪些事实已经证明当前目标完成"}
+  {"status":"finish","evidence_refs":["scene.summary"]}
 “本轮实际动作名”必须替换为下面实际可用动作集合中的一个值，不能原样输出占位文字。
 {{INPUT_RULE}}
 当前设备本轮可用动作（唯一运行时动作集合）：{{AVAILABLE_ACTIONS_JSON}}。
@@ -67,11 +63,14 @@ decision规则：
    press_enter、clear_verified_text、double_tap、long_press、drag、swipe、back、home、
    open_recent_apps、reveal_system_navigation、wait_for_change或launch_app。只选择当前
    画面和当前高层目标所需的一步，不预测下一页动作。
-2. 元素动作只填element_id；drag只填source_element_id和destination_element_id；
-   swipe必须填direction，可在绑定当前滚动/卡片容器时同时填element_id；系统动作
-   其余引用均为null。本地只把你的明确选择映射到同一scene的canonical candidate，
+2. 元素动作额外填写element_id；drag填写source_element_id和destination_element_id；
+   swipe填写direction，并可在绑定当前滚动/卡片容器时填写element_id；系统动作不填写元素引用。
+   不属于当前动作变体的null字段无需输出。本地只把你的明确选择映射到同一scene的canonical candidate，
    不会替你自动改选另一个动作。
-3. 当前高层目标已经由本图证明时写status=finish、action及动作引用均为null，并在
+   当input_structure只有一个合法application_inputs项时，本地将它唯一投影为
+   element_id="local_audited_input_1"；本轮若选择该输入字段的聚焦、输入或清空动作，必须引用这个ID。
+   若input_structure没有字段而scene只有一个聚焦前输入表面，则仍引用该scene元素自己的element_id。
+3. 当前高层目标已经由本图证明时写status=finish，不填写action或动作引用，并在
    evidence_refs中写一个或多个`scene.summary`或`element:<本响应element_id>`。不要把
    “刚才动作可能成功”当成finish；只看本轮JPEG和本响应scene。
 4. 当前画面没有最终目标控件、需要经过中间页面、不知道下一张页面具体长什么样、当前
@@ -81,8 +80,8 @@ decision规则：
 5. 多个可见元素存在时，按当前高层目标、元素语义、可见性和当前页面结构直接选择一个
    最能推进目标的可执行元素；不得因为存在辅助容器、说明文字或多个非动作事实而拒绝选择。
    本地不会替你改选另一个动作，引用不存在或不能唯一映射的元素会作为模型合同错误停止。
-6. action的evidence_refs必须为空。所有decision字段始终完整出现；confidence
-   为0..1。decision不得携带正文、包名、坐标、candidate ID或多步计划。
+6. reason和confidence是可选诊断字段，缺失不影响动作语义；若提供，confidence为0..1。
+   action不携带完成证据。decision不得携带正文、包名、裸坐标、candidate ID或多步计划。
 
 scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯一标记；decision是
 同一次响应对下一步action或finish的唯一选择。canonical只验证并绑定该选择。

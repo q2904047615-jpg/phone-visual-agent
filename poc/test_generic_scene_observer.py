@@ -4,7 +4,6 @@ import json
 import re
 import unittest
 import time
-from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -16,8 +15,6 @@ from agent.infrastructure.generic_scene_observer import (
     INPUT_STRUCTURE_AUDIT_VERSION,
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     SingleStepGenericSceneObserver,
-    _has_exact_passive_scene_element_fields,
-    _is_passive_scene_element_wire_object,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from agent.infrastructure.dashscope_vision_provider import _image_data_url
@@ -688,40 +685,6 @@ def multifield_next_audit(
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
-    def test_passive_scene_element_wire_schema_has_one_authority(self) -> None:
-        element = {
-            "element_id": "e1",
-            "role": "button",
-            "meaning": "open_target",
-            "label": "target",
-            "bounds": [100, 100, 200, 200],
-            "confidence": 0.95,
-            "states": {"goal_relevant": True},
-            "evidence": ["visible target"],
-        }
-
-        self.assertTrue(_has_exact_passive_scene_element_fields(element))
-        self.assertTrue(_is_passive_scene_element_wire_object(element))
-        self.assertFalse(
-            _is_passive_scene_element_wire_object(
-                {
-                    **element,
-                    "states": {
-                        "goal_relevant": True,
-                        "metadata": [{"action": "tap"}],
-                    },
-                }
-            )
-        )
-        self.assertFalse(_has_exact_passive_scene_element_fields({**element, "unexpected": "field"}))
-
-        source = (Path(__file__).parent / "agent" / "infrastructure" / "generic_scene_observer.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("exact_fields =", source)
-        self.assertNotIn("action_like =", source)
-        self.assertNotIn("def contains_action_like_key", source)
-
     def test_obsolete_blocked_decision_is_rejected_by_wire_contract(self) -> None:
         payload = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
@@ -753,6 +716,134 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 device_id="device-local-01",
                 available_action_kinds={"home"},
             )
+
+    def test_missing_fixed_outer_protocol_version_is_filled_once(self) -> None:
+        payload = {
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+        }
+        provider = SequenceProvider([payload])
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "确认当前页面"},
+            device_id="device-local-01",
+        )
+
+        self.assertEqual("app_home", observed.screen_id)
+        self.assertEqual(1, provider.calls)
+
+    def test_explicit_conflicting_outer_protocol_version_is_rejected(self) -> None:
+        payload = {
+            "protocol_version": "conflicting-version",
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+        }
+        provider = SequenceProvider([payload])
+
+        with self.assertRaisesRegex(VisionAgentError, "协议版本不匹配"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "确认当前页面"},
+                device_id="device-local-01",
+            )
+
+        self.assertEqual(1, provider.calls)
+
+    def test_nested_action_injection_inside_harmless_outer_metadata_is_rejected(self) -> None:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+            "metadata": {"plan": ["click once", "click again"]},
+        }
+        provider = SequenceProvider([payload])
+
+        with self.assertRaisesRegex(VisionAgentError, "动作或计划"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(), goal_context={"objective": "确认当前页面"},
+                device_id="device-local-01")
+
+        self.assertEqual(1, provider.calls)
+
+    def test_missing_optional_system_ui_and_camera_use_local_frame_facts(self) -> None:
+        compact_scene = scene_payload()
+        compact_scene.pop("system_ui")
+        compact_scene.pop("camera_alignment")
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": compact_scene,
+                    "input_structure": None,
+                    "decision": {
+                        "status": "finish",
+                        "evidence_refs": ["scene.summary"],
+                    },
+                }
+            ]
+        )
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "确认当前页面"},
+            device_id="device-local-01",
+        )
+
+        self.assertEqual("unknown", observed.system_ui.navigation_bar_visible)
+        self.assertEqual("portrait", observed.camera_alignment.camera_layout_orientation)
+        self.assertEqual("unknown", observed.camera_alignment.phone_content_rotation)
+
+    def test_duplicate_finish_evidence_is_normalized_without_a_second_veto(self) -> None:
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": scene_payload(),
+                    "input_structure": None,
+                    "decision": {
+                        "status": "finish",
+                        "evidence_refs": ["scene.summary", "scene.summary"],
+                    },
+                }
+            ]
+        )
+        observer = SingleStepGenericSceneObserver(provider)
+
+        observed = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "确认当前页面"},
+            device_id="device-local-01",
+        )
+
+        self.assertEqual(
+            ["scene.summary"],
+            observer.decision_for(observed.fingerprint)["evidence_refs"],
+        )
 
     def test_explicit_system_home_observation_sends_unmasked_phone_frame(
         self,
@@ -1161,27 +1252,13 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
-            SingleStepGenericSceneObserver(
-                SequenceProvider(
-                    [
-                        {
-                            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                            "coordinate_space": {
-                                "kind": "normalized_1000",
-                                "width": 1000,
-                                "height": 1000,
-                            },
-                            "scene": scene,
-                            "input_structure": audit,
-                        }
-                    ]
-                )
-            ).observe(
-                frames=stable_frames(),
-                goal_context=context,
-                device_id="device-local-01",
-            )
+        observed = SingleStepGenericSceneObserver(SequenceProvider([{
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene, "input_structure": audit,
+        }])).observe(frames=stable_frames(), goal_context=context, device_id="device-local-01")
+
+        self.assertIsNone(observed.unique_trusted_goal_element())
 
     def test_single_step_observer_uses_one_request_for_scene_and_input(self) -> None:
         scene = scene_payload()
@@ -1247,22 +1324,17 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(provider.call_options["max_attempts"], 1)
         prompt = json.dumps(provider.messages_seen[0], ensure_ascii=False)
-        self.assertIn(
-            "direct_latin describes the keyboard key mode only",
-            prompt,
-        )
-        self.assertIn("same Latin glyph sequence", prompt)
-        self.assertIn("second occurrence is the exact candidate", prompt)
-        self.assertIn(
-            "不得在scene.states.value中重复正文",
-            prompt,
-        )
+        self.assertIn("A blank input is valid", prompt)
+        self.assertIn("does not need visible text, placeholder, caret", prompt)
+        self.assertIn("Companion IME input/clear and a focus tap do not require them", prompt)
+        self.assertIn("scene中的role=input只是可选页面上下文", prompt)
+        self.assertIn('element_id=\\"local_audited_input_1\\"', prompt)
         self.assertEqual(
             observed.unique_trusted_goal_element().element_id,
             "local_audited_input_1",
         )
 
-    def test_input_target_miss_is_fail_closed_even_with_spoofed_phase(self):
+    def test_input_target_miss_does_not_create_an_execution_target(self):
         wrong_scene = scene_payload()
         wrong_scene.update(
             {
@@ -1301,12 +1373,12 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
-            SingleStepGenericSceneObserver(SequenceProvider([envelope])).observe(
-                frames=stable_frames(),
-                goal_context=context,
-                device_id="device-local-01",
-            )
+        provider = SequenceProvider([envelope])
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context=context, device_id="device-local-01")
+
+        self.assertIsNone(observed.unique_trusted_goal_element())
+        self.assertEqual(1, provider.calls)
 
     def test_unique_compact_input_miss_is_preserved_only_for_focus(self):
         compact_scene = scene_payload()
@@ -1319,18 +1391,11 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     {
                         "element_id": "coarse-input",
                         "role": "input",
-                        "meaning": "message_input_field",
-                        "label": "",
                         "bounds": [120, 910, 780, 960],
-                        "confidence": 1.0,
                         "states": {
                             "goal_relevant": True,
                             "fully_visible": True,
-                            "focus_only_input_surface": True,
-                            "value": "模型粗转写不得保留",
-                            "input_field_id": "model_minted_id",
                         },
-                        "evidence": ["底部工具栏中唯一完整白色文本输入区域"],
                     }
                 ],
             }
@@ -1392,7 +1457,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertNotIn("input_field_id", target.states)
                 self.assertFalse(target.element_id.startswith("local_audited_"))
 
-    def test_focus_only_input_requires_one_surface_and_hidden_keyboard(self):
+    def test_ambiguous_or_unbound_focus_surfaces_do_not_create_targets(self):
         base_input = {
             "element_id": "coarse-input-1",
             "role": "input",
@@ -1469,12 +1534,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "scene": candidate_scene,
                     "input_structure": audit,
                 }
-                with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
-                    SingleStepGenericSceneObserver(SequenceProvider([envelope])).observe(
-                        frames=stable_frames(),
-                        goal_context=context,
-                        device_id="device-local-01",
-                    )
+                observed = SingleStepGenericSceneObserver(SequenceProvider([envelope])).observe(
+                    frames=stable_frames(), goal_context=context, device_id="device-local-01")
+                self.assertIsNone(observed.unique_trusted_goal_element())
 
     def test_single_step_observer_uses_only_input_structure_for_blank_value(
         self,
@@ -1497,27 +1559,25 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         }
         cases = (
             (
-                "scene-value-omitted",
+                "harmless-extra",
                 "com.example.messaging",
                 "named_conversation",
-                [120, 910, 780, 960],
-                {"goal_relevant": True, "fully_visible": True},
-                "底部工具栏中唯一完整白色文本输入区域",
+                {"bounds": [120, 910, 780, 960], "text": "", "visual_note": "optional metadata"},
             ),
             (
-                "stale-scene-transcription",
+                "low-confidence",
                 "com.example.notes",
                 "edit_note",
-                [100, 300, 900, 390],
-                {
-                    "goal_relevant": True,
-                    "fully_visible": True,
-                    "value": "stale scene transcription",
-                },
-                "表单中唯一完整可见的文本编辑表面",
+                {"bounds": [100, 300, 900, 390], "confidence": 0.01},
+            ),
+            (
+                "no-fully-visible",
+                "com.example.forms",
+                "edit_form",
+                {"bounds": [80, 420, 920, 510]},
             ),
         )
-        for name, app_id, screen_id, bounds, states, visual_evidence in cases:
+        for name, app_id, screen_id, audit_item in cases:
             with self.subTest(name=name):
                 scene = scene_payload()
                 scene.update(
@@ -1525,31 +1585,10 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                         "foreground_app_id": app_id,
                         "screen_id": screen_id,
                         "summary": "当前页面有一个空输入框",
-                        "elements": [
-                            {
-                                "element_id": "e1",
-                                "role": "input",
-                                "meaning": "application_text_input",
-                                "label": "",
-                                "bounds": bounds,
-                                "confidence": 1.0,
-                                "states": states,
-                                "evidence": [visual_evidence],
-                            }
-                        ],
+                        "elements": [],
                     }
                 )
-                audit = input_audit_payload(
-                    application_inputs=[
-                        audited_application_input(
-                            structure_id="field",
-                            bounds=bounds,
-                            text="",
-                            placeholder="",
-                            visible_editable_cues=[],
-                        )
-                    ]
-                )
+                audit = input_audit_payload(application_inputs=[audit_item])
                 provider = SequenceProvider(
                     [
                         {
@@ -1561,11 +1600,14 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                             },
                             "scene": scene,
                             "input_structure": audit,
+                            "decision": {"status": "action", "action": "input_verified_text",
+                                "element_id": "local_audited_input_1"},
                         }
                     ]
                 )
 
-                observed = SingleStepGenericSceneObserver(provider).observe(
+                observer = SingleStepGenericSceneObserver(provider)
+                observed = observer.observe(
                     frames=stable_frames(),
                     goal_context=context,
                     device_id="device-local-01",
@@ -1575,7 +1617,193 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 field = observed.unique_trusted_goal_element()
                 self.assertEqual("local_audited_input_1", field.element_id)
                 self.assertEqual("", field.states["value"])
-                self.assertIn("输入结构审计确认当前输入框为空", " ".join(field.evidence))
+                self.assertNotIn("same_frame_input_surface_evidence", field.states)
+                decision = observer.decision_for(observed.fingerprint)
+                self.assertEqual("input_verified_text", decision["action"])
+                self.assertEqual(1.0, decision["confidence"])
+                self.assertTrue(decision["reason"])
+
+    def test_blank_input_with_invalid_bounds_is_still_rejected(self) -> None:
+        scene = scene_payload()
+        scene.update(
+            {
+                "foreground_app_id": "com.example.forms",
+                "screen_id": "edit_form",
+                "summary": "当前页面有一个空输入框",
+                "elements": [],
+            }
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框输入abc",
+                    "constraints": [],
+                    "completion_conditions": ["输入框内容为abc"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "abc",
+                        "active_input_field_id": "message_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": scene,
+                    "input_structure": input_audit_payload(
+                        application_inputs=[{"bounds": [100, 300, 100, 390]}]
+                    ),
+                    "decision": {
+                        "status": "action",
+                        "action": "input_verified_text",
+                        "element_id": "local_audited_input_1",
+                    },
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "bounds"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context=context,
+                device_id="device-local-01",
+            )
+
+    def test_optional_invalid_and_surplus_input_facts_do_not_veto_valid_blank_input(self) -> None:
+        scene = scene_payload()
+        scene.update({
+            "foreground_app_id": "com.example.forms",
+            "screen_id": "edit_form",
+            "summary": "当前页面有一个空输入框",
+            "elements": [],
+        })
+        context = {"entities": {"active_subgoal_visual_context": {
+            "subgoal_id": "input_message",
+            "objective": "在输入框输入abc",
+            "constraints": [],
+            "completion_conditions": ["输入框内容为abc"],
+            "execution_class": "navigate",
+            "goal_entities": {
+                "active_input_transaction_text": "abc",
+                "active_input_field_id": "message_field",
+                "active_input_multiline": False,
+            },
+        }}}
+        invalid_inputs = [{"bounds": [100, 300, 100, 390], "text": "noise"} for _ in range(6)]
+        invalid_preedits = [{
+            "region_id": f"optional-{index}",
+            "bounds": [100, 500, 100, 550],
+            "text": "noise",
+            "candidates": [{"text": "noise", "bounds": [80, 610, 80, 650]}] * 10,
+        } for index in range(6)]
+        audit = input_audit_payload(
+            application_inputs=[{"bounds": [100, 300, 900, 390], "text": ""}, *invalid_inputs],
+            ime_preedit_regions=invalid_preedits,
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 0, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+        provider = SequenceProvider([{
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene,
+            "input_structure": audit,
+            "decision": {"status": "action", "action": "input_verified_text",
+                "element_id": "local_audited_input_1"},
+        }])
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context=context, device_id="device-local-01")
+
+        field = observed.unique_trusted_goal_element()
+        self.assertEqual("local_audited_input_1", field.element_id)
+        self.assertEqual("", field.states["value"])
+
+    def test_selected_scene_element_with_invalid_bounds_is_rejected(self) -> None:
+        scene = scene_payload()
+        scene["elements"] = [{
+            "element_id": "selected-target",
+            "role": "button",
+            "meaning": "open_target",
+            "label": "打开",
+            "bounds": [200, 400, 200, 500],
+            "states": {"goal_relevant": True, "visible": True, "enabled": True},
+        }]
+        provider = SequenceProvider([{
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene,
+            "decision": {"status": "action", "action": "tap_semantic",
+                "element_id": "selected-target"},
+        }])
+
+        with self.assertRaisesRegex(VisionAgentError, "已选目标.*bounds"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(), goal_context={"objective": "打开目标"},
+                device_id="device-local-01")
+
+    def test_selected_scene_element_id_must_be_unique(self) -> None:
+        scene = scene_payload()
+        selected = {
+            "element_id": "selected-target",
+            "role": "button",
+            "meaning": "open_target",
+            "label": "打开",
+            "bounds": [200, 400, 500, 500],
+            "states": {"goal_relevant": True, "visible": True, "enabled": True},
+        }
+        scene["elements"] = [selected, {**selected, "bounds": [550, 400, 850, 500]}]
+        provider = SequenceProvider([{
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene,
+            "decision": {"status": "action", "action": "tap_semantic",
+                "element_id": "selected-target"},
+        }])
+
+        with self.assertRaisesRegex(VisionAgentError, "element_id不唯一"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(), goal_context={"objective": "打开目标"},
+                device_id="device-local-01")
+
+    def test_invalid_unselected_goal_hint_does_not_veto_selected_scene_element(self) -> None:
+        scene = scene_payload()
+        scene["elements"][0].update(
+            element_id="selected-target", meaning="open_target",
+            states={"goal_relevant": True, "visible": True, "enabled": True})
+        scene["elements"].append({
+            "element_id": "bad-optional-hint",
+            "role": "button",
+            "meaning": "other_target",
+            "bounds": [800, 300, 700, 400],
+            "states": {"goal_relevant": True},
+        })
+        provider = SequenceProvider([{
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene,
+            "decision": {"status": "action", "action": "tap_semantic",
+                "element_id": "selected-target"},
+        }])
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context={"objective": "打开目标"},
+            device_id="device-local-01")
+
+        self.assertEqual(["selected-target"], [item.element_id for item in observed.elements])
 
     def test_single_step_observer_keeps_input_when_optional_preedit_bounds_are_broad(
         self,
@@ -1887,12 +2115,6 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 [120, 870, 780, 915],
                 "coordinate_space",
             ),
-            (
-                "axis_grid_out_of_bounds",
-                {"kind": "axis_grid", "width": 1000, "height": 960},
-                [120, 870, 1200, 915],
-                "axis_grid",
-            ),
         )
         for name, coordinate_space, bounds, error in cases:
             with self.subTest(name=name):
@@ -1935,7 +2157,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             )
         self.assertEqual(1, provider.calls)
 
-    def test_single_step_observer_rejects_missing_nested_audit_version(self) -> None:
+    def test_single_step_observer_fills_the_only_missing_nested_audit_version(self) -> None:
         scene = scene_payload()
         scene.update(
             {
@@ -1991,18 +2213,15 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        with self.assertRaisesRegex(VisionAgentError, "协议外字段"):
-            SingleStepGenericSceneObserver(provider).observe(
-                frames=stable_frames(),
-                goal_context=context,
-                device_id="device-local-01",
-            )
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context=context, device_id="device-local-01")
 
         self.assertEqual(provider.calls, 1)
+        self.assertEqual("local_audited_input_1", observed.unique_trusted_goal_element().element_id)
 
-    def test_single_step_observer_rejects_other_nested_audit_shape_changes(self) -> None:
+    def test_single_step_observer_ignores_harmless_nested_audit_metadata(self) -> None:
         scene = scene_payload()
-        audit = input_audit_payload(application_inputs=[])
+        audit = input_audit_payload(application_inputs=[{"bounds": [100, 720, 900, 820], "text": ""}])
         audit.pop("protocol_version")
         audit["unexpected"] = True
         provider = SequenceProvider(
@@ -2037,14 +2256,32 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        with self.assertRaisesRegex(VisionAgentError, "协议外字段"):
-            SingleStepGenericSceneObserver(provider).observe(
-                frames=stable_frames(),
-                goal_context=context,
-                device_id="device-local-01",
-            )
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context=context, device_id="device-local-01")
 
         self.assertEqual(provider.calls, 1)
+        self.assertEqual("local_audited_input_1", observed.unique_trusted_goal_element().element_id)
+
+    def test_single_step_observer_rejects_explicit_conflicting_nested_audit_version(self) -> None:
+        scene = scene_payload()
+        audit = input_audit_payload(application_inputs=[])
+        audit["protocol_version"] = "conflicting-version"
+        provider = SequenceProvider([{
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "scene": scene, "input_structure": audit,
+        }])
+        context = {"entities": {"active_subgoal_visual_context": {
+            "subgoal_id": "input_message", "objective": "在消息输入框输入abc", "constraints": [],
+            "completion_conditions": ["消息输入框内容为abc"], "execution_class": "navigate",
+            "goal_entities": {"active_input_transaction_text": "abc",
+                "active_input_field_id": "message_field", "active_input_multiline": False},
+        }}}
+
+        with self.assertRaisesRegex(VisionAgentError, "协议版本不匹配"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(), goal_context=context, device_id="device-local-01")
+        self.assertEqual(1, provider.calls)
 
     def test_single_step_observer_does_not_retry_malformed_response(self) -> None:
         provider = SequenceProvider(["{not-json"])
@@ -2067,7 +2304,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
 
-    def test_single_step_non_input_rejects_overflow_geometry(self) -> None:
+    def test_single_step_non_input_ignores_unselected_overflow_geometry(self) -> None:
         scene = scene_payload()
         scene.update(
             {
@@ -2113,29 +2350,29 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(VisionAgentError, "axis_grid"):
-            SingleStepGenericSceneObserver(provider).observe(
-                frames=stable_frames(),
-                goal_context={
-                    "app_id": "sample_app",
-                    "app_name": "示例应用",
-                    "entities": {
-                        "active_subgoal_visual_context": {
-                            "subgoal_id": "launch_sample_app",
-                            "objective": "打开示例应用",
-                            "constraints": [],
-                            "completion_conditions": ["示例应用已打开"],
-                            "execution_class": "navigate",
-                            "goal_entities": {},
-                        }
-                    },
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={
+                "app_id": "sample_app",
+                "app_name": "示例应用",
+                "entities": {
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "launch_sample_app",
+                        "objective": "打开示例应用",
+                        "constraints": [],
+                        "completion_conditions": ["示例应用已打开"],
+                        "execution_class": "navigate",
+                        "goal_entities": {},
+                    }
                 },
-                device_id="device-local-01",
-            )
+            },
+            device_id="device-local-01",
+        )
 
         self.assertEqual(1, provider.calls)
+        self.assertEqual(["title"], [item.element_id for item in observed.elements])
 
-    def test_single_step_input_keeps_overflow_geometry_fail_closed(self) -> None:
+    def test_single_step_input_revokes_unselected_overflow_compact_geometry(self) -> None:
         scene = scene_payload()
         scene["elements"] = [
             {
@@ -2180,14 +2417,11 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        with self.assertRaises(VisionAgentError):
-            SingleStepGenericSceneObserver(provider).observe(
-                frames=stable_frames(),
-                goal_context=context,
-                device_id="device-local-01",
-            )
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context=context, device_id="device-local-01")
 
         self.assertEqual(1, provider.calls)
+        self.assertIsNone(observed.unique_trusted_goal_element())
 
     def test_exact_device_fingerprint_and_goal_context_reuse_observation(self) -> None:
         class PlainSequenceProvider:

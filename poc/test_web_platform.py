@@ -47,7 +47,6 @@ from agent.infrastructure.robot_controller import (
 )
 from agent.infrastructure.orientation_safety import (
     _mint_single_step_scene_credential,
-    camera_layout_orientation,
 )
 from agent.domain.ui_scene import UIScene
 
@@ -60,10 +59,6 @@ class _TestDirectionCredentialMixin:
             device_id=self.device_id,
             scene_fingerprint="test-scene",
             frame=frame,
-            camera_layout_orientation_value=camera_layout_orientation(frame.size),
-            phone_content_rotation="upright",
-            confidence=0.99,
-            evidence=("合成手机界面轴线",),
         )
         self._physical_execution_gate.arm(
             credential,

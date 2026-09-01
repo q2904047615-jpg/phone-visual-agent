@@ -23,7 +23,6 @@ from agent.infrastructure.orientation_safety import (
     OrientationCredential,
     PhysicalExecutionGate,
     _mint_single_step_scene_credential,
-    camera_layout_orientation,
     frame_fingerprint,
 )
 
@@ -276,12 +275,6 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 device_id=report["device_id"],
                 scene_fingerprint=report["execution"]["before_scene"]["fingerprint"],
                 frame=before_frames[0],
-                camera_layout_orientation_value=camera_layout_orientation(
-                    before_frames[0].size
-                ),
-                phone_content_rotation="upright",
-                confidence=0.95,
-                evidence=("手机状态文字正向",),
             ),
             evidence_frame_fingerprint=frame_fingerprint(before_frames[0]),
         )

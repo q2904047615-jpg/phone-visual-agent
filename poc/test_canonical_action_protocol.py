@@ -466,7 +466,6 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                     states={**base.states, "goal_relevant": False},
                 )
             ),
-            "low_confidence": scene(replace(base, confidence=0.5)),
             "missing_axis": scene(
                 replace(
                     base,
@@ -483,7 +482,6 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                     states={**base.states, "scrollable": False},
                 )
             ),
-            "missing_evidence": scene(replace(base, evidence=())),
             "duplicate_viewports": scene(
                 base,
                 replace(
@@ -503,6 +501,56 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                 self.assertFalse(report.candidates)
                 self.assertEqual("blocked", report.status)
 
+    def test_swipe_does_not_require_optional_prose_evidence(self) -> None:
+        viewport = replace(
+            element(
+                "viewport",
+                label="More content",
+                meaning="content_viewport",
+                role="container",
+                states={
+                    "goal_relevant": True,
+                    "fully_visible": False,
+                    "scrollable": True,
+                    "scroll_axis": "vertical",
+                },
+            ),
+            evidence=(),
+        )
+
+        report = compile_canonical_action_catalog(scene(viewport), swipe_ir(), {"swipe"})
+
+        self.assertEqual({"up", "down"},
+            {candidate.parameters.get("direction") for candidate in report.candidates})
+
+    def test_low_confidence_unique_viewport_still_exposes_canonical_swipes(self) -> None:
+        viewport = replace(
+            element(
+                "viewport",
+                label="More content",
+                meaning="content_viewport",
+                role="container",
+                states={
+                    "goal_relevant": True,
+                    "fully_visible": False,
+                    "scrollable": True,
+                    "scroll_axis": "vertical",
+                },
+            ),
+            confidence=0.01,
+        )
+
+        report = compile_canonical_action_catalog(
+            replace(scene(viewport), confidence=0.01),
+            swipe_ir(),
+            {"swipe"},
+        )
+
+        self.assertEqual(
+            {"up", "down"},
+            {item.parameters.get("direction") for item in report.candidates},
+        )
+
     def test_explicit_direction_swipes_unique_visible_object_without_coordinates(self) -> None:
         samples = (
             (
@@ -520,13 +568,13 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         )
         for source_text, label, app_id, role in samples:
             with self.subTest(source_text=source_text):
-                target = element(
+                target = replace(element(
                     "preview",
                     label=label,
                     meaning="application_preview_card",
                     role=role,
                     states={"goal_relevant": True},
-                )
+                ), evidence=())
                 current_scene = scene(
                     target,
                     element(
@@ -661,6 +709,38 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                 and candidate.parameters.get("element_id") == "target-link"
                 for candidate in report.candidates
             )
+        )
+
+    def test_low_confidence_unique_exact_target_still_exposes_canonical_tap(self) -> None:
+        current_scene = replace(
+            scene(
+                replace(
+                    element(
+                        "target-link",
+                        label="返回验收模式选择",
+                        meaning="return_to_mode_selection",
+                        role="text",
+                        states={"goal_relevant": True},
+                    ),
+                    confidence=0.01,
+                )
+            ),
+            confidence=0.01,
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            exact_tap_ir(target_label="返回验收模式选择"),
+            {"tap_semantic"},
+        )
+
+        self.assertEqual(
+            ["target-link"],
+            [
+                candidate.parameters.get("element_id")
+                for candidate in report.candidates
+                if candidate.action_kind == "tap_semantic"
+            ],
         )
 
     def test_exact_tap_visible_text_target_is_label_and_language_agnostic(self) -> None:
@@ -1098,19 +1178,22 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         )
 
     def test_focus_only_input_surface_exposes_tap_but_never_text_authority(self) -> None:
-        focus_surface = element(
-            "coarse-input",
-            label="消息",
-            meaning="message_input_field",
-            role="input",
-            states={
-                "goal_relevant": True,
-                "focus_only_input_surface": True,
-            },
+        focus_surface = replace(
+            element(
+                "coarse-input",
+                label="消息",
+                meaning="message_input_field",
+                role="input",
+                states={
+                    "goal_relevant": True,
+                    "focus_only_input_surface": True,
+                },
+            ),
+            confidence=0.01,
         )
 
         report = compile_canonical_action_catalog(
-            scene(focus_surface),
+            replace(scene(focus_surface), confidence=0.01),
             input_ir(active="type_last_char"),
             ALL_ACTIONS,
         )

@@ -2070,6 +2070,58 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual("input_field_1", verified.input_field_id)
         self.assertEqual("verified_companion_ime_action", verified.source)
 
+    def test_verified_text_does_not_require_optional_evidence_repetition(self) -> None:
+        action = resolved_text()
+        for optional_evidence in (None, ["仅描述页面布局，不重复输入正文"]):
+            with self.subTest(optional_evidence=optional_evidence), tempfile.TemporaryDirectory() as temp:
+                before = scene("", "before-fp")
+                after = scene(action["expected_input_value"], "after-fp")
+                for candidate in (before, after):
+                    candidate["elements"][0]["states"]["input_field_id"] = "input_field_1"
+                    candidate["elements"][0]["label"] = "当前编辑区域"
+                if optional_evidence is None:
+                    after["elements"][0].pop("evidence")
+                else:
+                    after["elements"][0]["evidence"] = optional_evidence
+
+                record = TypedInputLineageStore(Path(temp)).record_verified_action(
+                    action_type="text",
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    after_scene=after,
+                    after_frames=surface_frames(),
+                )
+                self.assertEqual(action["expected_input_value"], record.exact_value)
+                self.assertEqual("input_field_1", record.input_field_id)
+
+    def test_verified_text_still_rejects_value_field_or_bounds_mismatch(self) -> None:
+        action = resolved_text()
+        before = scene("", "before-fp")
+        before["elements"][0]["states"]["input_field_id"] = "input_field_1"
+        for mismatch in ("value", "field", "bounds"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as temp:
+                after = scene(action["expected_input_value"], "after-fp")
+                after_input = after["elements"][0]
+                after_input["states"]["input_field_id"] = "input_field_1"
+                after_input["evidence"] = ["无关的可选视觉说明"]
+                if mismatch == "value":
+                    after_input["states"]["value"] = "different"
+                elif mismatch == "field":
+                    after_input["states"]["input_field_id"] = "input_field_2"
+                else:
+                    after_input["bounds"] = [0.75, 0.54, 0.95, 0.61]
+
+                with self.assertRaises(InputValueLineageError):
+                    TypedInputLineageStore(Path(temp)).record_verified_action(
+                        action_type="text",
+                        device_id=DEVICE,
+                        resolved_action=action,
+                        before_scene=before,
+                        after_scene=after,
+                        after_frames=surface_frames(),
+                    )
+
     def test_companion_unicode_commit_rejects_field_or_preedit_drift(self) -> None:
         action = resolved_companion_text()
         for field_id, preedit in (("other_field", ""), ("input_field_1", "stale")):
@@ -2301,11 +2353,8 @@ class TypedInputLineageTests(unittest.TestCase):
         )
         candidate_mutations["duplicate"] = duplicate_candidate
         for name, changed_audit in candidate_mutations.items():
-            with self.subTest(candidate=name), self.assertRaisesRegex(
-                VisionAgentError,
-                "唯一逐字候选几何",
-            ):
-                _apply_input_structure_audit(
+            with self.subTest(candidate=name):
+                without_candidate = _apply_input_structure_audit(
                     base,
                     json.dumps(changed_audit, ensure_ascii=False),
                     fingerprint="after-fp",
@@ -2313,6 +2362,10 @@ class TypedInputLineageTests(unittest.TestCase):
                     verified_input_lineage=pending,
                     device_id=DEVICE,
                 )
+                preserved = without_candidate.get_element("local_audited_input_1")
+                self.assertEqual(prior, preserved.states["value"])
+                self.assertFalse(any(element.element_id == "local_audited_ime_candidate_1"
+                    for element in without_candidate.elements))
 
         for changed_goal in (
             (goal(field_id="other_field"), expected),
@@ -2769,6 +2822,29 @@ class TypedInputLineageTests(unittest.TestCase):
                     hardware_receipt=receipt(),
                     after_frames=surface_frames(),
                 )
+
+    def test_verified_newline_does_not_require_optional_evidence_repetition(self) -> None:
+        action, before, base_after = newline_case()
+        for optional_evidence in (None, ["仅描述页面布局，不重复换行结论"]):
+            with self.subTest(optional_evidence=optional_evidence), tempfile.TemporaryDirectory() as temp:
+                after = json.loads(json.dumps(base_after))
+                after["elements"][0]["label"] = "当前多行编辑区域"
+                if optional_evidence is None:
+                    after["elements"][0].pop("evidence")
+                else:
+                    after["elements"][0]["evidence"] = optional_evidence
+
+                record = TypedInputLineageStore(Path(temp)).record_verified_action(
+                    action_type="newline",
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    after_scene=after,
+                    hardware_receipt=receipt(),
+                    after_frames=surface_frames(),
+                )
+                self.assertEqual("first\n", record.exact_value)
+                self.assertEqual("input_field_1", record.input_field_id)
 
 
 if __name__ == "__main__":

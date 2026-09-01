@@ -22,7 +22,6 @@ from agent.domain.input_value_lineage import (
     input_screen_identity_family,
 )
 from agent.domain.ui_scene import (
-    MIN_TARGET_CONFIDENCE,
     UIElement,
     UIScene,
     UISceneError,
@@ -158,8 +157,12 @@ class ResolvedSemanticAction:
 class UniversalActionController:
     """Resolve semantic actions without knowing WeChat, Douyin or any App UI."""
 
-    def __init__(self, *, min_confidence: float=MIN_TARGET_CONFIDENCE) -> None:
-        self.min_confidence = float(min_confidence)
+    def __init__(self) -> None:
+        """Create the deterministic execution validator.
+
+        Model confidence is diagnostic and intentionally has no constructor
+        threshold that can become a second action authority.
+        """
 
     def resolve_one(self, action: SemanticAction, scene: UIScene, *, confirmed: bool=False,
         local_point_grounding: LocalPointGrounding | None=None) -> ResolvedSemanticAction:
@@ -170,15 +173,6 @@ class UniversalActionController:
             UniversalActionError('本地文字落点只能修正当前已选中的普通点按目标。'),
         )
         reject_if(not scene.stable, UniversalActionError("页面仍在变化，不能执行动作。"))
-        if float(scene.confidence) < self.min_confidence:
-            target_local_candidate = scene.unique_trusted_goal_element(min_confidence=self.min_confidence)
-            action_element_id = str(action.params.get("element_id") or "").strip()
-            reject_if(
-                action.action not in {'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
-                'clear_verified_text', 'double_tap', 'long_press'} or target_local_candidate is None
-                or target_local_candidate.element_id != action_element_id,
-                UniversalActionError('页面整体置信度不足，且没有唯一可信的目标局部证据。'),
-            )
         formal_candidate_id = str(action.params.get('formal_candidate_id') or '').strip()
         formal_transition = dict(action.params.get("formal_transition") or {})
         expected_effect = dict(action.params.get("expected_effect") or {})
@@ -421,7 +415,7 @@ class UniversalActionController:
             UniversalActionError("本地文字清空必须绑定真实可见的独立 × 图形。"),
         )
         inputs = tuple((candidate for candidate in scene.elements if candidate.role == 'input'
-            and float(candidate.confidence) >= self.min_confidence and (formal or candidate.states.get('goal_relevant')
+            and (formal or candidate.states.get('goal_relevant')
             is True) and (candidate.states.get('focused') is True) and isinstance(candidate.states.get('value'),
             str) and bool(candidate.states.get('value')) and (candidate.states.get('keyboard_layout') in {'qwerty',
             'numeric', 'symbol', 'unknown'})))
@@ -447,8 +441,8 @@ class UniversalActionController:
         target_label = str(states.get("target_input_field_label") or "").strip()
         expectations = formal_transition.get("expectations")
         reject_if(
-            not (formal and element.role == 'button' and (float(element.confidence) >= 0.9)
-            and (states.get('fully_visible') is True) and (states.get('input_next_field_key') is True)
+            not (formal and element.role == 'button' and (states.get('fully_visible') is True)
+            and (states.get('input_next_field_key') is True)
             and (states.get('key_action') == 'next') and source_id and target_id and target_label
             and (source_id != target_id) and (expected_effect == {'scene_changed': True}) and isinstance(expectations,
             list) and (expectations == [{'subject_ref': target_id, 'predicate': 'input_field.focused',
@@ -460,9 +454,9 @@ class UniversalActionController:
         formal: bool=False) -> None:
         states = element.states
         reject_if(
-            element.role != 'button' or float(element.confidence) < 0.9 or (not formal and states.get('goal_relevant')
-            is not True) or (states.get('fully_visible') is not True),
-            UniversalActionError("输入辅助键缺少本轮完整、高置信本地审计。"),
+            element.role != 'button' or (not formal and states.get('goal_relevant') is not True)
+            or (states.get('fully_visible') is not True),
+            UniversalActionError("输入辅助键缺少本轮完整本地审计。"),
         )
         input_id = str(states.get("input_element_id") or "").strip()
         input_element = self._required_element(scene, input_id, error='输入辅助键没有绑定唯一输入框')
@@ -523,7 +517,7 @@ class UniversalActionController:
             self._require_visual_postcondition(resolved.kind, resolved.expected_effect, before)
         if resolved.kind == 'long_press':
             self._verify_long_press_contract(resolved, before)
-        reject_if(not after.stable or float(after.confidence) < self.min_confidence, UniversalActionError("动作后的页面不稳定或置信度不足。"))
+        reject_if(not after.stable, UniversalActionError("动作后的页面仍在变化。"))
         reject_if(
             resolved.kind != 'wait_for_change' and resolved.kind != 'reveal_system_navigation'
             and (resolved.expected_effect.get('allow_unchanged') is not True) and (before.fingerprint
@@ -556,7 +550,7 @@ class UniversalActionController:
             meaning = str(element_state.get("meaning") or "").strip()
             states = dict(element_state.get("states") or {})
             try:
-                after.resolve_unique(meaning=meaning, states=states, min_confidence=self.min_confidence)
+                after.resolve_unique(meaning=meaning, states=states)
             except UISceneError as exc:
                 before_target_is_input = False
                 if resolved.target_element_id:
@@ -566,12 +560,12 @@ class UniversalActionController:
                         before_target_is_input = False
                 input_aliases = tuple((element for element in after.elements if resolved.kind in {'tap_semantic',
                     'input_verified_text', 'clear_verified_text'} and before_target_is_input
-                    and (element.role == 'input') and (float(element.confidence) >= self.min_confidence)
+                    and (element.role == 'input')
                     and all((element.states.get(key) == value for key, value in states.items()))))
                 provisional_direct_preedits = tuple((element for element
                     in after.elements if resolved.kind == 'input_verified_text'
                     and resolved.input_method == 'direct_latin' and before_target_is_input
-                    and (element.role == 'input') and (float(element.confidence) >= self.min_confidence)
+                    and (element.role == 'input')
                     and self._is_exact_direct_latin_preedit_transition(resolved, after, element)))
                 if len(input_aliases) != 1 and len(provisional_direct_preedits) != 1:
                     raise UniversalActionError(f'动作结果缺少元素状态证据：{exc}') from exc
@@ -686,7 +680,7 @@ class UniversalActionController:
         element_id: str | None=None) -> tuple[UIElement, ...]:
         return tuple(element for element in scene.elements if (role is None or element.role == role)
             and (element_id is None or element.element_id == element_id)
-            and float(element.confidence) >= self.min_confidence and element.states.get('visible') is not False)
+            and element.states.get('visible') is not False)
 
     def _matching_after_elements(self, before_element: UIElement, after: UIScene, *,
         overlap_fallback: bool=False) -> tuple[UIElement, ...]:
@@ -703,7 +697,7 @@ class UniversalActionController:
 
     def _required_element(self, scene: UIScene, element_id: str, *, error: str) -> UIElement:
         try:
-            return scene.get_element(element_id, min_confidence=self.min_confidence)
+            return scene.get_element(element_id)
         except UISceneError as exc:
             raise UniversalActionError(f'{error}：{exc}') from exc
 
@@ -804,7 +798,7 @@ class UniversalActionController:
         result_markers = ('verification', 'status', 'result', 'outcome', 'feedback', '验证', '状态', '结果', '反馈')
         new_structured_results = tuple((element for element in after.elements if element.role in {'text', 'button',
             'icon'} and element.states.get('goal_relevant') is True and (element.states.get('fully_visible') is True)
-            and (float(element.confidence) >= self.min_confidence) and bool(str(element.label or '').strip())
+            and bool(str(element.label or '').strip())
             and bool(element.evidence) and any((marker in str(element.meaning or '').casefold() for marker
             in result_markers)) and (not any((prior.role == element.role and prior.meaning == element.meaning
             and (prior.label == element.label) for prior in before.elements)))))
@@ -872,8 +866,7 @@ class UniversalActionController:
                 match_count = sum((1 for item in after.elements if item.element_id == input_element_id
                     and item.role == 'input' and (item.states.get(state_key) == value)
                     and (item.states.get('value') == resolved.expected_input_value)
-                    and (float(item.confidence) >= MIN_TARGET_CONFIDENCE) and (item.states.get('visible')
-                    is not False)))
+                    and (item.states.get('visible') is not False)))
                 reject_if(match_count != 1, UniversalActionError(f"typed {state_key} 后置状态未满足。"))
             elif key == ('effect.applied', 'equals'):
                 reject_if(value is not True or before.fingerprint == after.fingerprint, UniversalActionError("typed effect receipt 缺少动作后变化证据。"))
@@ -896,7 +889,7 @@ class UniversalActionController:
                     and (item.states.get('primary_input_geometry_verified') is True)
                     and (item.states.get('geometry_audit_source') == 'input_structure_audit')
                     and (str(item.states.get('input_field_id') or '').strip() not in {'',
-                    'unknown'}) and (float(item.confidence) >= self.min_confidence)))
+                    'unknown'})))
                 reject_if(
                     not (value is True and focus_only_source_count == audited_focus_count == 1
                     and input_app_identity_compatible(before.foreground_app_id,
@@ -911,7 +904,7 @@ class UniversalActionController:
                 match_count = sum((1 for item in after.elements if item.role == 'input'
                     and item.states.get('input_field_id') == expectation.get('subject_ref')
                     and (item.states.get('input_field_label') == target_label) and (item.states.get('focused')
-                    is value) and (float(item.confidence) >= MIN_TARGET_CONFIDENCE)))
+                    is value)))
                 reject_if(value is not True or match_count != 1, UniversalActionError("typed目标字段聚焦后置状态未满足。"))
             elif key == ('element.state.location_relation', 'equals'):
                 reject_if(
@@ -1010,7 +1003,7 @@ class UniversalActionController:
         prior = resolved.prior_input_value
         states = after_input.states
         exact_candidates = tuple((element for element in after.elements if element.meaning == 'ime_exact_candidate'
-            and element.label == fragment and (float(element.confidence) >= self.min_confidence)
+            and element.label == fragment
             and (element.states.get('goal_relevant') is True) and (element.states.get('fully_visible') is True)
             and (element.states.get('ime_candidate') is True)
             and (element.states.get('input_element_id') == after_input.element_id)
@@ -1138,14 +1131,13 @@ class UniversalActionController:
         reject_if(not isinstance(states, dict), UniversalActionError(f"{action.action}.{prefix}states 格式无效。"))
         try:
             if element_id:
-                element = scene.get_element(element_id, min_confidence=self.min_confidence)
+                element = scene.get_element(element_id)
                 reject_if(target and target.casefold() not in {element.meaning.casefold(), element.label.casefold()}, UISceneError(f'元素 {element_id} 的语义与目标不一致：{target}'))
                 reject_if(role and element.role != role, UISceneError(f'元素 {element_id} 的角色与目标不一致：{role}'))
                 reject_if(label and element.label.casefold() != label.casefold(), UISceneError(f'元素 {element_id} 的文字与目标不一致：{label}'))
                 reject_if(any((element.states.get(key) != value for key, value in states.items())), UISceneError(f"元素 {element_id} 的状态与目标不一致。"))
                 return element
-            return scene.resolve_unique(meaning=target, label=label, role=role, states=states,
-                min_confidence=self.min_confidence)
+            return scene.resolve_unique(meaning=target, label=label, role=role, states=states)
         except UISceneError as exc:
             raise UniversalActionError(str(exc)) from exc
 

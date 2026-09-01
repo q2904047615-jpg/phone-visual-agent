@@ -31,10 +31,6 @@ from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
 from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from agent.domain.ui_scene import (
-    CAMERA_LAYOUT_ORIENTATIONS,
-    CameraAlignmentFacts,
-    MIN_TARGET_CONFIDENCE,
-    PHONE_CONTENT_ROTATIONS,
     UI_SCENE_PROTOCOL_VERSION,
     UIScene,
     UISceneError,
@@ -58,9 +54,9 @@ from agent.application.input_value_lineage import (
 from agent.domain.input_value_lineage import TypedInputLineage
 import agent.domain.generic_goal as generic_goal_domain
 
-SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-01-single-step-scene-action-finish-v6"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-01-single-step-qwen-action-finish-v5"
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-01-single-step-scene-action-finish-v7"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-01-single-step-qwen-action-finish-v6"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-01-input-structure-audit-v12"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
 def _prompt_template(name: str) -> str:
@@ -77,10 +73,8 @@ OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
 
-_PASSIVE_SCENE_ELEMENT_FIELDS = frozenset({'element_id', 'role', 'meaning', 'label', 'bounds', 'confidence', 'states',
-    'evidence'})
-_ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'step', 'steps', 'tap', 'swipe', 'command',
-    'coordinates'})
+_ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe',
+    'command', 'shell', 'coordinates', 'next_action', 'execution_plan'})
 _MODEL_DECISION_FIELDS = frozenset({'status', 'action', 'element_id', 'source_element_id',
     'destination_element_id', 'direction', 'evidence_refs', 'confidence', 'reason'})
 _MODEL_ELEMENT_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'input_verified_text', 'press_enter',
@@ -91,6 +85,44 @@ _KEYBOARD_OPTIONAL_FIELDS = frozenset({'qwerty_anchors', 'backspace_key', 'enter
     'literal_keys', 'layout_switches'})
 _INPUT_AUDIT_FIELDS = frozenset({'structure_id', 'bounds', 'fully_visible', 'text', 'placeholder',
     'visible_editable_cues', 'caret_line_index', 'confidence', 'right_button'})
+
+
+def _hidden_keyboard_payload() -> dict[str, Any]:
+    return {'visible': False, 'bounds': None, 'layout': 'unknown', 'input_mode': 'unknown',
+        'case_mode': 'unknown', 'qwerty_anchors': None, 'mode_switch': None, 'backspace_key': None,
+        'enter_key': None, 'case_switch': None, 'literal_keys': [], 'layout_switches': []}
+
+
+def _normalize_input_structure_payload(value: Any) -> dict[str, Any]:
+    """Fill only fixed wire defaults; never invent input geometry or text."""
+
+    if value is None:
+        value = {}
+    reject_if(not isinstance(value, Mapping), UISceneError("input_structure必须是对象或null。"))
+    allowed = {'protocol_version', 'application_inputs', 'ime_preedit_regions', 'keyboard'}
+    reject_if(_contains_action_like_extra(value, allowed), UISceneError("input_structure包含动作或计划字段。"))
+    version = value.get('protocol_version', INPUT_STRUCTURE_AUDIT_VERSION)
+    reject_if(version != INPUT_STRUCTURE_AUDIT_VERSION, UISceneError("输入结构审计协议版本不匹配。"))
+    application_inputs = value.get('application_inputs', [])
+    ime_preedit_regions = value.get('ime_preedit_regions', [])
+    if not isinstance(application_inputs, list):
+        application_inputs = []
+    if not isinstance(ime_preedit_regions, list):
+        ime_preedit_regions = []
+    raw_keyboard = value.get('keyboard')
+    if raw_keyboard is None:
+        keyboard = _hidden_keyboard_payload()
+    elif isinstance(raw_keyboard, Mapping):
+        reject_if(_contains_action_like_extra(raw_keyboard,
+            _KEYBOARD_REQUIRED_FIELDS | _KEYBOARD_OPTIONAL_FIELDS),
+            UISceneError("输入结构审计 keyboard 包含动作或计划字段。"))
+        keyboard = _hidden_keyboard_payload()
+        keyboard.update({key: raw_keyboard[key] for key in _KEYBOARD_REQUIRED_FIELDS | _KEYBOARD_OPTIONAL_FIELDS
+            if key in raw_keyboard})
+    else:
+        keyboard = _hidden_keyboard_payload()
+    return {'protocol_version': INPUT_STRUCTURE_AUDIT_VERSION, 'application_inputs': list(application_inputs),
+        'ime_preedit_regions': list(ime_preedit_regions), 'keyboard': keyboard}
 
 
 @dataclass(frozen=True)
@@ -104,7 +136,6 @@ class _AuditedKeyboard:
     application_bounds: NormalizedBounds | None
     raw_qwerty_anchors: dict[str, Any] | None
     snapped_qwerty_anchors: dict[str, list[int]] | None
-    controls_revoked: bool
 
 
 @dataclass(frozen=True)
@@ -125,10 +156,6 @@ class _AuditedInputControls:
     case: dict[str, Any] | None = None
 
 
-def _has_exact_passive_scene_element_fields(value: Any) -> bool:
-    return isinstance(value, dict) and frozenset(value) == _PASSIVE_SCENE_ELEMENT_FIELDS
-
-
 def _contains_action_like_wire_key(value: Any) -> bool:
     if isinstance(value, dict):
         return any((str(key).strip().casefold() in _ACTION_LIKE_WIRE_KEYS
@@ -138,8 +165,9 @@ def _contains_action_like_wire_key(value: Any) -> bool:
     return False
 
 
-def _is_passive_scene_element_wire_object(value: Any) -> bool:
-    return _has_exact_passive_scene_element_fields(value) and not _contains_action_like_wire_key(value)
+def _contains_action_like_extra(value: Mapping[str, Any], allowed: Iterable[str]) -> bool:
+    allowed_keys = frozenset(allowed)
+    return _contains_action_like_wire_key({key: part for key, part in value.items() if key not in allowed_keys})
 
 
 STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查画面稳定性', 'waiting_single_step_observation': '等待千问单步完整观察',
@@ -352,22 +380,17 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     verified_input_lineage=verified_lineage, device_id=device_id, lineage_frame=frame,
                     qwerty_row_snapper=self.qwerty_row_snapper, qwerty_row_frames=frames[stable_tail_start:],
                     single_step_input_surface=single_step_input_surface), obstructions, fingerprint=fingerprint)
-                reject_if(
-                    (goal.transaction_text or goal.target_only) and (not _input_audit_established_local_target(scene))
-                    and (not _focus_only_input_surface_established(scene)),
-                    VisionAgentError("单步完整观察没有建立当前输入事务的唯一本地目标。"),
-                )
 
-            missing_evidence = [item.element_id for item in scene.elements if item.states.get('goal_relevant') is True
-                and (not any((value.strip() for value in item.evidence)))]
-            reject_if(missing_evidence, VisionAgentError("目标相关元素缺少原始可见证据，不能建立可信候选：" + ",".join(missing_evidence)))
-            target = scene.unique_trusted_goal_element()
-            completion = scene.trusted_completion_evidence()
-            reject_if(
-                not scene.stable or (float(scene.confidence) < MIN_TARGET_CONFIDENCE and target is None
-                and (not completion)),
-                VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。"),
-            )
+            reject_if(not scene.stable, VisionAgentError("页面仍在变化，不能建立可信候选。"))
+
+            if model_decision.get('status') == 'action':
+                selected_refs = [str(model_decision.get(name) or '').strip() for name in (
+                    'element_id', 'source_element_id', 'destination_element_id')
+                    if model_decision.get(name)]
+                for selected_ref in selected_refs:
+                    matches = [item for item in scene.elements if item.element_id == selected_ref]
+                    reject_if(len(matches) != 1,
+                        VisionAgentError(f"当前Qwen决策引用的元素不唯一或不可执行：{selected_ref}"))
 
             self.last_model_decision = model_decision
             self.last_model_decision_fingerprint = scene.fingerprint
@@ -521,7 +544,8 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
     if include_input_structure:
         input_contract = _input_structure_audit_prompt(context, current_input_text=current_input_text,
             wire_height=request_height)
-        input_rule = "input_structure必须是完整输入结构对象，使用下面INPUT CONTRACT的字段和值规则；不得为null。"
+        input_rule = ("input_structure报告下面INPUT CONTRACT中当前可见的最小事实；空输入只需合法bounds和"
+            "text=\"\"，无关可选字段、整套键盘几何和另一个scene输入框均不必补齐。")
     else:
         input_contract = "本轮子目标与文字输入无关。"
         input_rule = "input_structure必须为null，不得额外枚举键盘或输入结构。"
@@ -557,7 +581,7 @@ def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, .
 
 
 def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_image_size: tuple[int,
-    int]) -> dict[str, Any]:
+    int], decision: Mapping[str, Any]) -> dict[str, Any]:
     """Convert the sole request-bound axis grid to canonical 0..1000."""
     coordinate_space = payload.get("coordinate_space")
     request_width, request_height = request_image_size
@@ -565,37 +589,138 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
     reject_if(coordinate_space != expected, UISceneError("单步观察必须声明唯一coordinate_space。"))
     reject_if(request_width <= 0 or request_height <= 0, UISceneError("本轮Qwen请求图片尺寸无效。"))
 
-    def numbers(value: Any, length: int, label: str) -> list[float]:
-        reject_if(
-            not isinstance(value, (list, tuple)) or len(value) != length or any((isinstance(part,
-            bool) or not isinstance(part, (int, float)) for part in value)),
-            UISceneError(f"coordinate_space内存在无效{label}。"),
-        )
-        return [float(part) for part in value]
+    def normalized_bounds(value: Any, *, selected: bool=False) -> list[int] | None:
+        valid_shape = bool(isinstance(value, (list, tuple)) and len(value) == 4
+            and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value))
+        if not valid_shape:
+            reject_if(selected, UISceneError("已选目标的bounds格式无效。"))
+            return None
+        left, top, right, bottom = (float(part) for part in value)
+        valid_extent = bool(all(math.isfinite(part) for part in (left, top, right, bottom))
+            and 0 <= left < right <= 1000 and 0 <= top < bottom <= request_height)
+        if not valid_extent:
+            reject_if(selected, UISceneError("已选目标的bounds超出声明的axis_grid。"))
+            return None
+        result = [round(left), round(top * 1000 / request_height), round(right),
+            round(bottom * 1000 / request_height)]
+        if not _valid_1000_bounds(result):
+            reject_if(selected, UISceneError("已选目标的axis_grid换算后bounds退化。"))
+            return None
+        return result
 
-    def normalize(node: Any, *, anchors: bool=False) -> None:
-        if isinstance(node, list):
-            for item in node:
-                normalize(item, anchors=anchors)
-            return
-        if not isinstance(node, dict):
-            return
-        for (key, value) in tuple(node.items()):
-            if key == 'bounds' and value is not None:
-                left, top, right, bottom = numbers(value, 4, "bounds")
-                reject_if(not (0 <= left < right <= 1000 and 0 <= top < bottom <= request_height), UISceneError("bounds超出声明的axis_grid。"))
-                node[key] = [round(left), round(top * 1000 / request_height), round(right),
-                    round(bottom * 1000 / request_height)]
-                reject_if(not _valid_1000_bounds(node[key]), UISceneError("axis_grid换算后bounds退化。"))
-            elif anchors and value is not None:
-                x, y = numbers(value, 2, "锚点")
-                reject_if(not (0 <= x <= 1000 and 0 <= y <= request_height), UISceneError("锚点超出声明的axis_grid。"))
-                node[key] = [round(x), round(y * 1000 / request_height)]
-            else:
-                normalize(value, anchors=(key == "qwerty_anchors"))
+    def normalize_optional_control(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        result = dict(value)
+        bounds = normalized_bounds(result.get('bounds'))
+        if bounds is None:
+            return None
+        result['bounds'] = bounds
+        return result
 
-    normalize(payload.get("scene"))
-    normalize(payload.get("input_structure"))
+    scene = payload.get('scene')
+    reject_if(_contains_action_like_wire_key(scene), UISceneError("单步观察scene包含动作或计划字段。"))
+    selected_ids = {str(decision.get(name) or '').strip() for name in (
+        'element_id', 'source_element_id', 'destination_element_id') if decision.get(name)}
+    selected_ids.update(str(item).split(':', 1)[1].strip() for item in decision.get('evidence_refs', ())
+        if isinstance(item, str) and item.startswith('element:') and str(item).split(':', 1)[1].strip())
+    if isinstance(scene, dict):
+        raw_elements = scene.get('elements')
+        normalized_elements: list[dict[str, Any]] = []
+        selected_counts: dict[str, int] = {}
+        if isinstance(raw_elements, list):
+            for item in raw_elements:
+                if not isinstance(item, dict):
+                    continue
+                element_id = str(item.get('element_id') or '').strip()
+                selected = element_id in selected_ids
+                if selected:
+                    selected_counts[element_id] = selected_counts.get(element_id, 0) + 1
+                    reject_if(selected_counts[element_id] > 1,
+                        UISceneError(f"已选目标的element_id不唯一：{element_id}"))
+                bounds = normalized_bounds(item.get('bounds'), selected=selected)
+                if bounds is None:
+                    continue
+                normalized = dict(item)
+                normalized['bounds'] = bounds
+                normalized_elements.append(normalized)
+        scene['elements'] = normalized_elements
+
+    input_structure = payload.get('input_structure')
+    reject_if(_contains_action_like_wire_key(input_structure),
+        UISceneError("单步观察input_structure包含动作或计划字段。"))
+    if isinstance(input_structure, dict):
+        raw_inputs = input_structure.get('application_inputs')
+        normalized_inputs: list[dict[str, Any]] = []
+        invalid_inputs = 0
+        if isinstance(raw_inputs, list):
+            for item in raw_inputs:
+                if not isinstance(item, dict):
+                    invalid_inputs += 1
+                    continue
+                bounds = normalized_bounds(item.get('bounds'))
+                if bounds is None:
+                    invalid_inputs += 1
+                    continue
+                normalized = dict(item)
+                normalized['bounds'] = bounds
+                right_button = normalize_optional_control(normalized.get('right_button'))
+                normalized['right_button'] = right_button
+                normalized_inputs.append(normalized)
+        selected_input = bool(decision.get('status') == 'action'
+            and str(decision.get('element_id') or '').strip() == 'local_audited_input_1')
+        reject_if(selected_input and not normalized_inputs and invalid_inputs > 0,
+            UISceneError("已选输入框的bounds无效。"))
+        input_structure['application_inputs'] = normalized_inputs
+
+        raw_preedits = input_structure.get('ime_preedit_regions')
+        normalized_preedits: list[dict[str, Any]] = []
+        if isinstance(raw_preedits, list):
+            for region in raw_preedits:
+                if not isinstance(region, dict):
+                    continue
+                bounds = normalized_bounds(region.get('bounds'))
+                if bounds is None:
+                    continue
+                normalized_region = dict(region)
+                normalized_region['bounds'] = bounds
+                raw_candidates = region.get('candidates')
+                normalized_region['candidates'] = [item for item in (
+                    normalize_optional_control(candidate) for candidate in (
+                        raw_candidates if isinstance(raw_candidates, list) else [])) if item is not None]
+                normalized_preedits.append(normalized_region)
+        input_structure['ime_preedit_regions'] = normalized_preedits
+
+        raw_keyboard = input_structure.get('keyboard')
+        if isinstance(raw_keyboard, dict):
+            keyboard = dict(raw_keyboard)
+            keyboard['bounds'] = normalized_bounds(keyboard.get('bounds'))
+            anchors = keyboard.get('qwerty_anchors')
+            normalized_anchors: dict[str, list[int]] | None = None
+            if isinstance(anchors, dict):
+                candidate_anchors: dict[str, list[int]] = {}
+                for key, point in anchors.items():
+                    valid_point = bool(isinstance(point, (list, tuple)) and len(point) == 2
+                        and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in point))
+                    if not valid_point:
+                        candidate_anchors = {}
+                        break
+                    x, y = (float(part) for part in point)
+                    if not (math.isfinite(x) and math.isfinite(y)
+                        and 0 <= x <= 1000 and 0 <= y <= request_height):
+                        candidate_anchors = {}
+                        break
+                    candidate_anchors[str(key)] = [round(x), round(y * 1000 / request_height)]
+                if candidate_anchors:
+                    normalized_anchors = candidate_anchors
+            keyboard['qwerty_anchors'] = normalized_anchors
+            for name in ('mode_switch', 'backspace_key', 'enter_key', 'case_switch'):
+                keyboard[name] = normalize_optional_control(keyboard.get(name))
+            for name in ('literal_keys', 'layout_switches'):
+                raw_items = keyboard.get(name)
+                keyboard[name] = [item for item in (normalize_optional_control(value) for value in (
+                    raw_items if isinstance(raw_items, list) else [])) if item is not None]
+            input_structure['keyboard'] = keyboard
     payload.pop("coordinate_space", None)
     return {'wire_kind': 'axis_grid', 'wire_extent': [1000, request_height], 'request_image_size': [request_width,
         request_height], 'canonical_extent': [1000, 1000], 'applied': True}
@@ -607,24 +732,22 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
 
     try:
         payload = _extract_json_object(raw, reject_duplicate_keys=True)
-        required = {'protocol_version', 'coordinate_space', 'scene', 'input_structure', 'decision'}
-        if set(payload) != required:
-            missing = sorted(required - set(payload))
-            extra = sorted(set(payload) - required)
-            details = []
-            if missing:
-                details.append("缺少字段：" + ", ".join(missing))
-            if extra:
-                details.append("包含协议外字段：" + ", ".join(extra))
-            raise UISceneError("单步观察封装结构无效；" + "；".join(details))
-        reject_if(payload['protocol_version'] != SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, UISceneError("单步观察协议版本不匹配。"))
+        required = {'coordinate_space', 'scene', 'decision'}
+        missing = sorted(required - set(payload))
+        reject_if(bool(missing), UISceneError("单步观察封装结构无效；缺少字段：" + ", ".join(missing)))
+        reject_if(_contains_action_like_extra(payload, required | {'protocol_version', 'input_structure'}),
+            UISceneError("单步观察封装包含动作或计划字段。"))
+        version = payload.get('protocol_version', SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION)
+        reject_if(version != SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, UISceneError("单步观察协议版本不匹配。"))
         reject_if(not isinstance(payload['scene'], dict), UISceneError("单步观察scene必须是对象。"))
-        coordinate_normalization = _normalize_single_step_wire_coordinates(payload,
-            request_image_size=request_image_size)
-        input_payload = payload["input_structure"]
-        reject_if(input_structure_required and (not isinstance(input_payload, dict)), UISceneError("输入子目标必须在同一响应返回input_structure对象。"))
-        reject_if(not input_structure_required and input_payload is not None, UISceneError("非输入子目标的input_structure必须为null。"))
+        if input_structure_required:
+            payload['input_structure'] = _normalize_input_structure_payload(payload.get('input_structure'))
+        else:
+            # Irrelevant optional input facts cannot veto a non-input action.
+            payload['input_structure'] = None
         decision = _parse_model_step_decision(payload['decision'])
+        coordinate_normalization = _normalize_single_step_wire_coordinates(payload,
+            request_image_size=request_image_size, decision=decision)
         return {'scene': payload['scene'], 'input_structure': payload['input_structure'],
             'decision': decision, 'coordinate_normalization': coordinate_normalization}
     except (UISceneError, ValueError, TypeError) as exc:
@@ -632,21 +755,23 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
 
 
 def _parse_model_step_decision(value: Any) -> dict[str, Any]:
-    """Validate the one action/finish choice emitted with the current scene."""
+    """Parse the minimal action/finish tagged union emitted with the current scene."""
 
-    reject_if(not isinstance(value, dict) or set(value) != _MODEL_DECISION_FIELDS,
-        UISceneError("decision字段不完整或包含协议外字段。"))
+    reject_if(not isinstance(value, dict), UISceneError("decision必须是对象。"))
+    reject_if(_contains_action_like_extra(value, _MODEL_DECISION_FIELDS),
+        UISceneError("decision包含动作、计划或裸坐标字段。"))
     status = value.get('status')
     reject_if(status not in {'action', 'finish'}, UISceneError("decision.status只允许action或finish。"))
-    confidence = value.get('confidence')
-    reject_if(isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-        or not 0.0 <= float(confidence) <= 1.0, UISceneError("decision.confidence无效。"))
-    reason = value.get('reason')
-    reject_if(not isinstance(reason, str) or not reason.strip(), UISceneError("decision.reason不能为空。"))
-    refs = value.get('evidence_refs')
-    reject_if(not isinstance(refs, list) or len(refs) > 8
-        or any(not isinstance(item, str) or not item.strip() for item in refs)
-        or len(refs) != len(set(refs)), UISceneError("decision.evidence_refs无效。"))
+    confidence = value.get('confidence', 1.0)
+    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0):
+        confidence = 1.0
+    reason = value.get('reason', '')
+    if not isinstance(reason, str):
+        reason = ''
+    raw_refs = value.get('evidence_refs', [])
+    refs = list(dict.fromkeys(item.strip() for item in raw_refs
+        if isinstance(item, str) and item.strip()))[:8] if isinstance(raw_refs, list) else []
 
     text_fields = ('action', 'element_id', 'source_element_id', 'destination_element_id', 'direction')
     for name in text_fields:
@@ -678,8 +803,11 @@ def _parse_model_step_decision(value: Any) -> dict[str, Any]:
         else:
             reject_if(any(item is not None for item in (element_id, source_id, destination_id, direction)),
                 UISceneError("系统或容器动作不得携带元素或方向字段。"))
-    return {**value, 'reason': reason.strip()[:500], 'confidence': float(confidence),
-        'evidence_refs': list(refs)}
+    normalized_reason = reason.strip()[:500] or ("当前截图同帧证据证明目标完成" if status == 'finish'
+        else "当前截图选择一个推进目标的动作")
+    return {'status': status, 'action': action, 'element_id': element_id,
+        'source_element_id': source_id, 'destination_element_id': destination_id, 'direction': direction,
+        'reason': normalized_reason, 'confidence': float(confidence), 'evidence_refs': list(refs)}
 
 
 def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
@@ -693,9 +821,9 @@ def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
     else:
         keyboard_switch_rule = KEYBOARD_MODE_SWITCH_OBSERVATION_RULE
     input_rule = (("本轮input_structure.application_inputs.text是应用输入正文空/非空事实的"
-        "唯一视觉权威。scene中的role=input只可报告一个目标相关输入表面的身份、可见边界、"
-        "goal_relevant、fully_visible和外观证据；不得在scene.states.value中重复正文，也不得用scene正文"
-        "否决input_structure。键盘模式、IME和可执行输入几何只在同一响应的input_structure中报告。"
+        "唯一视觉权威。scene中的role=input只是可选页面上下文，不必与input_structure重复出现或"
+        "提供正文、占位符、光标、证据、置信度阈值或几何重合；不得用scene事实否决input_structure。"
+        "键盘模式、IME和可执行输入几何只在同一响应的input_structure中按当前动作需要报告。"
         + LOCAL_TEXT_CLEAR_OBSERVATION_RULE) if input_structure_is_value_authority else
         INPUT_VALUE_AND_MODE_OBSERVATION_RULE + keyboard_switch_rule + LOCAL_TEXT_CLEAR_OBSERVATION_RULE)
     if trusted_foreground_identity is None:
@@ -784,11 +912,17 @@ def _input_structure_audit_prompt(context: dict[str, Any], *, current_input_text
 def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None) -> UIScene:
     try:
         payload = _extract_json_object(raw)
-        reject_if('system_ui' not in payload, UISceneError("新观察必须显式返回 scene.system_ui；无法判断时两项都写 unknown。"))
+        if 'system_ui' not in payload:
+            payload['system_ui'] = {}
+        alignment = payload.get('camera_alignment')
+        if not isinstance(alignment, dict):
+            alignment = {}
+        else:
+            alignment = dict(alignment)
+        if camera_layout_orientation is not None:
+            alignment['camera_layout_orientation'] = camera_layout_orientation
+        payload['camera_alignment'] = alignment
         _drop_forbidden_camera_alignment_evidence(payload)
-        reject_if('camera_alignment' not in payload, UISceneError("新观察必须显式返回 scene.camera_alignment。"))
-        alignment = CameraAlignmentFacts.from_dict(payload["camera_alignment"])
-        reject_if(camera_layout_orientation is not None and alignment.camera_layout_orientation != camera_layout_orientation, UISceneError("模型报告的相机画布方向与本地稳定帧尺寸不一致。"))
         _strip_model_authored_local_attestations(payload)
         return UIScene.from_dict(payload, coordinate_scale=1000.0, stable_override=True,
             fingerprint_override=fingerprint)
@@ -814,27 +948,12 @@ def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
     if not isinstance(evidence, list) or not all((isinstance(item, str) for item in evidence)):
         return
     retained = [item for item in evidence if camera_alignment_evidence_is_safe(item)]
-    if retained and len(retained) != len(evidence):
+    if len(retained) != len(evidence):
         alignment["evidence"] = retained
-        return
-    if not evidence or retained:
-        return
-    required = {'camera_layout_orientation', 'phone_content_rotation', 'confidence', 'evidence'}
-    confidence = alignment.get("confidence")
-    if (
-        set(alignment) != required
-        or alignment.get("camera_layout_orientation") not in CAMERA_LAYOUT_ORIENTATIONS
-        or alignment.get("phone_content_rotation") not in PHONE_CONTENT_ROTATIONS
-        or isinstance(confidence, bool)
-        or not isinstance(confidence, (int, float))
-        or not 0.0 <= float(confidence) <= 1.0
-    ):
-        # The repair never hides malformed scalars; the strict parser still rejects them.
-        return
-    # HUD/coordinate text cannot prove rotation; revoke only that fact and retain the independent action gate.
-    alignment["phone_content_rotation"] = "unknown"
-    alignment["confidence"] = 0.0
-    alignment["evidence"] = []
+        if not retained:
+            # HUD/coordinate text cannot prove rotation; revoke only that optional fact.
+            alignment["phone_content_rotation"] = "unknown"
+            alignment["confidence"] = 0.0
 
 
 def _goal_view(context: dict[str, Any]) -> generic_goal_domain.ActiveVisualGoal:
@@ -864,7 +983,7 @@ def _strip_preliminary_input_elements(payload: dict[str, Any], goal_context: dic
     retained: list[Any] = []
     removed = False
     for item in elements:
-        passive = _is_passive_scene_element_wire_object(item)
+        passive = bool(isinstance(item, dict) and not _contains_action_like_wire_key(item))
         role = str(item.get("role") or "").strip() if passive else ""
         meaning = str(item.get("meaning") or "").strip().casefold() if passive else ""
         dedicated = bool(mode_only or role == 'input' or (text_input and (role == 'container' and 'keyboard' in meaning
@@ -890,54 +1009,25 @@ def _single_step_input_surface_attestation(payload: dict[str, Any], *, goal_cont
         return None
     candidates: list[dict[str, Any]] = []
     for item in elements:
-        if not _has_exact_passive_scene_element_fields(item):
+        if (not isinstance(item, dict) or _contains_action_like_wire_key(item)
+            or str(item.get('role') or '').strip() != 'input'):
             continue
-        states = item.get("states")
-        evidence = item.get("evidence")
-        confidence = item.get("confidence")
+        states = item.get("states") or {}
+        evidence = item.get("evidence") or []
         raw_bounds = item.get("bounds")
-        if (str(item.get('role') or '').strip() != 'input' or not isinstance(item.get('element_id'),
-            str) or (not item['element_id'].strip()) or str(item['element_id']).startswith('local_audited_')
-            or (not isinstance(item.get('meaning'), str)) or (not item['meaning'].strip())
-            or (not isinstance(item.get('label'), str)) or (not isinstance(states,
-            dict)) or (states.get('goal_relevant') is not True) or (states.get('fully_visible') is not True)
-            or isinstance(confidence, bool) or (not isinstance(confidence, (int,
-            float))) or (float(confidence) < 0.9) or (not isinstance(evidence,
-            list)) or (not evidence) or any((not isinstance(value,
-            str) or not value.strip() for value in evidence)) or (not _valid_1000_bounds(raw_bounds))):
+        if (not isinstance(item.get('element_id'), str) or (not item['element_id'].strip())
+            or str(item['element_id']).startswith('local_audited_') or (not isinstance(states, dict))
+            or (not _valid_1000_bounds(raw_bounds))):
             continue
         bounds = [float(value) for value in raw_bounds]
         if max(bounds) <= 1.0:
             bounds = [value * 1000.0 for value in bounds]
-        candidates.append({'element_id': item['element_id'].strip(), 'meaning': item['meaning'].strip(),
-            'label': item['label'].strip()[:200], 'bounds': bounds, 'confidence': float(confidence),
-            'evidence': tuple((str(value).strip()[:200] for value in evidence))})
+        candidates.append({'element_id': item['element_id'].strip(),
+            'meaning': str(item.get('meaning') or 'application_text_input').strip(),
+            'label': str(item.get('label') or '').strip()[:200], 'bounds': bounds,
+            'confidence': 1.0, 'evidence': tuple(str(value).strip()[:200] for value in evidence
+            if isinstance(value, str) and value.strip()) if isinstance(evidence, list) else ()})
     return candidates[0] if len(candidates) == 1 else None
-
-
-def _input_audit_established_local_target(scene: UIScene) -> bool:
-    """Return true only for authority minted by the dedicated input audit."""
-
-    local_ids = {'local_audited_input_1', 'local_audited_keyboard_mode_switch_1', 'local_audited_ime_candidate_1',
-        'local_audited_literal_key_1', 'local_audited_enter_key_1', 'local_audited_next_field_key_1',
-        'local_audited_keyboard_layout_switch_1', 'local_audited_keyboard_case_switch_1'}
-    candidates = tuple((element for element in scene.elements if element.element_id in local_ids
-        and element.states.get('goal_relevant') is True and (element.states.get('fully_visible') is True)
-        and (float(element.confidence) >= MIN_TARGET_CONFIDENCE)))
-    return len(candidates) == 1
-
-
-def _focus_only_input_surface_established(scene: UIScene) -> bool:
-    """Accept one sanitized focus-only surface with no text, field, or keyboard authority."""
-
-    candidates = tuple((element for element in scene.elements if element.role == 'input'
-        and element.states.get('focus_only_input_surface') is True and (element.states.get('goal_relevant') is True)
-        and (element.states.get('fully_visible') is True) and (float(element.confidence) >= MIN_TARGET_CONFIDENCE)
-        and any((str(item).strip() for item in element.evidence))))
-    if len(candidates) != 1:
-        return False
-    unique = scene.unique_trusted_goal_element()
-    return unique is not None and unique.element_id == candidates[0].element_id
 
 
 def _focus_only_compact_input_surface(attestation: dict[str, Any] | None, *, keyboard_visible: bool) -> dict[str,
@@ -946,25 +1036,20 @@ def _focus_only_compact_input_surface(attestation: dict[str, Any] | None, *, key
 
     if keyboard_visible or not isinstance(attestation, dict):
         return None
-    if set(attestation) != {'element_id', 'meaning', 'label', 'bounds', 'confidence', 'evidence'}:
-        return None
     element_id = str(attestation.get("element_id") or "").strip()
-    meaning = str(attestation.get("meaning") or "").strip()
+    meaning = str(attestation.get("meaning") or "application_text_input").strip()
     label = str(attestation.get("label") or "").strip()[:200]
     bounds = attestation.get("bounds")
     evidence = attestation.get("evidence")
-    confidence = attestation.get("confidence")
     if (not element_id or element_id.startswith('local_audited_') or (not meaning) or (not isinstance(bounds, (list,
         tuple))) or (len(bounds) != 4) or any((isinstance(value, bool) or not isinstance(value, (int,
-        float)) or (not 0 <= float(value) <= 1000) for value in bounds)) or isinstance(confidence,
-        bool) or (not isinstance(confidence, (int, float))) or (float(confidence) < MIN_TARGET_CONFIDENCE)
-        or (not isinstance(evidence, (list, tuple))) or (not evidence) or any((not isinstance(item,
-        str) or not item.strip() for item in evidence))):
+        float)) or (not 0 <= float(value) <= 1000) for value in bounds))):
         return None
     return {'element_id': element_id, 'role': 'input', 'meaning': meaning,
-        'bounds': [float(value) / 1000.0 for value in bounds], 'confidence': float(confidence), 'label': label,
+        'bounds': [float(value) / 1000.0 for value in bounds], 'confidence': 1.0, 'label': label,
         'states': {'goal_relevant': True, 'fully_visible': True, 'focus_only_input_surface': True},
-        'evidence': [str(item).strip()[:200] for item in evidence]}
+        'evidence': [str(item).strip()[:200] for item in evidence if isinstance(item, str)
+        and item.strip()] if isinstance(evidence, (list, tuple)) else []}
 
 
 def _adjacent_exact_preedit_cue(trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]],
@@ -1252,32 +1337,22 @@ def _trusted_ime_preedits(regions: list[Any], *, keyboard_visible: bool, keyboar
 
     result = []
     for region in regions:
-        if (not isinstance(region, dict) or set(region) not in ({'region_id', 'bounds', 'text', 'confidence'},
-            {'region_id', 'bounds', 'text', 'confidence', 'candidates'})
-            or (not _valid_1000_bounds(region.get('bounds')))):
+        if (not isinstance(region, dict) or _contains_action_like_wire_key(region)
+            or (not _valid_1000_bounds(region.get('bounds'))) or not isinstance(region.get('text', ''), str)):
             continue
-        try:
-            confidence = _audit_confidence(region.get("confidence"), "IME预编辑区")
-        except UISceneError:
-            continue
-        if confidence < 0.9:
-            continue
+        confidence = _diagnostic_confidence(region.get("confidence"))
         bounds = tuple(float(value) for value in region["bounds"])
         candidates = []
         raw_candidates = region.get("candidates", [])
         if isinstance(raw_candidates, list):
             for item in raw_candidates[:8]:
-                if (not isinstance(item, dict) or set(item) != {'text', 'bounds', 'confidence',
-                    'fully_visible'} or item.get('fully_visible') is not True
-                    or (not _valid_1000_bounds(item.get('bounds')))):
+                if (not isinstance(item, dict) or _contains_action_like_wire_key(item)
+                    or item.get('fully_visible') is False or (not _valid_1000_bounds(item.get('bounds')))):
                     continue
                 text = str(item.get("text") or "").strip()
-                try:
-                    item_confidence = _audit_confidence(item.get("confidence"), "IME候选")
-                except UISceneError:
-                    continue
+                item_confidence = _diagnostic_confidence(item.get("confidence"))
                 candidate_bounds = tuple(float(value) for value in item["bounds"])
-                if (text and len(text) <= 20 and (item_confidence >= 0.9)
+                if (text and len(text) <= 20
                     and _ime_candidate_is_near_preedit(candidate_bounds, bounds, keyboard_visible=keyboard_visible,
                     keyboard_layout=keyboard_layout, keyboard_bounds=keyboard_bounds, qwerty_anchors=qwerty_anchors)):
                     candidates.append({'text': text, 'bounds': candidate_bounds, 'confidence': item_confidence})
@@ -1315,23 +1390,30 @@ def _audit_strings(value: Any, *, name: str, limit: int, allow_empty: bool) -> t
     return tuple(dict.fromkeys(item.strip()[:120] for item in value if item.strip()))
 
 
+def _optional_audit_strings(value: Any, *, name: str, limit: int, allow_empty: bool) -> tuple[str, ...]:
+    """Project optional diagnostics without letting their shape veto valid input geometry."""
+
+    try:
+        return _audit_strings(value, name=name, limit=limit, allow_empty=allow_empty)
+    except UISceneError:
+        return ()
+
+
 def _parse_audited_keyboard(value: Any, *, qwerty_row_snapper: Callable[[list[Image.Image] | tuple[Image.Image, ...],
     dict[str, Any]], dict[str, list[int]] | None] | None, qwerty_row_frames: list[Image.Image] | tuple[Image.Image,
     ...] | None) -> _AuditedKeyboard:
-    reject_if(
-        not isinstance(value, dict) or not _KEYBOARD_REQUIRED_FIELDS.issubset(value)
-        or set(value) - _KEYBOARD_REQUIRED_FIELDS - _KEYBOARD_OPTIONAL_FIELDS,
-        UISceneError("输入结构审计 keyboard 字段不符合协议。"),
-    )
-    keyboard = dict(value)
-    visible = keyboard["visible"]
-    layout = keyboard["layout"]
-    input_mode = keyboard["input_mode"]
+    keyboard = _hidden_keyboard_payload()
+    if isinstance(value, dict):
+        keyboard.update({key: value[key] for key in _KEYBOARD_REQUIRED_FIELDS | _KEYBOARD_OPTIONAL_FIELDS
+            if key in value})
+    visible = keyboard["visible"] if isinstance(keyboard["visible"], bool) else False
+    layout = keyboard["layout"] if keyboard["layout"] in {'qwerty', 'numeric', 'symbol', 'unknown'} else 'unknown'
+    input_mode = keyboard["input_mode"] if keyboard["input_mode"] in {'direct_latin', 'chinese_pinyin',
+        'unknown'} else 'unknown'
     case_mode = keyboard.get("case_mode", "unknown")
-    reject_if(not isinstance(visible, bool), UISceneError("输入结构审计 keyboard.visible 必须是布尔值。"))
-    reject_if(layout not in {'qwerty', 'numeric', 'symbol', 'unknown'}, UISceneError("输入结构审计 keyboard.layout 无效。"))
-    reject_if(input_mode not in {'direct_latin', 'chinese_pinyin', 'unknown'}, UISceneError("输入结构审计 keyboard.input_mode 无效。"))
-    reject_if(case_mode not in {'lower', 'upper', 'unknown'}, UISceneError("输入结构审计 keyboard.case_mode 无效。"))
+    if case_mode not in {'lower', 'upper', 'unknown'}:
+        case_mode = 'unknown'
+    keyboard.update(visible=visible, layout=layout, input_mode=input_mode, case_mode=case_mode)
 
     raw_anchors = keyboard.get("qwerty_anchors") if isinstance(keyboard.get("qwerty_anchors"), dict) else None
     snapped_anchors = None
@@ -1357,9 +1439,10 @@ def _parse_audited_keyboard(value: Any, *, qwerty_row_snapper: Callable[[list[Im
         keyboard.update(mode_switch=None, backspace_key=None, enter_key=None, case_switch=None, literal_keys=[],
             layout_switches=[])
         keyboard.pop("qwerty_anchors", None)
-    elif (not visible and any((keyboard.get(key) not in (None, []) for key in ('bounds', 'mode_switch', 'backspace_key',
-        'enter_key', 'case_switch', 'literal_keys', 'layout_switches')))):
-        raise UISceneError("不可见键盘不能包含键位或切换控件。")
+    elif not visible:
+        keyboard.update(bounds=None, mode_switch=None, backspace_key=None, enter_key=None, case_switch=None,
+            literal_keys=[], layout_switches=[])
+        keyboard.pop("qwerty_anchors", None)
 
     application_bounds = bounds
     if _valid_1000_bounds(keyboard.get('bounds')):
@@ -1367,7 +1450,7 @@ def _parse_audited_keyboard(value: Any, *, qwerty_row_snapper: Callable[[list[Im
         if reported[2] - reported[0] >= 300:
             application_bounds = reported
     return _AuditedKeyboard(keyboard, visible, layout, input_mode, case_mode, bounds, application_bounds, raw_anchors,
-        snapped_anchors, controls_revoked)
+        snapped_anchors)
 
 
 def _label_count(labels: Iterable[str], expected: str) -> int:
@@ -1379,66 +1462,56 @@ def _collect_audited_input_matches(application_inputs: list[Any], *, active_fiel
     active_transaction_text: str, multiline_contract: bool, unique_typed_active_field: bool,
     application_keyboard_bounds: NormalizedBounds | None, trusted_preedits: list[dict[str, Any]],
     verified_input_lineage: TypedInputLineage | None, device_id: str, scene: UIScene, keyboard_input_mode: str,
-    single_step_input_surface: dict[str, Any] | None) -> list[dict[str, Any]]:
-    label_occurrences = sum((_label_count(item.get('field_labels', ()),
-        active_field_label) for item in application_inputs if active_field_label and isinstance(item,
-        dict) and isinstance(item.get('field_labels', ()), list)))
-    tall_labeled_field = unique_typed_active_field and label_occurrences == 1
+) -> list[dict[str, Any]]:
+    del active_field_label, multiline_contract, unique_typed_active_field, application_keyboard_bounds
     matches: list[dict[str, Any]] = []
     for item in application_inputs:
-        reject_if(
-            not isinstance(item, dict) or not _INPUT_AUDIT_FIELDS.issubset(item)
-            or set(item) - _INPUT_AUDIT_FIELDS - {'field_labels'} or (not isinstance(item.get('fully_visible'),
-            bool)) or (not _valid_1000_bounds(item.get('bounds'))) or (not isinstance(item.get('text'), str)),
-            UISceneError("应用输入结构字段不符合协议。"),
-        )
-        confidence = _audit_confidence(item["confidence"], "应用输入结构")
-        cues = list(_audit_strings(item['visible_editable_cues'], name='visible_editable_cues', limit=4,
-            allow_empty=True))
-        labels = _audit_strings(item.get('field_labels', []), name='field_labels', limit=6, allow_empty=False)
-        caret = item["caret_line_index"]
-        reject_if(caret is not None and (isinstance(caret, bool) or not isinstance(caret, int) or (not 0 <= caret <= 30)), UISceneError("caret_line_index 必须是0..30整数或 null。"))
-        if not item['fully_visible'] or confidence < 0.9:
+        if not isinstance(item, dict):
             continue
-        text = item["text"]
-        placeholder = str(item.get("placeholder") or "").strip()
+        reject_if(_contains_action_like_extra(item, _INPUT_AUDIT_FIELDS | {'field_labels'}),
+            UISceneError("应用输入结构包含动作或计划字段。"))
+        if not _valid_1000_bounds(item.get('bounds')):
+            continue
+        text = item.get('text', '')
+        if not isinstance(text, str) or len(text) > 4000:
+            continue
+        cues = list(_optional_audit_strings(item.get('visible_editable_cues', []),
+            name='visible_editable_cues', limit=4, allow_empty=True))
+        labels = _optional_audit_strings(item.get('field_labels', []), name='field_labels', limit=6,
+            allow_empty=False)
+        caret = item.get("caret_line_index")
+        if caret is not None and (isinstance(caret, bool) or not isinstance(caret, int) or not 0 <= caret <= 30):
+            caret = None
+        placeholder = item.get("placeholder")
+        placeholder = placeholder.strip()[:200] if isinstance(placeholder, str) else ""
         bounds = tuple(float(part) for part in item["bounds"])
-        surface_evidence = _same_frame_input_evidence(bounds, input_count=len(application_inputs), text=text,
-            surface=single_step_input_surface)
-        pending_shell = bool(verified_input_lineage is not None
-            and verified_input_lineage.source == 'pending_verified_ime_candidate_action' and (active_field_id not
-            in {'', 'unknown'}))
-        if not any((text, placeholder, cues, pending_shell, surface_evidence)):
-            continue
-        max_height = 600 if multiline_contract or (tall_labeled_field and _label_count(labels,
-            active_field_label) == 1) else 180
-        width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
-        if (bounds[1] <= 10 or bounds[3] >= 990 or width < 240 or (not 20 <= height <= max_height)
-            or (application_keyboard_bounds is not None and _bounds_overlap_ratio(bounds,
-            application_keyboard_bounds) >= 0.25)):
-            continue
-        button = _optional_right_button(item["right_button"], input_bounds=bounds)
+        button = _optional_right_button(item.get("right_button"), input_bounds=bounds)
         input_bounds = [round(part) for part in bounds]
         if button is not None:
             input_bounds[2] = button["bounds"][0]
-        if input_bounds[2] - input_bounds[0] < 120:
+        if input_bounds[2] <= input_bounds[0]:
             continue
         match = {'text': text, 'placeholder': placeholder, 'visible_editable_cues': cues, 'caret_line_index': caret,
             'field_labels': labels, 'input_bounds': input_bounds, 'right_button': button,
-            'same_frame_input_surface_evidence': surface_evidence, 'confidence': min(confidence,
-            float(button['confidence']) if button else confidence)}
+            'confidence': 1.0}
+        matches.append(match)
+    for match in matches:
         match['pending_ime_candidate_state'] = _resolve_pending_ime_candidate_input_state(match, trusted_preedits,
-            application_input_count=len(application_inputs), verified_input_lineage=verified_input_lineage,
+            application_input_count=len(matches), verified_input_lineage=verified_input_lineage,
             device_id=device_id, app_id=scene.app_id, screen_id=scene.screen_id, input_field_id=active_field_id,
             authorized_text=active_transaction_text, keyboard_input_mode=keyboard_input_mode)
-        matches.append(match)
     return matches
 
 
 def _unique_audited_input(matches: Iterable[dict[str, Any]], *, label: str='', text: str | None=None) -> dict[str,
     Any] | None:
-    selected = [item for item in matches if (not label or _label_count(item['field_labels'],
-        label) == 1) and (text is None or item['text'] == text)]
+    selected = [item for item in matches if text is None or item['text'] == text]
+    if label:
+        labeled = [item for item in selected if _label_count(item['field_labels'], label) == 1]
+        if len(labeled) == 1:
+            return labeled[0]
+        if labeled:
+            return None
     return selected[0] if len(selected) == 1 else None
 
 
@@ -1447,13 +1520,8 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
     controls: _AuditedInputControls) -> None:
     step = controls.step
     auxiliary = any(getattr(controls, key) is not None for key in ("candidate", "literal", "enter", "layout", "case"))
-    needs_auxiliary = bool(not active_clear_goal and step is not None and keyboard.visible
-        and (step.kind == 'literal_key' or (controls.required_mode is not None
-        and keyboard.input_mode != controls.required_mode) or (step.kind in {'direct_latin',
-        'chinese_pinyin'} and keyboard.layout != 'qwerty') or (bool(step.required_case_mode)
-        and keyboard.case_mode != step.required_case_mode)))
     states: dict[str, Any] = {'goal_relevant': bool(not controls.switch_is_goal and controls.next_field is None
-        and (not auxiliary) and (not needs_auxiliary) and (not keyboard.controls_revoked)), 'fully_visible': True,
+        and (not auxiliary)), 'fully_visible': True,
         'value': audited_input['text']}
     if field_id:
         states["input_field_id"] = field_id
@@ -1482,8 +1550,7 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
     elif controls.clearable_preedit:
         states["ime_preedit_text"] = controls.clearable_preedit
 
-    evidence = list(dict.fromkeys((*audited_input['field_labels'], *audited_input['visible_editable_cues'],
-        *audited_input.get('same_frame_input_surface_evidence', ()))))
+    evidence = list(dict.fromkeys((*audited_input['field_labels'], *audited_input['visible_editable_cues'])))
     text = audited_input["text"]
     if text:
         evidence.insert(0, f"应用输入框当前文字：{text}")
@@ -1502,8 +1569,6 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
             evidence.append(f'模型确认可见光标后，本地校准像素定位光标视觉行：{audited_input['local_caret_line_index']}')
     elif audited_input['placeholder']:
         evidence.insert(0, f"应用输入框为空，占位提示：{audited_input['placeholder']}")
-    elif audited_input.get('same_frame_input_surface_evidence'):
-        evidence.insert(0, "输入结构审计确认当前输入框为空；同帧场景只证明唯一可见输入表面与其重合")
     if controls.clearable_preedit:
         evidence.append("唯一相邻输入法预编辑串已绑定当前typed输入框，可清理文字：" f"{controls.clearable_preedit}")
     if not keyboard.visible:
@@ -1553,32 +1618,15 @@ def _append_audited_input_controls(elements: list[dict[str, Any]], *, controls: 
             'input_element_id': 'local_audited_input_1'}, evidence='键盘区域内方向明确的独立输入模式切换键'))
 
 
-def _same_frame_input_evidence(input_bounds: NormalizedBounds, *, input_count: int, text: str,
-    surface: dict[str, Any] | None) -> tuple[str, ...]:
-    if input_count != 1 or text or (not isinstance(surface, dict)):
-        return ()
-    surface_bounds = surface.get("bounds")
-    evidence = surface.get("evidence")
-    if not _valid_1000_bounds(surface_bounds) or not isinstance(evidence, (list, tuple)):
-        return ()
-    other = tuple(float(value) for value in surface_bounds)
-    if _bounds_overlap_ratio(input_bounds, other) < 0.85 or _bounds_overlap_ratio(other, input_bounds) < 0.85:
-        return ()
-    return tuple(str(value).strip()[:200] for value in evidence if str(value).strip())
-
-
 def _optional_right_button(value: Any, *, input_bounds: NormalizedBounds) -> dict[str, Any] | None:
-    if (not isinstance(value, dict) or set(value) != {'label', 'bounds',
-        'confidence'} or (not _valid_1000_bounds(value.get('bounds')))):
+    if (not isinstance(value, dict) or _contains_action_like_wire_key(value)
+        or (not _valid_1000_bounds(value.get('bounds')))):
         return None
-    try:
-        confidence = _audit_confidence(value.get("confidence"), "right_button")
-    except UISceneError:
-        return None
+    confidence = _diagnostic_confidence(value.get("confidence"))
     label = str(value.get("label") or "").strip()
     bounds = tuple(float(part) for part in value["bounds"])
     width = input_bounds[2] - input_bounds[0]
-    if (confidence < 0.9 or not label or (not _bounds_inside(bounds, input_bounds,
+    if (not label or (not _bounds_inside(bounds, input_bounds,
         tolerance=20)) or (bounds[0] <= input_bounds[0] + 0.55 * width) or (_vertical_overlap_ratio(bounds,
         input_bounds) < 0.8)):
         return None
@@ -1652,15 +1700,15 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
         if len(matches) == len(candidates) == 1:
             exact_ime_candidate = candidates[0]
             exact_ime_preedit = step.pinyin if step.kind == "chinese_pinyin" else matches[0]["text"]
-        elif len(matches) == 1:
-            raise UISceneError("有用输入法预编辑必须提供唯一逐字候选几何，不能转为清除。")
 
     qwerty_geometry = None
     raw_anchors = keyboard.get("qwerty_anchors")
-    if raw_anchors is not None:
-        reject_if(not keyboard_visible or keyboard_layout != 'qwerty' or keyboard_bounds is None, UISceneError("QWERTY anchors 必须绑定完整可见的 QWERTY 键盘。"))
-        qwerty_geometry = _validated_qwerty_keyboard_geometry(snapped_anchors or raw_anchors,
-            keyboard_bounds=keyboard_bounds, locally_snapped=snapped_anchors is not None)
+    if raw_anchors is not None and keyboard_visible and keyboard_layout == 'qwerty' and keyboard_bounds is not None:
+        try:
+            qwerty_geometry = _validated_qwerty_keyboard_geometry(snapped_anchors or raw_anchors,
+                keyboard_bounds=keyboard_bounds, locally_snapped=snapped_anchors is not None)
+        except UISceneError:
+            qwerty_geometry = None
     keyboard_controls = _validated_keyboard_controls(keyboard, keyboard_bounds=keyboard_bounds,
         keyboard_layout=keyboard_layout, keyboard_input_mode=keyboard_input_mode,
         keyboard_case_mode=keyboard_case_mode, snapped_anchors=snapped_anchors)
@@ -1680,9 +1728,9 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
     needs_mode_switch = bool(not active_clear_goal and (not clearable_preedit) and (exact_ime_candidate is None)
         and (step is not None) and (required_mode is not None) and keyboard_visible and (keyboard_layout == 'qwerty')
         and (keyboard_input_mode in {'direct_latin', 'chinese_pinyin'}) and (keyboard_input_mode != required_mode))
-    switch_is_goal = switch_is_goal or needs_mode_switch
     mode_switch = keyboard_controls['mode']
-    reject_if(needs_mode_switch and (mode_switch is None or mode_switch['target_mode'] != required_mode), UISceneError("模式切换键未绑定下一确定性文字分段所需方向。"))
+    switch_is_goal = bool(switch_is_goal or (needs_mode_switch and mode_switch is not None
+        and mode_switch['target_mode'] == required_mode))
 
     literal_keys = keyboard_controls['literal_keys']
     targets = set(_input_audit_literal_key_targets(goal.observation_context,
@@ -1718,13 +1766,6 @@ def _plan_audited_input_controls(*, trusted_input: dict[str, Any] | None, predec
             and (keyboard_case_mode != step.required_case_mode) and (case_switch is not None)
             and (case_switch['target_mode'] == step.required_case_mode)):
             exact_case = case_switch
-    reject_if(
-        trusted_input is not None and keyboard_visible and (keyboard_layout == 'qwerty') and (keyboard_input_mode
-        in {'direct_latin', 'chinese_pinyin'}) and goal.has_explicit_text and (not switch_is_goal) and (step
-        is not None) and (step.kind in {'direct_latin', 'chinese_pinyin'}) and (exact_case is None)
-        and (qwerty_geometry is None) and (not active_clear_goal),
-        UISceneError("文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"),
-    )
     return _AuditedInputControls(step=step, candidate=exact_ime_candidate, preedit=exact_ime_preedit,
         qwerty=qwerty_geometry, backspace=backspace, clearable_preedit=clearable_preedit, next_field=next_field_key,
         required_mode=required_mode, switch_is_goal=switch_is_goal, mode=mode_switch, literal=exact_literal,
@@ -1738,14 +1779,10 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
     ...] | None=None, single_step_input_surface: dict[str, Any] | None=None) -> UIScene:
     try:
         goal = _goal_view(goal_context)
-        payload = _extract_json_object(raw)
-        reject_if(set(payload) != {'protocol_version', 'application_inputs', 'ime_preedit_regions', 'keyboard'}, UISceneError("输入结构审计包含协议外字段。"))
-        reject_if(payload.get('protocol_version') != INPUT_STRUCTURE_AUDIT_VERSION, UISceneError("输入结构审计协议版本不匹配。"))
+        payload = _normalize_input_structure_payload(_extract_json_object(raw))
         application_inputs = payload.get("application_inputs")
         ime_preedit_regions = payload.get("ime_preedit_regions")
         keyboard = payload.get("keyboard")
-        reject_if(not isinstance(application_inputs, list) or len(application_inputs) > 4, UISceneError("输入结构审计 application_inputs 必须是最多4项的数组。"))
-        reject_if(not isinstance(ime_preedit_regions, list) or len(ime_preedit_regions) > 4, UISceneError("输入结构审计 ime_preedit_regions 必须是最多4项的数组。"))
         audited_keyboard = _parse_audited_keyboard(keyboard, qwerty_row_snapper=qwerty_row_snapper,
             qwerty_row_frames=qwerty_row_frames)
         keyboard = audited_keyboard.payload
@@ -1757,10 +1794,6 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
         application_keyboard_bounds = audited_keyboard.application_bounds
         raw_audited_qwerty_anchors = audited_keyboard.raw_qwerty_anchors
         locally_snapped_qwerty_anchors = audited_keyboard.snapped_qwerty_anchors
-        keyboard_controls_revoked = audited_keyboard.controls_revoked
-        if keyboard_controls_revoked:
-            ime_preedit_regions = []
-
         trusted_preedits = _trusted_ime_preedits(ime_preedit_regions, keyboard_visible=keyboard_visible,
             keyboard_layout=keyboard_layout, keyboard_bounds=application_keyboard_bounds,
             qwerty_anchors=locally_snapped_qwerty_anchors or raw_audited_qwerty_anchors)
@@ -1774,7 +1807,7 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
             multiline_contract=multiline_input_contract, unique_typed_active_field=unique_typed_active_field,
             application_keyboard_bounds=application_keyboard_bounds, trusted_preedits=trusted_preedits,
             verified_input_lineage=verified_input_lineage, device_id=str(device_id or ''), scene=scene,
-            keyboard_input_mode=keyboard_input_mode, single_step_input_surface=single_step_input_surface)
+            keyboard_input_mode=keyboard_input_mode)
 
         switch_is_goal = goal.mode_switch_requested
         active_clear_goal = goal.clear_requested
@@ -1883,11 +1916,11 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
         raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
 
 
-def _audit_confidence(value: Any, field_name: str) -> float:
-    reject_if(isinstance(value, bool) or not isinstance(value, (int, float)), UISceneError(f"{field_name} confidence 格式无效。"))
+def _diagnostic_confidence(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
     confidence = float(value)
-    reject_if(not 0.0 <= confidence <= 1.0, UISceneError(f"{field_name} confidence 超出0..1。"))
-    return confidence
+    return confidence if 0.0 <= confidence <= 1.0 else 0.0
 
 
 _QWERTY_ANCHOR_KEYS = frozenset({'q', 'p', 'a', 'l', 'z', 'm', 'backspace'})
@@ -1955,7 +1988,8 @@ def _locally_snapped_keyboard_enter_key(value: Any, *, anchors: dict[str, list[i
     float, float, float] | None) -> dict[str, Any] | None:
     fields = {"label", "bounds", "confidence", "fully_visible", "key_action"}
     if (keyboard_bounds is None or not isinstance(value,
-        dict) or set(value) != fields or (value.get('fully_visible') is not True) or (value.get('key_action') not
+        dict) or _contains_action_like_wire_key(value) or not (fields - {'confidence',
+        'fully_visible'}).issubset(value) or (value.get('fully_visible') is False) or (value.get('key_action') not
         in {'newline', 'next'})):
         return None
     action, label = value['key_action'], str(value.get('label') or '').strip()
@@ -1966,9 +2000,9 @@ def _locally_snapped_keyboard_enter_key(value: Any, *, anchors: dict[str, list[i
         'next', '下一步', '下一个', '下一项'}
     if not (action == 'newline' and (newline_label or not normalized) or (action == 'next' and next_label)):
         return None
-    confidence = _audit_confidence(value.get("confidence"), "enter_key")
+    confidence = _diagnostic_confidence(value.get("confidence"))
     raw_bounds = value.get("bounds")
-    if (confidence < 0.9 or not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 4 or any((isinstance(part,
+    if (not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 4 or any((isinstance(part,
         bool) or not isinstance(part, (int, float)) for part in raw_bounds))):
         return None
     left, top, right, bottom = (float(part) for part in raw_bounds)
@@ -2059,17 +2093,16 @@ def _validated_keyboard_controls(keyboard: dict[str, Any], *, keyboard_bounds: N
 
     def control(value: Any, *, field_name: str, fields: set[str], require_visible: bool=False,
         tolerance: float=12) -> dict[str, Any] | None:
-        if (keyboard_bounds is None or not isinstance(value, dict) or set(value) != fields
-            or (require_visible and value.get('fully_visible') is not True)
+        del field_name
+        required = fields - {'confidence', 'fully_visible'}
+        if (keyboard_bounds is None or not isinstance(value, dict) or _contains_action_like_wire_key(value)
+            or not required.issubset(value) or (require_visible and value.get('fully_visible') is False)
             or not _valid_1000_bounds(value.get('bounds'))):
             return None
-        try:
-            confidence = _audit_confidence(value.get('confidence'), field_name)
-        except UISceneError:
-            return None
+        confidence = _diagnostic_confidence(value.get('confidence'))
         label = str(value.get('label') or '').strip()
         bounds = tuple(float(part) for part in value['bounds'])
-        if not label or confidence < 0.9 or not _bounds_inside(bounds, keyboard_bounds, tolerance=tolerance):
+        if not label or not _bounds_inside(bounds, keyboard_bounds, tolerance=tolerance):
             return None
         return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence}
 
@@ -2088,12 +2121,12 @@ def _validated_keyboard_controls(keyboard: dict[str, Any], *, keyboard_bounds: N
 
     def items(value: Any, *, field_name: str, maximum: int, fields: set[str], item_error: str
         ) -> list[dict[str, Any]]:
-        reject_if(not isinstance(value, list) or len(value) > maximum,
-            UISceneError(f"{field_name} 必须是最多{maximum}项的数组。"))
-        reject_if(value and keyboard_bounds is None, UISceneError(f"{field_name} 必须绑定完整可见键盘。"))
-        for item in value:
-            reject_if(not isinstance(item, dict) or set(item) != fields, UISceneError(item_error))
-        return value
+        del field_name, item_error
+        if not isinstance(value, list) or (value and keyboard_bounds is None):
+            return []
+        required = fields - {'confidence', 'fully_visible'}
+        return [item for item in value[:maximum] if isinstance(item, dict) and required.issubset(item)
+            and not _contains_action_like_wire_key(item)]
 
     mode = directional(keyboard.get('mode_switch'), field_name='mode_switch',
         modes=frozenset({'direct_latin', 'chinese_pinyin'}), label_matches=_is_explicit_keyboard_mode_label,
@@ -2137,16 +2170,17 @@ def _validated_keyboard_controls(keyboard: dict[str, Any], *, keyboard_bounds: N
         item_error='literal_key 字段不符合协议。')
     for item in literal_items:
         key_value, label, key_kind = item.get('value'), item.get('label'), item.get('key_kind')
-        reject_if(not isinstance(key_value, str) or len(key_value) != 1 or not isinstance(label, str)
+        if (not isinstance(key_value, str) or len(key_value) != 1 or not isinstance(label, str)
             or key_kind not in {'character', 'space'} or not _valid_1000_bounds(item.get('bounds'))
-            or not isinstance(item.get('fully_visible'), bool), UISceneError("literal_key 内容无效。"))
+            or (item.get('fully_visible') is False)):
+            continue
         if (key_kind == 'character' and (key_value == ' ' or label != key_value)
             or key_kind == 'space' and (key_value != ' ' or label.strip().casefold() not in {'', 'space', '空格'})):
             # Revoke a mismatched optional glyph without vetoing independent input or layout evidence.
             continue
         bounds = tuple(float(part) for part in item['bounds'])
-        confidence = _audit_confidence(item.get('confidence'), 'literal_key')
-        if (item['fully_visible'] is not True or confidence < 0.9 or keyboard_bounds is None
+        confidence = _diagnostic_confidence(item.get('confidence'))
+        if (keyboard_bounds is None
             or not _bounds_inside(bounds, keyboard_bounds, tolerance=12)):
             continue
         if key_kind == 'space':
@@ -2164,7 +2198,6 @@ def _validated_keyboard_controls(keyboard: dict[str, Any], *, keyboard_bounds: N
         'symbol': r'(?:符|sym|[#?+]=?|[.?]123)'}
     for item in layout_items:
         target = item.get('target_layout')
-        _audit_confidence(item.get('confidence'), 'layout_switch')
         parsed = directional(item, field_name='layout_switch', modes=frozenset(patterns),
             current_mode=keyboard_layout, current_key='current_layout', target_key='target_layout',
             label_matches=lambda label, pattern=patterns.get(target): bool(pattern and re.search(pattern,

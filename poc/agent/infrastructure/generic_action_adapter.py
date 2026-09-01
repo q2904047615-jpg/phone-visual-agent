@@ -547,14 +547,11 @@ class GenericSingleActionAdapter:
 
     def _single_step_scene_orientation_credential(self, *, scene: UIScene,
         frames: list[Image.Image]) -> OrientationCredential:
-        """Mint locally from the direction facts in the sole step response."""
+        """Mint a local frame binding without consuming optional Qwen metadata."""
 
         reject_if(not frames, OrientationSafetyError("单步方向绑定缺少当前稳定帧。"))
-        alignment = scene.camera_alignment
         return _mint_single_step_scene_credential(device_id=self.device_id, scene_fingerprint=scene.fingerprint,
-            frame=frames[-1].convert('RGB'), camera_layout_orientation_value=alignment.camera_layout_orientation,
-            phone_content_rotation=alignment.phone_content_rotation, confidence=float(alignment.confidence),
-            evidence=tuple(alignment.evidence))
+            frame=frames[-1].convert('RGB'))
 
     def supported_action_kinds(self) -> frozenset[str]:
         """Return only actions backed by callable methods on this device."""
@@ -884,7 +881,7 @@ class GenericSingleActionAdapter:
             return after
         candidates = tuple((element for element in after.elements if element.element_id == input_id
             and element.role == 'input' and (element.meaning == 'application_text_input')
-            and (float(element.confidence) >= 0.9) and (element.states.get('fully_visible') is True)
+            and (element.states.get('fully_visible') is True)
             and (element.states.get('focused') is True)))
         if len(candidates) != 1:
             return after
@@ -892,7 +889,7 @@ class GenericSingleActionAdapter:
         observed = candidate.states.get("value")
         if (not isinstance(observed, str) or not {'\r', '\n'} & set(observed)
             or observed.count('\r') + observed.count('\n') > 3 or (observed.replace('\r', '').replace('\n',
-            '') != expected) or (not any((observed in str(item) for item in candidate.evidence)))):
+            '') != expected)):
             return after
         replacement = replace(candidate, label=expected if candidate.label == observed else candidate.label,
             states={**candidate.states, 'value': expected}, evidence=candidate.evidence + ('本地逐键回执确认该换行为控件视觉软折行',))
@@ -933,7 +930,7 @@ class GenericSingleActionAdapter:
             return after
         candidates = tuple((element for element in after.elements if element.element_id == resolved.target_element_id
             and element.role == 'input' and (element.meaning == 'application_text_input')
-            and (float(element.confidence) >= 0.9) and (element.states.get('fully_visible') is True)
+            and (element.states.get('fully_visible') is True)
             and (element.states.get('focused') is True) and (element.states.get('input_multiline') is False)
             and (str(element.states.get('input_field_id') or '').strip() == typed_field_id)
             and (element.states.get('keyboard_layout') == 'qwerty')
@@ -947,8 +944,7 @@ class GenericSingleActionAdapter:
         required_overlap = min(4, len(prior))
         if (not isinstance(observed, str) or not observed or observed == expected or (not expected.endswith(observed))
             or (not observed.endswith(fragment)) or (len(visible_prior_suffix) < required_overlap)
-            or (not prior.endswith(visible_prior_suffix)) or (not any((observed in str(item) for item
-            in candidate.evidence))) or (not input_app_identity_compatible(before.foreground_app_id,
+            or (not prior.endswith(visible_prior_suffix)) or (not input_app_identity_compatible(before.foreground_app_id,
             after.foreground_app_id)) or (not input_screen_identity_compatible(before.screen_id, after.screen_id))):
             return after
         replacement = replace(candidate, states={**candidate.states, 'visible_value_suffix': observed,
@@ -965,8 +961,7 @@ class GenericSingleActionAdapter:
             return None
         reject_if(resolved.kind == 'input_verified_text' and (not resolved.text), GenericActionAdapterError("输入动作缺少已校验文字。"))
         try:
-            input_element = scene.get_element(str(resolved.target_element_id or ''),
-                min_confidence=self.controller.min_confidence)
+            input_element = scene.get_element(str(resolved.target_element_id or ''))
         except UISceneError as exc:
             raise GenericActionAdapterError(f"当前文字输入缺少可信输入框：{exc}") from exc
         if resolved.text_transport == 'companion_ime':
@@ -1027,7 +1022,7 @@ class GenericSingleActionAdapter:
             diagnostic_flag = "local_qwerty_rows_verified"
             if credential is None:
                 credential = self._single_step_scene_orientation_credential(scene=scene, frames=frames)
-                diagnostic_flag = "single_step_scene_reused"
+                diagnostic_flag = "local_frame_binding_verified"
             selected = len(frames) - 1
             try:
                 self.observer.last_orientation_audit_diagnostics = {'audit_source': credential.source, 'model_calls': 0,

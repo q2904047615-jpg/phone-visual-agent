@@ -33,7 +33,6 @@ def _element_realizes_effect(element: UIElement, effect_kind: str) -> bool:
         'toggle'} and (element.meaning in meanings) and (element.states.get('visible') is not False)
         and (element.states.get('enabled') is not False) and (element.states.get('fully_visible') is True))
 
-MIN_ELEMENT_CONFIDENCE = 0.72
 MIN_READY_CANDIDATES = 1
 MAX_READY_CANDIDATES = 24
 
@@ -297,8 +296,8 @@ class CanonicalActionCatalog(_ValidatedRecordWire):
             seen.add(candidate.candidate_id)
 
 def _element_eligible(element: UIElement) -> bool:
-    return element.role in ELEMENT_ACTION_ROLES and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE and (
-        element.states.get('enabled') is not False) and (element.states.get('visible')
+    return element.role in ELEMENT_ACTION_ROLES and (element.states.get('enabled') is not False) and (
+        element.states.get('visible')
         is not False) and (element.states.get('fully_visible') is True)
 
 
@@ -350,19 +349,18 @@ def _companion_text_step(element: UIElement, target_text: str) -> tuple[str, str
 
 
 def _element_proves_scrollable_viewport(element: UIElement) -> bool:
-    """Grant swipe affordance only from a typed, evidenced viewport fact."""
+    """Grant swipe affordance from one typed, geometrically valid viewport fact."""
 
-    base_evidence = bool(element.role == 'container' and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE
-        and (element.states.get('visible') is not False) and (element.states.get('scrollable') is True)
-        and (element.states.get('scroll_axis') in {'vertical',
-        'horizontal'}) and any((str(item).strip() for item in element.evidence)))
+    base_evidence = bool(element.role == 'container' and (element.states.get('visible') is not False)
+        and (element.states.get('scrollable') is True)
+        and (element.states.get('scroll_axis') in {'vertical', 'horizontal'}))
     if not base_evidence:
         return False
     if element.states.get("fully_visible") is True:
         # Preserve the already verified cross-App swipe contract.
         return True
     # For a scrollable viewport, fully_visible=false is the typed content-crop
-    # fact; non-empty element evidence above must independently support it.
+    # fact.  Optional prose evidence does not create a second swipe authority.
     return bool(element.states.get('fully_visible') is False and element.states.get('goal_relevant') is True)
 
 
@@ -431,12 +429,10 @@ def _unique_directional_swipe_presence(scene: UIScene) -> UIElement | None:
         if len(completion_evidence) != 1:
             return None
         target = completion_evidence[0]
-        if (any((other.element_id != target.element_id and other.states.get('goal_relevant') is True
-            and (float(other.confidence) >= MIN_ELEMENT_CONFIDENCE) for other in scene.elements))):
+        if any((other.element_id != target.element_id and other.states.get('goal_relevant') is True
+            and (_element_eligible(other) or _exact_tap_text_target_eligible(other)) for other in scene.elements)):
             return None
     if target.states.get('fully_visible') is not True:
-        return None
-    if not any((str(item).strip() for item in target.evidence)):
         return None
     return target
 
@@ -444,8 +440,7 @@ def _unique_directional_swipe_presence(scene: UIScene) -> UIElement | None:
 def _exact_tap_text_target_eligible(element: UIElement) -> bool:
     """Admit only an exact-authorized visible text target for a semantic tap."""
 
-    return element.role == 'text' and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE and (element.states.get(
-        'enabled') is not False) and (element.states.get('visible')
+    return element.role == 'text' and (element.states.get('enabled') is not False) and (element.states.get('visible')
         is not False) and (element.states.get('fully_visible') is True) and (element.states.get('goal_relevant')
         is True)
 

@@ -13,9 +13,8 @@ from agent.domain.trusted_observation import (
     OBSERVATION_ID_PATTERN,
     TrustedObservation,
     canonicalize_trusted_scene,
-    trusted_target_local_candidate,
 )
-from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIScene
+from agent.domain.ui_scene import UIScene
 from agent.domain.vision_model import VisionAgentError
 from agent.infrastructure.observation_images import (
     local_frame_fingerprint,
@@ -43,12 +42,7 @@ def build_trusted_observation(*, frames: list[Image.Image], device_id: str, scen
     fingerprint = local_frame_fingerprint(frames[selected].convert("RGB"))
     scene.validate()
     canonical_scene, aliases, conflicts = canonicalize_trusted_scene(scene)
-    target_local_candidate = trusted_target_local_candidate(canonical_scene, conflicts)
-    reject_if(
-        not scene.stable or (float(scene.confidence) < MIN_TARGET_CONFIDENCE and target_local_candidate is None
-        and (not canonical_scene.trusted_completion_evidence())),
-        VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。"),
-    )
+    reject_if(not scene.stable, VisionAgentError("页面仍在变化，不能建立可信观察。"))
     reject_if(scene.fingerprint != fingerprint, VisionAgentError('只读观察 fingerprint 与当前本地帧不一致，拒绝建立可信候选。'))
     resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
     reject_if(not OBSERVATION_ID_PATTERN.fullmatch(resolved_id), VisionAgentError(f"observation_id 格式无效：{resolved_id!r}"))

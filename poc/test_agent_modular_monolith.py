@@ -1722,7 +1722,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         source = application_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class QwenVisualDecisionObserver:"))
         self.assertEqual(
-            "2026-09-01-qwen-same-response-action-finish-v8",
+            "2026-09-01-qwen-same-response-action-finish-v9",
             qwen_visual_decision.QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
         )
         for forbidden in (
@@ -1851,7 +1851,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(observer_module, "PostActionVisualContext"))
         self.assertEqual(
-            "2026-09-01-single-step-scene-action-finish-v6",
+            "2026-09-01-single-step-scene-action-finish-v7",
             observer_module.SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
 

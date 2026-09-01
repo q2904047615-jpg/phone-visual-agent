@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from .validation import NormalizedBounds, NormalizedPoint, ValidatedDataclassWire, bounds_overlap, dataclass_wire, reject_if
+from .validation import NormalizedBounds, NormalizedPoint, ValidatedDataclassWire, dataclass_wire, reject_if
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 
 UI_SCENE_PROTOCOL_VERSION = "2026-08-14-ui-scene-v3"
-MIN_TARGET_CONFIDENCE = 0.72
-# A low-confidence dynamic background must never authorize a screen-wide action.
-# It may only expose one locally trustworthy, goal-relevant element for the
-# downstream exact-element gates.
+# Model confidence remains diagnostic.  Executability is established by typed
+# semantic state, legal geometry and uniqueness, not by a second score gate.
 TARGET_LOCAL_ACTION_ROLES = frozenset({'button', 'icon', 'input', 'text', 'tab', 'toggle', 'image', 'list_item'})
 COMPLETION_EVIDENCE_ROLES = frozenset({"container", "dialog"})
 
@@ -44,6 +42,15 @@ def camera_alignment_evidence_is_safe(value: Any) -> bool:
         and (not _CAMERA_ALIGNMENT_EVIDENCE_FORBIDDEN.search(value)))
 
 
+def _diagnostic_confidence(value: Any, *, default: float=0.0) -> float:
+    """Normalize optional model confidence without turning it into an execution gate."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return float(default)
+    result = float(value)
+    return result if 0.0 <= result <= 1.0 else float(default)
+
+
 @dataclass(frozen=True)
 class SystemUIFacts(ValidatedDataclassWire):
     """Read-only system UI facts; unknown never satisfies a visual gate."""
@@ -60,14 +67,16 @@ class SystemUIFacts(ValidatedDataclassWire):
 
     @classmethod
     def from_dict(cls, value: Any) -> 'SystemUIFacts':
-        reject_if(not isinstance(value, dict), UISceneError("scene.system_ui 必须是 JSON 对象。"))
-        required = {"immersive_or_fullscreen", "navigation_bar_visible"}
-        missing = required - set(value)
-        unexpected = set(value) - required
-        reject_if(missing, UISceneError('scene.system_ui 缺少字段：' + ', '.join(sorted(missing))))
-        reject_if(unexpected, UISceneError('scene.system_ui 包含协议外字段：' + ', '.join(sorted(map(str, unexpected)))))
-        facts = cls(immersive_or_fullscreen=value['immersive_or_fullscreen'],
-            navigation_bar_visible=value['navigation_bar_visible'])
+        if not isinstance(value, dict):
+            return cls()
+        _reject_action_data(value, "scene.system_ui")
+
+        def fact(name: str) -> bool | str:
+            candidate = value.get(name, SYSTEM_UI_UNKNOWN)
+            return candidate if isinstance(candidate, bool) or candidate == SYSTEM_UI_UNKNOWN else SYSTEM_UI_UNKNOWN
+
+        facts = cls(immersive_or_fullscreen=fact('immersive_or_fullscreen'),
+            navigation_bar_visible=fact('navigation_bar_visible'))
         facts.validate()
         return facts
 
@@ -109,17 +118,23 @@ class CameraAlignmentFacts:
 
     @classmethod
     def from_dict(cls, value: Any) -> 'CameraAlignmentFacts':
-        reject_if(not isinstance(value, dict), UISceneError("scene.camera_alignment 必须是 JSON 对象。"))
-        required = {'camera_layout_orientation', 'phone_content_rotation', 'confidence', 'evidence'}
-        missing = required - set(value)
-        unexpected = set(value) - required
-        reject_if(missing, UISceneError('scene.camera_alignment 缺少字段：' + ', '.join(sorted(missing))))
-        reject_if(unexpected, UISceneError('scene.camera_alignment 包含协议外字段：' + ', '.join(sorted(map(str, unexpected)))))
-        evidence = value["evidence"]
-        reject_if(not isinstance(evidence, list), UISceneError("scene.camera_alignment.evidence 必须是数组。"))
-        facts = cls(camera_layout_orientation=value['camera_layout_orientation'],
-            phone_content_rotation=value['phone_content_rotation'], confidence=value['confidence'],
-            evidence=tuple(evidence))
+        if not isinstance(value, dict):
+            return cls()
+        _reject_action_data(value, "scene.camera_alignment")
+        camera_layout = value.get('camera_layout_orientation', CAMERA_ALIGNMENT_UNKNOWN)
+        if camera_layout not in CAMERA_LAYOUT_ORIENTATIONS:
+            camera_layout = CAMERA_ALIGNMENT_UNKNOWN
+        phone_rotation = value.get('phone_content_rotation', CAMERA_ALIGNMENT_UNKNOWN)
+        if phone_rotation not in PHONE_CONTENT_ROTATIONS:
+            phone_rotation = CAMERA_ALIGNMENT_UNKNOWN
+        raw_evidence = value.get('evidence', [])
+        evidence = tuple(item.strip() for item in raw_evidence[:2]
+            if isinstance(item, str) and camera_alignment_evidence_is_safe(item)) if isinstance(raw_evidence,
+            list) else ()
+        if phone_rotation != CAMERA_ALIGNMENT_UNKNOWN and not evidence:
+            phone_rotation = CAMERA_ALIGNMENT_UNKNOWN
+        facts = cls(camera_layout_orientation=camera_layout, phone_content_rotation=phone_rotation,
+            confidence=_diagnostic_confidence(value.get('confidence')), evidence=evidence)
         facts.validate()
         return facts
 
@@ -151,7 +166,7 @@ class UIElement(ValidatedDataclassWire):
         if 'value' in self.states:
             value = self.states["value"]
             reject_if(self.role != 'input' or not isinstance(value, str), UISceneError("只有 input 元素的 states.value 可以保存可见字符串。"))
-            reject_if(len(value) > 200, UISceneError("input 元素的 states.value 最多200个字符。"))
+            reject_if(len(value) > 4000, UISceneError("input 元素的 states.value 最多4000个字符。"))
         if 'value_visibility' in self.states:
             visible_suffix = self.states.get("visible_value_suffix")
             full_value = self.states.get("value")
@@ -227,7 +242,7 @@ class UIElement(ValidatedDataclassWire):
                 bool) or (not isinstance(page_index, int)) or isinstance(page_count,
                 bool) or (not isinstance(page_count, int)) or (page_count < 2) or (not 0 <= page_index < page_count)
                 or (self.states.get('scrollable') is not True) or (self.states.get('scroll_axis') not in {'horizontal',
-                'vertical'}) or (self.states.get('fully_visible') is not True) or (not self.evidence),
+                'vertical'}) or (self.states.get('fully_visible') is not True),
                 UISceneError('分页视口必须用 paged_viewport container 保存有证据的零基页码、总页数和滚动轴。'),
             )
         if 'focus_only_input_surface' in self.states:
@@ -236,8 +251,7 @@ class UIElement(ValidatedDataclassWire):
             reject_if(
                 self.states.get('focus_only_input_surface') is not True or self.role != 'input'
                 or self.element_id.startswith('local_audited_') or (self.states.get('goal_relevant') is not True)
-                or (self.states.get('fully_visible') is not True) or set(self.states) - allowed_focus_only_states
-                or (not any((str(item).strip() for item in self.evidence))),
+                or (self.states.get('fully_visible') is not True) or set(self.states) - allowed_focus_only_states,
                 UISceneError('focus_only_input_surface 只能标记唯一完整可见的粗输入面，且不得携带正文、typed字段身份、键盘状态或本地审计权威。'),
             )
         _reject_action_data(self.states, "states")
@@ -251,9 +265,6 @@ class UIElement(ValidatedDataclassWire):
     def from_dict(cls, value: dict[str, Any], *, coordinate_scale: float=1.0) -> 'UIElement':
         reject_if(not isinstance(value, dict), UISceneError("元素必须是 JSON 对象。"))
         _reject_action_data(value, "element")
-        allowed = {'element_id', 'role', 'meaning', 'bounds', 'confidence', 'label', 'states', 'evidence'}
-        unexpected = set(value) - allowed
-        reject_if(unexpected, UISceneError('元素包含协议外字段：' + ', '.join(sorted(map(str, unexpected)))))
         raw_bounds = value.get("bounds")
         reject_if(not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 4, UISceneError("元素 bounds 必须包含4个数值。"))
         reject_if(coordinate_scale <= 0, UISceneError("coordinate_scale 必须大于0。"))
@@ -261,19 +272,17 @@ class UIElement(ValidatedDataclassWire):
             bounds = tuple(float(item) / coordinate_scale for item in raw_bounds)
         except (TypeError, ValueError) as exc:
             raise UISceneError("元素 bounds 含有非数值。") from exc
-        states = value.get("states") or {}
-        reject_if(not isinstance(states, dict), UISceneError("元素 states 必须是 JSON 对象。"))
-        evidence = value.get("evidence") or []
-        reject_if(not isinstance(evidence, (list, tuple)), UISceneError("元素 evidence 必须是数组。"))
+        states = value.get("states") if isinstance(value.get("states"), dict) else {}
+        evidence = value.get("evidence") if isinstance(value.get("evidence"), (list, tuple)) else []
         element = cls(
             element_id=str(value.get("element_id") or "").strip(),
             role=str(value.get("role") or "unknown").strip(),
             meaning=str(value.get("meaning") or "").strip(),
             bounds=bounds,  # type: ignore[arg-type]
-            confidence=float(value.get("confidence") or 0.0),
+            confidence=_diagnostic_confidence(value.get("confidence")),
             label=str(value.get("label") or "").strip()[:200],
             states=dict(states),
-            evidence=tuple(str(item).strip()[:200] for item in evidence if str(item).strip()),
+            evidence=tuple(item.strip()[:200] for item in evidence if isinstance(item, str) and item.strip()),
         )
         element.validate()
         return element
@@ -352,15 +361,13 @@ class UIScene:
             seen.add(element.element_id)
 
     def find_elements(self, *, label: str | None=None, meaning: str | None=None, role: str | None=None,
-        states: dict[str, Any] | None=None, min_confidence: float=MIN_TARGET_CONFIDENCE) -> tuple[UIElement, ...]:
+        states: dict[str, Any] | None=None) -> tuple[UIElement, ...]:
         self.validate()
         expected_label = (label or "").strip().casefold()
         expected_meaning = (meaning or "").strip().casefold()
         expected_states = states or {}
         matches: list[UIElement] = []
         for element in self.elements:
-            if float(element.confidence) < min_confidence:
-                continue
             if role and element.role != role:
                 continue
             if expected_label and element.label.casefold() != expected_label:
@@ -372,7 +379,7 @@ class UIScene:
             matches.append(element)
         return tuple(matches)
 
-    def get_element(self, element_id: str, *, min_confidence: float=MIN_TARGET_CONFIDENCE) -> UIElement:
+    def get_element(self, element_id: str) -> UIElement:
         """Resolve one model element ID inside this exact observation only."""
 
         self.validate()
@@ -381,42 +388,30 @@ class UIScene:
         for element in self.elements:
             if element.element_id != expected:
                 continue
-            reject_if(float(element.confidence) < min_confidence, UISceneError(f"元素置信度不足：{expected}"))
             return element
         raise UISceneError(f"当前场景不存在元素：{expected}")
 
-    def unique_trusted_goal_element(self, *, min_confidence: float=MIN_TARGET_CONFIDENCE) -> UIElement | None:
-        """Return the sole strong actionable goal element in this scene."""
+    def unique_trusted_goal_element(self) -> UIElement | None:
+        """Return the sole actionable goal element; confidence is diagnostic only."""
 
         self.validate()
         matches = tuple((element for element in self.elements if element.role in TARGET_LOCAL_ACTION_ROLES
             and element.states.get('goal_relevant') is True and (element.states.get('enabled') is not False)
-            and (element.states.get('visible') is not False) and (float(element.confidence) >= min_confidence)))
-        if len(matches) != 1:
-            return None
-        candidate = matches[0]
-        for other in self.elements:
-            if other.element_id == candidate.element_id:
-                continue
-            if (other.role in TARGET_LOCAL_ACTION_ROLES and float(other.confidence) >= min_confidence
-                and (bounds_overlap(candidate.bounds, other.bounds)['iou'] >= 0.5)):
-                return None
-        return candidate
+            and (element.states.get('visible') is not False)))
+        return matches[0] if len(matches) == 1 else None
 
-    def trusted_completion_evidence(self, *, min_confidence: float=MIN_TARGET_CONFIDENCE) -> tuple[UIElement, ...]:
-        """Return strong read-only facts; these never authorize an action."""
+    def trusted_completion_evidence(self) -> tuple[UIElement, ...]:
+        """Return goal-bound read-only facts; confidence is diagnostic only."""
 
         self.validate()
         return tuple((element for element in self.elements if element.role in COMPLETION_EVIDENCE_ROLES
             and element.states.get('goal_relevant') is True and (element.states.get('visible') is not False)
-            and (float(element.confidence) >= min_confidence)))
+            ))
 
     def resolve_unique(self, *, meaning: str, label: str | None=None, role: str | None=None, states: dict[str,
-        Any] | None=None, min_confidence: float=MIN_TARGET_CONFIDENCE) -> UIElement:
+        Any] | None=None) -> UIElement:
         reject_if(not self.stable, UISceneError("页面仍在变化，禁止定位控件。"))
-        reject_if(float(self.confidence) < min_confidence, UISceneError("页面整体置信度不足，禁止定位控件。"))
-        matches = self.find_elements(meaning=meaning, label=label, role=role, states=states,
-            min_confidence=min_confidence)
+        matches = self.find_elements(meaning=meaning, label=label, role=role, states=states)
         reject_if(not matches, UISceneError(f"未找到可信的语义控件：{meaning}"))
         reject_if(len(matches) != 1, UISceneError(f"语义控件不唯一：{meaning}，共{len(matches)}个"))
         return matches[0]
@@ -433,24 +428,31 @@ class UIScene:
         fingerprint_override: str | None=None) -> 'UIScene':
         reject_if(not isinstance(value, dict), UISceneError("视觉场景必须是 JSON 对象。"))
         _reject_action_data(value, "scene")
-        allowed = {'protocol_version', 'foreground_app_id', 'app_id', 'screen_id', 'summary', 'system_ui',
-            'camera_alignment', 'elements', 'overlays', 'stable', 'confidence', 'fingerprint'}
-        unexpected = set(value) - allowed
-        reject_if(unexpected, UISceneError('视觉场景包含协议外字段：' + ', '.join(sorted(map(str, unexpected)))))
         raw_elements = value.get("elements") or []
-        reject_if(not isinstance(raw_elements, list), UISceneError("场景 elements 必须是数组。"))
-        reject_if(len(raw_elements) > 60, UISceneError("单个场景元素超过60个，拒绝不受控的视觉输出。"))
-        elements = tuple((UIElement.from_dict(item, coordinate_scale=coordinate_scale) for item in raw_elements))
+        if not isinstance(raw_elements, list):
+            raw_elements = []
+        parsed_elements: list[UIElement] = []
+        seen_element_ids: set[str] = set()
+        for raw_element in raw_elements:
+            try:
+                element = UIElement.from_dict(raw_element, coordinate_scale=coordinate_scale)
+            except (UISceneError, TypeError, ValueError):
+                # The same-envelope decision layer, which has the selected
+                # element reference, performs the strict selected-bound check.
+                # A malformed unselected scene fact is only revoked here.
+                continue
+            if element.element_id in seen_element_ids:
+                continue
+            seen_element_ids.add(element.element_id)
+            parsed_elements.append(element)
+        elements = tuple(parsed_elements)
         overlays = value.get("overlays") or []
-        reject_if(not isinstance(overlays, list), UISceneError("场景 overlays 必须是数组。"))
-        reject_if(any((not isinstance(item, str) for item in overlays)), UISceneError('场景 overlays 只允许字符串描述；可交互候选必须放入 elements。'))
+        if not isinstance(overlays, list):
+            overlays = []
+        overlays = [item for item in overlays if isinstance(item, str)]
         screen_id = str(value.get("screen_id") or "unknown").strip().lower()
-        reject_if(
-            value.get('foreground_app_id') and value.get('app_id')
-            and (str(value.get('foreground_app_id')).strip().lower() != str(value.get('app_id')).strip().lower()),
-            UISceneError('foreground_app_id 与兼容字段 app_id 冲突，拒绝含糊场景。'),
-        )
         raw_foreground_app_id = str(value.get('foreground_app_id') or value.get('app_id') or 'unknown').strip().lower()
+        raw_stable = value.get('stable', True)
         scene = cls(protocol_version=str(value.get('protocol_version') or UI_SCENE_PROTOCOL_VERSION).strip(),
             app_id=_normalize_foreground_app_id(raw_foreground_app_id, screen_id), screen_id=screen_id,
             summary=str(value.get('summary') or '').strip()[:500],
@@ -458,8 +460,9 @@ class UIScene:
             camera_alignment=CameraAlignmentFacts.from_dict(value['camera_alignment']) if 'camera_alignment'
             in value else CameraAlignmentFacts(), elements=elements,
             overlays=tuple((item.strip()[:120] for item in overlays if item.strip())),
-            stable=bool(value.get('stable')) if stable_override is None else bool(stable_override),
-            confidence=float(value.get('confidence') or 0.0),
+            stable=raw_stable if isinstance(raw_stable, bool) and stable_override is None else bool(
+                True if stable_override is None else stable_override),
+            confidence=_diagnostic_confidence(value.get('confidence')),
             fingerprint=str(value.get('fingerprint') or '').strip() if fingerprint_override
             is None else str(fingerprint_override))
         scene.validate()
@@ -507,7 +510,7 @@ def scene_matches_app_identity(scene: UIScene, app_id: str, app_name: str='') ->
     title_matches = tuple((element for element in scene.elements if element.role in {'text',
         'container'} and any((marker in str(element.meaning or '').strip().casefold() for marker in ('page_title',
         'title', 'heading', 'app_header'))) and (str(element.label or '').strip().casefold() == app_name)
-        and (float(element.confidence) >= MIN_TARGET_CONFIDENCE) and (element.states.get('fully_visible') is True)))
+        and (element.states.get('fully_visible') is True)))
     return len(title_matches) == 1
 
 
@@ -555,7 +558,8 @@ def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:
 
 
 def _reject_action_data(value: Any, path: str) -> None:
-    forbidden = {'action', 'tap', 'swipe', 'command', 'shell', 'next_action', 'execution_plan'}
+    forbidden = {'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe', 'command', 'shell',
+        'coordinates', 'next_action', 'execution_plan'}
     if isinstance(value, dict):
         for (key, item) in value.items():
             reject_if(str(key).strip().lower() in forbidden, UISceneError(f"视觉场景包含动作字段：{path}.{key}"))

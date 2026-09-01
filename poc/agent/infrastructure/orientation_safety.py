@@ -141,13 +141,17 @@ class OrientationCredential:
         reject_if(self.device_id != device_id, OrientationSafetyError("方向凭据与设备不匹配。"))
         reject_if(self.scene_fingerprint != scene_fingerprint, OrientationSafetyError("方向凭据与稳定场景不匹配。"))
         reject_if(self.frame_size != tuple(frame_size), OrientationSafetyError("方向凭据与本地画布尺寸不匹配。"))
-        # These calibrated system-navigation primitives stay bound to the
-        # exact device, scene, frame, confidence and one-shot live seal, but
-        # do not depend on the central App content disclosing its rotation.
-        # Visual/geometry actions remain strict, including callers that omit
-        # an action scope.
-        reject_if(self.phone_content_rotation != 'upright' and action not in FIXED_SYSTEM_NAVIGATION_ACTIONS, OrientationSafetyError("手机内容方向不一致或未知。"))
-        reject_if(float(self.confidence) < MIN_ORIENTATION_CONFIDENCE, OrientationSafetyError("方向独立审计置信度不足。"))
+        # A typed, explicit rotated value remains a physical-safety fact.  An
+        # omitted/unknown model diagnostic does not become a second veto: the
+        # locally minted single-step credential is already bound to the fresh
+        # frame layout, device, scene, exact action and one-shot live seal.
+        reject_if(self.phone_content_rotation in {'rotated_90', 'rotated_180', 'rotated_270'}
+            and action not in FIXED_SYSTEM_NAVIGATION_ACTIONS, OrientationSafetyError("手机内容方向与执行坐标轴不一致。"))
+        # Only the genuinely independent orientation-audit source owns an
+        # authorization confidence.  Model confidence copied into a scene is
+        # diagnostic and is never consulted by the locally minted source.
+        reject_if(self.source == ORIENTATION_AUDIT_SOURCE and float(self.confidence) <
+            MIN_ORIENTATION_CONFIDENCE, OrientationSafetyError("方向独立审计置信度不足。"))
 
     def claim_live_execution_source(self) -> None:
         """Atomically claim this exact in-process credential for one promotion."""
@@ -225,24 +229,25 @@ def _mint_locally_verified_qwerty_credential(*, device_id: str, scene_fingerprin
     return item
 
 
-def _mint_single_step_scene_credential(*, device_id: str, scene_fingerprint: str, frame: Image.Image,
-    camera_layout_orientation_value: str, phone_content_rotation: str, confidence: float, evidence: tuple[str,
-    ...]) -> OrientationCredential:
-    """Bind the sole step's parsed direction facts to fresh pixels and one live credential."""
+def _mint_single_step_scene_credential(*, device_id: str, scene_fingerprint: str,
+    frame: Image.Image) -> OrientationCredential:
+    """Mint a one-shot credential only from the fresh local frame binding.
+
+    Qwen ``camera_alignment`` fields are optional diagnostics.  They are not
+    accepted here, so they cannot become a second hardware authority.
+    """
 
     local_layout = camera_layout_orientation(tuple(frame.size))
-    reject_if(camera_layout_orientation_value != local_layout, OrientationSafetyError('单步画面方向与本地稳定帧尺寸不一致。'))
     seal = object()
     item = OrientationCredential(version=ORIENTATION_CREDENTIAL_VERSION, credential_id=uuid.uuid4().hex,
         source=SINGLE_STEP_SCENE_ORIENTATION_SOURCE, device_id=validate_device_id(device_id),
         scene_fingerprint=str(scene_fingerprint or '').strip(), frame_fingerprint=frame_fingerprint(frame),
         evidence_frame_fingerprint='', frame_size=tuple(frame.size), camera_layout_orientation=local_layout,
-        phone_content_rotation=str(phone_content_rotation or '').strip(), confidence=float(confidence),
-        evidence=tuple(evidence), _audit_seal=seal)
+        phone_content_rotation='unknown', confidence=1.0,
+        evidence=('本地当前帧尺寸与像素形成一次性方向绑定',), _audit_seal=seal)
     item.validate()
-    if float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE:
-        with _AUDIT_SEAL_LOCK:
-            _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
+    with _AUDIT_SEAL_LOCK:
+        _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
     return item
 
 

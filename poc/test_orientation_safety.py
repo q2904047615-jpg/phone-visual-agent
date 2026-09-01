@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import unittest
 import weakref
+from dataclasses import replace
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageEnhance
@@ -17,7 +18,6 @@ from agent.infrastructure.orientation_safety import (
     _CLAIMED_AUDIT_CREDENTIALS,
     _mint_locally_verified_qwerty_credential,
     _mint_single_step_scene_credential,
-    camera_layout_orientation,
 )
 from agent.infrastructure.robot_controller import RobotController
 from run_xy_calibration import click_raw_pixel
@@ -42,18 +42,37 @@ def audited_credential(
     frame=FRAME,
     phone_content_rotation="upright",
 ):
-    return _mint_single_step_scene_credential(
+    credential = _mint_single_step_scene_credential(
         device_id=device_id,
         scene_fingerprint=scene,
         frame=frame,
-        camera_layout_orientation_value=camera_layout_orientation(frame.size),
-        phone_content_rotation=phone_content_rotation,
-        confidence=0.95,
-        evidence=("手机状态文字正向",),
     )
+    return replace(credential, phone_content_rotation=phone_content_rotation)
 
 
 class OrientationCredentialTests(unittest.TestCase):
+    def test_optional_model_alignment_metadata_cannot_veto_local_frame_binding(self):
+        credential = _mint_single_step_scene_credential(
+            device_id="device-a",
+            scene_fingerprint="scene-optional-alignment",
+            frame=FRAME,
+        )
+
+        self.assertEqual("portrait", credential.camera_layout_orientation)
+        self.assertEqual("unknown", credential.phone_content_rotation)
+        self.assertEqual(1.0, credential.confidence)
+        self.assertEqual(
+            ("本地当前帧尺寸与像素形成一次性方向绑定",),
+            credential.evidence,
+        )
+        gate = PhysicalExecutionGate("device-a")
+        gate.arm(
+            credential,
+            action="tap_semantic",
+            scene_fingerprint="scene-optional-alignment",
+        )
+        gate.consume(action="tap_semantic", frame=FRAME.copy())
+
     def test_fixed_system_navigation_keeps_frame_binding_without_app_rotation(self):
         for action, rotation in (
             ("back", "rotated_90"),
@@ -158,6 +177,14 @@ class OrientationCredentialTests(unittest.TestCase):
             gate.consume(action="tap_semantic", frame=changed)
         self.assertEqual(changed.size, caught.exception.actual_frame.size)
         self.assertGreater(caught.exception.centered_mae, 6.0)
+
+        credential = audited_credential(frame=reference)
+        gate.arm(credential, action="tap_semantic", scene_fingerprint="scene-a")
+        with self.assertRaisesRegex(OrientationSafetyError, "画布尺寸不匹配"):
+            gate.consume(
+                action="tap_semantic",
+                frame=Image.new("RGB", (960, 540), "gray"),
+            )
 
     def test_gate_freshness_is_the_one_shot_visual_binding_not_wall_clock(self):
         reference = patterned_frame()
@@ -335,12 +362,11 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         [item.call_count for item in mocks],
                     )
 
-    def test_non_upright_credentials_cannot_reach_visual_robot_physical_entry(self):
+    def test_explicit_rotated_credentials_cannot_reach_visual_robot_physical_entry(self):
         for rotation in (
             "rotated_90",
             "rotated_180",
             "rotated_270",
-            "unknown",
         ):
             with self.subTest(rotation=rotation):
                 controller = self._controller()
@@ -349,7 +375,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(
                     OrientationSafetyError,
-                    "方向不一致或未知",
+                    "与执行坐标轴不一致",
                 ):
                     controller.arm_physical_execution(
                         credential,

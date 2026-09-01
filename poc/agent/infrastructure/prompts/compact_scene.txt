@@ -18,17 +18,17 @@
    fully_visible:true/false；只有整个轮廓均在原图内且无遮挡时才可写true。
 5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
 6. 每个element的evidence最多一条不超过40个字的画面短文字或明确外观。
-   summary不超过60个字。看不清就降低confidence或省略元素。
+   summary不超过60个字。confidence只是可选诊断，缺失或不确定不会决定动作；无法给出合法边界时省略元素。
 7. 禁止action、plan、step、tap、swipe、command、coordinates等动作字段。
    overlays只允许简短字符串名称；任何带边界、角色或ID的可交互候选必须放入elements，
    不得把对象放入overlays。
 8. 场景confidence只评价当前画面本身是否清楚、稳定、可描述，不评价目标是否已完成或目标控件
    是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
    elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
-9. 输入框可能为空，也可能已经含有文字；预填充且未聚焦时可以没有光标或占位提示。当一个有清晰独立边界的横向矩形内含查询/地址/表单文字，并带有边界独立的尾部功能控件（例如搜索、提交、清除、语音或扫描图标）时，这组结构本身就是role=input的可靠视觉证据，不得仅因没有光标而降级成text或container；尾部功能控件必须作为另一个控件观察，不能把输入框和功能控件合成横幅。这个判断只报告页面事实，绝不表示可以激活尾部控件。框内文字的内容或主题不能改变控件角色；其他没有上述成组结构的带文字区域仍不得仅因含有文字就被认作输入框。
+9. 输入框可能为空，也可能已经含有文字；没有文字、占位提示、光标、聚焦高亮或独立描边都不能单独否定输入角色。一个唯一可界定的中心编辑面如果与同一行中边界独立的语音、表情、附件、清除、搜索或提交工具共同形成完整编辑栏/表单行，这个整体布局可以证明中心空白面是role=input；各工具必须继续作为独立控件观察，不能与输入面合成横幅。仅有任意空隙、孤立图标、目标文字或固定位置仍不能证明输入框。
 10. {{INPUT_RULE}}
-11. system_ui必须始终存在，且只允许immersive_or_fullscreen和navigation_bar_visible两个字段。每个值只能是true、false或字符串unknown：只有画面明确证明时才写布尔值，裁切、遮挡、模糊或无法排除时必须写unknown。这是系统UI的只读事实，不是完成判断。navigation_bar、system_navigation_bar或system_nav_bar绝不得写入elements，即使它部分可见或与目标相关。
-12. camera_alignment in the compact scene is descriptive and can never authorize hardware. camera_layout_orientation describes the supplied canvas only and must be portrait, landscape, or square. phone_content_rotation describes how the phone App/system axes appear: upright, rotated_90, rotated_180, rotated_270, or unknown. Inspect only the physical phone display; seller-controller PX/MM readouts, colored borders, and bottom action/orientation buttons are external chrome and never phone evidence. Black or sparse App content does not lower alignment confidence when visible phone text or system structure establishes its axes. Evidence must contain one or two short non-control strings and no coordinates, actions, or bounds.
+11. system_ui是可选只读诊断。若报告，只使用immersive_or_fullscreen和navigation_bar_visible；每个值只能是true、false或unknown。navigation_bar、system_navigation_bar或system_nav_bar绝不得写入elements。
+12. camera_alignment是可选只读诊断，永远不能授权硬件。camera_layout_orientation由本地JPEG尺寸确定；你只在画面确实证明时报告phone_content_rotation和短证据。卖家控制器PX/MM、彩框和底部控制按钮永远不是手机证据。缺失或不确定时省略，执行期仍由本地方向与坐标门校验。
 13. 如果目标尚未出现，而当前画面明确是列表或信息流，并且原图边缘能看见只露出一部分的后续
     列表项/卡片，必须在summary中简短记录“对应边缘存在部分可见的后续内容，列表仍在延伸”。
     这是只读滚动线索，不得猜测被裁切项就是目标，不得给动作建议；被裁切元素不得标成可操作目标。
@@ -59,12 +59,12 @@
     scroll_axis:"horizontal"、从0开始的page_index和page_count；evidence写明实际看见的圆点总数和
     当前第几页。圆点不清、选中项不唯一或只有一页时不得输出page_index/page_count，也不得猜测。
 
-只返回下列完整JSON，不要Markdown：
+只返回下列简洁JSON，不要Markdown。protocol_version、system_ui、camera_alignment、stable、confidence和fingerprint均可省略；本地只补固定默认值，不会补控件或坐标：
 {"protocol_version":"{{SCENE_PROTOCOL}}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"当前画面短描述","system_ui":{"immersive_or_fullscreen":"unknown",
 "navigation_bar_visible":"unknown"},"camera_alignment":{"camera_layout_orientation":"portrait",
 "phone_content_rotation":"unknown","confidence":0.0,"evidence":[]},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}
-每个element只允许：
+每个element优先只使用：
 {"element_id":"e1","role":"button","meaning":"open_search","label":"搜索",
 "bounds":[0,0,1000,{{WIRE_HEIGHT}}],"confidence":0.0,"states":{"goal_relevant":true},"evidence":[]}

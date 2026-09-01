@@ -21,7 +21,8 @@
 - 当前唯一动作语义协议是 `2026-08-20-canonical-action-v1`：DeepSeek 首次生成轻量有序目标定义后退出运行循环；本地只派生一份运行进度；Qwen 在同一次当前截图响应中发布 scene，并只选择一个推进当前目标的 canonical candidate，或以同帧证据报告 `finish`。
 - Qwen 不拥有普通语义 `blocked` 否决权。Controller 只处理当前设备、scope、几何和一次执行结果；本地 selector、动作后 DeepSeek replan、可见进度和 App lineage 不得建立第二套动作或完成权威。
 - `matched` 只证明刚才动作符合预期；只有当前截图上的 Qwen `finish` 才能推进高层目标或结束。若还有下一目标，必须按新目标取得新截图，不能向旧观察投影后继目标。
-- 当前输入正文的唯一视觉权威是同一单步响应中的 `input_structure.application_inputs[*].text`。scene 输入元素只证明同帧输入表面存在、可见和几何重合，不得因 `states.value` 缺失、为空或含过时转写而生成、覆盖或否决正文。
+- 当前输入正文的唯一视觉权威是同一单步响应中的 `input_structure.application_inputs[*].text`。scene 输入元素只是可选页面上下文，不得被要求与 `input_structure` 重复存在、重复正文或达到几何重合阈值，也不得因 `states.value`、文字、占位符、光标、标签、证据或其它可选视觉事实缺失而生成、覆盖或否决正文。当前 typed 输入事务及 active field 已唯一确定时，唯一合法 bounds 的空字符串字段可以成立；聚焦前唯一可界定的完整编辑栏中心空白面可以只签发一次聚焦点击。
+- Qwen 输出的 scene/element/decision `confidence` 只作诊断，不得成为普通动作候选、canonical 映射或动作后验证的第二否决权。独立本地方向凭据、真实帧稳定性/清晰度、合法坐标、唯一候选、设备与 scope/fingerprint 校验继续保留。
 - 用户批准的项目自有 Companion IME 仅作为 `input_verified_text` / `clear_verified_text` 的可信文字 transport，操作当前已聚焦的 Android 编辑连接；它不观察页面、不选择字段，也不形成第二套视觉、字段或动作权威。
 - 用户批准的 `launch_app` 只可使用本地可信包名注册表。Companion IME 与 `launch_app` 均不得扩展为任意 ADB/Shell、ADB Keyboard、卖家文字对话框、剪贴板、Accessibility、force-stop、清数据或后台脚本。
 

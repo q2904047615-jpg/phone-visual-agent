@@ -509,9 +509,7 @@ def _single_input(scene: dict[str, Any], *, expected_value: str | None=None) -> 
     for element in elements:
         states = element.get("states") if isinstance(element, dict) else None
         if (isinstance(states, dict) and element.get('role') == 'input'
-            and (element.get('meaning') == 'application_text_input') and isinstance(element.get('confidence'), (int,
-            float)) and (not isinstance(element.get('confidence'),
-            bool)) and (float(element['confidence']) >= 0.9) and (states.get('fully_visible') is True)
+            and (element.get('meaning') == 'application_text_input') and (states.get('fully_visible') is True)
             and (states.get('focused') is True) and isinstance(states.get('value'),
             str) and (expected_value is None or states.get('value') == expected_value)
             and (_valid_bounds(element.get('bounds')) is not None)):
@@ -674,8 +672,11 @@ def _resolve_verified_input_surface(*, after_scene: dict[str, Any], before_input
     missing_screen_message: str) -> _InputLineageSurface:
     app_id = fallback_surface.app_id if fallback_surface else after_scene.get("app_id")
     screen_id = fallback_surface.screen_id if fallback_surface else after_scene.get('screen_id')
+    before_input_field_id = _typed_input_field_id(before_input)
     input_field_id = _typed_input_field_id(after_input)
-    typed_field_stable = bool(input_field_id != 'unknown' and _typed_input_field_id(before_input) == input_field_id)
+    typed_field_stable = bool(input_field_id != 'unknown' and before_input_field_id == input_field_id)
+    reject_if(before_input_field_id != 'unknown' and input_field_id != before_input_field_id,
+        InputValueLineageError('输入值连续性 typed input_field_id 在动作前后不一致。'))
     reject_if(not isinstance(app_id, str) or not app_id.strip() or (app_id == 'unknown' and (not typed_field_stable)), InputValueLineageError(missing_app_message))
     reject_if(not isinstance(screen_id, str) or not screen_id.strip() or screen_id == 'unknown', InputValueLineageError(missing_screen_message))
     input_bounds = _valid_bounds(after_input.get("bounds"))
@@ -729,7 +730,7 @@ def _verified_value_lineage(*, device_id: str, resolved: dict[str, Any], before_
     raw_after = after_input['states']['value']
     matches = _exact_or_soft_wrapped_visual_text(raw_after, expected) if wrapped else (
         _collapsed_visual_text(raw_after) == expected)
-    reject_if(not matches or not any(raw_after in str(item) for item in after_input.get('evidence', ()))
+    reject_if(not matches
         or not _bounds_compatible(_valid_bounds(before_input['bounds']), _valid_bounds(after_input['bounds'])),
         InputValueLineageError(mismatch_message))
     return _verified_lineage(device_id=device_id, resolved=resolved, before_scene=before_scene,
@@ -763,12 +764,10 @@ def build_verified_newline_lineage(*, device_id: str, resolved: Any, before_scen
     before_input, prior, expected = _validated_newline_action_chain(resolved, before_scene)
     after_input = _single_input(after_scene, expected_value=expected)
     after_states = after_input.get("states")
-    after_evidence = after_input.get("evidence")
     reject_if(
         not isinstance(after_states, dict) or after_states.get('value') != expected
         or after_states.get('input_field_id') != _typed_input_field_id(before_input)
-        or (after_states.get('verified_trailing_newline') is not True) or (not isinstance(after_evidence,
-        list)) or (not any(('已验证换行动作' in str(item) for item in after_evidence)))
+        or (after_states.get('verified_trailing_newline') is not True)
         or (not _bounds_compatible(_valid_bounds(before_input['bounds']), _valid_bounds(after_input['bounds']))),
         InputValueLineageError("动作后场景没有证明同一字段的真实尾随换行。"),
     )

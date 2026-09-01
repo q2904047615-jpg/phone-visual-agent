@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from dataclasses import replace
 
 from agent.domain.semantic_action import SemanticAction
@@ -105,55 +106,146 @@ class UISceneTests(unittest.TestCase):
             current.to_dict()["system_ui"],
         )
 
-    def test_system_ui_rejects_missing_extra_or_ambiguous_values(self) -> None:
+    def test_system_ui_missing_or_ambiguous_values_normalize_to_unknown(self) -> None:
         cases = (
-            {"immersive_or_fullscreen": True},
-            {
-                "immersive_or_fullscreen": True,
-                "navigation_bar_visible": False,
-                "status_bar_visible": True,
-            },
-            {
-                "immersive_or_fullscreen": "yes",
-                "navigation_bar_visible": False,
-            },
-            {
-                "immersive_or_fullscreen": False,
-                "navigation_bar_visible": None,
-            },
+            (
+                {"immersive_or_fullscreen": True},
+                (True, "unknown"),
+            ),
+            (
+                {
+                    "immersive_or_fullscreen": "yes",
+                    "navigation_bar_visible": False,
+                },
+                ("unknown", False),
+            ),
+            (
+                {
+                    "immersive_or_fullscreen": False,
+                    "navigation_bar_visible": None,
+                },
+                (False, "unknown"),
+            ),
         )
-        for system_ui in cases:
-            with self.subTest(system_ui=system_ui), self.assertRaises(UISceneError):
-                SystemUIFacts.from_dict(system_ui)
+        for system_ui, expected in cases:
+            with self.subTest(system_ui=system_ui):
+                parsed = SystemUIFacts.from_dict(system_ui)
+                self.assertEqual(expected[0], parsed.immersive_or_fullscreen)
+                self.assertEqual(expected[1], parsed.navigation_bar_visible)
+
+    def test_scene_element_system_ui_and_camera_ignore_harmless_metadata(self) -> None:
+        current = UIScene.from_dict(
+            {
+                "foreground_app_id": "sample.app",
+                "screen_id": "main",
+                "summary": "页面显示唯一目标按钮",
+                "system_ui": {
+                    "immersive_or_fullscreen": False,
+                    "navigation_bar_visible": True,
+                    "status_bar_visible": True,
+                },
+                "camera_alignment": {
+                    "camera_layout_orientation": "portrait",
+                    "phone_content_rotation": "upright",
+                    "confidence": 0.01,
+                    "evidence": ["手机页面文字正向显示"],
+                    "diagnostic_note": "optional model metadata",
+                },
+                "elements": [
+                    {
+                        "element_id": "target",
+                        "role": "button",
+                        "meaning": "open_target",
+                        "label": "打开",
+                        "bounds": [0.1, 0.2, 0.4, 0.3],
+                        "states": {"goal_relevant": True},
+                        "evidence": [],
+                        "visual_note": "optional model metadata",
+                    }
+                ],
+                "stable": True,
+                "diagnostic_note": "optional model metadata",
+            }
+        )
+
+        self.assertEqual("target", current.unique_trusted_goal_element().element_id)
+        self.assertIs(True, current.system_ui.navigation_bar_visible)
+        self.assertEqual("upright", current.camera_alignment.phone_content_rotation)
+
+    def test_scene_rejects_action_plan_or_raw_coordinate_injection_at_any_depth(self) -> None:
+        base = {
+            "foreground_app_id": "sample.app",
+            "screen_id": "main",
+            "summary": "页面显示唯一目标按钮",
+            "system_ui": {
+                "immersive_or_fullscreen": False,
+                "navigation_bar_visible": True,
+            },
+            "camera_alignment": {
+                "camera_layout_orientation": "portrait",
+                "phone_content_rotation": "upright",
+                "confidence": 0.95,
+                "evidence": ["手机页面文字正向显示"],
+            },
+            "elements": [
+                {
+                    "element_id": "target",
+                    "role": "button",
+                    "meaning": "open_target",
+                    "label": "打开",
+                    "bounds": [0.1, 0.2, 0.4, 0.3],
+                    "confidence": 0.95,
+                    "states": {"goal_relevant": True},
+                    "evidence": ["打开"],
+                }
+            ],
+            "stable": True,
+            "confidence": 0.95,
+        }
+        targets = {
+            "scene": lambda payload: payload,
+            "element": lambda payload: payload["elements"][0],
+            "system_ui": lambda payload: payload["system_ui"],
+            "camera_alignment": lambda payload: payload["camera_alignment"],
+        }
+        injections = {
+            "action": "tap_semantic",
+            "plan": ["tap target", "tap another target"],
+            "coordinates": [120, 240],
+        }
+        for scope, select in targets.items():
+            for field, value in injections.items():
+                with self.subTest(scope=scope, field=field), self.assertRaisesRegex(
+                    UISceneError, "动作|计划|坐标"
+                ):
+                    payload = deepcopy(base)
+                    select(payload)[field] = value
+                    UIScene.from_dict(payload)
 
     def test_navigation_bar_is_not_a_scene_element(self) -> None:
         with self.assertRaisesRegex(UISceneError, "只能写入 scene.system_ui"):
             element("system-bar", "system_navigation_bar", role="container").validate()
 
-    def test_overlay_objects_are_rejected_instead_of_stringified(self) -> None:
-        with self.assertRaisesRegex(
-            UISceneError,
-            "overlays 只允许字符串描述",
-        ):
-            UIScene.from_dict(
-                {
-                    "protocol_version": UI_SCENE_PROTOCOL_VERSION,
-                    "foreground_app_id": "unknown",
-                    "screen_id": "window_manager",
-                    "summary": "窗口管理",
-                    "elements": [],
-                    "overlays": [
-                        {
-                            "overlay_id": "add-new",
-                            "role": "button",
-                            "bounds": [0.4, 0.8, 0.6, 0.9],
-                        }
-                    ],
-                    "stable": True,
-                    "confidence": 0.95,
-                    "fingerprint": "frame-1",
-                }
-            )
+    def test_non_string_overlay_metadata_is_ignored_instead_of_stringified(self) -> None:
+        for optional_overlays in ([{
+                "overlay_id": "add-new",
+                "role": "button",
+                "bounds": [0.4, 0.8, 0.6, 0.9],
+            }], "unstructured optional overlay note"):
+            with self.subTest(optional_overlays=optional_overlays):
+                current = UIScene.from_dict({
+                "protocol_version": UI_SCENE_PROTOCOL_VERSION,
+                "foreground_app_id": "unknown",
+                "screen_id": "window_manager",
+                "summary": "窗口管理",
+                "elements": [],
+                "overlays": optional_overlays,
+                "stable": True,
+                "confidence": 0.95,
+                "fingerprint": "frame-1",
+                })
+
+                self.assertEqual((), current.overlays)
 
     def test_scene_protocol_separates_foreground_app_from_target_goal(self) -> None:
         current = UIScene.from_dict(
@@ -266,12 +358,15 @@ class UISceneTests(unittest.TestCase):
             )
 
     def test_low_scene_confidence_allows_exact_unique_goal_element_only(self) -> None:
-        target = element(
-            "tab-list",
-            "open_tab_list",
-            states={"goal_relevant": True},
+        target = replace(
+            element(
+                "tab-list",
+                "open_tab_list",
+                states={"goal_relevant": True},
+            ),
+            confidence=0.01,
         )
-        current = scene(target, confidence=0.6)
+        current = scene(target, confidence=0.01)
         action = SemanticAction(
             node_id="open-tabs",
             action="tap_semantic",
@@ -282,10 +377,10 @@ class UISceneTests(unittest.TestCase):
 
         self.assertEqual("tab-list", resolved.target_element_id)
 
-    def test_low_scene_confidence_rejects_screen_wide_action(self) -> None:
+    def test_low_scene_confidence_does_not_veto_screen_wide_action(self) -> None:
         current = scene(
             element("tab-list", "open_tab_list", states={"goal_relevant": True}),
-            confidence=0.6,
+            confidence=0.01,
         )
         action = SemanticAction(
             node_id="scroll",
@@ -293,10 +388,66 @@ class UISceneTests(unittest.TestCase):
             params={"direction": "up"},
         )
 
-        with self.assertRaisesRegex(UniversalActionError, "局部证据"):
-            UniversalActionController().resolve_one(action, current)
+        resolved = UniversalActionController().resolve_one(action, current)
 
-    def test_target_local_candidate_rejects_overlapping_strong_element(self) -> None:
+        self.assertEqual("swipe", resolved.kind)
+
+    def test_invalid_bounds_and_duplicate_element_ids_still_fail(self) -> None:
+        with self.assertRaisesRegex(UISceneError, "bounds"):
+            UIElement.from_dict(
+                {
+                    "element_id": "invalid",
+                    "role": "button",
+                    "meaning": "invalid_bounds",
+                    "bounds": [0.1, 0.2, 1.1, 0.3],
+                }
+            )
+
+        first = element("duplicate", "first")
+        with self.assertRaisesRegex(UISceneError, "元素ID重复"):
+            scene(first, replace(first, meaning="second")).validate()
+
+    def test_malformed_unselected_scene_fact_and_surplus_count_do_not_veto_unique_target(self) -> None:
+        raw_elements = [
+            {
+                "element_id": "target",
+                "role": "button",
+                "meaning": "open_target",
+                "bounds": [0.1, 0.2, 0.4, 0.3],
+                "states": {"goal_relevant": True, "visible": True, "enabled": True},
+            },
+            {
+                "element_id": "bad-optional",
+                "role": "button",
+                "meaning": "decorative_suggestion",
+                "bounds": [0.8, 0.2, 0.7, 0.3],
+                # A redundant goal hint is not the same-envelope selected ID.
+                "states": {"goal_relevant": True},
+            },
+        ]
+        raw_elements.extend(
+            {
+                "element_id": f"optional-{index}",
+                "role": "text",
+                "meaning": "optional_context",
+                "bounds": [0.01, 0.01, 0.02, 0.02],
+                "states": {"goal_relevant": False},
+            }
+            for index in range(65)
+        )
+
+        current = UIScene.from_dict({
+            "foreground_app_id": "sample.app",
+            "screen_id": "main",
+            "summary": "页面显示唯一可执行目标",
+            "elements": raw_elements,
+        })
+
+        self.assertEqual("target", current.unique_trusted_goal_element().element_id)
+        self.assertNotIn("bad-optional", {item.element_id for item in current.elements})
+        self.assertEqual(66, len(current.elements))
+
+    def test_unrelated_overlapping_element_does_not_veto_unique_goal(self) -> None:
         target = element(
             "tab-list",
             "open_tab_list",
@@ -304,7 +455,8 @@ class UISceneTests(unittest.TestCase):
         )
         conflicting = element("other", "close_tab")
 
-        self.assertIsNone(
+        self.assertEqual(
+            target,
             scene(target, conflicting, confidence=0.6).unique_trusted_goal_element()
         )
 
@@ -333,7 +485,7 @@ class UISceneTests(unittest.TestCase):
             scene(target, page_context).unique_trusted_goal_element(),
         )
 
-    def test_completion_evidence_never_makes_screen_action_executable(self) -> None:
+    def test_completion_evidence_does_not_veto_screen_action(self) -> None:
         evidence = element(
             "visible-count",
             "four_tabs_visible",
@@ -343,15 +495,16 @@ class UISceneTests(unittest.TestCase):
         current = scene(evidence, confidence=0.6)
         self.assertEqual((evidence,), current.trusted_completion_evidence())
 
-        with self.assertRaisesRegex(UniversalActionError, "局部证据"):
-            UniversalActionController().resolve_one(
-                SemanticAction(
-                    node_id="scroll",
-                    action="swipe",
-                    params={"direction": "up"},
-                ),
-                current,
-            )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="scroll",
+                action="swipe",
+                params={"direction": "up"},
+            ),
+            current,
+        )
+
+        self.assertEqual("swipe", resolved.kind)
 
     def test_container_is_valid_scene_structure_but_not_clickable(self) -> None:
         content = element("content", "video_content", role="container")
@@ -1096,6 +1249,28 @@ class UISceneTests(unittest.TestCase):
             coordinate_scale=1000,
         )
         self.assertEqual("", parsed.states["value"])
+        max_length = UIElement.from_dict(
+            {
+                "element_id": "long-field",
+                "role": "input",
+                "meaning": "message_field",
+                "bounds": [100, 100, 900, 200],
+                "states": {"value": "x" * 4000},
+            },
+            coordinate_scale=1000,
+        )
+        self.assertEqual(4000, len(max_length.states["value"]))
+        with self.assertRaisesRegex(UISceneError, "4000"):
+            UIElement.from_dict(
+                {
+                    "element_id": "too-long-field",
+                    "role": "input",
+                    "meaning": "message_field",
+                    "bounds": [100, 100, 900, 200],
+                    "states": {"value": "x" * 4001},
+                },
+                coordinate_scale=1000,
+            )
         with self.assertRaisesRegex(UISceneError, "keyboard_layout"):
             UIElement.from_dict(
                 {

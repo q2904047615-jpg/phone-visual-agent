@@ -129,15 +129,15 @@ def trusted_target_local_candidate(scene: UIScene, conflicts: tuple[dict[str, An
     return candidate
 
 
-def canonical_element_rank(element: UIElement) -> tuple[int, int, float, float]:
+def canonical_element_rank(element: UIElement) -> tuple[int, int, float]:
     left, top, right, bottom = element.bounds
     area = (right - left) * (bottom - top)
     locally_audited_input_control = int(element.element_id.startswith('local_audited_')
-        and (element.meaning == 'ime_exact_candidate' and element.states.get('ime_candidate') is True
-        or (element.meaning == 'input_exact_literal_key' and element.states.get('input_literal_key') is True)
-        or element.states.get('keyboard_layout_switch') is True or (element.states.get('keyboard_case_switch') is True)
-        or (element.states.get('keyboard_input_mode_switch') is True)))
-    return (locally_audited_input_control, ROLE_PRIORITY.get(element.role, 0), float(element.confidence), -area)
+        and element.states.get('primary_input_geometry_verified') is True
+        and element.states.get('geometry_audit_source') == 'input_structure_audit')
+    # Model confidence is diagnostic only.  max() keeps the first original
+    # element when local-audit priority, role and area are all equal.
+    return (locally_audited_input_control, ROLE_PRIORITY.get(element.role, 0), -area)
 
 
 def elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:

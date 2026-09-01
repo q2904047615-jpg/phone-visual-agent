@@ -2115,7 +2115,16 @@ class GenericActionAdapterTests(unittest.TestCase):
                 replace(missing_evidence_input, evidence=("可见输入框",)),
             ),
         )
-        for unsafe_after in (wrong_text, missing_evidence):
+        reconciled_without_repeated_text = GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
+            resolved,
+            before,
+            missing_evidence,
+        )
+        self.assertEqual(
+            "live2",
+            reconciled_without_repeated_text.get_element("local_audited_input_1").states["value"],
+        )
+        for unsafe_after in (wrong_text,):
             with self.subTest(fingerprint=unsafe_after.fingerprint):
                 self.assertIs(
                     unsafe_after,
@@ -2293,11 +2302,23 @@ class GenericActionAdapterTests(unittest.TestCase):
                     after.get_element("local_audited_input_1"),
                     evidence=("可见输入框", "caret"),
                 )
+                reconciled_without_repeated_suffix = (
+                    GenericSingleActionAdapter._reconcile_verified_text_horizontal_suffix(
+                        resolved,
+                        before,
+                        replace(after, elements=(missing_evidence_input,)),
+                    )
+                )
+                self.assertEqual(
+                    expected,
+                    reconciled_without_repeated_suffix.get_element(
+                        "local_audited_input_1"
+                    ).states["value"],
+                )
                 for unsafe_input in (
                     wrong_field_input,
                     no_overlap_input,
                     wrong_prefix_input,
-                    missing_evidence_input,
                 ):
                     unsafe_after = replace(after, elements=(unsafe_input,))
                     self.assertIs(
@@ -3219,151 +3240,77 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("wait_for_change", supported)
         self.assertIn("swipe", supported)
 
-    def test_orientation_mismatch_blocks_visual_actions_before_robot(self):
-        mismatch = CameraAlignmentFacts(
-            camera_layout_orientation="portrait",
-            phone_content_rotation="rotated_90",
-            confidence=0.95,
-            evidence=("手机界面文字需旋转九十度才正向",),
-        )
-        ordinary_scene = scene("planned", camera_alignment=mismatch)
-        drag_scene = UIScene(
-            app_id="settings",
-            screen_id="arrange",
-            summary="两个可拖动对象",
-            elements=(
-                UIElement(
-                    element_id="source",
-                    role="icon",
-                    meaning="source_item",
-                    label="源",
-                    bounds=(0.15, 0.25, 0.25, 0.35),
-                    confidence=0.96,
-                ),
-                UIElement(
-                    element_id="destination",
-                    role="icon",
-                    meaning="destination_slot",
-                    label="目标",
-                    bounds=(0.60, 0.25, 0.70, 0.35),
-                    confidence=0.96,
-                ),
-            ),
-            confidence=0.96,
-            fingerprint="planned",
-            camera_alignment=mismatch,
-        )
+    def test_optional_camera_alignment_metadata_does_not_veto_ordinary_action(self):
         cases = (
+            ("omitted", CameraAlignmentFacts()),
             (
-                "tap_semantic",
-                ordinary_scene,
-                SemanticAction(
-                    node_id="blocked-tap",
-                    action="tap_semantic",
-                    params={"element_id": "e1", "target": "app_icon"},
+                "low_model_confidence",
+                CameraAlignmentFacts(
+                    camera_layout_orientation="portrait",
+                    phone_content_rotation="upright",
+                    confidence=0.01,
+                    evidence=("模型仅提供诊断性方向描述",),
                 ),
             ),
             (
-                "swipe",
-                ordinary_scene,
-                SemanticAction(
-                    node_id="blocked-swipe",
-                    action="swipe",
-                    params={
-                        "direction": "up",
-                        "expected_effect": {"scene_changed": True},
-                    },
+                "model_layout_mismatch",
+                CameraAlignmentFacts(
+                    camera_layout_orientation="landscape",
+                    phone_content_rotation="unknown",
+                    confidence=0.0,
+                    evidence=(),
                 ),
             ),
             (
-                "drag",
-                drag_scene,
-                SemanticAction(
-                    node_id="blocked-drag",
-                    action="drag",
-                    params={
-                        "source_element_id": "source",
-                        "destination_element_id": "destination",
-                        "expected_effect": {"scene_changed": True},
-                    },
+                "model_reports_rotated_content",
+                CameraAlignmentFacts(
+                    camera_layout_orientation="portrait",
+                    phone_content_rotation="rotated_90",
+                    confidence=0.99,
+                    evidence=("模型诊断为旋转画面",),
                 ),
             ),
         )
         frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
-        for kind, planned, action in cases:
-            with self.subTest(kind=kind):
-                robot = FakeRobot()
-                adapter = GenericSingleActionAdapter(
-                    capture=SequenceCapture(["gray"] * 4),
-                    observer=FakeSceneObserver(
-                        [planned]
-                        if action.action
-                        in GenericSingleActionAdapter.GEOMETRY_BOUND_KINDS
-                        else []
-                    ),
-                    robot=robot,
-                    frame_interval=0,
-                    post_action_settle=0,
-                )
-                with self.assertRaisesRegex(
-                    GenericActionAdapterError,
-                    "方向不一致或未知",
-                ) as caught:
-                    adapter.execute(
-                        requested_action=action,
-                        planned_scene=planned,
-                        planned_frames=frames,
-                        goal=goal(),
-                        confirmed=True,
-                    )
-                self.assertEqual(0, caught.exception.physical_actions)
-                self.assertEqual([], robot.actions)
 
-    def test_visual_orientation_gate_rejects_unknown_low_confidence_or_local_mismatch(self):
-        cases = (
-            ("rotated_90", 0.95, "方向不一致或未知"),
-            ("rotated_180", 0.95, "方向不一致或未知"),
-            ("rotated_270", 0.95, "方向不一致或未知"),
-            ("unknown", 0.95, "方向不一致或未知"),
-            ("upright", 0.4, "置信度不足"),
-        )
-        frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
-        for rotation, confidence, error in cases:
-            with self.subTest(rotation=rotation, confidence=confidence):
-                planned = scene(
-                    "planned",
-                    camera_alignment=CameraAlignmentFacts(
-                        camera_layout_orientation="portrait",
-                        phone_content_rotation=rotation,
-                        confidence=confidence,
-                        evidence=("手机界面方向由本轮完整画面报告",),
-                    ),
-                )
+        class PreserveOptionalAlignmentObserver(FakeSceneObserver):
+            def observe(self, *, frames, goal_context=None):
+                self.calls += 1
+                self.goal_contexts.append(goal_context)
+                result = self.scenes.pop(0)
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+        for label, alignment in cases:
+            with self.subTest(label=label):
+                planned = scene("planned", camera_alignment=alignment)
+                after = scene("after", screen_id="app_home", element_id="after")
                 robot = FakeRobot()
                 adapter = GenericSingleActionAdapter(
-                    capture=SequenceCapture(["gray"] * 4),
-                    observer=FakeSceneObserver([planned]),
+                    capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+                    observer=PreserveOptionalAlignmentObserver([after]),
                     robot=robot,
                     frame_interval=0,
                     post_action_settle=0,
                 )
-                with self.assertRaisesRegex(GenericActionAdapterError, error) as caught:
-                    adapter.execute(
-                        requested_action=SemanticAction(
-                            node_id="blocked-tap",
-                            action="tap_semantic",
-                            params={
-                                "element_id": "e1",
-                                "target": "app_icon",
-                            },
-                        ),
-                        planned_scene=planned,
-                        planned_frames=frames,
-                        goal=goal(),
-                        confirmed=True,
-                    )
-                self.assertEqual(0, caught.exception.physical_actions)
-                self.assertEqual([], robot.actions)
+
+                result = adapter.execute(
+                    requested_action=SemanticAction(
+                        node_id="ordinary-tap",
+                        action="tap_semantic",
+                        params={"element_id": "e1", "target": "app_icon"},
+                    ),
+                    planned_scene=planned,
+                    planned_frames=frames,
+                    goal=goal(),
+                    confirmed=True,
+                )
+
+                self.assertEqual(1, result.physical_actions)
+                self.assertEqual([("tap", 300, 400)], robot.actions)
+                self.assertEqual("portrait", result.orientation_credential.camera_layout_orientation)
+                self.assertEqual(1.0, result.orientation_credential.confidence)
 
     def test_reveal_system_navigation_calls_one_dedicated_robot_action(self):
         hidden = SystemUIFacts(
@@ -7056,13 +7003,13 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([], robot.actions)
 
-    def test_low_confidence_observation_stops_without_model_retry(self):
+    def test_observer_exception_stops_without_retry_or_action(self):
         planned = scene("planned")
         fresh = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver(
             [
-                RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
+                RuntimeError("观察器返回不可解析响应。"),
                 fresh,
                 after,
             ]
@@ -7084,31 +7031,6 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(1, observer.calls)
         self.assertEqual(0, len(robot.actions))
-
-    def test_first_low_confidence_failure_stops_without_action(self):
-        observer = FakeSceneObserver(
-            [
-                RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
-                RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
-            ]
-        )
-        robot = FakeRobot()
-        action = SemanticAction(
-            node_id="generic_step_1",
-            action="tap_semantic",
-            params={"element_id": "e1", "target": "app_icon"},
-        )
-
-        with self.assertRaisesRegex(GenericActionAdapterError, "第1轮动作前观察失败"):
-            self._adapter(observer, robot).execute(
-                requested_action=action,
-                planned_scene=scene("planned"),
-                goal=goal(),
-                confirmed=True,
-            )
-
-        self.assertEqual(1, observer.calls)
-        self.assertEqual([], robot.actions)
 
     def test_goal_polluted_home_app_is_normalized_before_confirmation(self):
         planned = scene("planned", app_id="douyin")

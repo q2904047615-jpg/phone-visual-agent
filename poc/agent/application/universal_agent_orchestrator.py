@@ -58,6 +58,38 @@ def _action_digest(action: Any) -> str:
     return canonical_digest(payload)
 
 
+def _input_focus_action_facts(graph: DynamicTaskGraph, observation: Any,
+    decision: Any) -> tuple[str, str, bool] | None:
+    """Identify one typed input focus tap without depending on model element IDs or bounds jitter."""
+
+    proposal = getattr(decision, 'proposal', None)
+    action = getattr(proposal, 'action', None)
+    if getattr(proposal, 'status', None) != 'action' or getattr(action, 'action', None) != 'tap_semantic':
+        return None
+    current = graph.active_subgoal()
+    if current is None or not current.input_field_id:
+        return None
+    params = getattr(action, 'params', None)
+    if not isinstance(params, Mapping) or str(params.get('role') or '') != 'input':
+        return None
+    states = params.get('states')
+    if not isinstance(states, Mapping):
+        return None
+    field_id = str(states.get('input_field_id') or '').strip()
+    if not field_id or field_id != current.input_field_id:
+        return None
+    key = canonical_digest({'subgoal_id': current.subgoal_id, 'action': 'tap_semantic',
+        'role': 'input', 'input_field_id': field_id})
+    value = states.get('value')
+    semantic_state = {'focused': states.get('focused') is True,
+        'value': value if isinstance(value, str) else None,
+        'soft_keyboard_visible': states.get('soft_keyboard_visible') is True,
+        'ime_preedit_text': str(states.get('ime_preedit_text') or ''),
+        'keyboard_layout': str(states.get('keyboard_layout') or 'unknown'),
+        'keyboard_input_mode': str(states.get('keyboard_input_mode') or 'unknown')}
+    return key, canonical_digest(semantic_state), states.get('focused') is True
+
+
 def _confirmation_effect_ids(graph: DynamicTaskGraph, current: Any | None) -> tuple[str, ...]:
     if current is None:
         return ()
@@ -362,7 +394,8 @@ class UniversalAgentOrchestrator:
             self._set_status(session, 'needs_reobservation',
                 'Qwen已完成当前高层目标；下一目标必须取得新截图。')
 
-    def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any) -> Any:
+    def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any,
+        executed_input_focus: tuple[str, str, bool] | None=None) -> Any:
         graph = session.task_graph
         observation = session.trusted_observation
         assert graph is not None and observation is not None
@@ -370,10 +403,31 @@ class UniversalAgentOrchestrator:
         session.qwen_decision = decision
         self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, decision))
         if decision.proposal.status == 'finish':
+            session.input_focus_retry_key = ''
+            session.input_focus_retry_state_digest = ''
             self._complete_from_finish(session, decision)
             return decision
         reject_if(decision.proposal.status != 'action',
             UniversalAgentOrchestratorError('Qwen单步决策只允许action或finish。'))
+        focus = _input_focus_action_facts(graph, observation, decision)
+        if session.input_focus_retry_key:
+            repeated_after_correction = bool(focus and focus[0] == session.input_focus_retry_key
+                and (focus[1] == session.input_focus_retry_state_digest or focus[2]))
+            session.input_focus_retry_key = ''
+            session.input_focus_retry_state_digest = ''
+            reject_if(repeated_after_correction, UniversalAgentOrchestratorError(
+                '同一输入框聚焦动作在一次新观察纠正后仍无推进；已停止且未重复点击。'))
+        repeated_without_progress = bool(focus and executed_input_focus
+            and focus[0] == executed_input_focus[0] and focus[1] == executed_input_focus[1])
+        redundant_focused_tap = bool(focus and focus[2])
+        if focus and (repeated_without_progress or redundant_focused_tap):
+            session.input_focus_retry_key = focus[0]
+            session.input_focus_retry_state_digest = focus[1]
+            session.controller_decision = None
+            session.confirmation_authority = None
+            self._set_status(session, 'needs_reobservation',
+                '当前截图仍建议重复聚焦同一输入框；先取得一次新截图让Qwen纠正，不重复旧点击。')
+            return decision
         receipt = self._selection_receipt(session, decision)
         session.controller_decision = receipt
         self._remember(session, session.evidence_store.write_controller_decision(session.step_number,
@@ -491,6 +545,7 @@ class UniversalAgentOrchestrator:
         authority = self._consume_confirmation(session, confirmation)
         graph, observation, decision = session.task_graph, session.trusted_observation, session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
+        executed_input_focus = _input_focus_action_facts(graph, observation, decision)
         receipt = session.controller_decision
         reject_if(receipt is None,
             UniversalAgentOrchestratorError('动作缺少canonical映射回执。'))
@@ -547,7 +602,7 @@ class UniversalAgentOrchestrator:
             UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
         next_decision = self._decide(session, frames=after_frames, observation=new_observation,
             model_decision=result.after_model_decision)
-        self._stage_decision(session, decision=next_decision)
+        self._stage_decision(session, decision=next_decision, executed_input_focus=executed_input_focus)
         transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             'transition_kind': 'new_screenshot_decision', 'outcome': outcome,
             'physical_actions_before': before_actions, 'physical_actions': session.physical_actions,

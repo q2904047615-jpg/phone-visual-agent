@@ -72,6 +72,10 @@ def _input_scene(
     fingerprint: str = "input-frame-a",
     value: str = "",
     label: str = "消息输入框",
+    element_id: str = "message-input",
+    input_field_id: str = "primary_input",
+    bounds: tuple[float, float, float, float] = (0.08, 0.78, 0.82, 0.9),
+    focused: bool = True,
 ) -> UIScene:
     return UIScene(
         app_id="messenger",
@@ -79,19 +83,19 @@ def _input_scene(
         summary=f"{label}当前可见",
         elements=(
             UIElement(
-                element_id="message-input",
+                element_id=element_id,
                 role="input",
                 meaning="application_text_input",
                 label=label,
-                bounds=(0.08, 0.78, 0.82, 0.9),
+                bounds=bounds,
                 confidence=0.97,
                 states={
                     "goal_relevant": True,
                     "fully_visible": True,
                     "enabled": True,
-                    "focused": True,
+                    "focused": focused,
                     "value": value,
-                    "input_field_id": "primary_input",
+                    "input_field_id": input_field_id,
                     "primary_input_geometry_verified": True,
                     "geometry_audit_source": "input_structure_audit",
                 },
@@ -287,13 +291,15 @@ class FakeAdapter:
         self.followup_model_decision = dict(self.initial_model_decision)
 
     def configure_model_decisions(self, *, status: str, after_status: str,
-        action_kind: str) -> None:
+        action_kind: str, after_action_kind: str | None = None) -> None:
         self.initial_model_decision = _same_frame_model_decision(
             self.scene, status=status, action_kind=action_kind
         )
         followup_scene = getattr(self, "after_scene", self.scene)
         self.followup_model_decision = _same_frame_model_decision(
-            followup_scene, status=after_status, action_kind=action_kind
+            followup_scene,
+            status=after_status,
+            action_kind=after_action_kind or action_kind,
         )
 
     def capture_scene(self, goal, *, evidence_dir, prefix):
@@ -421,11 +427,13 @@ class FakeQwenObserver:
         after_status="finish",
         mutate_identity=None,
         action_kind="tap_semantic",
+        after_action_kind=None,
     ) -> None:
         self.status = status
         self.after_status = after_status
         self.mutate_identity = mutate_identity
         self.action_kind = action_kind
+        self.after_action_kind = after_action_kind
         self.calls = []
         self.text_transport_profiles = []
 
@@ -532,6 +540,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
             status=qwen.status,
             after_status=qwen.after_status,
             action_kind=qwen.action_kind,
+            after_action_kind=qwen.after_action_kind,
         )
         return UniversalAgentOrchestrator(
             deepseek_planner=planner,
@@ -797,6 +806,124 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertIsNot(qwen.calls[0][0][0], qwen.calls[1][0][0])
         self.assertEqual("finish", session.qwen_decision.proposal.status)
         self.assertIsNone(session.confirmation_authority)
+
+    def test_autonomous_loop_stops_repeated_unprogressed_input_focus_across_visual_drift(self) -> None:
+        """A fresh Qwen observation may correct once, but may not reclick one unchanged field."""
+        initial_scene = _input_scene(
+            fingerprint="focus-before",
+            element_id="input-visible-1",
+            bounds=(0.08, 0.78, 0.82, 0.9),
+            focused=False,
+        )
+        after_scene = _input_scene(
+            fingerprint="focus-after",
+            element_id="input-renumbered-42",
+            bounds=(0.085, 0.779, 0.823, 0.902),
+            focused=False,
+        )
+        qwen = FakeQwenObserver(after_status="action", action_kind="tap_semantic")
+        adapter = FakeExecutingAdapter(initial_scene, after_scene)
+        orchestrator = self.orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-stop-repeated-input-focus",
+                raw_goal="在当前输入框输入指定文字",
+                exact_input_text="cross-app text",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "输入框聚焦动作.*仍无推进.*未重复点击",
+            ):
+                orchestrator.run_autonomous_safe_loop(
+                    session,
+                    max_physical_actions=6,
+                    max_iterations=12,
+                )
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, adapter.capture_calls)
+        self.assertEqual(3, len(qwen.calls))
+        self.assertEqual("failed", session.status)
+        self.assertEqual("primary_input", initial_scene.elements[0].states["input_field_id"])
+        self.assertEqual("primary_input", after_scene.elements[0].states["input_field_id"])
+
+    def test_fresh_focus_progress_can_advance_to_input_instead_of_being_repeat_blocked(self) -> None:
+        initial_scene = _input_scene(
+            fingerprint="focus-progress-before",
+            element_id="input-before",
+            focused=False,
+        )
+        after_scene = _input_scene(
+            fingerprint="focus-progress-after",
+            element_id="input-after",
+            bounds=(0.081, 0.781, 0.821, 0.901),
+            focused=True,
+        )
+        qwen = FakeQwenObserver(
+            after_status="action",
+            action_kind="tap_semantic",
+            after_action_kind="input_verified_text",
+        )
+        adapter = FakeExecutingAdapter(initial_scene, after_scene)
+        orchestrator = self.orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-focus-progresses-to-input",
+                raw_goal="在当前输入框输入指定文字",
+                exact_input_text="cross-app text",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(
+            "input_verified_text",
+            session.qwen_decision.proposal.action.action,
+        )
+        self.assertEqual(
+            "primary_input",
+            session.qwen_decision.proposal.action.params["input_field_id"],
+        )
+
+    def test_focused_input_is_not_physically_tapped_again_when_qwen_repeats_focus(self) -> None:
+        initial_scene = _input_scene(fingerprint="focus-before", focused=False)
+        focused_scene = _input_scene(
+            fingerprint="focus-after",
+            element_id="renumbered-focused-input",
+            bounds=(0.082, 0.779, 0.824, 0.903),
+            focused=True,
+        )
+        qwen = FakeQwenObserver(after_status="action", action_kind="tap_semantic")
+        adapter = FakeExecutingAdapter(initial_scene, focused_scene)
+        orchestrator = self.orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-no-retap-focused-input",
+                raw_goal="在当前输入框输入指定文字",
+                exact_input_text="cross-app text",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "输入框聚焦动作.*仍无推进.*未重复点击",
+            ):
+                orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, adapter.capture_calls)
+        self.assertEqual(3, len(qwen.calls))
 
     def test_autonomous_loop_keeps_physical_action_error_terminal(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())

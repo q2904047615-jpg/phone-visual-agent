@@ -1616,6 +1616,86 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertEqual(1.0, decision["confidence"])
                 self.assertTrue(decision["reason"])
 
+    def test_blank_audited_input_focus_follows_affirmative_caret_cues_without_keyboard(
+        self,
+    ) -> None:
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_text",
+                    "objective": "在当前唯一输入框中输入文字",
+                    "constraints": [],
+                    "completion_conditions": ["输入框显示指定文字"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "sample text",
+                        "active_input_field_id": "current_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        cases = (
+            ("cursor", ["cursor"], True),
+            ("caret", ["caret"], True),
+            ("chinese-cursor", ["光标"], True),
+            ("insertion-mark", ["插入符"], True),
+            ("insertion-mark-in-field", ["插入符位于空输入框内"], True),
+            ("no-cue", [], False),
+            ("border", ["complete input border"], False),
+            ("outline", ["input outline"], False),
+            ("negated-cursor", ["no cursor"], False),
+            ("hidden-caret", ["caret hidden"], False),
+            ("invisible-chinese-cursor", ["光标不可见"], False),
+        )
+        for index, (name, cues, expected_focused) in enumerate(cases, start=1):
+            with self.subTest(name=name):
+                scene = scene_payload()
+                scene.update(
+                    {
+                        "foreground_app_id": f"com.example.editor{index}",
+                        "screen_id": "edit_text",
+                        "summary": "当前页面有一个空输入框",
+                        "elements": [],
+                    }
+                )
+                audit = input_audit_payload(
+                    application_inputs=[
+                        audited_application_input(
+                            structure_id="current-input",
+                            bounds=[100, 720, 900, 820],
+                            text="",
+                            visible_editable_cues=cues,
+                        )
+                    ],
+                    keyboard={
+                        "visible": False,
+                        "bounds": None,
+                        "layout": "unknown",
+                        "input_mode": "unknown",
+                        "mode_switch": None,
+                    },
+                )
+
+                observed = SingleStepGenericSceneObserver(SequenceProvider([{
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": scene,
+                    "input_structure": audit,
+                }])).observe(
+                    frames=stable_frames(),
+                    goal_context=context,
+                    device_id="device-local-01",
+                )
+
+                field = observed.get_element("local_audited_input_1")
+                self.assertEqual(expected_focused, field.states.get("focused") is True)
+                self.assertFalse(field.states["soft_keyboard_visible"])
+
     def test_same_response_selected_scene_input_keeps_b425_element_identity(self) -> None:
         scene = scene_payload()
         scene.update({

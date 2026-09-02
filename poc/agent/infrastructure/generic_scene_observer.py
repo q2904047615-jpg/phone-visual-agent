@@ -1251,6 +1251,35 @@ def _unique_audited_input(matches: Iterable[dict[str, Any]], *, label: str='', t
     return selected[0] if len(selected) == 1 else None
 
 
+_INPUT_FOCUS_CUE_MARKERS = ('caret', 'cursor', '光标', '插入符')
+_NEGATED_INPUT_FOCUS_CUE = re.compile(
+    r'\b(?:no|not|without|absent|missing|hidden)\b.{0,24}\b(?:caret|cursor)\b|'
+    r'\b(?:caret|cursor)\b.{0,24}\b(?:not\s+visible|hidden|absent|missing)\b|'
+    r'(?:无|没有|未显示|未出现|未检测到).{0,12}(?:光标|插入符)|'
+    r'(?:光标|插入符).{0,12}(?:不可见|隐藏|不存在|缺失)', re.IGNORECASE)
+
+
+def _audited_input_has_focus_cue(audited_input: dict[str, Any]) -> bool:
+    """Normalize only affirmative caret facts from the one input audit response."""
+
+    caret = audited_input.get('caret_line_index')
+    if isinstance(caret, int) and not isinstance(caret, bool) and 0 <= caret <= 30:
+        return True
+    cues = audited_input.get('visible_editable_cues')
+    if not isinstance(cues, list):
+        return False
+    for cue in cues:
+        if not isinstance(cue, str):
+            continue
+        normalized = cue.strip().casefold()
+        if normalized == '|':
+            return True
+        if (not _NEGATED_INPUT_FOCUS_CUE.search(normalized)
+            and any(marker in normalized for marker in _INPUT_FOCUS_CUE_MARKERS)):
+            return True
+    return False
+
+
 def _append_audited_input_element(elements: list[dict[str, Any]], audited_input: dict[str, Any], *, field_id: str,
     field_label: str, multiline: bool, active_clear_goal: bool, keyboard: _AuditedKeyboard,
     controls: _AuditedInputControls, input_element_id: str='local_audited_input_1') -> None:
@@ -1274,8 +1303,10 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
         states["soft_keyboard_visible"] = False
     if audited_input['placeholder']:
         states["placeholder"] = audited_input["placeholder"]
+    if keyboard.visible or _audited_input_has_focus_cue(audited_input):
+        states["focused"] = True
     if keyboard.visible:
-        states.update(focused=True, keyboard_layout=keyboard.layout, keyboard_input_mode=keyboard.input_mode,
+        states.update(keyboard_layout=keyboard.layout, keyboard_input_mode=keyboard.input_mode,
             keyboard_case_mode=keyboard.case_mode)
     if controls.qwerty is not None:
         states["keyboard_geometry"] = controls.qwerty

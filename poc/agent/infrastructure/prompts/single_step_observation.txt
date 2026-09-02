@@ -82,6 +82,13 @@ decision规则：
    本地不会替你改选另一个动作，引用不存在或不能唯一映射的元素会作为模型合同错误停止。
 6. reason和confidence是可选诊断字段，缺失不影响动作语义；若提供，confidence为0..1。
    action不携带完成证据。decision不得携带正文、包名、裸坐标、candidate ID或多步计划。
+7. input_verified_text和clear_verified_text只能引用本响应已经证明聚焦的typed输入框；press_enter只能
+   引用states.input_element_id绑定该输入框的明确Enter/换行键。聚焦证据只能是同一input_structure中
+   keyboard.visible=true，或对应application_inputs的visible_editable_cues明确报告肯定式
+   caret/cursor/光标/插入符，或caret_line_index为合法行号；keyboard.visible=false本身既不证明聚焦，
+   也不能推翻明确光标。若当前typed输入框尚无上述聚焦证据，必须先选择tap_semantic并引用同一个
+   输入元素；执行后等待下一张新截图确认聚焦，再选择文字、清空或绑定的换行键。不得跳过聚焦，
+   也不得把这两个物理步骤合并成一个动作。
 
 scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯一标记；decision是
 同一次响应对下一步action或finish的唯一选择。canonical只验证并绑定该选择。

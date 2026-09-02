@@ -1582,7 +1582,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                         "elements": [],
                     }
                 )
-                audit = input_audit_payload(application_inputs=[audit_item])
+                focused_audit_item = dict(audit_item)
+                focused_audit_item["caret_line_index"] = 0
+                audit = input_audit_payload(application_inputs=[focused_audit_item])
                 provider = SequenceProvider(
                     [
                         {
@@ -1636,19 +1638,20 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
         cases = (
-            ("cursor", ["cursor"], True),
-            ("caret", ["caret"], True),
-            ("chinese-cursor", ["光标"], True),
-            ("insertion-mark", ["插入符"], True),
-            ("insertion-mark-in-field", ["插入符位于空输入框内"], True),
-            ("no-cue", [], False),
-            ("border", ["complete input border"], False),
-            ("outline", ["input outline"], False),
-            ("negated-cursor", ["no cursor"], False),
-            ("hidden-caret", ["caret hidden"], False),
-            ("invisible-chinese-cursor", ["光标不可见"], False),
+            ("cursor", ["cursor"], None, True),
+            ("caret", ["caret"], None, True),
+            ("chinese-cursor", ["光标"], None, True),
+            ("insertion-mark", ["插入符"], None, True),
+            ("insertion-mark-in-field", ["插入符位于空输入框内"], None, True),
+            ("caret-line-zero", [], 0, True),
+            ("no-cue", [], None, False),
+            ("border", ["complete input border"], None, False),
+            ("outline", ["input outline"], None, False),
+            ("negated-cursor", ["no cursor"], None, False),
+            ("hidden-caret", ["caret hidden"], None, False),
+            ("invisible-chinese-cursor", ["光标不可见"], None, False),
         )
-        for index, (name, cues, expected_focused) in enumerate(cases, start=1):
+        for index, (name, cues, caret_line_index, expected_focused) in enumerate(cases, start=1):
             with self.subTest(name=name):
                 scene = scene_payload()
                 scene.update(
@@ -1666,6 +1669,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                             bounds=[100, 720, 900, 820],
                             text="",
                             visible_editable_cues=cues,
+                            caret_line_index=caret_line_index,
                         )
                     ],
                     keyboard={
@@ -1695,6 +1699,43 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 field = observed.get_element("local_audited_input_1")
                 self.assertEqual(expected_focused, field.states.get("focused") is True)
                 self.assertFalse(field.states["soft_keyboard_visible"])
+
+    def test_single_step_prompt_requires_focus_before_each_typed_operation(self) -> None:
+        for operation in ("input_verified_text", "clear_verified_text", "press_enter"):
+            with self.subTest(operation=operation):
+                scene = scene_payload()
+                scene.update({"foreground_app_id": "com.example.notes", "screen_id": "editor",
+                    "summary": "当前页面有一个空白编辑框", "elements": []})
+                audit = input_audit_payload(application_inputs=[audited_application_input(
+                    structure_id="note-body", bounds=[100, 700, 900, 820], text="",
+                    visible_editable_cues=[])])
+                provider = SequenceProvider([{
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+                    "scene": scene, "input_structure": audit,
+                    "decision": {"status": "action", "action": "tap_semantic",
+                        "element_id": "local_audited_input_1"},
+                }])
+                context = {"entities": {"active_subgoal_visual_context": {
+                    "subgoal_id": "edit_note", "objective": "修改指定文字", "constraints": [],
+                    "completion_conditions": ["编辑框达到目标状态"], "execution_class": "navigate",
+                    "goal_entities": {"active_input_transaction_text": "sample text",
+                        "active_input_field_id": "note_body", "active_input_operation": operation,
+                        "active_input_multiline": operation == "press_enter"}}}}
+
+                observed, decision = SingleStepGenericSceneObserver(provider).observe_with_decision(
+                    frames=stable_frames(), goal_context=context, device_id="device-local-01")
+
+                field = observed.get_element("local_audited_input_1")
+                self.assertIsNot(field.states.get("focused"), True)
+                self.assertEqual("note_body", field.states["input_field_id"])
+                self.assertEqual("tap_semantic", decision["action"])
+                prompt = json.dumps(provider.messages_seen[0], ensure_ascii=False)
+                self.assertIn("必须先选择tap_semantic", prompt)
+                self.assertIn("执行后等待下一张新截图确认聚焦", prompt)
+                self.assertIn("states.input_element_id绑定该输入框", prompt)
+                self.assertIn("caret_line_index为合法行号", prompt)
+                self.assertIn("不得把这两个物理步骤合并成一个动作", prompt)
 
     def test_same_response_selected_scene_input_keeps_b425_element_identity(self) -> None:
         scene = scene_payload()
@@ -1796,7 +1837,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "element_id": "message-input",
                     "bounds": [100, 500, 800, 590],
                     "text": current_text,
-                    "visible_editable_cues": ["stale-lineage-value"],
+                    "visible_editable_cues": ["stale-lineage-value", "cursor"],
                 }])
                 observer = SingleStepGenericSceneObserver(SequenceProvider([{
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,

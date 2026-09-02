@@ -49,7 +49,6 @@ class UniversalAgentSessionState:
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
     input_focus_retry_key: str = field(default='', repr=False)
-    input_focus_retry_state_digest: str = field(default='', repr=False)
     effect_previews: tuple[dict[str, Any], ...] = ()
     failed_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().astimezone().isoformat(timespec='seconds'))

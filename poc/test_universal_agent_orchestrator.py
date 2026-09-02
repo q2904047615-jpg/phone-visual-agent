@@ -76,7 +76,19 @@ def _input_scene(
     input_field_id: str = "primary_input",
     bounds: tuple[float, float, float, float] = (0.08, 0.78, 0.82, 0.9),
     focused: bool = True,
+    state_overrides: dict | None = None,
 ) -> UIScene:
+    states = {
+        "goal_relevant": True,
+        "fully_visible": True,
+        "enabled": True,
+        "focused": focused,
+        "value": value,
+        "input_field_id": input_field_id,
+        "primary_input_geometry_verified": True,
+        "geometry_audit_source": "input_structure_audit",
+    }
+    states.update(state_overrides or {})
     return UIScene(
         app_id="messenger",
         screen_id="conversation",
@@ -89,16 +101,7 @@ def _input_scene(
                 label=label,
                 bounds=bounds,
                 confidence=0.97,
-                states={
-                    "goal_relevant": True,
-                    "fully_visible": True,
-                    "enabled": True,
-                    "focused": focused,
-                    "value": value,
-                    "input_field_id": input_field_id,
-                    "primary_input_geometry_verified": True,
-                    "geometry_audit_source": "input_structure_audit",
-                },
+                states=states,
                 evidence=(f"{label}边界清晰可见",),
             ),
         ),
@@ -183,12 +186,17 @@ def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
     return graph
 
 
-def _effect_graph(kind: str, *, device_id: str = "device-1") -> DynamicTaskGraph:
+def _effect_graph(
+    kind: str,
+    *,
+    confirmation_required: bool = True,
+    device_id: str = "device-1",
+) -> DynamicTaskGraph:
     graph = DynamicTaskGraph(
         task_id=f"task-{kind}",
         device_id=device_id,
         revision=1,
-        status="awaiting_confirmation",
+        status="awaiting_confirmation" if confirmation_required else "running",
         goal=GraphGoal(
             objective=f"完成一次{kind}目标",
             target_apps=(TargetApp(app_id="gallery", app_name="图片工具"),),
@@ -206,7 +214,7 @@ def _effect_graph(kind: str, *, device_id: str = "device-1") -> DynamicTaskGraph
             RiskAction(
                 risk_id="effect-1",
                 subgoal_ids=("subgoal-1",),
-                confirmation_required=True,
+                confirmation_required=confirmation_required,
                 effect_kind=kind,
                 expected_result_texts=("当前页面显示目标已经完成",),
             ),
@@ -417,6 +425,29 @@ class StaleOnceExecutingAdapter(FakeExecutingAdapter):
         return super().execute(**kwargs)
 
 
+class FocusCorrectionExecutingAdapter(FakeExecutingAdapter):
+    """Use a third scene for the one read-only correction after a focus click."""
+
+    def __init__(
+        self,
+        scene: UIScene,
+        after_scene: UIScene,
+        correction_scene: UIScene,
+    ) -> None:
+        super().__init__(scene, after_scene)
+        self.correction_scene = correction_scene
+
+    def capture_scene(self, goal, *, evidence_dir, prefix):
+        if self.capture_calls:
+            self.scene = self.correction_scene
+            self.followup_model_decision = _same_frame_model_decision(
+                self.correction_scene,
+                status="action",
+                action_kind="tap_semantic",
+            )
+        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix)
+
+
 class FakeQwenObserver:
     """Emit one scripted decision per fresh observation; never invoke DeepSeek."""
 
@@ -615,6 +646,120 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(2, len(qwen.calls))
         self.assertEqual(1, len(planner.plan_calls))
 
+    def test_automatic_send_effect_rejects_a_second_action_after_one_physical_effect(self) -> None:
+        planner = FakeDeepSeekPlanner(
+            _effect_graph("send_message", confirmation_required=False)
+        )
+        qwen = FakeQwenObserver(after_status="action", action_kind="tap_semantic")
+        adapter = FakeExecutingAdapter(
+            _scene(meaning="send_message", label="发送"),
+            _scene(
+                fingerprint="send-effect-after",
+                meaning="send_message",
+                label="发送",
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-send-effect-action-after-action",
+                raw_goal="发送当前已准备的内容",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            self.assertIsNone(session.effect_confirmation_authority)
+            self.assertEqual(("effect-1",), session.confirmation_authority.effect_ids)
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("failed", session.status)
+        self.assertIn("外部效果子目标已执行一次物理动作", session.failed_reason)
+        self.assertIn("未自动重复", session.failed_reason)
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, len(adapter.action_authorities))
+        self.assertEqual(("effect-1",), adapter.action_authorities[0].effect_ids)
+        self.assertIsNone(session.confirmation_authority)
+        self.assertIsNone(session.controller_decision)
+
+    def test_automatic_send_effect_accepts_finish_after_exactly_one_physical_effect(self) -> None:
+        planner = FakeDeepSeekPlanner(
+            _effect_graph("send_message", confirmation_required=False)
+        )
+        qwen = FakeQwenObserver(after_status="finish", action_kind="tap_semantic")
+        adapter = FakeExecutingAdapter(
+            _scene(meaning="send_message", label="发送"),
+            _scene(
+                fingerprint="send-effect-finished",
+                meaning="sent_content",
+                label="已发送内容",
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-send-effect-finish-after-action",
+                raw_goal="发送当前已准备的内容",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, len(adapter.action_authorities))
+        self.assertEqual(("effect-1",), adapter.action_authorities[0].effect_ids)
+        self.assertIsNone(session.confirmation_authority)
+
+    def test_automatic_publish_effect_rejects_a_different_followup_action(self) -> None:
+        planner = FakeDeepSeekPlanner(
+            _effect_graph("publish_content", confirmation_required=False)
+        )
+        qwen = FakeQwenObserver(
+            after_status="action",
+            action_kind="tap_semantic",
+            after_action_kind="swipe",
+        )
+        adapter = FakeExecutingAdapter(
+            _scene(meaning="publish_content", label="发布"),
+            _scene(
+                fingerprint="publish-effect-after",
+                meaning="published_content",
+                label="发布后页面",
+            ),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-publish-effect-different-followup",
+                raw_goal="发布当前已准备的内容",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("failed", session.status)
+        self.assertIn("外部效果子目标已执行一次物理动作", session.failed_reason)
+        self.assertIn("未自动重复", session.failed_reason)
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, len(adapter.action_authorities))
+        self.assertEqual(("effect-1",), adapter.action_authorities[0].effect_ids)
+        self.assertIsNone(session.confirmation_authority)
+        self.assertIsNone(session.controller_decision)
+
     def test_finish_on_first_screenshot_uses_zero_actions(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
         qwen = FakeQwenObserver(status="finish")
@@ -808,21 +953,46 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertIsNone(session.confirmation_authority)
 
     def test_autonomous_loop_stops_repeated_unprogressed_input_focus_across_visual_drift(self) -> None:
-        """A fresh Qwen observation may correct once, but may not reclick one unchanged field."""
+        """Caret/keyboard state drift may not reopen one already-clicked typed field."""
         initial_scene = _input_scene(
             fingerprint="focus-before",
             element_id="input-visible-1",
             bounds=(0.08, 0.78, 0.82, 0.9),
             focused=False,
+            state_overrides={
+                "soft_keyboard_visible": False,
+                "keyboard_layout": "unknown",
+                "keyboard_input_mode": "unknown",
+            },
         )
         after_scene = _input_scene(
             fingerprint="focus-after",
             element_id="input-renumbered-42",
             bounds=(0.085, 0.779, 0.823, 0.902),
+            focused=True,
+            state_overrides={
+                "soft_keyboard_visible": True,
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            },
+        )
+        correction_scene = _input_scene(
+            fingerprint="focus-correction-caret-blink",
+            element_id="input-renumbered-99",
+            bounds=(0.083, 0.781, 0.825, 0.904),
             focused=False,
+            state_overrides={
+                "soft_keyboard_visible": False,
+                "keyboard_layout": "unknown",
+                "keyboard_input_mode": "unknown",
+            },
         )
         qwen = FakeQwenObserver(after_status="action", action_kind="tap_semantic")
-        adapter = FakeExecutingAdapter(initial_scene, after_scene)
+        adapter = FocusCorrectionExecutingAdapter(
+            initial_scene,
+            after_scene,
+            correction_scene,
+        )
         orchestrator = self.orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter)
 
         with tempfile.TemporaryDirectory() as temp:
@@ -850,6 +1020,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual("failed", session.status)
         self.assertEqual("primary_input", initial_scene.elements[0].states["input_field_id"])
         self.assertEqual("primary_input", after_scene.elements[0].states["input_field_id"])
+        self.assertEqual("primary_input", correction_scene.elements[0].states["input_field_id"])
 
     def test_fresh_focus_progress_can_advance_to_input_instead_of_being_repeat_blocked(self) -> None:
         initial_scene = _input_scene(

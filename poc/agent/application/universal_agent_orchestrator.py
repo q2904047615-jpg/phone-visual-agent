@@ -58,8 +58,7 @@ def _action_digest(action: Any) -> str:
     return canonical_digest(payload)
 
 
-def _input_focus_action_facts(graph: DynamicTaskGraph, observation: Any,
-    decision: Any) -> tuple[str, str, bool] | None:
+def _input_focus_action_facts(graph: DynamicTaskGraph, decision: Any) -> tuple[str, bool] | None:
     """Identify one typed input focus tap without depending on model element IDs or bounds jitter."""
 
     proposal = getattr(decision, 'proposal', None)
@@ -80,14 +79,7 @@ def _input_focus_action_facts(graph: DynamicTaskGraph, observation: Any,
         return None
     key = canonical_digest({'subgoal_id': current.subgoal_id, 'action': 'tap_semantic',
         'role': 'input', 'input_field_id': field_id})
-    value = states.get('value')
-    semantic_state = {'focused': states.get('focused') is True,
-        'value': value if isinstance(value, str) else None,
-        'soft_keyboard_visible': states.get('soft_keyboard_visible') is True,
-        'ime_preedit_text': str(states.get('ime_preedit_text') or ''),
-        'keyboard_layout': str(states.get('keyboard_layout') or 'unknown'),
-        'keyboard_input_mode': str(states.get('keyboard_input_mode') or 'unknown')}
-    return key, canonical_digest(semantic_state), states.get('focused') is True
+    return key, states.get('focused') is True
 
 
 def _confirmation_effect_ids(graph: DynamicTaskGraph, current: Any | None) -> tuple[str, ...]:
@@ -395,7 +387,8 @@ class UniversalAgentOrchestrator:
                 'Qwen已完成当前高层目标；下一目标必须取得新截图。')
 
     def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any,
-        executed_input_focus: tuple[str, str, bool] | None=None) -> Any:
+        executed_input_focus: tuple[str, bool] | None=None,
+        executed_effect_scope: tuple[str, tuple[str, ...]] | None=None) -> Any:
         graph = session.task_graph
         observation = session.trusted_observation
         assert graph is not None and observation is not None
@@ -404,25 +397,32 @@ class UniversalAgentOrchestrator:
         self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, decision))
         if decision.proposal.status == 'finish':
             session.input_focus_retry_key = ''
-            session.input_focus_retry_state_digest = ''
             self._complete_from_finish(session, decision)
             return decision
         reject_if(decision.proposal.status != 'action',
             UniversalAgentOrchestratorError('Qwen单步决策只允许action或finish。'))
-        focus = _input_focus_action_facts(graph, observation, decision)
+        if executed_effect_scope is not None:
+            effect_subgoal_id, effect_ids = executed_effect_scope
+            current = graph.active_subgoal()
+            reject_if(current is None or current.subgoal_id != effect_subgoal_id
+                or tuple(sorted(current.risk_action_ids)) != effect_ids,
+                UniversalAgentOrchestratorError('已执行效果scope与当前任务图不一致。'))
+            session.controller_decision = None
+            session.confirmation_authority = None
+            self._set_status(session, 'failed',
+                '外部效果子目标已执行一次物理动作；新截图未证明完成，已停止且未自动重复。')
+            return decision
+        focus = _input_focus_action_facts(graph, decision)
         if session.input_focus_retry_key:
-            repeated_after_correction = bool(focus and focus[0] == session.input_focus_retry_key
-                and (focus[1] == session.input_focus_retry_state_digest or focus[2]))
+            repeated_after_correction = bool(focus and focus[0] == session.input_focus_retry_key)
             session.input_focus_retry_key = ''
-            session.input_focus_retry_state_digest = ''
             reject_if(repeated_after_correction, UniversalAgentOrchestratorError(
                 '同一输入框聚焦动作在一次新观察纠正后仍无推进；已停止且未重复点击。'))
         repeated_without_progress = bool(focus and executed_input_focus
-            and focus[0] == executed_input_focus[0] and focus[1] == executed_input_focus[1])
-        redundant_focused_tap = bool(focus and focus[2])
+            and focus[0] == executed_input_focus[0])
+        redundant_focused_tap = bool(focus and focus[1])
         if focus and (repeated_without_progress or redundant_focused_tap):
             session.input_focus_retry_key = focus[0]
-            session.input_focus_retry_state_digest = focus[1]
             session.controller_decision = None
             session.confirmation_authority = None
             self._set_status(session, 'needs_reobservation',
@@ -545,7 +545,7 @@ class UniversalAgentOrchestrator:
         authority = self._consume_confirmation(session, confirmation)
         graph, observation, decision = session.task_graph, session.trusted_observation, session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
-        executed_input_focus = _input_focus_action_facts(graph, observation, decision)
+        executed_input_focus = _input_focus_action_facts(graph, decision)
         receipt = session.controller_decision
         reject_if(receipt is None,
             UniversalAgentOrchestratorError('动作缺少canonical映射回执。'))
@@ -602,7 +602,10 @@ class UniversalAgentOrchestrator:
             UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
         next_decision = self._decide(session, frames=after_frames, observation=new_observation,
             model_decision=result.after_model_decision)
-        self._stage_decision(session, decision=next_decision, executed_input_focus=executed_input_focus)
+        executed_effect_scope = ((authority.subgoal_id, tuple(sorted(authority.effect_ids)))
+            if physical == 1 and authority.effect_ids else None)
+        self._stage_decision(session, decision=next_decision, executed_input_focus=executed_input_focus,
+            executed_effect_scope=executed_effect_scope)
         transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             'transition_kind': 'new_screenshot_decision', 'outcome': outcome,
             'physical_actions_before': before_actions, 'physical_actions': session.physical_actions,

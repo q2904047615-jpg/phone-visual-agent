@@ -70,7 +70,7 @@ def _launch_context(*, app_id: str, app_name: str) -> QwenTaskContext:
     task_id = f"task-open-{app_id}"
     subgoal_id = f"open_{app_id}"
     return QwenTaskContext(
-        protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+        protocol_version="2026-09-03-deepseek-required-action-v6",
         task_id=task_id,
         device_id="device-1",
         revision=1,

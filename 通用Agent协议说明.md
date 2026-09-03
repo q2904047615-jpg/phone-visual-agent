@@ -4,7 +4,7 @@
 
 当前用户边界的唯一清单见 `用户决策与协议边界.md`。未经用户批准不得扩展确认集合。
 
-当前唯一正式高层协议为 `2026-08-20-deepseek-typed-task-graph-v4`。项目不再迁移、修补或执行 DeepSeek v2/v3，也不再让旧自由文本风险审计、旧风险字段或 App 固定流程参与正式会话。
+当前唯一正式高层协议为 `2026-09-03-deepseek-required-action-v6`。项目不再迁移、修补或执行 DeepSeek v2/v3/v4，也不再让旧自由文本风险审计、旧风险字段或 App 固定流程参与正式会话。
 
 运行时公开的配套协议为 `2026-08-20-task-semantic-ir-v3`、`2026-08-20-typed-effect-authority-v1` 和唯一动作协议 `2026-08-20-canonical-action-v1`。`/api/device` 只公开当前 typed effect 与 canonical action 协议，不再公开旧 `semantic_risk_authority`、visual action authority/shadow/selection 或 `formal_qwen_v3` 名称。
 

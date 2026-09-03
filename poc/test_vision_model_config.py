@@ -129,6 +129,52 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
             mocked.call_args.kwargs["json"]["response_format"],
         )
 
+    def test_strict_json_schema_is_forwarded_and_max_tokens_can_be_omitted(self) -> None:
+        provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "pending_transition",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"status": {"type": "string", "enum": ["action"]}},
+                    "required": ["status"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        with patch(
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
+            return_value=self._response(),
+        ) as mocked:
+            provider._chat(
+                [{"role": "user", "content": "json"}],
+                max_tokens=None,
+                response_format=response_format,
+            )
+        body = mocked.call_args.kwargs["json"]
+        self.assertNotIn("max_tokens", body)
+        self.assertEqual(response_format, body["response_format"])
+
+    def test_malformed_json_schema_is_rejected_before_network(self) -> None:
+        provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
+        with patch("agent.infrastructure.dashscope_vision_provider.httpx.post") as mocked:
+            with self.assertRaisesRegex(Exception, "严格 json_schema"):
+                provider._chat(
+                    [{"role": "user", "content": "json"}],
+                    max_tokens=None,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "unsafe_schema",
+                            "strict": True,
+                            "schema": {"type": "object"},
+                        },
+                    },
+                )
+        mocked.assert_not_called()
+
     def test_explicit_model_config_is_atomic(self) -> None:
         config = VisionModelConfig(
             model="qwen3.7-plus-2026-05-26",

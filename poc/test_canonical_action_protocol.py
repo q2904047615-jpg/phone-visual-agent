@@ -8,6 +8,7 @@ from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
     GenericStepProposal,
     bind_same_response_action,
+    normalize_model_step_decision,
 )
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.text_transport import TEXT_TRANSPORT_PROTOCOL, TextTransportProfile
@@ -55,8 +56,8 @@ def payload(action: str, **parts) -> dict:
 
 def ime_profile(*, device_id: str="device-local-01") -> TextTransportProfile:
     profile = TextTransportProfile(protocol_version=TEXT_TRANSPORT_PROTOCOL, profile_id="profile-local-01",
-        device_id=device_id, pairing_id="pair-local-01", enabled=True,
-        capabilities=("append_text", "clear_text"), ack_timeout_seconds=3.0)
+        device_id=device_id, adb_serial="serial-local-01", enabled=True,
+        capabilities=("append_text", "clear_text"), command_timeout_seconds=3.0)
     profile.validate()
     return profile
 
@@ -102,15 +103,22 @@ class DirectCanonicalBindingTests(unittest.TestCase):
             bind_same_response_action(payload("tap_semantic", element_id=current.element_id), context=context(),
                 observation=observation(current), available_action_kinds={"home"})
 
-    def test_swipe_and_drag_bind_only_current_frame_data(self) -> None:
+    def test_scroll_element_swipe_and_drag_bind_only_current_frame_data(self) -> None:
         source = element("source", bounds=(0.1, 0.1, 0.3, 0.25))
         destination = element("destination", bounds=(0.6, 0.6, 0.9, 0.8))
         current = observation(source, destination)
 
-        swipe = bind_same_response_action(payload("swipe", direction="left", element_id="source"),
-            context=context(), observation=current, available_action_kinds={"swipe"})
+        scroll = bind_same_response_action(payload("scroll", direction="left", element_id="source"),
+            context=context(), observation=current, available_action_kinds={"scroll"})
         self.assertEqual({"direction": "left", "element_id": "source", "target": "target", "role": "button",
-            "label": "目标", "states": {"enabled": True, "fully_visible": True}}, swipe.params)
+            "label": "目标", "states": {"enabled": True, "fully_visible": True}}, scroll.params)
+
+        element_swipe = bind_same_response_action(payload("swipe_element", element_id="source",
+            start=[200, 180], end=[50, 180]), context=context(), observation=current,
+            available_action_kinds={"swipe_element"})
+        self.assertEqual((0.2, 0.18), element_swipe.params["start"])
+        self.assertEqual((0.05, 0.18), element_swipe.params["end"])
+        self.assertEqual("source", element_swipe.params["element_id"])
 
         drag = bind_same_response_action(payload("drag", source_element_id="source",
             destination_element_id="destination"), context=context(), observation=current,
@@ -118,6 +126,15 @@ class DirectCanonicalBindingTests(unittest.TestCase):
         self.assertEqual("source", drag.params["source_element_id"])
         self.assertEqual("destination", drag.params["destination_element_id"])
         self.assertFalse({"expected_effect", "formal_candidate_id", "formal_transition"}.intersection(drag.params))
+
+    def test_element_swipe_requires_complete_in_frame_trajectory(self) -> None:
+        current = observation(element("source", bounds=(0.1, 0.1, 0.5, 0.5)))
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "起点和终点"):
+            normalize_model_step_decision(payload("swipe_element", element_id="source", start=[200, 200]))
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "坐标范围"):
+            bind_same_response_action(payload("swipe_element", element_id="source",
+                start=[200, 200], end=[1001, 200]), context=context(), observation=current,
+                available_action_kinds={"swipe_element"})
 
     def test_launch_app_accepts_only_complete_trusted_registry_mapping(self) -> None:
         launch = {"launch_ref": "trusted:settings", "expected_app_id": "com.android.settings",
@@ -132,7 +149,7 @@ class DirectCanonicalBindingTests(unittest.TestCase):
             bind_same_response_action(payload("launch_app"), context=context(), observation=observation(),
                 available_action_kinds={"launch_app"}, launch_target={"launch_ref": "trusted:settings"})
 
-    def test_companion_input_binds_exact_typed_prior_fragment_and_expected(self) -> None:
+    def test_adb_keyboard_input_binds_exact_typed_prior_fragment_and_expected(self) -> None:
         input_box = element("message-input", role="input", meaning="message_input", label="消息",
             states={"enabled": True, "fully_visible": True, "focused": True, "value": "aa",
                 "input_field_id": "primary_input"})
@@ -141,12 +158,34 @@ class DirectCanonicalBindingTests(unittest.TestCase):
                 operation="input_verified_text"), observation=observation(input_box),
             available_action_kinds={"input_verified_text"}, text_transport_profile=ime_profile())
 
-        self.assertEqual("companion_ime", action.params["text_transport"])
+        self.assertEqual("adb_keyboard", action.params["text_transport"])
         self.assertEqual("primary_input", action.params["input_field_id"])
         self.assertEqual("aa", action.params["prior_input_value"])
         self.assertEqual("你好", action.params["input_fragment"])
         self.assertEqual("aa你好", action.params["expected_input_value"])
         self.assertNotIn("expected_effect", action.params)
+
+    def test_adb_keyboard_input_rejects_unfocused_field_even_when_unique_and_visible(self) -> None:
+        input_box = element("message-input", role="input", meaning="message_input", label="消息",
+            states={"enabled": True, "fully_visible": True, "value": "",
+                "soft_keyboard_visible": False, "input_field_id": "primary_input"})
+
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "明确已聚焦"):
+            bind_same_response_action(payload("input_verified_text", element_id="message-input"),
+                context=context(entities={"input_text": "ADB测试？你好"}, field_id="primary_input",
+                    operation="input_verified_text"), observation=observation(input_box),
+                available_action_kinds={"input_verified_text"}, text_transport_profile=ime_profile())
+
+    def test_adb_keyboard_clear_rejects_old_text_without_current_focus(self) -> None:
+        input_box = element("message-input", role="input", meaning="message_input", label="消息",
+            states={"enabled": True, "fully_visible": True, "value": "aaazjie？你好",
+                "soft_keyboard_visible": False, "input_field_id": "message-body"})
+
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "明确已聚焦"):
+            bind_same_response_action(payload("clear_verified_text", element_id="message-input"),
+                context=context(field_id="message-body", operation="clear_verified_text"),
+                observation=observation(input_box), available_action_kinds={"clear_verified_text"},
+                text_transport_profile=ime_profile())
 
     def test_input_fields_bind_by_typed_current_subgoal_identity(self) -> None:
         input_box = element("second-input", role="input", meaning="form_input", label="姓氏",

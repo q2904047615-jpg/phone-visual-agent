@@ -94,7 +94,7 @@ def _materialize_case(raw_case: Any, *, index: int) -> dict[str, Any]:
         device_id = str(task.get("device_id") or "offline_phone_01")
         revision = task.get("revision", index)
         task_context = {
-            "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
+            "protocol_version": "2026-09-03-deepseek-required-action-v6",
             "task_id": task_id,
             "device_id": device_id,
             "revision": revision,

@@ -824,6 +824,48 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         drag.assert_called_once_with(123, (54, 192), (377, 767))
         clear_overlay.assert_called_once_with(123)
 
+    def test_verified_swipe_uses_distinct_path_and_records_receipt(self):
+        controller = RobotController(title="test", verified_actions={"swipe"})
+        frame = Image.new("RGB", (540, 960), "white")
+        receipt = {
+            "version": "2026-09-03-seller-gui-swipe-path-v1",
+            "channel": "right_button_swipe_path",
+            "right_button_down_dispatched": True,
+            "right_button_up_dispatched": True,
+            "interpolation_steps_completed": 6,
+            "seller_position_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "touch_down_seconds": 0.35,
+            "movement_seconds": 0.3,
+            "step_count": 6,
+            "client_start": [377, 480],
+            "client_end": [54, 480],
+            "mechanical_contact_ack": False,
+        }
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch("agent.infrastructure.tap_calibration.corrected_grid_point",
+                side_effect=[(700.0, 500.0), (100.0, 500.0)]),
+            patch("agent.infrastructure.robot_controller.seller_gui.swipe_client_path",
+                return_value=receipt) as swipe,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear_overlay,
+        ):
+            result = controller.vision_swipe_relative(700, 500, 100, 500, "left")
+
+        self.assertEqual(((377, 480), (54, 480)), result)
+        swipe.assert_called_once_with(123, (377, 480), (54, 480), touch_down_seconds=0.35,
+            movement_seconds=0.3, steps=6)
+        drag.assert_not_called()
+        stored = controller.consume_last_swipe_receipt()
+        self.assertEqual("left", stored["requested_direction"])
+        self.assertFalse(stored["mechanical_contact_ack"])
+        self.assertIsNone(controller.consume_last_swipe_receipt())
+        clear_overlay.assert_called_once_with(123)
+
     def test_system_navigation_reveal_is_independent_and_default_disabled(self):
         controller = RobotController(title="test")
         self.assertFalse(
@@ -1411,7 +1453,7 @@ class DeviceRuntimeResourceRegistryTests(unittest.TestCase):
             registry.camera_coordinator("")
 
 
-class CompanionImeCompositionTests(unittest.TestCase):
+class AdbKeyboardCompositionTests(unittest.TestCase):
     def test_main_and_capability_adapters_receive_same_device_transport(self) -> None:
         device_id = web_app.runtime.device_controllers.default_device_id
         transport = object()
@@ -1447,6 +1489,7 @@ class CompanionImeCompositionTests(unittest.TestCase):
 
         self.assertIs(main_adapter, built_main)
         self.assertIs(transport, adapter_factory.call_args.kwargs["text_transport"])
+        self.assertNotIn("foreground_identity_provider", adapter_factory.call_args.kwargs)
         transport_for_device.assert_called_once_with(device_id)
 
         with (
@@ -1472,15 +1515,15 @@ class CompanionImeCompositionTests(unittest.TestCase):
             transport,
             capability_adapter_factory.call_args.kwargs["text_transport"],
         )
+        self.assertNotIn(
+            "foreground_identity_provider",
+            capability_adapter_factory.call_args.kwargs,
+        )
         capability_transport_for_device.assert_called_once_with(device_id)
 
-    def test_runtime_lifecycle_owns_companion_bridge_and_always_stops_controller(self) -> None:
+    def test_runtime_lifecycle_has_no_companion_bridge_and_stops_controller(self) -> None:
         events: list[str] = []
         runtime = web_app.Runtime.__new__(web_app.Runtime)
-        runtime.companion_ime_runtime = SimpleNamespace(
-            start=lambda: events.append("companion:start"),
-            stop=lambda: events.append("companion:stop"),
-        )
         runtime.controller = SimpleNamespace(
             request_stop=lambda: events.append("controller:stop")
         )
@@ -1488,11 +1531,7 @@ class CompanionImeCompositionTests(unittest.TestCase):
         runtime.start()
         runtime.shutdown()
 
-        self.assertEqual([
-            "companion:start",
-            "companion:stop",
-            "controller:stop",
-        ], events)
+        self.assertEqual(["controller:stop"], events)
 
     def test_project_api_exposes_no_raw_companion_text_route(self) -> None:
         paths = {
@@ -1501,6 +1540,18 @@ class CompanionImeCompositionTests(unittest.TestCase):
         }
         self.assertFalse(any("companion-ime" in path for path in paths))
         self.assertFalse(any("text-transport" in path for path in paths))
+
+    def test_runtime_has_no_adb_page_observation_authority(self) -> None:
+        root = Path(__file__).resolve().parent
+        sources = "\n".join((root / relative).read_text(encoding="utf-8") for relative in (
+            "web_app.py",
+            "agent/infrastructure/generic_action_adapter.py",
+            "agent/infrastructure/generic_scene_observer.py",
+        ))
+        self.assertFalse((root / "agent" / "domain" / "foreground_app_identity.py").exists())
+        for forbidden in ("foreground_identity_provider", "trusted_foreground_identity",
+            "supports_trusted_foreground_identity", "adb_dumpsys"):
+            self.assertNotIn(forbidden, sources)
 
 
 class ApiEndToEndTests(unittest.TestCase):
@@ -1725,7 +1776,7 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(universal["supported_app_scope"], "dynamic")
         self.assertEqual(
             universal["action_protocol"],
-            "2026-08-20-canonical-action-v1",
+            "2026-09-03-canonical-recents-home-clear-v5",
         )
         self.assertEqual(
             universal["controller_protocol"],
@@ -1736,6 +1787,9 @@ class ApiEndToEndTests(unittest.TestCase):
             sorted(web_app.CANONICAL_ACTION_KINDS - {"wait_for_change"}),
         )
         self.assertNotIn("launch_app", universal["enabled_physical_actions"])
+        self.assertNotIn("swipe", universal["enabled_physical_actions"])
+        self.assertIn("scroll", universal["enabled_physical_actions"])
+        self.assertIn("swipe_element", universal["enabled_physical_actions"])
         semantic_authority = universal["typed_effect_authority"]
         self.assertEqual(
             semantic_authority["authority_scope"],
@@ -1746,7 +1800,7 @@ class ApiEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(
             semantic_authority["canonical_action_protocol"],
-            "2026-08-20-canonical-action-v1",
+            "2026-09-03-canonical-recents-home-clear-v5",
         )
         self.assertEqual(
             universal["hardware_capability_profile"]["protocol_version"],

@@ -3,6 +3,9 @@
   "android_recents_y_ratio": 0.976,
   "android_back_x_ratio": 0.685,
   "android_back_y_ratio": 0.976,
+  "swipe_touch_down_seconds": 0.35,
+  "swipe_movement_seconds": 0.3,
+  "swipe_steps": 6,
   "keyboard_backspace_x_ratio": 0.862,
   "keyboard_backspace_y_ratio": 0.844,
   "pinyin_keyboard": {

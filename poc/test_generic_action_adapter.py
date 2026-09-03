@@ -29,8 +29,9 @@ from agent.domain.validation import canonical_digest
 from agent.infrastructure import RobotDeviceExecutor
 from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
+    LocalPointGroundingAmbiguousError,
     stable_qwerty_ocr_anchors,
-    stable_text_ocr_grounding,
+    stable_visual_point_grounding,
 )
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.generic_goal import GenericIntentDraft
@@ -124,6 +125,18 @@ class FakeSceneObserver:
             "reason": "测试观察器在同一帧返回 scene 与 decision。",
         }
 
+
+class RuntimeActionRecordingObserver(FakeSceneObserver):
+    supports_runtime_action_contract = True
+
+    def __init__(self, scenes):
+        super().__init__(scenes)
+        self.available_action_sets = []
+
+    def observe_with_decision(self, *, available_action_kinds, **kwargs):
+        self.available_action_sets.append(frozenset(available_action_kinds))
+        return super().observe_with_decision(**kwargs)
+
 class RawFailureSceneObserver(FakeSceneObserver):
     def __init__(self, raw_response: str) -> None:
         super().__init__([RuntimeError("目标精查严格协议拒绝")])
@@ -142,6 +155,7 @@ class FakeRobot:
         self._armed = None
         self._long_press_receipt = None
         self._click_receipt = None
+        self._swipe_receipt = None
 
     def _record_click_receipt(self, click_count=1):
         self._click_receipt = {
@@ -212,6 +226,16 @@ class FakeRobot:
                 end_y,
             )
         )
+        self._swipe_receipt = {
+            "right_button_down_dispatched": True,
+            "right_button_up_dispatched": True,
+            "seller_position_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+            "requested_direction": direction,
+            "step_count": 6,
+            "interpolation_steps_completed": 6,
+        }
         return (start_x, start_y), (end_x, end_y)
 
     def vision_reveal_system_navigation(self):
@@ -234,6 +258,11 @@ class FakeRobot:
     def consume_last_click_receipt(self):
         receipt = self._click_receipt
         self._click_receipt = None
+        return receipt
+
+    def consume_last_swipe_receipt(self):
+        receipt = self._swipe_receipt
+        self._swipe_receipt = None
         return receipt
 
     def vision_type_text_with_layout(self, text, keyboard_layout):
@@ -340,19 +369,18 @@ class GenericSingleActionAdapter(_GenericSingleActionAdapter):
         return super().execute(*args, planned_frames=planned_frames, **kwargs)
 
 
-class FakeCompanionTextTransport:
+class FakeAdbKeyboardTextTransport:
     def __init__(self) -> None:
         self.profile = TextTransportProfile(protocol_version=TEXT_TRANSPORT_PROTOCOL,
-            profile_id="profile-test-device", device_id="test-device", pairing_id="pairing-test-device",
-            enabled=True, capabilities=("append_text", "clear_text"), ack_timeout_seconds=5.0)
+            profile_id="profile-test-device", device_id="test-device", adb_serial="serial-test-device",
+            enabled=True, capabilities=("append_text", "clear_text"), command_timeout_seconds=5.0)
         self.minted = []
         self.calls = []
 
     def mint_action_scope(self, **values):
         self.minted.append(dict(values))
         return TextTransportActionScope(protocol_version=TEXT_TRANSPORT_PROTOCOL,
-            device_id=self.profile.device_id, editor_session_id="editor-session-0001",
-            issued_at_epoch=100.0, expires_at_epoch=110.0,
+            device_id=self.profile.device_id, issued_at_epoch=100.0,
             nonce="nonce-0000000000001", **values)
 
     @staticmethod
@@ -646,14 +674,15 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
         element = cls.before_scene().elements[0]
         return SemanticAction(
             node_id="dismiss-card",
-            action="swipe",
+            action="swipe_element",
             params={
-                "direction": "up",
                 "element_id": element.element_id,
                 "target": element.meaning,
                 "role": element.role,
                 "label": element.label,
                 "states": dict(element.states),
+                "start": (0.5, 0.68),
+                "end": (0.5, 0.08),
             },
         )
 
@@ -679,7 +708,7 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
         robot._armed = "swipe"
         targeted = executor.execute(
             DeviceActionRequest(
-                kind="swipe",
+                kind="swipe_element",
                 point=(500, 680),
                 end_point=(500, 80),
                 direction="up",
@@ -693,14 +722,14 @@ class ElementBoundSwipeControllerTests(unittest.TestCase):
 
         robot._armed = "swipe"
         viewport = executor.execute(
-            DeviceActionRequest(kind="swipe", direction="up")
+            DeviceActionRequest(kind="scroll", direction="up")
         )
         self.assertEqual(1, viewport.physical_actions)
         self.assertEqual(("swipe", "up"), robot.actions[-1])
 
         with self.assertRaisesRegex(DeviceExecutionError, "请求方向不一致"):
             DeviceActionRequest(
-                kind="swipe",
+                kind="swipe_element",
                 point=(500, 80),
                 end_point=(500, 680),
                 direction="up",
@@ -712,7 +741,7 @@ class ExactTypedInputControllerTests(unittest.TestCase):
 
 
 
-    def test_companion_clear_binds_typed_field_without_keyboard_geometry(self):
+    def test_adb_keyboard_clear_binds_typed_field_without_keyboard_geometry(self):
         controller = UniversalActionController()
         before = UIScene(app_id="generic_app", screen_id="editor", summary="唯一聚焦输入框",
             elements=(UIElement(element_id="field", role="input", meaning="application_text_input",
@@ -722,12 +751,12 @@ class ExactTypedInputControllerTests(unittest.TestCase):
                 }),), stable=True, confidence=0.98, fingerprint="before-companion-clear")
         action = SemanticAction(node_id="companion-clear", action="clear_verified_text", params={
             "element_id": "field", "target": "application_text_input", "role": "input", "label": "草稿",
-            "states": before.elements[0].states, "text_transport": "companion_ime",
+            "states": before.elements[0].states, "text_transport": "adb_keyboard",
             "input_field_id": "field_primary", "prior_input_value": "草稿🙂", "expected_input_value": "",
         })
 
         resolved = controller.resolve_one(action, before, confirmed=True)
-        self.assertEqual("companion_ime", resolved.text_transport)
+        self.assertEqual("adb_keyboard", resolved.text_transport)
         self.assertIsNone(resolved.normalized_point)
         self.assertIsNone(resolved.delete_count)
         after = replace(before, fingerprint="after-companion-clear", elements=(replace(before.elements[0],
@@ -859,6 +888,103 @@ class GenericActionAdapterTests(unittest.TestCase):
         ):
             self.assertNotIn(retired_name, source)
 
+    def test_post_action_goal_exposes_only_the_scoped_executed_transition(self) -> None:
+        goal = GenericIntentDraft(
+            understood=True,
+            app_id="messenger",
+            app_name="消息工具",
+            objective="输入新文字",
+            entities={"active_subgoal_visual_context": {
+                "subgoal_id": "input-text",
+                "objective": "输入新文字",
+                "constraints": [],
+                "completion_conditions": ["输入框显示新文字"],
+                "execution_class": "navigate",
+                "goal_entities": {},
+                "transition_receipt": {
+                    "state": "pending",
+                    "subgoal_id": "input-text",
+                    "required_operation": "input_verified_text",
+                    "executed_operation": "",
+                    "effect_ids": [],
+                },
+            }},
+        )
+        authority = ConfirmationAuthority(
+            session_id="session-1",
+            task_id="task-1",
+            device_id="device-1",
+            revision=1,
+            subgoal_id="input-text",
+            effect_ids=(),
+            observation_id="obs-1",
+            fingerprint="frame-1",
+            decision_node_id="node-1",
+            action_digest="0" * 64,
+        )
+
+        projected = _GenericSingleActionAdapter._post_action_goal(
+            goal,
+            authority=authority,
+            resolved=ResolvedSemanticAction(node_id="node-1", kind="input_verified_text"),
+            physical_actions=1,
+        )
+        receipt = projected.entities["active_subgoal_visual_context"]["transition_receipt"]
+
+        self.assertEqual("executed", receipt["state"])
+        self.assertEqual("input_verified_text", receipt["executed_operation"])
+        self.assertEqual("pending", goal.entities["active_subgoal_visual_context"]["transition_receipt"]["state"])
+
+    def test_effect_finish_rejects_unchanged_raw_frames_after_one_action(self) -> None:
+        frame = textured_phone_frame()
+        fingerprint = local_frame_fingerprint(frame)
+        planned = scene(fingerprint)
+        target = planned.elements[0]
+        action = SemanticAction(node_id='effect-without-visual-transition', action='tap_semantic', params={
+            'element_id': target.element_id,
+            'target': target.meaning,
+            'role': target.role,
+            'label': target.label,
+            'states': dict(target.states),
+        })
+        authority = ConfirmationAuthority(session_id='session-effect', task_id='task-effect',
+            device_id='test-device', revision=1, subgoal_id='effect-subgoal', effect_ids=('effect-1',),
+            observation_id='observation-effect', fingerprint=fingerprint, decision_node_id=action.node_id,
+            action_digest=canonical_digest(action.to_dict()), consumed=True)
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture([frame.copy() for _ in range(8)]),
+            observer=FakeSceneObserver([replace(planned, fingerprint='after-same-pixels')]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        with self.assertRaisesRegex(GenericActionAdapterError, '真实帧没有可归因的新变化') as raised:
+            adapter.execute(requested_action=action, planned_scene=planned,
+                planned_frames=tuple(frame.copy() for _ in range(4)), goal=goal(), confirmed=True,
+                action_authority=authority)
+
+        self.assertEqual(1, raised.exception.physical_actions)
+        self.assertEqual([('tap', 300, 400)], robot.actions)
+        credential = raised.exception.execution_metadata['effect_visual_transition']
+        self.assertFalse(credential['material'])
+        self.assertLess(credential['max_tile_median_delta'], credential['minimum_tile_delta'])
+
+    def test_capture_scene_forwards_current_subgoal_action_scope_to_qwen(self) -> None:
+        observer = RuntimeActionRecordingObserver([scene("scoped")])
+        adapter = self._adapter(observer, FakeRobot())
+        scoped = frozenset({"tap_semantic", "home", "back"})
+
+        adapter.capture_scene(
+            goal(),
+            evidence_dir=None,
+            prefix="scoped-actions",
+            available_action_kinds=scoped,
+        )
+
+        self.assertEqual([scoped], observer.available_action_sets)
+
     def test_production_execute_requires_the_current_qwen_frames(self) -> None:
         robot = FakeRobot()
         adapter = _GenericSingleActionAdapter(
@@ -919,7 +1045,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         return current, action
 
-    def test_stable_text_ocr_grounding_repairs_coarse_adjacent_row_point(self):
+    def test_stable_visual_point_grounding_repairs_coarse_adjacent_row_point_from_ocr(self):
         current, action = self._coarse_text_target_scene()
         frames = [Image.new("RGB", (810, 1440), "white") for _ in range(3)]
         responses = [
@@ -932,7 +1058,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             calls.append((args, kwargs))
             return responses.pop(0)
 
-        grounding = stable_text_ocr_grounding(
+        grounding = stable_visual_point_grounding(
             frames,
             current,
             action,
@@ -956,7 +1082,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             calls.append((args, kwargs))
             return ocr_text_payload("目标条目", left=315, top=475)
 
-        grounding = stable_text_ocr_grounding(
+        grounding = stable_visual_point_grounding(
             frames,
             current,
             action,
@@ -976,7 +1102,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertIsNone(
-            stable_text_ocr_grounding(
+            stable_visual_point_grounding(
                 frames,
                 current,
                 action,
@@ -990,13 +1116,172 @@ class GenericActionAdapterTests(unittest.TestCase):
             ocr_text_payload("目标条目", left=192, top=850),
         ]
         self.assertIsNone(
-            stable_text_ocr_grounding(
+            stable_visual_point_grounding(
                 frames,
                 current,
                 action,
                 ocr_recognizer=lambda *_args, **_kwargs: responses.pop(0),
             )
         )
+
+    @staticmethod
+    def _surface_target_scene(*, bounds=(0.38, 0.60, 0.82, 0.70), label="继续操作"):
+        target = UIElement(
+            element_id="surface-target",
+            role="button",
+            meaning="continue_action",
+            label=label,
+            bounds=bounds,
+            confidence=1.0,
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        current = UIScene(
+            app_id="generic.app",
+            screen_id="generic_surface",
+            summary="通用控件页面",
+            elements=(target,),
+            stable=True,
+            confidence=1.0,
+            fingerprint="fresh-surface-frame",
+        )
+        action = SemanticAction(
+            node_id="tap-surface",
+            action="tap_semantic",
+            params={
+                "element_id": target.element_id,
+                "target": target.meaning,
+                "role": target.role,
+                "label": target.label,
+                "states": dict(target.states),
+            },
+        )
+        return current, action
+
+    @staticmethod
+    def _surface_frames(*, color, boxes):
+        frames = []
+        for box in boxes:
+            frame = Image.new("RGB", (600, 1000), (214, 216, 219))
+            draw = ImageDraw.Draw(frame)
+            draw.rounded_rectangle(box, radius=14, fill=color)
+            frames.append(frame)
+        return frames
+
+    def test_visual_point_grounding_repairs_model_center_to_stable_generic_surface(self):
+        current, action = self._surface_target_scene()
+        boxes = ((260, 548, 470, 625), (261, 548, 471, 625), (260, 549, 470, 626))
+        frames = self._surface_frames(color=(51, 103, 184), boxes=boxes)
+
+        grounding = stable_visual_point_grounding(
+            frames,
+            current,
+            action,
+            ocr_recognizer=lambda *_args, **_kwargs: {"lines": []},
+        )
+
+        self.assertIsNotNone(grounding)
+        self.assertEqual(2, grounding.matched_frames)
+        point_x, point_y = grounding.grounded_point
+        self.assertTrue((260 + 0.20 * (470 - 260)) / 600 <= point_x
+            <= (470 - 0.20 * (470 - 260)) / 600)
+        self.assertTrue((548 + 0.20 * (625 - 548)) / 1000 <= point_y
+            <= (625 - 0.20 * (625 - 548)) / 1000)
+        self.assertLess(point_y, current.elements[0].center[1])
+
+    def test_visual_point_grounding_is_not_bound_to_one_color_position_or_label(self):
+        current, action = self._surface_target_scene(bounds=(0.12, 0.30, 0.46, 0.40), label="下一步")
+        boxes = ((88, 258, 252, 338), (88, 259, 252, 339), (89, 258, 253, 338))
+        frames = self._surface_frames(color=(137, 68, 162), boxes=boxes)
+
+        grounding = stable_visual_point_grounding(
+            frames,
+            current,
+            action,
+            ocr_recognizer=lambda *_args, **_kwargs: {"lines": []},
+        )
+
+        self.assertIsNotNone(grounding)
+        self.assertTrue((88 + 0.20 * (252 - 88)) / 600 <= grounding.grounded_point[0]
+            <= (252 - 0.20 * (252 - 88)) / 600)
+        self.assertTrue((258 + 0.20 * (338 - 258)) / 1000 <= grounding.grounded_point[1]
+            <= (338 - 0.20 * (338 - 258)) / 1000)
+
+    def test_visual_point_grounding_finds_one_stable_surface_just_outside_model_box(self):
+        current, action = self._surface_target_scene(bounds=(0.40, 0.70, 0.78, 0.76), label="确认操作")
+        boxes = ((260, 635, 450, 690), (261, 635, 451, 690), (260, 636, 450, 691))
+        frames = self._surface_frames(color=(37, 128, 83), boxes=boxes)
+
+        grounding = stable_visual_point_grounding(
+            frames,
+            current,
+            action,
+            ocr_recognizer=lambda *_args, **_kwargs: {"lines": []},
+        )
+
+        self.assertIsNotNone(grounding)
+        self.assertLess(grounding.grounded_bounds[3], current.elements[0].bounds[1])
+        self.assertTrue((260 + 0.20 * (450 - 260)) / 600 <= grounding.grounded_point[0]
+            <= (450 - 0.20 * (450 - 260)) / 600)
+        self.assertTrue((635 + 0.20 * (690 - 635)) / 1000 <= grounding.grounded_point[1]
+            <= (690 - 0.20 * (690 - 635)) / 1000)
+
+    def test_visual_point_grounding_rejects_two_equally_plausible_surfaces(self):
+        current, action = self._surface_target_scene(bounds=(0.38, 0.55, 0.82, 0.66))
+        frames = []
+        for offset in (0, 1, 0):
+            frame = Image.new("RGB", (600, 1000), (214, 216, 219))
+            draw = ImageDraw.Draw(frame)
+            draw.rounded_rectangle((250, 530 + offset, 350, 615 + offset), radius=14, fill=(45, 113, 176))
+            draw.rounded_rectangle((370, 530 + offset, 470, 615 + offset), radius=14, fill=(45, 113, 176))
+            frames.append(frame)
+
+        with self.assertRaisesRegex(LocalPointGroundingAmbiguousError, "多个同等可信"):
+            stable_visual_point_grounding(
+                frames,
+                current,
+                action,
+                ocr_recognizer=lambda *_args, **_kwargs: {"lines": []},
+            )
+
+    def test_ambiguous_local_point_grounding_stops_before_device_action(self):
+        planned = scene("planned")
+        target = planned.elements[0]
+        action = SemanticAction(
+            node_id="ambiguous-point",
+            action="tap_semantic",
+            params={
+                "element_id": target.element_id,
+                "target": target.meaning,
+                "role": target.role,
+                "label": target.label,
+                "states": dict(target.states),
+            },
+        )
+        frame = textured_phone_frame()
+        robot = FakeRobot()
+
+        def ambiguous(*_args, **_kwargs):
+            raise LocalPointGroundingAmbiguousError("存在两个候选")
+
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture([frame.copy() for _ in range(4)]),
+            observer=FakeSceneObserver([]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            point_grounder=ambiguous,
+        )
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "本地视觉落点不唯一"):
+            adapter.execute(
+                requested_action=action,
+                planned_scene=planned,
+                planned_frames=tuple(frame.copy() for _ in range(4)),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
 
     @staticmethod
     def _literal_input_scene(
@@ -1799,7 +2084,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(0, caught.exception.physical_actions)
         self.assertEqual([], robot.actions)
         self.assertIsNone(robot._armed)
-        self.assertEqual([SINGLE_STEP_OUTPUT_TOKENS], provider.max_tokens_seen)
+        self.assertEqual([None], provider.max_tokens_seen)
 
     def test_failed_observation_persists_bounded_redacted_qwen_response(self):
         raw = (
@@ -1954,7 +2239,8 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("back", supported)
         self.assertIn("home", supported)
         self.assertIn("wait_for_change", supported)
-        self.assertIn("swipe", supported)
+        self.assertIn("scroll", supported)
+        self.assertIn("swipe_element", supported)
 
     def test_optional_camera_alignment_metadata_does_not_veto_ordinary_action(self):
         cases = (
@@ -2814,7 +3100,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             evidence=(f"应用输入框当前文字：{expected}",)),))
         action = SemanticAction(node_id="companion-unicode", action="input_verified_text", params={
             "element_id": "field", "target": "application_text_input", "role": "input", "label": "前缀",
-            "states": before.elements[0].states, "text": expected, "text_transport": "companion_ime",
+            "states": before.elements[0].states, "text": expected, "text_transport": "adb_keyboard",
             "input_field_id": "field_primary", "prior_input_value": "前缀",
             "input_fragment": "🙂\nsecond@例", "expected_input_value": expected,
 
@@ -2823,7 +3109,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             revision=3, subgoal_id="subgoal-1", effect_ids=(), observation_id="observation-1",
             fingerprint=before.fingerprint, decision_node_id=action.node_id,
             action_digest=canonical_digest(action.to_dict()), consumed=True)
-        transport = FakeCompanionTextTransport()
+        transport = FakeAdbKeyboardTextTransport()
         robot = FakeRobot()
 
         result = self._adapter(FakeSceneObserver([before, after, after]), robot,
@@ -2840,6 +3126,40 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(before.fingerprint, minted["observation_fingerprint"])
         self.assertNotIn(expected, json.dumps(result.execution_metadata, ensure_ascii=False))
         self.assertEqual("accepted", result.execution_metadata["transport_status"])
+
+    def test_adb_keyboard_transport_accepts_focused_typed_field_without_visible_keyboard(self):
+        before = UIScene(
+            app_id="sample.app", screen_id="editor", summary="唯一 typed 输入框可见",
+            elements=(UIElement(element_id="field", role="input", meaning="application_text_input",
+                label="", bounds=(0.1, 0.2, 0.9, 0.3), confidence=0.99, states={
+                    "goal_relevant": True, "fully_visible": True, "focused": True,
+                    "soft_keyboard_visible": False,
+                    "value": "", "input_field_id": "field_primary", "ime_preedit_text": "",
+                }),), stable=True, confidence=0.99, fingerprint="before-adb-no-keyboard",
+            camera_alignment=aligned_camera_facts(),
+        )
+        expected = "ADB测试？你好"
+        after = replace(before, fingerprint="after-adb-no-keyboard", elements=(replace(before.elements[0],
+            label=expected, states={**before.elements[0].states, "value": expected}),))
+        action = SemanticAction(node_id="adb-unicode", action="input_verified_text", params={
+            "element_id": "field", "target": "application_text_input", "role": "input", "label": "",
+            "states": before.elements[0].states, "text": expected, "text_transport": "adb_keyboard",
+            "input_field_id": "field_primary", "prior_input_value": "",
+            "input_fragment": expected, "expected_input_value": expected,
+        })
+        authority = ConfirmationAuthority(session_id="session-1", task_id="task-1", device_id="test-device",
+            revision=3, subgoal_id="subgoal-1", effect_ids=(), observation_id="observation-1",
+            fingerprint=before.fingerprint, decision_node_id=action.node_id,
+            action_digest=canonical_digest(action.to_dict()), consumed=True)
+        transport = FakeAdbKeyboardTextTransport()
+        robot = FakeRobot()
+
+        result = self._adapter(FakeSceneObserver([before, after, after]), robot,
+            text_transport=transport).execute(requested_action=action, planned_scene=before, goal=goal(),
+            confirmed=True, action_authority=authority)
+
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual(("append_text", expected), (transport.calls[0][0], transport.calls[0][2]))
 
     def test_confirmed_input_accepts_optional_page_wording_change_with_exact_value(self):
         before = UIScene(
@@ -3096,7 +3416,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         action = SemanticAction(
             node_id="generic_step_1",
-            action="swipe",
+            action="scroll",
             params={"direction": "up", },
         )
 
@@ -3125,7 +3445,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         action = SemanticAction(
             node_id="generic_step_1",
-            action="swipe",
+            action="scroll",
             params={"direction": "up", },
         )
 
@@ -3824,7 +4144,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         action = SemanticAction(
             node_id="generic_step_1",
-            action="swipe",
+            action="scroll",
             params={"direction": "up", },
         )
 

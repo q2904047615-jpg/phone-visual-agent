@@ -3,11 +3,16 @@ from __future__ import annotations
 from agent.domain.validation import bounds_overlap, reject_if
 import hashlib
 import os
+import statistics
 from typing import Iterable
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 from agent.domain.visual_evidence import LocalFrameStability, VisualObstruction
+
+
+MATERIAL_VISUAL_TRANSITION_PROTOCOL = "2026-09-02-local-material-transition-v1"
+MATERIAL_VISUAL_TRANSITION_MIN_TILE_DELTA = 2.0
 
 
 def local_frame_fingerprint(frame: Image.Image) -> str:
@@ -201,6 +206,61 @@ def measure_static_band_identity_delta(reference_frames: list[Image.Image] | tup
     if len(nearest_deltas) % 2:
         return nearest_deltas[middle]
     return (nearest_deltas[middle - 1] + nearest_deltas[middle]) / 2.0
+
+
+def measure_material_visual_transition(reference_frames: list[Image.Image] | tuple[Image.Image, ...],
+    candidate_frames: list[Image.Image] | tuple[Image.Image, ...], *,
+    minimum_tile_delta: float=MATERIAL_VISUAL_TRANSITION_MIN_TILE_DELTA) -> dict[str, object]:
+    """Measure raw post-action novelty without deciding what the new UI means.
+
+    The shallow top and bottom seller overlays are excluded.  Each settled
+    candidate is paired with its nearest pre-action frame, then a median over
+    all candidate frames prevents one cursor/camera outlier from creating a
+    false transition.  The strongest stable tile preserves small local UI
+    changes that a whole-frame mean would dilute.
+    """
+
+    references = tuple(reference_frames)
+    candidates = tuple(candidate_frames)
+    reject_if(len(references) < 3 or len(candidates) < 3,
+        ValueError("动作前后物理变化校验各至少需要3帧。"))
+    sizes = {frame.size for frame in references + candidates}
+    reject_if(len(sizes) != 1, ValueError("动作前后物理变化校验的画面尺寸不一致。"))
+    reject_if(isinstance(minimum_tile_delta, bool) or minimum_tile_delta <= 0,
+        ValueError("物理变化阈值必须为正数。"))
+
+    def compact(frame: Image.Image) -> Image.Image:
+        source = frame.convert("L")
+        top = round(source.height * 0.07)
+        bottom = round(source.height * 0.91)
+        reject_if(bottom <= top, ValueError("动作画面高度不足。"))
+        return source.crop((0, top, source.width, bottom)).resize((96, 128), Image.Resampling.BILINEAR)
+
+    compact_references = tuple(compact(frame) for frame in references)
+    compact_candidates = tuple(compact(frame) for frame in candidates)
+    global_deltas: list[float] = []
+    tile_rows: list[list[float]] = []
+    for candidate in compact_candidates:
+        nearest = min(compact_references,
+            key=lambda reference: ImageStat.Stat(ImageChops.difference(candidate, reference)).mean[0])
+        difference = ImageChops.difference(candidate, nearest)
+        global_deltas.append(float(ImageStat.Stat(difference).mean[0]))
+        tile_rows.append([float(ImageStat.Stat(difference.crop((column * 16, row * 16,
+            (column + 1) * 16, (row + 1) * 16))).mean[0])
+            for row in range(8) for column in range(6)])
+
+    tile_medians = [statistics.median(row[index] for row in tile_rows) for index in range(48)]
+    global_median = float(statistics.median(global_deltas))
+    max_tile_median = float(max(tile_medians))
+    return {
+        "protocol_version": MATERIAL_VISUAL_TRANSITION_PROTOCOL,
+        "reference_frame_count": len(references),
+        "candidate_frame_count": len(candidates),
+        "global_median_delta": round(global_median, 3),
+        "max_tile_median_delta": round(max_tile_median, 3),
+        "minimum_tile_delta": round(float(minimum_tile_delta), 3),
+        "material": max_tile_median >= float(minimum_tile_delta),
+    }
 
 
 def measure_frame_sharpness(image: Image.Image) -> float:

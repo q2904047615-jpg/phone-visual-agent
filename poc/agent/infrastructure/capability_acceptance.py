@@ -25,7 +25,11 @@ from agent.infrastructure.tap_calibration import (
     MIN_COVERAGE_SPAN_Y,
     TapCalibrationError,
 )
-from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
+from agent.domain.action_capabilities import (
+    CALIBRATION_BOUND_ACTIONS,
+    PROMOTABLE_ACTIONS,
+    physical_capability_for_action,
+)
 
 
 ACCEPTANCE_REPORT_VERSION = 3
@@ -306,7 +310,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     try:
         orientation_credential = OrientationCredential.from_dict(execution.get('orientation_credential'))
         orientation_credential.assert_authorizes(device_id=device_id, scene_fingerprint=execution_before_fingerprint,
-            frame_size=before_frame_size, action=action)
+            frame_size=before_frame_size, action=physical_capability_for_action(action))
     except OrientationSafetyError as exc:
         raise CapabilityAcceptanceError(f'独立方向凭据不能支持能力晋级：{exc}') from exc
     before_fingerprints: set[str] = set()
@@ -503,8 +507,10 @@ class CapabilityRegistryPromoter:
         registry, raw = self._load_registry()
         device = self._registry_device(registry, report["device_id"])
         action = report["candidate_action"]
+        physical_action = physical_capability_for_action(action)
         self._require_matching_calibration(report, device)
-        reject_if(action in device['verified_actions'], CapabilityAcceptanceError(f"设备能力 {action} 已经启用。"))
+        reject_if(physical_action in device['verified_actions'],
+            CapabilityAcceptanceError(f"设备能力 {action} 对应的物理能力已经启用。"))
         scope = PromotionScope(trial_id=report['trial_id'], device_id=report['device_id'], action=action,
             report_sha256=sha256_file(Path(report_path)), registry_sha256=_sha256_bytes(raw))
         try:
@@ -560,18 +566,21 @@ class CapabilityRegistryPromoter:
             reject_if(_sha256_bytes(registry_raw) != scope.registry_sha256, CapabilityAcceptanceError("设备注册表在确认后发生变化。"))
             device = self._registry_device(registry, scope.device_id)
             self._require_matching_calibration(report, device)
-            reject_if(scope.action in device['verified_actions'], CapabilityAcceptanceError(f"设备能力 {scope.action} 已经启用。"))
+            physical_action = physical_capability_for_action(scope.action)
+            reject_if(physical_action in device['verified_actions'],
+                CapabilityAcceptanceError(f"设备能力 {scope.action} 对应的物理能力已经启用。"))
 
             trial_dir = Path(report_path).resolve(strict=True).parent
             backup_path = trial_dir / "registry_before.json"
             promotion_path = trial_dir / "promotion.json"
             reject_if(backup_path.exists() or promotion_path.exists(), CapabilityAcceptanceError("本次 trial 已存在晋级证据，禁止重复晋级。"))
 
-            device['verified_actions'] = sorted({*device['verified_actions'], scope.action})
+            device['verified_actions'] = sorted({*device['verified_actions'], physical_action})
             encoded_registry = (json.dumps(registry, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
             after_sha256 = _sha256_bytes(encoded_registry)
             promoted_at = self._now().astimezone(timezone.utc).isoformat()
-            result = {'version': 1, 'trial_id': scope.trial_id, 'device_id': scope.device_id, 'action': scope.action,
+            result = {'version': 1, 'trial_id': scope.trial_id, 'device_id': scope.device_id,
+                'action': scope.action, 'physical_action': physical_action,
                 'report_sha256': scope.report_sha256, 'registry_before_sha256': scope.registry_sha256,
                 'registry_after_sha256': after_sha256, 'promoted_at': promoted_at, 'requires_restart': True}
             encoded_promotion = (json.dumps(result, ensure_ascii=False, indent=2) + '\n').encode('utf-8')

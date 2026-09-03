@@ -85,7 +85,8 @@ class VisionSessionUsageLedger:
         self._totals['total_elapsed_seconds'] += elapsed
         self._totals['max_elapsed_seconds'] = max(self._totals['max_elapsed_seconds'], elapsed)
 
-    def reserve_request(self, *, model: str, stage: str, fingerprint: str, max_completion_tokens: int) -> str:
+    def reserve_request(self, *, model: str, stage: str, fingerprint: str,
+        max_completion_tokens: int | None) -> str:
         stage, fingerprint = self._metadata(stage, fingerprint)
         model = str(model or "").strip()
         with self._lock:
@@ -112,7 +113,8 @@ class VisionSessionUsageLedger:
             self._totals['model_requests'] += 1
             self._events.append({'event': 'model_request', 'outcome': 'started', 'timestamp': self._timestamp(),
                 'local_request_id': local_request_id, 'provider_request_id': '', 'stage': stage,
-                'fingerprint': fingerprint, 'model': model, 'max_completion_tokens': max(0, int(max_completion_tokens)),
+                'fingerprint': fingerprint, 'model': model, 'max_completion_tokens': max(0,
+                    int(max_completion_tokens or 0)),
                 'network_attempts': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
             return local_request_id
 

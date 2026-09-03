@@ -13,11 +13,13 @@ from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     SingleStepGenericSceneObserver,
     _apply_input_structure_audit,
+    _locally_verified_blinking_caret,
+    _single_step_observation_prompt,
+    _single_step_response_format,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION, UIScene
-from agent.infrastructure.dashscope_vision_provider import _image_data_url
+from agent.infrastructure.dashscope_vision_provider import _extract_json_object, _image_data_url
 from agent.domain.vision_model import VisionAgentError
-from agent.domain.foreground_app_identity import ForegroundAppIdentity
 from agent.domain.visual_evidence import VisualObstruction
 
 
@@ -119,11 +121,11 @@ class FakeProvider:
     def _chat(
         self,
         messages: list[dict],
-        max_tokens: int,
+        max_tokens: int | None,
         *,
         timeout: float | None = None,
         max_attempts: int | None = None,
-        response_format: dict[str, str] | None = None,
+        response_format: dict | None = None,
     ) -> str:
         self.calls += 1
         self.messages = messages
@@ -156,11 +158,11 @@ class SequenceProvider(FakeProvider):
     def _chat(
         self,
         messages: list[dict],
-        max_tokens: int,
+        max_tokens: int | None,
         *,
         timeout: float | None = None,
         max_attempts: int | None = None,
-        response_format: dict[str, str] | None = None,
+        response_format: dict | None = None,
     ) -> str:
         self.calls += 1
         self.messages_seen.append(messages)
@@ -203,39 +205,116 @@ class SequenceProvider(FakeProvider):
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
-class TrustedForegroundIdentityTests(unittest.TestCase):
-    def test_signed_system_identity_overrides_model_app_id_but_not_page_semantics(self) -> None:
-        provider = FakeProvider(scene_payload())
-        now = time.time()
-        identity = ForegroundAppIdentity(device_id="device-local-01", package_name="com.android.settings",
-            source="usage_stats", event_at_epoch=now - 10, observed_at_epoch=now)
+class StructuredDecisionContractTests(unittest.TestCase):
+    @staticmethod
+    def _context(state: str) -> dict:
+        return {"entities": {"active_subgoal_visual_context": {
+            "subgoal_id": "input_message",
+            "objective": "在当前输入框输入指定文字",
+            "constraints": [],
+            "completion_conditions": ["输入框正文达到目标值"],
+            "execution_class": "input",
+            "goal_entities": {"active_input_field_id": "primary_input",
+                "active_input_field_label": "消息", "active_input_multiline": False,
+                "active_input_transaction_text": "sample"},
+            "transition_receipt": {"state": state, "subgoal_id": "input_message",
+                "required_operation": "input_verified_text", "executed_operation": ""
+                if state == "pending" else "input_verified_text", "effect_ids": []},
+        }}}
 
-        observed = SingleStepGenericSceneObserver(provider).observe(frames=stable_frames(),
-            goal_context={"objective": "打开系统设置"}, device_id="device-local-01",
-            available_action_kinds={"home", "launch_app"}, trusted_foreground_identity=identity)
+    def test_pending_transition_schema_forbids_finish_and_requires_scoped_action(self) -> None:
+        response_format = _single_step_response_format(self._context("pending"),
+            input_structure_required=True, request_height=1778,
+            available_action_kinds=("clear_verified_text", "input_verified_text"))
+        wrapper = response_format["json_schema"]
+        decision = wrapper["schema"]["properties"]["decision"]
 
-        self.assertEqual("com.android.settings", observed.foreground_app_id)
-        self.assertEqual("app_home", observed.screen_id)
-        prompt = provider.messages[1]["content"][0]["text"]
-        self.assertIn("com.android.settings", prompt)
-        self.assertIn("不得根据JPEG", prompt)
+        self.assertIs(wrapper["strict"], True)
+        self.assertEqual(["action"], decision["properties"]["status"]["enum"])
+        self.assertEqual(["status", "action"], decision["required"])
+        self.assertEqual(["clear_verified_text", "input_verified_text"],
+            decision["properties"]["action"]["enum"])
+        self.assertEqual([1778], wrapper["schema"]["properties"]["coordinate_space"]["properties"][
+            "height"]["enum"])
 
-    def test_no_system_identity_keeps_visual_fallback_and_system_identity_overrides_next_observation(self) -> None:
-        provider = FakeProvider(scene_payload())
-        observer = SingleStepGenericSceneObserver(provider)
-        frames = stable_frames()
-        visual = observer.observe(frames=frames, goal_context={"objective": "观察当前页面"},
-            device_id="device-local-01", available_action_kinds={"home"})
-        now = time.time()
-        identity = ForegroundAppIdentity(device_id="device-local-01", package_name="com.tencent.mm",
-            source="editor_info", event_at_epoch=now, observed_at_epoch=now)
-        system = observer.observe(frames=frames, goal_context={"objective": "观察当前页面"},
-            device_id="device-local-01", available_action_kinds={"home"},
-            trusted_foreground_identity=identity)
+    def test_executed_transition_schema_restores_same_frame_finish_choice(self) -> None:
+        response_format = _single_step_response_format(self._context("executed"),
+            input_structure_required=True, request_height=1778,
+            available_action_kinds=("input_verified_text",))
+        decision = response_format["json_schema"]["schema"]["properties"]["decision"]
 
-        self.assertEqual("calculator", visual.foreground_app_id)
-        self.assertEqual("com.tencent.mm", system.foreground_app_id)
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(["action", "finish"], decision["properties"]["status"]["enum"])
+        self.assertEqual(["status"], decision["required"])
+
+    def test_prompt_places_current_subgoal_and_future_effect_boundary_next_to_decision(self) -> None:
+        context = {'entities': {'active_subgoal_visual_context': {
+            'subgoal_id': 'open-app',
+            'objective': '打开消息应用',
+            'constraints': [],
+            'completion_conditions': ['消息应用可见'],
+            'execution_class': 'navigate',
+            'goal_entities': {},
+            'current_effect_kinds': [],
+            'forbidden_future_effect_kinds': ['send_message'],
+        }}}
+        prompt = _single_step_observation_prompt(
+            context,
+            include_input_structure=False,
+            image_count=4,
+            request_image_size=(540, 960),
+            available_action_kinds=('home', 'tap_semantic'),
+        )
+
+        self.assertIn('本轮唯一高层子目标合同', prompt)
+        self.assertIn('"subgoal_id":"open-app"', prompt)
+        self.assertIn('"forbidden_future_effect_kinds":["send_message"]', prompt)
+
+    def test_prompt_carries_one_bounded_element_gesture_correction(self) -> None:
+        context = {'entities': {'active_subgoal_visual_context': {
+            'subgoal_id': 'dismiss-card', 'objective': '移走当前卡片', 'constraints': [],
+            'completion_conditions': ['目标卡片不再可见'], 'execution_class': 'navigate',
+            'goal_entities': {}, 'gesture_correction': {
+                'state': 'previous_trajectory_did_not_complete_target',
+                'target': {'meaning': 'recent_app_card', 'label': '目标卡片'},
+                'start': [0.3, 0.5], 'end': [0.05, 0.5], 'direction': 'left',
+                'required_change': 'choose_materially_different_trajectory_or_other_action_or_finish_from_current_scene',
+            },
+        }}}
+        prompt = _single_step_observation_prompt(
+            context, include_input_structure=False, image_count=1,
+            request_image_size=(540, 960),
+            available_action_kinds=('scroll', 'swipe_element'),
+        )
+
+        self.assertIn('previous_trajectory_did_not_complete_target', prompt)
+        self.assertIn('绝不能重复原轨迹', prompt)
+
+
+class LocalBlinkingCaretTests(unittest.TestCase):
+    @staticmethod
+    def _frames(*, blinking: bool=True, wide: bool=False) -> list[Image.Image]:
+        frames = []
+        for index in range(4):
+            frame = Image.new('RGB', (400, 800), (235, 235, 235))
+            draw = ImageDraw.Draw(frame)
+            draw.rectangle((40, 640, 360, 720), fill=(250, 250, 250))
+            if (not blinking) or index % 2 == 0:
+                draw.rectangle((80, 650, 108 if wide else 82, 700), fill=(50, 50, 50))
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _input() -> dict:
+        return {"input_bounds": [100, 800, 900, 900], "text": "", "visible_editable_cues": []}
+
+    def test_unique_narrow_temporal_caret_is_local_focus_evidence(self) -> None:
+        self.assertTrue(_locally_verified_blinking_caret(self._input(), frames=self._frames()))
+
+    def test_static_vertical_line_is_not_blinking_focus_evidence(self) -> None:
+        self.assertFalse(_locally_verified_blinking_caret(self._input(), frames=self._frames(blinking=False)))
+
+    def test_wide_temporal_change_is_not_caret_focus_evidence(self) -> None:
+        self.assertFalse(_locally_verified_blinking_caret(self._input(), frames=self._frames(wide=True)))
 
 
 def stable_frames(color: tuple[int, int, int] = (30, 40, 50)) -> list[Image.Image]:
@@ -773,6 +852,81 @@ def multifield_next_audit(
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
+    def test_single_step_accepts_exactly_one_object_wrapped_in_array(self) -> None:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 960},
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+        }
+        provider = SequenceProvider([json.dumps([payload], ensure_ascii=False)])
+
+        observed, decision = SingleStepGenericSceneObserver(provider).observe_with_decision(
+            frames=stable_frames(), goal_context={"objective": "确认当前页面"},
+            device_id="device-local-01")
+
+        self.assertEqual("app_home", observed.screen_id)
+        self.assertEqual("finish", decision["status"])
+        self.assertEqual(1, provider.calls)
+
+    def test_single_step_rejects_ambiguous_or_nonobject_arrays_without_retry(self) -> None:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 960},
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+        }
+        cases = ([], [payload, payload], ["not-an-object"])
+        for value in cases:
+            with self.subTest(value_type=type(value[0]).__name__ if value else "empty",
+                item_count=len(value)):
+                provider = SequenceProvider([json.dumps(value, ensure_ascii=False)])
+                observer = SingleStepGenericSceneObserver(provider)
+
+                with self.assertRaisesRegex(VisionAgentError, "恰好包含一个 JSON 对象"):
+                    observer.observe(frames=stable_frames())
+
+                self.assertEqual(1, provider.calls)
+                self.assertFalse(observer.last_diagnostics["remote_retry_used"])
+
+    def test_single_step_singleton_array_keeps_duplicate_key_rejection(self) -> None:
+        raw = ('[{"protocol_version":"' + SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+            + '","coordinate_space":{"kind":"axis_grid","width":1000,"height":960},'
+            + '"scene":{},"decision":{"status":"finish"},'
+            + '"decision":{"status":"finish"}}]')
+        provider = SequenceProvider([raw])
+
+        with self.assertRaisesRegex(VisionAgentError, "重复字段"):
+            SingleStepGenericSceneObserver(provider).observe(frames=stable_frames())
+
+        self.assertEqual(1, provider.calls)
+
+    def test_non_single_step_json_extraction_remains_object_only(self) -> None:
+        with self.assertRaisesRegex(VisionAgentError, "必须是 JSON 对象"):
+            _extract_json_object('[{"value":1}]')
+
+    def test_element_swipe_axis_grid_points_normalize_with_current_image_height(self) -> None:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 960},
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "action", "action": "swipe_element",
+                "element_id": "e1", "start": [180, 680], "end": [500, 680]},
+        }
+        observed, decision = SingleStepGenericSceneObserver(
+            SequenceProvider([payload])
+        ).observe_with_decision(
+            frames=stable_frames(), goal_context={"objective": "移走当前目标"},
+            device_id="device-local-01", available_action_kinds={"swipe_element"},
+        )
+
+        self.assertIsNotNone(observed.get_element("e1"))
+        self.assertEqual([180, 708], decision["start"])
+        self.assertEqual([500, 708], decision["end"])
+
     def test_obsolete_blocked_decision_is_rejected_by_wire_contract(self) -> None:
         payload = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
@@ -932,6 +1086,10 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             ["scene.summary"],
             model_decision["evidence_refs"],
         )
+        self.assertEqual([None], provider.max_tokens_seen)
+        self.assertEqual("json_schema", provider.call_options["response_format"]["type"])
+        self.assertEqual(["action", "finish"], provider.call_options["response_format"]["json_schema"][
+            "schema"]["properties"]["decision"]["properties"]["status"]["enum"])
 
     def test_explicit_system_home_observation_sends_unmasked_phone_frame(
         self,
@@ -1013,6 +1171,12 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "open_recent_apps：打开Android最近任务卡片页",
                     prompt,
                 )
+                self.assertIn("必须严格服从当前高层子目标的三段顺序", prompt)
+                self.assertIn("先从非Launcher", prompt)
+                self.assertIn("不得从App页面直接open_recent_apps", prompt)
+                self.assertIn("系统“一键清理全部”按钮", prompt)
+                self.assertIn("tap_semantic点击该按钮", prompt)
+                self.assertIn("不得用swipe_element移除任务卡片", prompt)
                 self.assertIn(
                     '当前设备本轮可用动作（唯一运行时动作集合）：["back","home"]',
                     prompt,
@@ -1314,7 +1478,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         prompt = json.dumps(provider.messages_seen[0], ensure_ascii=False)
         self.assertIn("A blank input is valid", prompt)
         self.assertIn("does not need visible text, placeholder, caret", prompt)
-        self.assertIn("Companion IME input/clear and a focus tap do not require them", prompt)
+        self.assertIn("ADB Keyboard input/clear and a focus tap do not require them", prompt)
         self.assertIn("scene中的role=input只是可选页面上下文", prompt)
         self.assertIn('element_id=\\"local_audited_input_1\\"', prompt)
         self.assertEqual(
@@ -1736,6 +1900,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertIn("states.input_element_id绑定该输入框", prompt)
                 self.assertIn("caret_line_index为合法行号", prompt)
                 self.assertIn("不得把这两个物理步骤合并成一个动作", prompt)
+                self.assertIn("聊天气泡、帖子、历史记录", prompt)
+                self.assertIn("只能用同一响应input_structure.application_inputs", prompt)
+                self.assertIn("也不得再次点同一输入框或finish", prompt)
 
     def test_same_response_selected_scene_input_keeps_b425_element_identity(self) -> None:
         scene = scene_payload()

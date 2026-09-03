@@ -24,6 +24,7 @@
     "depends_on": ["前置子目标ID"],
     "constraints": ["本子目标约束"],
     "completion_conditions": ["动作后应出现的正向结果"],
+    "required_action_kind": "仅当用户或正式协议已唯一确定本子目标动作时填写 canonical 动作名",
     "input_field_id": "仅输入类子目标填写；单字段固定为 primary_input，多字段使用 entities.input_fields[].field_id",
     "input_operation": "仅输入类子目标填写：focus|input_verified_text|clear_verified_text|press_enter"
   }],

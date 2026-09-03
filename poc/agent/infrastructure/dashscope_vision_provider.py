@@ -27,6 +27,32 @@ class _DuplicateJSONKeyError(ValueError):
     pass
 
 
+def _validated_response_format(value: Any) -> dict[str, Any] | None:
+    """Accept only the two documented, bounded structured-output modes."""
+
+    if value is None:
+        return None
+    if value == {'type': 'json_object'}:
+        return {'type': 'json_object'}
+    reject_if(not isinstance(value, dict) or set(value) != {'type', 'json_schema'}
+        or value.get('type') != 'json_schema', VisionAgentError("千问视觉 response_format 不符合受支持的结构化输出协议。"))
+    wrapper = value.get('json_schema')
+    reject_if(not isinstance(wrapper, dict) or set(wrapper) != {'name', 'strict', 'schema'},
+        VisionAgentError("千问视觉 json_schema 封装结构无效。"))
+    name = wrapper.get('name')
+    schema = wrapper.get('schema')
+    reject_if(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}', name),
+        VisionAgentError("千问视觉 json_schema.name 无效。"))
+    reject_if(wrapper.get('strict') is not True or not isinstance(schema, dict)
+        or schema.get('type') != 'object' or schema.get('additionalProperties') is not False,
+        VisionAgentError("千问视觉严格 json_schema 必须是禁止额外字段的对象。"))
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise VisionAgentError("千问视觉 json_schema 不能序列化为有效 JSON。") from exc
+    return value
+
+
 def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for (key, item) in pairs:
@@ -35,7 +61,8 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]
     return value
 
 
-def _extract_json_object(raw: str, *, reject_duplicate_keys: bool=False) -> dict[str, Any]:
+def _extract_json_object(raw: str, *, reject_duplicate_keys: bool=False,
+    unwrap_singleton_object_array: bool=False) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith('```'):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
@@ -55,6 +82,10 @@ def _extract_json_object(raw: str, *, reject_duplicate_keys: bool=False) -> dict
             raise VisionAgentError(f'模型返回的 JSON 包含重复字段：{exc}') from exc
         except json.JSONDecodeError as exc:
             raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+    if unwrap_singleton_object_array and isinstance(value, list):
+        reject_if(len(value) != 1 or not isinstance(value[0], dict),
+            VisionAgentError("模型返回的单步观察数组必须恰好包含一个 JSON 对象。"))
+        value = value[0]
     reject_if(not isinstance(value, dict), VisionAgentError("模型返回值必须是 JSON 对象。"))
     return value
 
@@ -177,11 +208,11 @@ class DashScopeVisionProvider:
     def _chat(
         self,
         messages: list[dict[str, Any]],
-        max_tokens: int,
+        max_tokens: int | None,
         *,
         timeout: float | None = None,
         max_attempts: int | None = None,
-        response_format: dict[str, str] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         # This provider instance is shared by all device sessions.  Its
         # response metadata is intentionally serialized with the request so a
@@ -191,8 +222,8 @@ class DashScopeVisionProvider:
             return self._chat_locked(messages, max_tokens, timeout=timeout, max_attempts=max_attempts,
                 response_format=response_format)
 
-    def _chat_locked(self, messages: list[dict[str, Any]], max_tokens: int, *, timeout: float | None=None,
-        max_attempts: int | None=None, response_format: dict[str, str] | None=None) -> str:
+    def _chat_locked(self, messages: list[dict[str, Any]], max_tokens: int | None, *, timeout: float | None=None,
+        max_attempts: int | None=None, response_format: dict[str, Any] | None=None) -> str:
         reject_if(not self.configured, VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"))
         ledger = self._active_usage_ledger.get()
         stage, fingerprint = self._active_call_metadata.get()
@@ -222,8 +253,8 @@ class DashScopeVisionProvider:
                 elapsed_seconds=time.perf_counter() - request_started)
         return content
 
-    def _chat_untracked(self, messages: list[dict[str, Any]], max_tokens: int, *, timeout: float | None=None,
-        max_attempts: int | None=None, response_format: dict[str, str] | None=None) -> str:
+    def _chat_untracked(self, messages: list[dict[str, Any]], max_tokens: int | None, *, timeout: float | None=None,
+        max_attempts: int | None=None, response_format: dict[str, Any] | None=None) -> str:
         reject_if(not self.configured, VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"))
         self.last_usage = {}
         self.last_request_id = ""
@@ -232,14 +263,17 @@ class DashScopeVisionProvider:
         self.last_response_model = ""
         effective_timeout = self.timeout if timeout is None else max(1.0, float(timeout))
         effective_attempts = self.max_attempts if max_attempts is None else max(1, int(max_attempts))
-        reject_if(response_format not in (None, {'type': 'json_object'}), VisionAgentError("千问视觉 response_format 只允许 json_object。"))
+        reject_if(max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
+            or max_tokens <= 0), VisionAgentError("千问视觉 max_tokens 必须为正整数或省略。"))
+        response_format = _validated_response_format(response_format)
         last_error: Exception | None = None
         for attempt in range(1, effective_attempts + 1):
             self.last_network_attempts = attempt
             try:
                 response = httpx.post(f'{self.base_url}/chat/completions', headers={'Authorization': f'Bearer {
                     self.api_key}', 'Content-Type': 'application/json'}, json={'model': self.model,
-                    'messages': messages, 'temperature': 0.0, 'max_tokens': max_tokens, **({
+                    'messages': messages, 'temperature': 0.0, **({'max_tokens': max_tokens}
+                    if max_tokens is not None else {}), **({
                     'response_format': response_format} if response_format is not None else {}),
                     **self.model_config.request_options()}, timeout=effective_timeout)
                 response.raise_for_status()

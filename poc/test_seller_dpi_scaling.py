@@ -12,6 +12,7 @@ class _FakeCursorUser32:
     def __init__(self, cursor: tuple[int, int]):
         self.cursor = cursor
         self.positions: list[tuple[int, int]] = []
+        self.mouse_events: list[int] = []
 
     def GetCursorPos(self, point):
         point._obj.x, point._obj.y = self.cursor
@@ -21,6 +22,20 @@ class _FakeCursorUser32:
         self.cursor = (int(x), int(y))
         self.positions.append(self.cursor)
         return 1
+
+    def ClientToScreen(self, _hwnd, point):
+        point._obj.x += 10
+        point._obj.y += 20
+        return 1
+
+    def ShowWindow(self, _hwnd, _command):
+        return 1
+
+    def SetForegroundWindow(self, _hwnd):
+        return 1
+
+    def mouse_event(self, event, *_args):
+        self.mouse_events.append(int(event))
 
     def GetWindowRect(self, _hwnd, rect):
         rect._obj.left = 0
@@ -34,6 +49,61 @@ class _FakeCursorUser32:
 
 
 class SellerDpiScalingTests(unittest.TestCase):
+    def test_swipe_path_has_distinct_timing_and_honest_receipt(self) -> None:
+        fake = _FakeCursorUser32((400, 400))
+        sleeps: list[float] = []
+        with (
+            patch.object(seller, "user32", fake),
+            patch.object(seller, "client_geometry", return_value=(10, 20, 810, 1515)),
+            patch.object(seller, "seller_camera_height", return_value=1440),
+            patch.object(seller, "_check_escape"),
+            patch.object(seller, "_stable_seller_position_baseline", return_value=object()),
+            patch.object(seller, "_round_trip_position_barrier", return_value=(3, 240, 235, 0.035)) as barrier,
+            patch.object(seller, "sleep_interruptible", side_effect=lambda seconds: sleeps.append(seconds)),
+            patch.object(seller.time, "sleep"),
+        ):
+            receipt = seller.swipe_client_path(123, (198, 797), (17, 797),
+                touch_down_seconds=0.35, movement_seconds=0.3, steps=6)
+
+        self.assertEqual([seller.MOUSEEVENTF_RIGHTDOWN, seller.MOUSEEVENTF_RIGHTUP], fake.mouse_events)
+        self.assertEqual((208, 817), fake.positions[0])
+        self.assertEqual((27, 817), fake.positions[-2])
+        self.assertEqual((400, 400), fake.positions[-1])
+        self.assertEqual(0.35, sleeps[0])
+        self.assertEqual(6, len(sleeps[1:]))
+        for delay in sleeps[1:]:
+            self.assertAlmostEqual(0.05, delay)
+        barrier.assert_called_once()
+        self.assertTrue(receipt["right_button_down_dispatched"])
+        self.assertTrue(receipt["right_button_up_dispatched"])
+        self.assertTrue(receipt["seller_position_barrier_confirmed"])
+        self.assertEqual(6, receipt["interpolation_steps_completed"])
+        self.assertFalse(receipt["mechanical_contact_ack"])
+
+    def test_swipe_path_releases_right_button_when_movement_fails(self) -> None:
+        fake = _FakeCursorUser32((400, 400))
+        calls = 0
+
+        def fail_during_movement(_seconds: float) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("movement failed")
+
+        with (
+            patch.object(seller, "user32", fake),
+            patch.object(seller, "client_geometry", return_value=(10, 20, 810, 1515)),
+            patch.object(seller, "seller_camera_height", return_value=1440),
+            patch.object(seller, "_check_escape"),
+            patch.object(seller, "sleep_interruptible", side_effect=fail_during_movement),
+            patch.object(seller.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "movement failed"):
+                seller.swipe_client_path(123, (198, 797), (17, 797))
+
+        self.assertEqual([seller.MOUSEEVENTF_RIGHTDOWN, seller.MOUSEEVENTF_RIGHTUP], fake.mouse_events)
+        self.assertEqual((400, 400), fake.cursor)
+
     def test_documented_100_percent_geometry_is_unchanged(self) -> None:
         self.assertEqual(seller.seller_ui_scale(540), 1.0)
         self.assertEqual(seller.seller_camera_height(540, 1010), 960)

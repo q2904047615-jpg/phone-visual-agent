@@ -139,7 +139,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
     def test_page_exposes_only_generic_safe_action_modes(self) -> None:
         page = ACTION_PAGE_PATH.read_text(encoding="utf-8")
         for marker in (
-            "mode=swipe",
+            "mode=scroll",
             "mode=tap",
             "mode=back",
             "mode=input",
@@ -211,7 +211,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
     def test_action_event_store_records_generic_three_step_sequence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ActionEventStore(Path(directory))
-            for index, kind in enumerate(("swipe", "tap_semantic", "back"), 1):
+            for index, kind in enumerate(("scroll", "tap_semantic", "back"), 1):
                 store.append(
                     {
                         "kind": kind,
@@ -224,7 +224,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
 
         self.assertEqual([0, 1, 2], [item["sequence"] for item in snapshot["events"]])
         self.assertEqual(
-            ["swipe", "tap_semantic", "back"],
+            ["scroll", "tap_semantic", "back"],
             [item["kind"] for item in snapshot["events"]],
         )
 

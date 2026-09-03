@@ -1,6 +1,6 @@
 # DeepSeek 类型化动态任务图 v4
 
-正式协议：`2026-08-20-deepseek-typed-task-graph-v4`
+正式协议：`2026-09-03-deepseek-required-action-v6`
 
 ## 职责
 

@@ -1224,7 +1224,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         expected = {
             "agent_api_cli.py",
             "capture_click_burst.py",
-            "companion_ime_setup.py",
             "eval_qwen_visual_decision.py",
             "eval_task_sequences.py",
             "local_agent_api_client.py",
@@ -1239,6 +1238,21 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         }
         self.assertEqual(expected, actual)
 
+    def test_companion_ime_runtime_is_permanently_removed(self) -> None:
+        root = Path(__file__).resolve().parent
+        retired = (
+            root / "companion_ime_setup.py",
+            root / "companion_ime_registry.example.json",
+            root / "agent" / "infrastructure" / "companion_ime_runtime.py",
+            root / "agent" / "infrastructure" / "companion_ime_transport.py",
+            root / "agent" / "infrastructure" / "windows_companion_pairing_store.py",
+        )
+        self.assertTrue(all(not path.exists() for path in retired))
+        production = "\n".join(path.read_text(encoding="utf-8") for path in
+            (root / "agent").rglob("*.py")) + (root / "web_app.py").read_text(encoding="utf-8")
+        for marker in ("companion_ime", "CompanionIme", "ROBOT_COMPANION"):
+            self.assertNotIn(marker, production)
+
         web_source = (root / "web_app.py").read_text(encoding="utf-8")
         client_source = (root / "local_agent_api_client.py").read_text(
             encoding="utf-8"
@@ -1248,6 +1262,16 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertIn('"/openapi.json"', client_source)
         self.assertIn("LocalAgentApiClient", cli_source)
 
+        expected = {
+            "agent_api_cli.py",
+            "capture_click_burst.py",
+            "eval_qwen_visual_decision.py",
+            "eval_task_sequences.py",
+            "local_agent_api_client.py",
+            "run_xy_calibration.py",
+            "touch_calibration_server.py",
+            "web_app.py",
+        }
         root_module_names = {path.removesuffix(".py") for path in expected}
         reverse_imports: list[str] = []
         for path in (root / "agent").rglob("*.py"):
@@ -1430,7 +1454,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "open_recent_apps",
             "press_enter",
             "reveal_system_navigation",
-            "swipe",
+            "scroll",
+            "swipe_element",
             "tap_semantic",
             "wait_for_change",
         }
@@ -1615,7 +1640,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse(hasattr(qwen_visual_decision, "QwenTaskContext"))
         self.assertIs(QwenTaskContext, universal_agent_orchestrator.QwenTaskContext)
         self.assertEqual(
-            "2026-08-20-deepseek-typed-task-graph-v4",
+            "2026-09-03-deepseek-required-action-v6",
             SUPPORTED_TASK_CONTEXT_PROTOCOL,
         )
         self.assertEqual("agent.domain.qwen_task_context", QwenTaskContext.__module__)
@@ -1674,7 +1699,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         source = application_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class QwenVisualDecisionObserver:"))
         self.assertEqual(
-            "2026-09-01-qwen-same-response-action-finish-v9",
+            "2026-09-03-qwen-required-action-v14",
             qwen_visual_decision.QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
         )
         for forbidden in (
@@ -1733,7 +1758,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 symbol.__module__,
             )
         self.assertEqual(
-            "2026-09-02-universal-action-v18",
+            "2026-09-03-universal-action-v22",
             controller_module.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
         )
 
@@ -2071,7 +2096,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             {
                 "tap_semantic",
                 "dismiss_overlay",
-                "swipe",
+                "scroll",
+                "swipe_element",
                 "back",
                 "home",
                 "reveal_system_navigation",

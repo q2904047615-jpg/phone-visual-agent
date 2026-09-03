@@ -11,12 +11,12 @@
       "expected_actions": [
         {"kind": "home"},
         {"kind": "tap_semantic", "point": [240, 310]},
-        {"kind": "swipe", "direction": "up"}
+        {"kind": "scroll", "direction": "up"}
       ],
       "recorded_actions": [
         {"kind": "home"},
         {"kind": "tap_semantic", "point": [240, 310]},
-        {"kind": "swipe", "direction": "up"}
+        {"kind": "scroll", "direction": "up"}
       ]
     },
     {

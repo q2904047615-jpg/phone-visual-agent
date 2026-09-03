@@ -67,7 +67,7 @@ class SuccessfulEvalProvider(EvalProvider):
         self.calls += 1
         return json.dumps(
             {
-                "protocol_version": "2026-09-01-single-step-qwen-action-finish-v6",
+                "protocol_version": "2026-09-03-single-step-required-action-v10",
                 "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 960},
                 "scene": {
                     "protocol_version": "2026-08-10-ui-scene-v2",

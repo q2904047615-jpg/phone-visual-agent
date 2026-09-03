@@ -8,6 +8,7 @@ from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
     detect_top_edge_opaque_bands,
     measure_local_stability,
+    measure_material_visual_transition,
 )
 
 
@@ -123,6 +124,33 @@ class ObservationImageTests(unittest.TestCase):
 
         self.assertFalse(stability.stable)
         self.assertIn("末尾3帧", stability.reason)
+
+    def test_material_transition_rejects_camera_noise_without_new_ui_state(self) -> None:
+        before = patterned_frame()
+        after = Image.new("RGB", before.size)
+        after.paste(before)
+        after = after.point(lambda value: min(255, value + 1))
+
+        credential = measure_material_visual_transition(
+            [before.copy() for _ in range(4)],
+            [after.copy() for _ in range(4)],
+        )
+
+        self.assertFalse(credential["material"])
+        self.assertLess(credential["max_tile_median_delta"], credential["minimum_tile_delta"])
+
+    def test_material_transition_accepts_small_local_ui_change(self) -> None:
+        before = patterned_frame()
+        after = before.copy()
+        ImageDraw.Draw(after).rectangle((420, 700, 500, 780), fill="#19b45b")
+
+        credential = measure_material_visual_transition(
+            [before.copy() for _ in range(4)],
+            [after.copy() for _ in range(4)],
+        )
+
+        self.assertTrue(credential["material"])
+        self.assertGreaterEqual(credential["max_tile_median_delta"], credential["minimum_tile_delta"])
 
 if __name__ == "__main__":
     unittest.main()

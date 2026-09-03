@@ -27,7 +27,8 @@
 - `observe`：重新观察页面。
 - `tap_semantic`：按语义选择唯一控件并点击。
 - `input_verified_text`：输入文字并逐段验证。
-- `swipe`：按语义方向滑动。
+- `scroll`：按语义方向滚动页面或容器。
+- `swipe_element`：从当前目标元素内部起点沿 Qwen 同帧轨迹直接操纵该元素。
 - `back`：系统返回。
 - `dismiss_overlay`：关闭阻塞弹层。
 - `wait_for_change`：等待页面变化。

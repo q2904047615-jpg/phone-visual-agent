@@ -16,7 +16,7 @@ DeepSeek 会话开始时生成一次轻量有序目标
 
 - `domain`：轻量目标、当前 UI scene、canonical action、Controller 硬校验、瞬时 typed 文字事务、设备/会话/风险不变量。
 - `application`：会话开始时调用一次 DeepSeek；把同一次 Qwen 响应直接绑定为一个 action 或 finish；编排一次观察、一次执行和下一张截图。
-- `infrastructure`：DeepSeek/Qwen provider、新鲜截图观察、单动作 adapter、相机、机械臂、Companion IME、可信包名直启、租约和证据存储。
+- `infrastructure`：DeepSeek/Qwen provider、新鲜截图观察、单动作 adapter、相机、机械臂、有界 ADB Keyboard、可信包名直启、租约和证据存储。
 - `web_app.py`：HTTP/Pydantic 转换和依赖装配。
 
 正式运行不存在 TaskSemanticIR、candidate selector、动作后 DeepSeek replan、持久视觉或输入

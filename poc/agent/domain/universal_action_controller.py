@@ -21,13 +21,14 @@ from agent.domain.validation import DataclassWire, NormalizedBounds, NormalizedP
 from agent.domain.verified_text_transaction import VerifiedTextTransactionError, plan_from_input_states
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-09-02-universal-action-v18"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-09-03-universal-action-v22"
 
-LOCAL_POINT_GROUNDING_SOURCE = "2026-08-25-stable-local-ocr-label-v1"
+LOCAL_POINT_GROUNDING_SOURCE = "2026-09-03-stable-local-visual-surface-v3"
 MAX_LOCAL_GROUNDING_BOX_GAP = 0.06
 
 GESTURE_EDGE_MARGIN = 0.02
 TARGETED_SWIPE_EDGE_MARGIN = 0.08
+ELEMENT_SWIPE_START_INSET_RATIO = 0.06
 MIN_DRAG_DISTANCE = 0.08
 MAX_DRAG_DISTANCE = 0.90
 DRAG_DURATION_SECONDS = 0.8
@@ -81,10 +82,10 @@ class LocalPointGrounding(DataclassWire):
             element.element_id.startswith("local_audited_")
             or element.meaning == "application_text_input"
             or element.meaning.startswith(("input_", "ime_", "switch_keyboard_")),
-            UniversalActionError("输入事务目标不允许使用普通文字落点修正。"),
+            UniversalActionError("输入事务目标不允许使用普通视觉落点修正。"),
         )
         model_bounds = self._normalized_numbers(self.model_bounds, 4, "模型目标框")
-        grounded_bounds = self._normalized_numbers(self.grounded_bounds, 4, "本地文字框")
+        grounded_bounds = self._normalized_numbers(self.grounded_bounds, 4, "本地视觉框")
         proposed = self._normalized_numbers(self.proposed_point, 2, "模型提议落点")
         grounded = self._normalized_numbers(self.grounded_point, 2, "本地修正落点")
         reject_if(
@@ -95,7 +96,7 @@ class LocalPointGrounding(DataclassWire):
         left, top, right, bottom = grounded_bounds
         reject_if(
             not (left <= grounded[0] <= right and top <= grounded[1] <= bottom),
-            UniversalActionError("本地修正落点不在已识别文字框内。"),
+            UniversalActionError("本地修正落点不在已识别视觉框内。"),
         )
         reject_if(
             isinstance(self.matched_frames, bool)
@@ -111,7 +112,7 @@ class LocalPointGrounding(DataclassWire):
         vertical_gap = max(0.0, grounded_top - model_bottom, model_top - grounded_bottom)
         reject_if(
             math.hypot(horizontal_gap, vertical_gap) > MAX_LOCAL_GROUNDING_BOX_GAP,
-            UniversalActionError("本地文字框与模型目标框不属于同一邻近区域。"),
+            UniversalActionError("本地视觉框与模型目标框不属于同一邻近区域。"),
         )
 
 
@@ -172,7 +173,7 @@ class UniversalActionController:
         reject_if(
             local_point_grounding is not None
             and action.action not in {"tap_semantic", "dismiss_overlay", "double_tap", "long_press"},
-            UniversalActionError("本地文字落点只能修正当前已选中的普通点按目标。"),
+            UniversalActionError("本地视觉落点只能修正当前已选中的普通点按目标。"),
         )
 
         def resolved(kind: str | None = None, **values: Any) -> ResolvedSemanticAction:
@@ -342,19 +343,21 @@ class UniversalActionController:
                 target_app_name=target_app_name,
             )
 
-        if action.action == "swipe":
+        if action.action == "scroll":
             direction = str(action.params.get("direction") or "").strip().lower()
             reject_if(
                 direction not in {"up", "down", "left", "right"},
                 UniversalActionError(f"不支持的滑动方向：{direction}"),
             )
+            reject_if(scene.screen_id == "system_recent_tasks" and direction not in {"up", "down"},
+                UniversalActionError("系统后台任务页只允许上下 scroll 寻找目标。"))
             element_id = str(action.params.get("element_id") or "").strip()
             if element_id:
                 element = self._resolve_target(action, scene)
                 self._validate_executable_element(element)
-                start, end = self._targeted_swipe_path(element, direction)
+                start, end = self._targeted_scroll_path(element, direction)
                 return resolved(
-                    "swipe",
+                    "scroll",
                     normalized_point=start,
                     normalized_end_point=end,
                     direction=direction,
@@ -362,7 +365,25 @@ class UniversalActionController:
                     path_distance=math.dist(start, end),
                     target_element_id=element.element_id,
                 )
-            return resolved("swipe", direction=direction)
+            return resolved("scroll", direction=direction)
+
+        if action.action == "swipe_element":
+            element = self._resolve_target(action, scene)
+            self._validate_executable_element(element)
+            start = self._gesture_param_point(action.params.get("start"), "元素滑动起点")
+            end = self._gesture_param_point(action.params.get("end"), "元素滑动终点")
+            self._validate_element_swipe_start(element, start)
+            self._validate_gesture_point(end, label="元素滑动终点")
+            distance = math.dist(start, end)
+            reject_if(not MIN_DRAG_DISTANCE <= distance <= MAX_DRAG_DISTANCE,
+                UniversalActionError(
+                    f"元素滑动轨迹距离必须在{MIN_DRAG_DISTANCE:.2f}～{MAX_DRAG_DISTANCE:.2f}之间。"))
+            direction = self._gesture_direction(start, end)
+            reject_if(scene.screen_id == "system_recent_tasks",
+                UniversalActionError("系统后台任务页不得再用 swipe_element 移除卡片；清理任务必须点击当前截图中的系统一键清理按钮。"))
+            return resolved("swipe_element", normalized_point=start, normalized_end_point=end,
+                direction=direction, hold_seconds=DRAG_DURATION_SECONDS, path_distance=distance,
+                target_element_id=element.element_id)
 
         if action.action in {"back", "home", "open_recent_apps", "wait_for_change"}:
             return resolved()
@@ -378,7 +399,7 @@ class UniversalActionController:
         self._validate_executable_element(element)
         text_transport = str(action.params.get("text_transport") or "mechanical_keyboard")
         reject_if(
-            text_transport not in {"mechanical_keyboard", "companion_ime"},
+            text_transport not in {"mechanical_keyboard", "adb_keyboard"},
             UniversalActionError("文字输入 transport 无效。"),
         )
         input_field_id = str(element.states.get("input_field_id") or "").strip()
@@ -387,13 +408,13 @@ class UniversalActionController:
             UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。"),
         )
 
-        if text_transport == "companion_ime":
+        if text_transport == "adb_keyboard":
             prior = element.states.get("value")
             fragment = action.params.get("input_fragment")
             expected = action.params.get("expected_input_value")
             reject_if(
                 input_field_id in {"", "unknown"} or action.params.get("input_field_id") != input_field_id,
-                UniversalActionError("Companion IME 输入没有绑定当前 typed input_field_id。"),
+                UniversalActionError("ADB Keyboard 输入没有绑定当前 typed input_field_id。"),
             )
             reject_if(
                 not isinstance(prior, str)
@@ -403,17 +424,18 @@ class UniversalActionController:
                 or expected != prior + fragment
                 or expected != text
                 or action.params.get("prior_input_value") != prior,
-                UniversalActionError("Companion IME 输入的 prior/fragment/expected 与当前画面不一致。"),
+                UniversalActionError("ADB Keyboard 输入的 prior/fragment/expected 与当前画面不一致。"),
             )
             reject_if(
                 element.states.get("ime_preedit_text"),
-                UniversalActionError("Companion IME 输入前仍有未完成的输入法组合。"),
+                UniversalActionError("ADB Keyboard 输入前仍有未完成的输入法组合。"),
             )
             self._require_unique_input(
                 scene,
                 element,
+                require_focused=True,
                 require_empty_preedit=True,
-                error="Companion IME 输入要求当前画面只有一个同 typed 字段。",
+                error="ADB Keyboard 输入要求当前画面只有一个同 typed 字段。",
             )
             return resolved(
                 "input_verified_text",
@@ -490,7 +512,7 @@ class UniversalActionController:
         text_transport = str(action.params.get("text_transport") or "mechanical_keyboard")
         input_field_id = str(element.states.get("input_field_id") or "").strip()
         reject_if(
-            text_transport not in {"mechanical_keyboard", "companion_ime"},
+            text_transport not in {"mechanical_keyboard", "adb_keyboard"},
             UniversalActionError("清空文字 transport 无效。"),
         )
         reject_if(
@@ -524,20 +546,21 @@ class UniversalActionController:
         self._require_unique_input(
             scene,
             element,
+            require_focused=True,
             require_text=True,
             error="清空文字要求当前画面只有一个同 typed 非空目标输入框。",
         )
-        if text_transport == "companion_ime":
+        if text_transport == "adb_keyboard":
             reject_if(
                 input_field_id in {"", "unknown"}
                 or action.params.get("input_field_id") != input_field_id
                 or action.params.get("prior_input_value") != observed_value
                 or action.params.get("expected_input_value") != "",
-                UniversalActionError("Companion IME 清空没有绑定当前 typed 文字事务。"),
+                UniversalActionError("ADB Keyboard 清空没有绑定当前 typed 文字事务。"),
             )
         return resolved(
             "clear_verified_text",
-            normalized_point=None if text_transport == "companion_ime" else element.center,
+            normalized_point=None if text_transport == "adb_keyboard" else element.center,
             text="",
             delete_count=delete_count,
             text_transport=text_transport,
@@ -610,6 +633,7 @@ class UniversalActionController:
         target: UIElement,
         *,
         required_states: Mapping[str, Any] | None = None,
+        require_focused: bool = True,
         require_empty_preedit: bool = False,
         require_text: bool = False,
         error: str,
@@ -627,7 +651,7 @@ class UniversalActionController:
                     and str(element.states.get("input_field_id") or "").strip() == typed_field_id
                 )
             )
-            and element.states.get("focused") is True
+            and (not require_focused or element.states.get("focused") is True)
             and all(element.states.get(key) == value for key, value in required_states.items())
             and (not require_empty_preedit or not element.states.get("ime_preedit_text"))
             and (
@@ -794,7 +818,7 @@ class UniversalActionController:
         element.validate()
 
     @classmethod
-    def _targeted_swipe_path(cls, element: UIElement, direction: str) -> tuple[NormalizedPoint, NormalizedPoint]:
+    def _targeted_scroll_path(cls, element: UIElement, direction: str) -> tuple[NormalizedPoint, NormalizedPoint]:
         left, top, right, bottom = element.bounds
         width = right - left
         height = bottom - top
@@ -824,6 +848,37 @@ class UniversalActionController:
             ),
         )
         return start, end
+
+    @staticmethod
+    def _gesture_param_point(value: Any, label: str) -> NormalizedPoint:
+        reject_if(not isinstance(value, (list, tuple)) or len(value) != 2
+            or any(isinstance(part, bool) or not isinstance(part, (int, float))
+            or not math.isfinite(float(part)) for part in value),
+            UniversalActionError(f"{label}格式无效。"))
+        point = (float(value[0]), float(value[1]))
+        reject_if(not all(0.0 <= part <= 1.0 for part in point),
+            UniversalActionError(f"{label}超出归一化画面。"))
+        return point
+
+    @classmethod
+    def _validate_element_swipe_start(cls, element: UIElement, point: NormalizedPoint) -> None:
+        cls._validate_gesture_point(point, label="元素滑动起点")
+        left, top, right, bottom = element.bounds
+        inset_x = (right - left) * ELEMENT_SWIPE_START_INSET_RATIO
+        inset_y = (bottom - top) * ELEMENT_SWIPE_START_INSET_RATIO
+        reject_if(not (left + inset_x <= point[0] <= right - inset_x
+            and top + inset_y <= point[1] <= bottom - inset_y),
+            UniversalActionError("元素滑动起点必须位于当前目标元素内部安全区域。"))
+
+    @staticmethod
+    def _gesture_direction(start: NormalizedPoint, end: NormalizedPoint) -> str:
+        delta_x = end[0] - start[0]
+        delta_y = end[1] - start[1]
+        reject_if(abs(delta_x) == abs(delta_y),
+            UniversalActionError("元素滑动轨迹方向不唯一。"))
+        if abs(delta_x) > abs(delta_y):
+            return "right" if delta_x > 0 else "left"
+        return "down" if delta_y > 0 else "up"
 
     @staticmethod
     def _regions_stably_overlap(before_bounds: NormalizedBounds, after_bounds: NormalizedBounds) -> bool:
@@ -916,10 +971,10 @@ class UniversalActionController:
                 states.get(key) != value,
                 UniversalActionError(f"动作后输入框 {key} 不匹配：实际 {states.get(key)!r}，预期 {value!r}。"),
             )
-        if resolved.text_transport == "companion_ime":
+        if resolved.text_transport == "adb_keyboard":
             reject_if(
                 states.get("ime_preedit_text") not in (None, ""),
-                UniversalActionError("Companion IME 动作后仍残留输入法预编辑文字。"),
+                UniversalActionError("ADB Keyboard 动作后仍残留输入法预编辑文字。"),
             )
         if resolved.kind == "clear_verified_text" and before_input.states.get("ime_preedit_text"):
             reject_if(

@@ -10,16 +10,24 @@ from typing import Any, Iterable, Mapping
 CAPABILITY_PROTOCOL = "2026-08-19-action-capability-v1"
 CAPABILITY_GAP_PROTOCOL = "2026-08-19-capability-gap-v1"
 
-PROMOTABLE_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'swipe', 'back', 'home', 'reveal_system_navigation',
+PROMOTABLE_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'scroll', 'swipe_element', 'back', 'home', 'reveal_system_navigation',
     'input_verified_text', 'double_tap', 'long_press', 'drag'})
 
 CALIBRATION_BOUND_ACTIONS = frozenset({'double_tap', 'long_press', 'drag', 'reveal_system_navigation'})
 
-KNOWN_ACTION_CAPABILITIES = frozenset({'tap_semantic', 'dismiss_overlay', 'swipe', 'reveal_system_navigation', 'back',
+KNOWN_ACTION_CAPABILITIES = frozenset({'tap_semantic', 'dismiss_overlay', 'scroll', 'swipe_element', 'reveal_system_navigation', 'back',
     'home', 'open_recent_apps', 'wait_for_change', 'input_verified_text', 'clear_verified_text', 'long_press', 'drag',
     'double_tap', 'press_enter', 'launch_app', 'pinch', 'hardware_key'})
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_PHYSICAL_CAPABILITY_ALIASES = {'swipe': frozenset({'scroll', 'swipe_element'})}
+
+
+def physical_capability_for_action(action: str) -> str:
+    """Map canonical gesture semantics to the sole device-level swipe transport."""
+
+    resolved = str(action or '').strip()
+    return 'swipe' if resolved in {'scroll', 'swipe_element'} else resolved
 
 
 class ActionCapabilityError(ValueError):
@@ -88,9 +96,13 @@ class DeviceCapabilitySnapshot:
 
 def build_device_capability_snapshot(*, device_id: str, supported_actions: Iterable[str], raw_profile: Mapping[str,
     Any] | None=None) -> DeviceCapabilitySnapshot:
-    supported = frozenset(str(item) for item in supported_actions)
-    unknown = supported - KNOWN_ACTION_CAPABILITIES
+    declared = frozenset(str(item) for item in supported_actions)
+    unknown = declared - KNOWN_ACTION_CAPABILITIES - frozenset(_PHYSICAL_CAPABILITY_ALIASES)
     reject_if(unknown, ActionCapabilityError('设备声明未知动作能力：' + ', '.join(sorted(unknown))))
+    expanded = set(declared & KNOWN_ACTION_CAPABILITIES)
+    for alias in declared & frozenset(_PHYSICAL_CAPABILITY_ALIASES):
+        expanded.update(_PHYSICAL_CAPABILITY_ALIASES[alias])
+    supported = frozenset(expanded)
     raw_actions = raw_profile.get('actions', {}) if isinstance(raw_profile, Mapping) else {}
     if not isinstance(raw_actions, Mapping):
         raw_actions = {}

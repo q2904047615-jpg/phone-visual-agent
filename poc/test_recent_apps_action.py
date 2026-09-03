@@ -38,7 +38,7 @@ def recent_context(objective: str) -> QwenTaskContext:
     task_id = "task-recent-current-frame"
     subgoal_id = "recent-current-step"
     return QwenTaskContext(
-        protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+        protocol_version="2026-09-03-deepseek-required-action-v6",
         task_id=task_id,
         device_id="device-local-01",
         revision=1,
@@ -131,51 +131,44 @@ class RecentAppsActionTests(unittest.TestCase):
         self.assertEqual("open_recent_apps", resolved.kind)
         self.assertEqual(before.fingerprint, resolved.before_fingerprint)
 
-    def test_new_recent_tasks_frame_binds_only_the_qwen_selected_card_and_direction(self) -> None:
-        card = UIElement(
-            element_id="preview-card",
-            role="list_item",
-            meaning="sample_preview_card",
-            label="示例应用",
-            bounds=(0.25, 0.2, 0.75, 0.8),
+    def test_new_recent_tasks_frame_binds_only_the_qwen_selected_clear_all_button(self) -> None:
+        button = UIElement(
+            element_id="clear-all",
+            role="button",
+            meaning="clear_all_recent_tasks",
+            label="×",
+            bounds=(0.45, 0.82, 0.57, 0.92),
             confidence=1.0,
             states={"visible": True, "enabled": True, "fully_visible": True},
-            evidence=("唯一完整可见的应用预览卡片",),
+            evidence=("最近任务页底部唯一圆形清理按钮",),
         )
         current = scene(
             app_id="system",
             screen_id="system_recent_tasks",
             fingerprint="b" * 64,
-            elements=(card,),
+            elements=(button,),
         )
-        for direction in ("left", "right"):
-            with self.subTest(direction=direction):
-                action = bind_same_response_action(
-                    {
-                        "action": "swipe",
-                        "direction": direction,
-                        "element_id": card.element_id,
-                    },
-                    context=recent_context("清除当前截图中的示例应用预览卡片"),
-                    observation=trusted(current),
-                    available_action_kinds={"swipe", "back", "home", "open_recent_apps"},
-                )
-                self.assertEqual(
-                    {"direction": direction, "element_id": card.element_id,
-                     "target": card.meaning, "role": card.role, "label": card.label,
-                     "states": dict(card.states)},
-                    action.params,
-                )
+        action = bind_same_response_action(
+            {
+                "action": "tap_semantic",
+                "element_id": button.element_id,
+            },
+            context=recent_context("清理全部后台应用"),
+            observation=trusted(current),
+            available_action_kinds={"tap_semantic", "scroll", "back", "home", "open_recent_apps"},
+        )
+        self.assertEqual(
+            {"element_id": button.element_id,
+             "target": button.meaning, "role": button.role, "label": button.label,
+             "states": dict(button.states)},
+            action.params,
+        )
 
-                resolved = UniversalActionController().resolve_one(action, current)
-                self.assertEqual("swipe", resolved.kind)
-                self.assertEqual(direction, resolved.direction)
-                self.assertEqual(card.element_id, resolved.target_element_id)
-                self.assertIsNotNone(resolved.normalized_point)
-                self.assertIsNotNone(resolved.normalized_end_point)
-                self.assertGreater(resolved.path_distance or 0.0, 0.0)
-                for point in (resolved.normalized_point, resolved.normalized_end_point):
-                    self.assertTrue(all(0.0 <= value <= 1.0 for value in point or ()))
+        resolved = UniversalActionController().resolve_one(action, current)
+        self.assertEqual("tap_semantic", resolved.kind)
+        self.assertEqual(button.element_id, resolved.target_element_id)
+        self.assertIsNotNone(resolved.normalized_point)
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in resolved.normalized_point or ()))
 
     def test_device_recents_calibration_stays_inside_left_navigation_key(self) -> None:
         configured = load_controller_config()

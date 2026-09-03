@@ -79,7 +79,8 @@ def _capture_stable_frames(controller: Any, *, sleep: Callable[[float], None]) -
 
 
 def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: Any, qwen_provider: Any,
-    active_session: str | None, protocols: Mapping[str, str], sleep: Callable[[float], None]=time.sleep) -> dict[str,
+    active_session: str | None, protocols: Mapping[str, str], text_transport: Any=None,
+    sleep: Callable[[float], None]=time.sleep) -> dict[str,
     Any]:
     """Inspect the current formal runtime without requesting a physical action."""
 
@@ -107,6 +108,19 @@ def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: An
         blockers.append(qwen_blocker)
     if qwen_status.get('configured') and qwen_status.get('model') != DEFAULT_VISION_MODEL:
         blockers.append('正式视觉模型不是 qwen3.7-plus：' + str(qwen_status.get('model') or 'unknown'))
+
+    text_transport_status: dict[str, Any] | None = None
+    if text_transport is not None:
+        try:
+            raw_text_status = text_transport.status()
+            if isinstance(raw_text_status, Mapping):
+                text_transport_status = dict(raw_text_status)
+            else:
+                blockers.append("文字 transport 状态格式无效")
+        except Exception as exc:
+            blockers.append("文字 transport 状态读取失败：" + type(exc).__name__)
+        if text_transport_status is not None and text_transport_status.get("ready") is not True:
+            blockers.append("ADB Keyboard 不可用：" + str(text_transport_status.get("reason_code") or "unknown"))
 
     capability_profile: Mapping[str, Any] = {}
     profile_provider = getattr(controller, "hardware_capability_profile", None)
@@ -158,5 +172,6 @@ def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: An
         'frame_count': len(frames), 'frame_sizes': [list(frame.size) for frame in frames],
         'frame_fingerprints': [_frame_fingerprint(frame) for frame in frames], 'stability': stability,
         'capture_error_type': capture_error}, 'providers': {'deepseek': deepseek_status, 'qwen': qwen_status},
-        'protocols': {str(key): str(value) for key, value in protocols.items()}, 'capabilities': capability_snapshot,
+        'protocols': {str(key): str(value) for key, value in protocols.items()},
+        'text_transport': text_transport_status, 'capabilities': capability_snapshot,
         'blockers': unique_blockers}

@@ -77,7 +77,7 @@
       "image": "images/settings_list_redacted.png",
       "task": {"objective": "继续查看当前设置列表下方的项目", "subgoal_id": "scroll_settings", "execution_class": "navigate", "completion_conditions": ["列表下方出现新的设置项"], "constraints": ["不要点击或修改设置项"]},
       "accepted_statuses": ["action"],
-      "accepted_actions": ["swipe"],
+      "accepted_actions": ["scroll"],
       "expectations": {"page": {"foreground_app_ids": ["settings", "com.android.settings", "system_settings", "android_settings"], "semantic_contains_any": ["settings", "setting", "设置"]}}
     },
     {

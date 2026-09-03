@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from .canonical_action_kinds import CANONICAL_ACTION_KINDS
 from .validation import ValidatedDataclassWire, dataclass_wire, reject_if
 import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-20-deepseek-typed-task-graph-v4"
+DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-09-03-deepseek-required-action-v6"
 SUBGOAL_EXTERNAL_IMPACTS = frozenset({'read_only', 'navigation_only', 'external_state', 'unknown'})
 PLANNER_EFFECT_KINDS = frozenset({'send_message', 'publish_content', 'relationship_change', 'membership_change',
     'data_mutation', 'authentication', 'financial_transaction', 'sensitive_permission_change',
@@ -123,6 +124,7 @@ class Subgoal:
     external_impact: str
     input_field_id: str = ''
     input_operation: str = ''
+    required_action_kind: str = ''
 
     def validate(self) -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
@@ -140,6 +142,10 @@ class Subgoal:
             _validate_id(self.input_field_id, 'subgoals.input_field_id')
             reject_if(self.input_operation not in INPUT_OPERATIONS, TaskGraphError(
                 f'子目标 input_operation 无效：{self.input_operation}'))
+        reject_if(self.required_action_kind and self.required_action_kind not in CANONICAL_ACTION_KINDS,
+            TaskGraphError(f'子目标 required_action_kind 无效：{self.required_action_kind}'))
+        reject_if(bool(self.required_action_kind) and bool(self.input_operation), TaskGraphError(
+            f'子目标不能同时声明 required_action_kind 与 input_operation：{self.subgoal_id}'))
         reject_if(self.status == 'completed' and (not self.completion_evidence), TaskGraphError(f"已完成子目标缺少完成证据：{self.subgoal_id}"))
         reject_if(self.status != 'completed' and self.completion_evidence, TaskGraphError(f"未完成子目标不能携带完成证据：{self.subgoal_id}"))
 
@@ -172,6 +178,8 @@ def _subgoal_wire(subgoal: Subgoal) -> dict[str, Any]:
     if subgoal.input_field_id:
         value['input_field_id'] = subgoal.input_field_id
         value['input_operation'] = subgoal.input_operation
+    if subgoal.required_action_kind:
+        value['required_action_kind'] = subgoal.required_action_kind
     return value
 
 
@@ -504,7 +512,7 @@ def _effect_from_payload(value: Any, *, subgoals: dict[str, Subgoal], entities: 
 def _subgoal_from_payload(value: Any) -> Subgoal:
     raw = _expect_dict(value, 'subgoals[]')
     required = {'subgoal_id', 'objective', 'depends_on', 'constraints', 'completion_conditions'}
-    allowed = required | {'input_field_id', 'input_operation'}
+    allowed = required | {'input_field_id', 'input_operation', 'required_action_kind'}
     retired_runtime_copies = {'status', 'completion_evidence', 'effect_ids', 'execution_class'}
     unexpected = set(raw) - allowed - retired_runtime_copies
     reject_if(unexpected, TaskGraphError('subgoals[] 包含协议外字段：' + ', '.join(sorted(unexpected))))
@@ -512,13 +520,15 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
     item = {key: raw[key] for key in allowed if key in raw}
     field_id = str(item.get('input_field_id') or '').strip().lower()
     operation = str(item.get('input_operation') or '').strip().lower()
+    required_action_kind = str(item.get('required_action_kind') or '').strip().lower()
     return Subgoal(subgoal_id=str(item.get('subgoal_id') or '').strip().lower(),
         objective=_require_text(item.get('objective'), 'subgoals.objective'),
         status='pending', depends_on=_id_tuple(item.get('depends_on'),
         'subgoals.depends_on'), constraints=_text_tuple(item.get('constraints'), 'subgoals.constraints'),
         completion_conditions=_text_tuple(item.get('completion_conditions'), 'subgoals.completion_conditions'),
         completion_evidence=(), risk_action_ids=(),
-        external_impact='navigation_only', input_field_id=field_id, input_operation=operation)
+        external_impact='navigation_only', input_field_id=field_id, input_operation=operation,
+        required_action_kind=required_action_kind)
 
 
 def _definition_object(value: Any, keys: set[str], path: str) -> dict[str, Any]:

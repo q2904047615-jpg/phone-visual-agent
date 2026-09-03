@@ -25,7 +25,7 @@ from agent.domain.validation import NormalizedBounds, dataclass_wire, reject_if
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-01-qwen-same-response-action-finish-v9"
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-03-qwen-required-action-v14"
 QWEN_VISUAL_DECISION_MODEL_ROLE = "single_response_scene_action_or_finish"
 SINGLE_ELEMENT_ACTIONS = frozenset({"tap_semantic", "dismiss_overlay", "input_verified_text", "press_enter",
     "clear_verified_text", "double_tap", "long_press"})
@@ -33,7 +33,8 @@ QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
 
 def _targets_single_element(kind: str, params: Mapping[str, Any]) -> bool:
-    return kind in SINGLE_ELEMENT_ACTIONS or (kind == "swipe" and bool(str(params.get("element_id") or "").strip()))
+    return kind in SINGLE_ELEMENT_ACTIONS or kind == "swipe_element" or (
+        kind == "scroll" and bool(str(params.get("element_id") or "").strip()))
 
 
 @dataclass(frozen=True)

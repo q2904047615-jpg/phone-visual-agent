@@ -1,6 +1,6 @@
 # Qwen 视觉能力离线验收集
 
-本目录用已保存的真实截图验证“页面理解 → 目标定位 → 输入状态 → 完成判断 → 唯一下一动作”。它借鉴 AndroidWorld 的任务集和标准答案思路，但不启动 Android 模拟器：不连接摄像头、网页服务、`main.exe`、机械臂或 Companion IME。
+本目录用已保存的真实截图验证“页面理解 → 目标定位 → 输入状态 → 完成判断 → 唯一下一动作”。它借鉴 AndroidWorld 的任务集和标准答案思路，但不启动 Android 模拟器：不连接摄像头、网页服务、`main.exe`、机械臂或 ADB Keyboard。
 
 ## 输入边界
 
@@ -11,7 +11,7 @@ Qwen 的同一次响应接收当前高层目标、当前设备本轮实际可用
 - 与当前子目标绑定的正向完成条件；
 - 当前稳定帧序列。响应同时发布 scene 和本轮唯一 decision。
 
-正式共享协议只有 `2026-08-20-deepseek-typed-task-graph-v4`。Qwen 必须逐项复用
+正式共享协议只有 `2026-09-03-deepseek-required-action-v6`。Qwen 必须逐项复用
 本地生成的计划定义；它不能生成确认布尔值、旧风险字段或机械权限。v2/v3、
 额外退役字段和伪装成 v4 的旧结构都会被拒绝，不存在迁移 fallback。当前前端/离线交叉夹具为
 `frontend_contract_fixtures/deepseek_typed_task_graph_v4.json`。

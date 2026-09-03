@@ -29,7 +29,8 @@ class GenericSingleActionAdapterPort(Protocol):
     """Minimal application contract implemented by the device adapter."""
 
     def capture_scene(self, goal: Any, *, evidence_dir: Path | None,
-        prefix: str) -> tuple[Any, list[Any], tuple[str, ...], Mapping[str, Any]]: ...
+        prefix: str, available_action_kinds: Any=None
+        ) -> tuple[Any, list[Any], tuple[str, ...], Mapping[str, Any]]: ...
 
     def resolve_app_launch_target(self, app_id: str, app_name: str) -> AppLaunchTarget | None: ...
 

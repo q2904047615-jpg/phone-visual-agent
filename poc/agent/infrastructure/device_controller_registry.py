@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.infrastructure.robot_controller import MockRobotController, RobotController
+from agent.domain.action_capabilities import physical_capability_for_action
 
 
 class DeviceControllerRegistryError(RuntimeError):
@@ -78,14 +79,16 @@ class DeviceControllerRegistry:
 
         resolved_device = str(device_id or "").strip()
         action = str(candidate_action or "").strip()
+        physical_action = physical_capability_for_action(action)
         reject_if(action not in self._promotable_actions, ProvisionalDeviceControllerError(f'动作 {action or 'missing'} 不能进入真机能力验收。'))
         try:
             original = self._controllers[resolved_device]
             descriptor = self._descriptors[resolved_device]
         except KeyError as exc:
             raise ProvisionalDeviceControllerError(f'device_id 未登记或未启用：{resolved_device or 'missing'}。') from exc
-        reject_if(action in original.verified_actions, ProvisionalDeviceControllerError(f'设备能力 {action} 已经通过真机验收。'))
-        verified_actions = set(original.verified_actions) | {action}
+        reject_if(physical_action in original.verified_actions,
+            ProvisionalDeviceControllerError(f'设备能力 {action} 对应的物理能力已经通过真机验收。'))
+        verified_actions = set(original.verified_actions) | {physical_action}
         if isinstance(original, MockRobotController):
             return MockRobotController(verified_actions=verified_actions, device_id=resolved_device)
         return RobotController(descriptor['window_title'] or original.title,

@@ -18,7 +18,7 @@ OUTPUT_ROOT = ROOT / "output" / "xy_calibration"
 ROOT_ACTION_MODES = frozenset(
     {
         "index",
-        "swipe",
+        "scroll",
         "tap",
         "back",
         "input",
@@ -172,7 +172,7 @@ PAGE_STATE = PageStateStore()
 class ActionEventStore:
     ALLOWED_KINDS = frozenset(
         {
-            "swipe",
+        "scroll",
             "tap_semantic",
             "back",
             "input_verified_text",

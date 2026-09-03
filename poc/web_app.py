@@ -54,7 +54,7 @@ from agent.infrastructure.capability_acceptance_runtime import (
 from agent.application.capability_acceptance_planner import (
     CapabilityAcceptanceTaskGraphPlanner,
 )
-from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS, physical_capability_for_action
 from agent.infrastructure.deepseek_intent_provider import (
     DeepSeekIntentProvider,
     IntentProviderError,
@@ -63,7 +63,7 @@ from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter,
     persist_observer_failure_diagnostic,
     stable_qwerty_ocr_anchors,
-    stable_text_ocr_grounding,
+    stable_visual_point_grounding,
 )
 from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
 from agent.application.action_adapter import GenericActionAdapterError
@@ -94,8 +94,8 @@ from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
-from agent.infrastructure.companion_ime_runtime import (
-    CompanionImeRuntimeRegistry,
+from agent.infrastructure.adb_keyboard_transport import (
+    AdbKeyboardRuntimeRegistry,
 )
 
 from agent.infrastructure.robot_controller import (
@@ -120,9 +120,9 @@ DEVICE_REGISTRY_PATH = Path(
 )
 APP_PACKAGE_REGISTRY_PATH = Path(os.environ.get("ROBOT_APP_PACKAGE_REGISTRY",
     Path(__file__).with_name("app_package_registry.json")))
-COMPANION_IME_REGISTRY_PATH = Path(os.environ.get(
-    "ROBOT_COMPANION_IME_REGISTRY",
-    Path(__file__).with_name("companion_ime_registry.json"),
+ADB_KEYBOARD_REGISTRY_PATH = Path(os.environ.get(
+    "ROBOT_ADB_KEYBOARD_REGISTRY",
+    Path(__file__).with_name("adb_keyboard_registry.json"),
 ))
 def current_code_revision() -> str:
     """Return a reproducible revision; dirty worktrees are never promotable."""
@@ -287,12 +287,7 @@ class Runtime:
         self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
-        self.companion_ime_runtime = CompanionImeRuntimeRegistry(
-            COMPANION_IME_REGISTRY_PATH,
-            pairing_state_directory=(
-                WEB_OUTPUT_DIR / "state" / "companion_ime_pairings"
-            ),
-        )
+        self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(ADB_KEYBOARD_REGISTRY_PATH)
         self.generic_scene_observer = SingleStepGenericSceneObserver(
             self.vision_provider,
             qwerty_row_snapper=stable_qwerty_ocr_anchors,
@@ -317,8 +312,8 @@ class Runtime:
                 app_launcher=self.app_launcher_for_device(device_id),
                 controller=UniversalActionController(),
                 qwerty_row_snapper=stable_qwerty_ocr_anchors,
-                text_point_grounder=(
-                    stable_text_ocr_grounding
+                point_grounder=(
+                    stable_visual_point_grounding
                     if not isinstance(
                         self.controller_for_device(device_id),
                         MockRobotController,
@@ -331,9 +326,6 @@ class Runtime:
                 ),
                 device_id=device_id,
                 text_transport=self.text_transport_for_device(device_id),
-                foreground_identity_provider=lambda: (
-                    self.companion_ime_runtime.foreground_identity_for_device(device_id)
-                ),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
@@ -387,7 +379,7 @@ class Runtime:
         return self._app_launchers[device_id]
 
     def text_transport_for_device(self, device_id: str):
-        return self.companion_ime_runtime.transport_for_device(device_id)
+        return self.adb_keyboard_runtime.transport_for_device(device_id)
 
     def capability_code_revision(self) -> str:
         current = current_code_revision()
@@ -418,8 +410,8 @@ class Runtime:
                 robot=provisional_controller,
                 controller=UniversalActionController(),
                 qwerty_row_snapper=stable_qwerty_ocr_anchors,
-                text_point_grounder=(
-                    stable_text_ocr_grounding
+                point_grounder=(
+                    stable_visual_point_grounding
                     if not isinstance(provisional_controller, MockRobotController)
                     else None
                 ),
@@ -429,9 +421,6 @@ class Runtime:
                 ),
                 device_id=device_id,
                 text_transport=self.text_transport_for_device(device_id),
-                foreground_identity_provider=lambda: (
-                    self.companion_ime_runtime.foreground_identity_for_device(device_id)
-                ),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
@@ -478,13 +467,10 @@ class Runtime:
             yield
 
     def start(self) -> None:
-        self.companion_ime_runtime.start()
+        return None
 
     def shutdown(self) -> None:
-        try:
-            self.companion_ime_runtime.stop()
-        finally:
-            self.controller.request_stop()
+        self.controller.request_stop()
 
 
 
@@ -586,6 +572,21 @@ def device() -> dict[str, Any]:
         if callable(capability_profile_provider)
         else None
     )
+    default_text_transport = runtime.text_transport_for_device(runtime.device_controllers.default_device_id)
+    text_transport_status = (default_text_transport.status()
+        if default_text_transport is not None and callable(getattr(default_text_transport, "status", None)) else None)
+    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
+        hardware_capability_profile = dict(hardware_capability_profile)
+        copied_actions = {str(name): dict(spec) for name, spec in
+            dict(hardware_capability_profile.get("actions") or {}).items() if isinstance(spec, dict)}
+        for action_name, operation in (("input_verified_text", "append_text"),
+            ("clear_verified_text", "clear_text")):
+            if action_name in copied_actions:
+                copied_actions[action_name]["text_transport"] = "adb_keyboard"
+                copied_actions[action_name]["operation"] = operation
+                copied_actions[action_name]["implicit_clear"] = False
+                copied_actions[action_name]["retry_on_failure"] = False
+        hardware_capability_profile["actions"] = copied_actions
     profile_actions = (
         hardware_capability_profile.get("actions", {})
         if isinstance(hardware_capability_profile, dict)
@@ -597,13 +598,10 @@ def device() -> dict[str, Any]:
         if isinstance(action, str) and isinstance(spec, dict)
     }
     default_device_id = runtime.device_controllers.default_device_id
-    enabled_physical_actions = {
-        action
-        for action, enabled in (
-            effective_hardware_capabilities or hardware_capabilities
-        ).items()
-        if enabled and action != "wait_for_change"
-    }
+    device_capabilities = effective_hardware_capabilities or hardware_capabilities
+    enabled_physical_actions = {action for action in CANONICAL_ACTION_KINDS
+        if action != "wait_for_change" and bool(device_capabilities.get(
+            physical_capability_for_action(action), False))}
     default_app_launcher = runtime.app_launcher_for_device(default_device_id)
     if bool(getattr(default_app_launcher, "enabled", False)):
         enabled_physical_actions.add("launch_app")
@@ -624,7 +622,7 @@ def device() -> dict[str, Any]:
         "fixed_app_workflows_retired": True,
         "active_orchestrator": "universal_agent",
         "universal_agent": {
-            "goal_protocol": "2026-08-20-deepseek-typed-task-graph-v4",
+            "goal_protocol": "2026-09-03-deepseek-required-action-v6",
             "scene_protocol": UI_SCENE_PROTOCOL_VERSION,
             "action_protocol": CANONICAL_ACTION_PROTOCOL,
             "controller_protocol": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
@@ -641,6 +639,7 @@ def device() -> dict[str, Any]:
             ),
             "hardware_capabilities": hardware_capabilities,
             "hardware_capability_profile": hardware_capability_profile,
+            "text_transport": text_transport_status,
             "supported_app_scope": "dynamic",
             "typed_effect_authority": {
                 "semantic_ir_protocol": None,
@@ -707,9 +706,10 @@ def runtime_doctor(device_id: str) -> dict[str, Any]:
                 controller=controller,
                 deepseek_provider=runtime.intent_provider,
                 qwen_provider=runtime.vision_provider,
+                text_transport=runtime.text_transport_for_device(device_id),
                 active_session=active_session,
                 protocols={
-                    "goal": "2026-08-20-deepseek-typed-task-graph-v4",
+                    "goal": "2026-09-03-deepseek-required-action-v6",
                     "scene": UI_SCENE_PROTOCOL_VERSION,
                     "action": CANONICAL_ACTION_PROTOCOL,
                     "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,

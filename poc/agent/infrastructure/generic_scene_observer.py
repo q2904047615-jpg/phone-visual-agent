@@ -23,7 +23,6 @@ from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
-from agent.domain.foreground_app_identity import ForegroundAppIdentity
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
@@ -50,7 +49,7 @@ from agent.domain.verified_text_transaction import (
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-01-single-step-qwen-action-finish-v6"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-03-single-step-required-action-v10"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-01-input-structure-audit-v12"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
@@ -179,7 +178,6 @@ class _SingleStepObserverBase:
         self._current_stage = "idle"
         self._last_stage = "idle"
         self.supports_runtime_action_contract = True
-        self.supports_trusted_foreground_identity = True
 
     def _set_stage(self, stage: str) -> None:
         with self._stage_lock:
@@ -187,8 +185,8 @@ class _SingleStepObserverBase:
             if stage != 'idle':
                 self._last_stage = stage
 
-    def _provider_chat(self, messages: list[dict[str, Any]], *, max_tokens: int, response_format: dict[str,
-        str] | None=None) -> str:
+    def _provider_chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None,
+        response_format: dict[str, Any] | None=None) -> str:
         return self.provider._chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS, max_attempts=1,
             response_format=response_format or {'type': 'json_object'})
 
@@ -215,25 +213,17 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         return value
 
     def observe(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
-        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None,
-        trusted_foreground_identity: ForegroundAppIdentity | None=None) -> UIScene:
+        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None) -> UIScene:
         scene, _ = self.observe_with_decision(frames=frames, goal_context=goal_context, device_id=device_id,
-            available_action_kinds=available_action_kinds,
-            trusted_foreground_identity=trusted_foreground_identity)
+            available_action_kinds=available_action_kinds)
         return scene
 
     def observe_with_decision(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
-        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None,
-        trusted_foreground_identity: ForegroundAppIdentity | None=None) -> tuple[UIScene, dict[str, Any]]:
+        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None) -> tuple[UIScene, dict[str, Any]]:
         self.last_raw_response = ""
         model_identity = public_model_identity(self.provider.status())
-        if trusted_foreground_identity is not None:
-            trusted_foreground_identity.validate()
-            reject_if(not isinstance(device_id, str) or trusted_foreground_identity.device_id != device_id,
-                VisionAgentError("Companion 前台 App 身份与本轮观察设备不一致。"))
         self.last_diagnostics = {"vision_model": model_identity,
-            "foreground_identity_source": trusted_foreground_identity.source if trusted_foreground_identity else
-            "qwen_visual"}
+            "foreground_identity_source": "qwen_visual"}
         self._set_stage("checking_stability")
         started = time.perf_counter()
         model_calls = 0
@@ -260,11 +250,13 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             request_image_sizes = {_image_request_size(item) for item in model_frames}
             reject_if(len(request_image_sizes) != 1, VisionAgentError("同一步发送给Qwen的稳定帧尺寸不一致，不能建立唯一坐标空间。"))
             request_image_size = next(iter(request_image_sizes))
+            response_format = _single_step_response_format(context,
+                input_structure_required=input_structure_required, request_height=request_image_size[1],
+                available_action_kinds=runtime_actions)
 
             prompt = _single_step_observation_prompt(context, include_input_structure=input_structure_required,
                 image_count=len(model_frames), request_image_size=request_image_size,
-                available_action_kinds=runtime_actions,
-                trusted_foreground_identity=trusted_foreground_identity)
+                available_action_kinds=runtime_actions)
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
             for (index, item) in enumerate(model_frames, start=1):
                 content.extend(({'type': 'text', 'text': f'IMAGE {index} - SAME STABLE PHONE SURFACE'},
@@ -277,7 +269,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             model_calls = 1
             with scope:
                 raw = self._provider_chat([_json_only_system_message(), {'role': 'user', 'content': content}],
-                    max_tokens=SINGLE_STEP_OUTPUT_TOKENS, response_format={'type': 'json_object'})
+                    max_tokens=None, response_format=response_format)
             call_elapsed = round(time.perf_counter() - call_started, 3)
             self.last_raw_response = raw
             self._set_stage("parsing_single_step_observation")
@@ -287,9 +279,6 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             scene_payload = dict(envelope["scene"])
             model_foreground_app_id = str(scene_payload.get("foreground_app_id")
                 or scene_payload.get("app_id") or "unknown").strip()
-            if trusted_foreground_identity is not None:
-                scene_payload["foreground_app_id"] = trusted_foreground_identity.package_name
-                scene_payload["app_id"] = trusted_foreground_identity.package_name
             single_step_input_surface = _single_step_input_surface_attestation(scene_payload,
                 input_structure=envelope["input_structure"], goal_context=context) if input_structure_required else None
             obstructions = consensus_top_edge_obstructions(frames[stable_tail_start:])
@@ -325,15 +314,12 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 'frame_size': list(frame.size), 'request_image_size': list(request_image_size),
                 'coordinate_normalization': envelope.get('coordinate_normalization'), 'fingerprint': fingerprint,
                 'element_count': len(scene.elements), 'decision_status': model_decision['status'],
-                'foreground_identity_source': trusted_foreground_identity.source
-                if trusted_foreground_identity else 'qwen_visual',
-                'trusted_foreground_app_id': trusted_foreground_identity.package_name
-                if trusted_foreground_identity else None,
+                'foreground_identity_source': 'qwen_visual',
                 'model_foreground_app_id': model_foreground_app_id,
                 'available_action_kinds': list(runtime_actions),
                 'local_visual_obstructions': [item.to_dict() for item in obstructions],
                 'model_call_elapsed_seconds': [call_elapsed],
-                'model_call_token_budgets': [SINGLE_STEP_OUTPUT_TOKENS],
+                'model_call_token_budgets': [None],
                 'elapsed_seconds': round(time.perf_counter() - started, 3)}
             self._set_stage("completed")
             return scene, model_decision
@@ -347,10 +333,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 'online_stages': ['single_step_observation'] if model_calls else [],
                 'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
                 'failed_stage': failed_stage, 'fingerprint': fingerprint, 'error': str(exc),
-                'foreground_identity_source': trusted_foreground_identity.source
-                if trusted_foreground_identity else 'qwen_visual',
-                'trusted_foreground_app_id': trusted_foreground_identity.package_name
-                if trusted_foreground_identity else None,
+                'foreground_identity_source': 'qwen_visual',
                 'error_type': classify_qwen_error(exc, raw_response=self.last_raw_response),
                 'safe_stop_reason': '单次模型输出未建立完整可信观察；没有发起第二次Qwen请求，控制器与机械臂均未执行。',
                 'raw_response_length': len(self.last_raw_response),
@@ -393,12 +376,11 @@ LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
 
 def _single_step_observation_prompt(context: dict[str, Any], *, include_input_structure: bool,
     image_count: int, request_image_size: tuple[int, int],
-    available_action_kinds: tuple[str, ...],
-    trusted_foreground_identity: ForegroundAppIdentity | None=None) -> str:
+    available_action_kinds: tuple[str, ...]) -> str:
     request_width, request_height = request_image_size
+    current_goal = _goal_view(context).observation_context
     scene_contract = _compact_prompt(context, wire_height=request_height,
-        input_structure_is_value_authority=include_input_structure,
-        trusted_foreground_identity=trusted_foreground_identity)
+        input_structure_is_value_authority=include_input_structure)
     if include_input_structure:
         input_contract = _input_structure_audit_prompt(context, wire_height=request_height)
         input_rule = ("input_structure报告下面INPUT CONTRACT中当前可见的最小事实；空输入只需合法bounds和"
@@ -412,7 +394,8 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
         INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule,
         INPUT_RULE=input_rule, REQUEST_WIDTH=str(request_width), REQUEST_HEIGHT=str(request_height),
         OBSERVATION_PROTOCOL=SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION,
-        AVAILABLE_ACTIONS_JSON=json.dumps(list(available_action_kinds), ensure_ascii=False, separators=(',', ':')))
+        AVAILABLE_ACTIONS_JSON=json.dumps(list(available_action_kinds), ensure_ascii=False, separators=(',', ':')),
+        CURRENT_SUBGOAL_JSON=json.dumps(current_goal, ensure_ascii=False, separators=(',', ':')))
 
 
 def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, ...]:
@@ -425,6 +408,94 @@ def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, .
     reject_if(not normalized or '' in normalized or normalized - CANONICAL_ACTION_KINDS,
         VisionAgentError("本轮可用动作集合为空或包含协议外动作。"))
     return tuple(sorted(normalized))
+
+
+def _single_step_response_format(context: dict[str, Any], *, input_structure_required: bool,
+    request_height: int, available_action_kinds: tuple[str, ...]) -> dict[str, Any]:
+    """Constrain impossible pending-transition finishes before Qwen generates them."""
+
+    receipt = _goal_view(context).focus.get('transition_receipt')
+    pending_transition = bool(isinstance(receipt, Mapping) and receipt.get('state') == 'pending')
+    decision_required = ['status', 'action'] if pending_transition else ['status']
+    status_values = ['action'] if pending_transition else ['action', 'finish']
+    input_schema: dict[str, Any]
+    if input_structure_required:
+        input_schema = {
+            'type': 'object',
+            'properties': {
+                'protocol_version': {'type': 'string'},
+                'application_inputs': {'type': 'array', 'items': {'type': 'object',
+                    'additionalProperties': True}},
+                'ime_preedit_regions': {'type': 'array', 'items': {'type': 'object',
+                    'additionalProperties': True}},
+                'keyboard': {'type': ['object', 'null'], 'additionalProperties': True},
+            },
+            'required': ['protocol_version', 'application_inputs', 'ime_preedit_regions', 'keyboard'],
+            'additionalProperties': False,
+        }
+    else:
+        input_schema = {'type': 'null'}
+    schema = {
+        'type': 'object',
+        'properties': {
+            'protocol_version': {'type': 'string', 'enum': [SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION]},
+            'coordinate_space': {
+                'type': 'object',
+                'properties': {
+                    'kind': {'type': 'string', 'enum': ['axis_grid']},
+                    'width': {'type': 'integer', 'enum': [1000]},
+                    'height': {'type': 'integer', 'enum': [request_height]},
+                },
+                'required': ['kind', 'width', 'height'],
+                'additionalProperties': False,
+            },
+            'scene': {
+                'type': 'object',
+                'properties': {
+                    'protocol_version': {'type': 'string', 'enum': [UI_SCENE_PROTOCOL_VERSION]},
+                    'foreground_app_id': {'type': 'string'},
+                    'screen_id': {'type': 'string'},
+                    'summary': {'type': 'string'},
+                    'system_ui': {'type': 'object', 'additionalProperties': True},
+                    'camera_alignment': {'type': 'object', 'additionalProperties': True},
+                    'elements': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': True}},
+                    'overlays': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': True}},
+                    'stable': {'type': 'boolean'},
+                    'confidence': {'type': 'number'},
+                    'fingerprint': {'type': 'string'},
+                },
+                'required': ['protocol_version', 'foreground_app_id', 'screen_id', 'summary', 'system_ui',
+                    'camera_alignment', 'elements', 'overlays', 'stable', 'confidence', 'fingerprint'],
+                'additionalProperties': False,
+            },
+            'input_structure': input_schema,
+            'decision': {
+                'type': 'object',
+                'properties': {
+                    'status': {'type': 'string', 'enum': status_values},
+                    'action': {'type': 'string', 'enum': list(available_action_kinds)},
+                    'element_id': {'type': 'string'},
+                    'source_element_id': {'type': 'string'},
+                    'destination_element_id': {'type': 'string'},
+                    'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right']},
+                    'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
+                    'end': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
+                    'evidence_refs': {'type': 'array', 'items': {'type': 'string'}},
+                    'confidence': {'type': 'number'},
+                    'reason': {'type': 'string'},
+                },
+                'required': decision_required,
+                'additionalProperties': False,
+            },
+        },
+        'required': ['protocol_version', 'coordinate_space', 'scene', 'input_structure', 'decision'],
+        'additionalProperties': False,
+    }
+    return {'type': 'json_schema', 'json_schema': {
+        'name': 'pending_transition_observation' if pending_transition else 'current_scene_observation',
+        'strict': True,
+        'schema': schema,
+    }}
 
 
 def _decision_element_ids(decision: Mapping[str, Any]) -> tuple[str, ...]:
@@ -475,6 +546,16 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
         result['bounds'] = bounds
         return result
 
+    def normalized_point(value: Any, *, label: str) -> list[int]:
+        valid_shape = bool(isinstance(value, (list, tuple)) and len(value) == 2
+            and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value))
+        reject_if(not valid_shape, UISceneError(f"{label}格式无效。"))
+        x, y = (float(part) for part in value)
+        reject_if(not (math.isfinite(x) and math.isfinite(y)
+            and 0 <= x <= 1000 and 0 <= y <= request_height),
+            UISceneError(f"{label}超出声明的axis_grid。"))
+        return [round(x), round(y * 1000 / request_height)]
+
     scene = payload.get('scene')
     reject_if(_contains_action_like_wire_key(scene), UISceneError("单步观察scene包含动作或计划字段。"))
     selected_ids = set(_decision_element_ids(decision))
@@ -499,6 +580,10 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
                 normalized['bounds'] = bounds
                 normalized_elements.append(normalized)
         scene['elements'] = normalized_elements
+
+    if decision.get('action') == 'swipe_element':
+        decision['start'] = normalized_point(decision.get('start'), label='swipe_element.start')
+        decision['end'] = normalized_point(decision.get('end'), label='swipe_element.end')
 
     input_structure = payload.get('input_structure')
     reject_if(_contains_action_like_wire_key(input_structure),
@@ -591,7 +676,8 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
     """Parse one current-scene response without remote repair or resampling."""
 
     try:
-        payload = _extract_json_object(raw, reject_duplicate_keys=True)
+        payload = _extract_json_object(raw, reject_duplicate_keys=True,
+            unwrap_singleton_object_array=True)
         required = {'coordinate_space', 'scene', 'decision'}
         missing = sorted(required - set(payload))
         reject_if(bool(missing), UISceneError("单步观察封装结构无效；缺少字段：" + ", ".join(missing)))
@@ -615,8 +701,7 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
 
 
 def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
-    input_structure_is_value_authority: bool=False,
-    trusted_foreground_identity: ForegroundAppIdentity | None=None) -> str:
+    input_structure_is_value_authority: bool=False) -> str:
     context = _goal_view(context).observation_context
     if _goal_view(context).mode_switch_requested:
         keyboard_switch_rule = (" 当前子目标明确要求切换键盘输入模式；本轮快速观察不得在elements中报告或定位"
@@ -630,17 +715,10 @@ def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
         "键盘模式、IME和可执行输入几何只在同一响应的input_structure中按当前动作需要报告。"
         + LOCAL_TEXT_CLEAR_OBSERVATION_RULE) if input_structure_is_value_authority else
         INPUT_VALUE_AND_MODE_OBSERVATION_RULE + keyboard_switch_rule + LOCAL_TEXT_CLEAR_OBSERVATION_RULE)
-    if trusted_foreground_identity is None:
-        foreground_identity_rule = ("桌面写 launcher；系统最近任务页面必须写foreground_app_id=system、"
-            "screen_id=system_recent_tasks；不确定写 unknown。不得把目标App当成当前App，也不得把"
-            "current_foreground、current_app、foreground_app、target_app 或 active_app 等引用占位符"
-            "写成foreground_app_id；该字段只能来自当前画面的视觉身份。")
-    else:
-        trusted_foreground_identity.validate()
-        foreground_identity_rule = ("本地已通过配对签名和Android系统接口确定当前前台包名为"
-            f"{trusted_foreground_identity.package_name}（source={trusted_foreground_identity.source}）。"
-            "foreground_app_id必须逐字写该包名；不得根据JPEG、目标App、嵌入内容或页面文字改写、"
-            "覆盖或否决。你仍须仅根据当前JPEG判断screen_id、控件和页面语义。")
+    foreground_identity_rule = ("桌面写 launcher；系统最近任务页面必须写foreground_app_id=system、"
+        "screen_id=system_recent_tasks；不确定写 unknown。不得把目标App当成当前App，也不得把"
+        "current_foreground、current_app、foreground_app、target_app 或 active_app 等引用占位符"
+        "写成foreground_app_id；该字段只能来自当前画面的视觉身份。")
     return _render_prompt("compact_scene.txt", CONTEXT=json.dumps(context, ensure_ascii=False, separators=(',', ':')),
         INPUT_RULE=input_rule, MAX_ELEMENTS=str(MAX_COMPACT_ELEMENTS), WIRE_HEIGHT=str(wire_height),
         SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION, FOREGROUND_IDENTITY_RULE=foreground_identity_rule)
@@ -1280,6 +1358,69 @@ def _audited_input_has_focus_cue(audited_input: dict[str, Any]) -> bool:
     return False
 
 
+def _locally_verified_blinking_caret(audited_input: dict[str, Any], *,
+    frames: tuple[Image.Image, ...] | list[Image.Image] | None) -> bool:
+    """Confirm one narrow blinking caret inside the sole audited input bounds."""
+
+    if not frames or len(frames) < 4 or not _valid_1000_bounds(audited_input.get('input_bounds')):
+        return False
+    if any(not isinstance(frame, Image.Image) for frame in frames):
+        return False
+    sizes = {tuple(frame.size) for frame in frames}
+    if len(sizes) != 1:
+        return False
+    frame_width, frame_height = next(iter(sizes))
+    left, top, right, bottom = (float(part) for part in audited_input['input_bounds'])
+    crop_box = (max(0, round(left * frame_width / 1000)), max(0, round(top * frame_height / 1000)),
+        min(frame_width, round(right * frame_width / 1000)),
+        min(frame_height, round(bottom * frame_height / 1000)))
+    crop_width, crop_height = crop_box[2] - crop_box[0], crop_box[3] - crop_box[1]
+    if crop_width < 40 or crop_height < 18:
+        return False
+    pixels = [tuple(frame.convert('L').crop(crop_box).tobytes()) for frame in frames]
+    if any(len(values) != crop_width * crop_height for values in pixels):
+        return False
+    changing = [max(values) - min(values) >= 24 for values in zip(*pixels)]
+    visited: set[int] = set()
+    candidates: list[tuple[int, int, int, int]] = []
+    for start, enabled in enumerate(changing):
+        if not enabled or start in visited:
+            continue
+        stack = [start]
+        visited.add(start)
+        xs: list[int] = []
+        ys: list[int] = []
+        while stack:
+            point = stack.pop()
+            x, y = point % crop_width, point // crop_width
+            xs.append(x)
+            ys.append(y)
+            for neighbor_y in range(max(0, y - 1), min(crop_height, y + 2)):
+                for neighbor_x in range(max(0, x - 1), min(crop_width, x + 2)):
+                    neighbor = neighbor_y * crop_width + neighbor_x
+                    if changing[neighbor] and neighbor not in visited:
+                        visited.add(neighbor)
+                        stack.append(neighbor)
+        component_width = max(xs) - min(xs) + 1
+        component_height = max(ys) - min(ys) + 1
+        area = len(xs)
+        if (min(xs) <= 1 or min(ys) <= 1 or max(xs) >= crop_width - 2 or max(ys) >= crop_height - 2
+            or component_width > max(8, round(crop_width * 0.02))
+            or component_height < max(10, round(crop_height * 0.25))
+            or component_height > round(crop_height * 0.9)
+            or component_height < 3.5 * component_width
+            or area < max(12, round(component_height * 0.45))
+            or area / (component_width * component_height) < 0.25):
+            continue
+        region = tuple((y * crop_width + x for y in range(min(ys), max(ys) + 1)
+            for x in range(min(xs), max(xs) + 1)))
+        means = sorted(sum(values[index] for index in region) / len(region) for values in pixels)
+        if max((second - first for first, second in zip(means, means[1:])), default=0.0) < 15:
+            continue
+        candidates.append((min(xs), min(ys), max(xs), max(ys)))
+    return len(candidates) == 1
+
+
 def _append_audited_input_element(elements: list[dict[str, Any]], audited_input: dict[str, Any], *, field_id: str,
     field_label: str, multiline: bool, active_clear_goal: bool, keyboard: _AuditedKeyboard,
     controls: _AuditedInputControls, input_element_id: str='local_audited_input_1') -> None:
@@ -1303,7 +1444,8 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
         states["soft_keyboard_visible"] = False
     if audited_input['placeholder']:
         states["placeholder"] = audited_input["placeholder"]
-    if keyboard.visible or _audited_input_has_focus_cue(audited_input):
+    if (keyboard.visible or _audited_input_has_focus_cue(audited_input)
+        or audited_input.get('local_blinking_caret_verified') is True):
         states["focused"] = True
     if keyboard.visible:
         states.update(keyboard_layout=keyboard.layout, keyboard_input_mode=keyboard.input_mode,
@@ -1319,6 +1461,8 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
         states["ime_preedit_text"] = controls.clearable_preedit
 
     evidence = list(dict.fromkeys((*audited_input['field_labels'], *audited_input['visible_editable_cues'])))
+    if audited_input.get('local_blinking_caret_verified') is True:
+        evidence.append('本地稳定多帧在唯一输入框内确认单一闪烁插入光标')
     text = audited_input["text"]
     if text:
         evidence.insert(0, f"应用输入框当前文字：{text}")
@@ -1522,6 +1666,10 @@ def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str, 
         switch_is_goal = goal.mode_switch_requested
         active_clear_goal = goal.clear_requested
         trusted_input = _unique_audited_input(matches, label=active_field_label)
+        if trusted_input is not None and _locally_verified_blinking_caret(trusted_input,
+            frames=(tuple(qwerty_row_frames) if qwerty_row_frames is not None else None)):
+            trusted_input = dict(trusted_input)
+            trusted_input['local_blinking_caret_verified'] = True
         predecessor_field_id, predecessor_field_label, predecessor_text = goal.predecessor
         predecessor_input = _unique_audited_input(matches, label=predecessor_field_label,
             text=predecessor_text) if predecessor_field_id else None

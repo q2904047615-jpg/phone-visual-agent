@@ -8,16 +8,17 @@ import statistics
 import time
 import re
 import uuid
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image, ImageChops, ImageStat
+import numpy as np
+from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutor
 from agent.domain.confirmation_authority import ConfirmationAuthority
-from agent.domain.foreground_app_identity import ForegroundAppIdentity
 from agent.domain.text_transport import text_digest
 from agent.application.text_transport import TrustedTextTransportPort
 from agent.infrastructure import RobotDeviceExecutor
@@ -29,6 +30,7 @@ from agent.infrastructure.windows_ocr_runtime import find_text, recognize as rec
 from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
+    measure_material_visual_transition,
     measure_static_band_identity_delta,
 )
 from agent.infrastructure.orientation_safety import (
@@ -46,6 +48,7 @@ from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import UIElement, UIScene, UISceneError
 from agent.domain.universal_action_controller import (
     LOCAL_POINT_GROUNDING_SOURCE,
+    MAX_LOCAL_GROUNDING_BOX_GAP,
     LocalPointGrounding,
     ResolvedSemanticAction,
     UniversalActionController,
@@ -207,26 +210,56 @@ def stable_qwerty_ocr_anchors(frames: tuple[Image.Image, ...] | list[Image.Image
         return None
 
 
-def stable_text_ocr_grounding(frames: tuple[Image.Image, ...] | list[Image.Image], scene: UIScene,
-    action: SemanticAction, *, ocr_recognizer: Any=recognize_ocr) -> LocalPointGrounding | None:
-    """Refine a fixed canonical target point only from a stable unique exact-label OCR match."""
+class LocalPointGroundingAmbiguousError(RuntimeError):
+    """Positive local evidence found multiple equally plausible surfaces."""
 
+
+@dataclass(frozen=True)
+class _SurfaceCandidate:
+    bounds: tuple[int, int, int, int]
+    point: tuple[int, int]
+    area: int
+    interior_depth: int
+    score: float
+
+
+def _target_for_local_point_grounding(scene: UIScene, action: SemanticAction) -> UIElement | None:
     if action.action not in {'tap_semantic', 'dismiss_overlay', 'double_tap', 'long_press'}:
-        return None
-    frame_list = list(frames)[-3:]
-    if not frame_list or not scene.fingerprint:
         return None
     element_id = str(action.params.get("element_id") or "").strip()
     try:
         element = scene.get_element(element_id)
     except UISceneError:
         return None
-    if (element.role not in {'button', 'icon', 'text', 'tab', 'toggle', 'image',
-        'list_item'} or element.element_id.startswith('local_audited_') or element.meaning == 'application_text_input'
-        or element.meaning.startswith(('input_', 'ime_', 'switch_keyboard_')) or (str(action.params.get('label')
-        or '') != element.label) or (str(action.params.get('target') or '') != element.meaning)
-        or (str(action.params.get('role') or '') != element.role)):
+    if (element.role not in {'button', 'icon', 'text', 'tab', 'toggle', 'image', 'list_item'}
+        or element.element_id.startswith('local_audited_')
+        or element.meaning == 'application_text_input'
+        or element.meaning.startswith(('input_', 'ime_', 'switch_keyboard_'))
+        or str(action.params.get('label') or '') != element.label
+        or str(action.params.get('target') or '') != element.meaning
+        or str(action.params.get('role') or '') != element.role):
         return None
+    return element
+
+
+def _grounding_from_geometry(*, scene: UIScene, element: UIElement,
+    grounded_bounds: NormalizedBounds, grounded_point: NormalizedPoint,
+    matched_frames: int, inspected_frames: int) -> LocalPointGrounding:
+    grounding = LocalPointGrounding(source=LOCAL_POINT_GROUNDING_SOURCE, scene_fingerprint=scene.fingerprint,
+        element_id=element.element_id, label=element.label,
+        model_bounds=tuple(float(value) for value in element.bounds),
+        proposed_point=tuple(float(value) for value in element.center),
+        grounded_bounds=tuple(float(value) for value in grounded_bounds),
+        grounded_point=tuple(float(value) for value in grounded_point),
+        matched_frames=matched_frames, inspected_frames=inspected_frames)
+    grounding.validate_for(scene, element)
+    return grounding
+
+
+def _stable_exact_text_grounding(frames: list[Image.Image], scene: UIScene, element: UIElement,
+    *, ocr_recognizer: Any) -> LocalPointGrounding | None:
+    """Return stable unique exact-label geometry without owning fallback policy."""
+
     label = element.label.strip()
     compact_label = re.sub(r"[\s\u3000]+", "", label)
     if len(compact_label) < 2 or len(compact_label) > 64:
@@ -245,48 +278,255 @@ def stable_text_ocr_grounding(frames: tuple[Image.Image, ...] | list[Image.Image
             return None
         return bounds, ((left + right) / 2.0, (top + bottom) / 2.0)
 
-    try:
-        inspected_frames = 1
-        newest = unique_match_geometry(frame_list[-1])
-        if newest is None:
-            return None
-        proposed_point = element.center
-        # Keep an already matching Qwen center and avoid another local OCR pass.
-        if math.dist(proposed_point, newest[1]) <= 0.025:
-            return None
-
-        stable_matches = [newest]
-        for frame in reversed(frame_list[:-1]):
-            inspected_frames += 1
-            candidate = unique_match_geometry(frame)
-            if candidate is None:
-                continue
-            if math.dist(candidate[1], newest[1]) > 0.015:
-                continue
-            if (any((abs(candidate[0][index + 2] - candidate[0][index] - (newest[0][index + 2] - newest[0][index])) >
-                0.03 for index in (0, 1)))):
-                continue
-            stable_matches.append(candidate)
-            if len(stable_matches) >= 2:
-                break
-        if len(stable_matches) < 2:
-            return None
-
-        grounded_bounds = tuple((float(statistics.median((match[0][index] for match in stable_matches))) for index
-            in range(4)))
-        grounded_point = ((grounded_bounds[0] + grounded_bounds[2]) / 2.0,
-            (grounded_bounds[1] + grounded_bounds[3]) / 2.0)
-        if math.dist(proposed_point, grounded_point) <= 0.025:
-            return None
-        grounding = LocalPointGrounding(source=LOCAL_POINT_GROUNDING_SOURCE, scene_fingerprint=scene.fingerprint,
-            element_id=element.element_id, label=element.label,
-            model_bounds=tuple((float(value) for value in element.bounds)),
-            proposed_point=tuple((float(value) for value in proposed_point)), grounded_bounds=grounded_bounds,
-            grounded_point=grounded_point, matched_frames=len(stable_matches), inspected_frames=inspected_frames)
-        grounding.validate_for(scene, element)
-        return grounding
-    except Exception:
+    inspected_frames = 1
+    newest = unique_match_geometry(frames[-1])
+    if newest is None:
         return None
+    proposed_point = element.center
+    if math.dist(proposed_point, newest[1]) <= 0.025:
+        return None
+
+    stable_matches = [newest]
+    for frame in reversed(frames[:-1]):
+        inspected_frames += 1
+        candidate = unique_match_geometry(frame)
+        if candidate is None or math.dist(candidate[1], newest[1]) > 0.015:
+            continue
+        if any(abs(candidate[0][index + 2] - candidate[0][index]
+            - (newest[0][index + 2] - newest[0][index])) > 0.03 for index in (0, 1)):
+            continue
+        stable_matches.append(candidate)
+        if len(stable_matches) >= 2:
+            break
+    if len(stable_matches) < 2:
+        return None
+
+    grounded_bounds = tuple(float(statistics.median(match[0][index] for match in stable_matches))
+        for index in range(4))
+    grounded_point = ((grounded_bounds[0] + grounded_bounds[2]) / 2.0,
+        (grounded_bounds[1] + grounded_bounds[3]) / 2.0)
+    if math.dist(proposed_point, grounded_point) <= 0.025:
+        return None
+    return _grounding_from_geometry(scene=scene, element=element, grounded_bounds=grounded_bounds,
+        grounded_point=grounded_point, matched_frames=len(stable_matches), inspected_frames=inspected_frames)
+
+
+def _box_intersection(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> int:
+    return max(0, min(first[2], second[2]) - max(first[0], second[0])) * max(
+        0, min(first[3], second[3]) - max(first[1], second[1]))
+
+
+def _box_iou(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
+    intersection = _box_intersection(first, second)
+    first_area = max(0, first[2] - first[0]) * max(0, first[3] - first[1])
+    second_area = max(0, second[2] - second[0]) * max(0, second[3] - second[1])
+    union = first_area + second_area - intersection
+    return float(intersection) / union if union > 0 else 0.0
+
+
+def _deepest_component_point(component: np.ndarray, *, offset_x: int,
+    offset_y: int) -> tuple[tuple[int, int], int]:
+    """Choose a maximum-depth point after surrounding the component with background."""
+
+    # A connected component is cropped to its own bounds.  Eroding that tight crop
+    # lets Pillow replicate foreground edge pixels outside the image and can leave a
+    # false "deepest" point on the component boundary.  An explicit background pad
+    # makes every visible edge participate in the distance-to-boundary calculation.
+    padded = np.pad(np.asarray(component, dtype=bool), 1, mode='constant', constant_values=False)
+    mask = Image.fromarray(np.where(padded, 255, 0).astype(np.uint8), mode='L')
+    deepest = np.argwhere(padded)
+    interior_depth = 0
+    for _ in range(max(1, min(component.shape) // 2 + 1)):
+        eroded = mask.filter(ImageFilter.MinFilter(3))
+        coordinates = np.argwhere(np.asarray(eroded, dtype=np.uint8) > 0)
+        if coordinates.size == 0:
+            break
+        mask = eroded
+        deepest = coordinates
+        interior_depth += 1
+    center_y = float(np.median(deepest[:, 0]))
+    center_x = float(np.median(deepest[:, 1]))
+    nearest = min(deepest, key=lambda value: (float(value[0]) - center_y) ** 2
+        + (float(value[1]) - center_x) ** 2)
+    return ((offset_x + int(nearest[1]) - 1, offset_y + int(nearest[0]) - 1),
+        interior_depth)
+
+
+def _surface_candidates(frame: Image.Image, model_bounds: NormalizedBounds) -> list[_SurfaceCandidate]:
+    """Detect generic filled control surfaces near one already-selected model box."""
+
+    rgb = frame.convert('RGB')
+    width, height = rgb.size
+    if width <= 0 or height <= 0:
+        return []
+    model = (round(model_bounds[0] * width), round(model_bounds[1] * height),
+        round(model_bounds[2] * width), round(model_bounds[3] * height))
+    model_width = max(1, model[2] - model[0])
+    model_height = max(1, model[3] - model[1])
+    margin_x = round(min(width * 0.05, model_width * 0.50))
+    margin_y = round(min(height * 0.055, model_height * 1.20))
+    crop_box = (max(0, model[0] - margin_x), max(0, model[1] - margin_y),
+        min(width, model[2] + margin_x), min(height, model[3] + margin_y))
+    if crop_box[2] - crop_box[0] < 3 or crop_box[3] - crop_box[1] < 3:
+        return []
+    pixels = np.asarray(rgb.crop(crop_box).filter(ImageFilter.GaussianBlur(2)), dtype=np.int16)
+    crop_height, crop_width = pixels.shape[:2]
+    seed_points: set[tuple[int, int]] = set()
+    for x_fraction in (0.10, 0.30, 0.50, 0.70, 0.90):
+        for y_fraction in (0.12, 0.32, 0.52, 0.72):
+            seed_x = max(0, min(crop_width - 1,
+                round(model[0] + model_width * x_fraction) - crop_box[0]))
+            seed_y = max(0, min(crop_height - 1,
+                round(model[1] + model_height * y_fraction) - crop_box[1]))
+            seed_points.add((seed_x, seed_y))
+    # A model box can be slightly beyond a visible control instead of merely
+    # overlapping it.  Probe the already-bounded neighborhood as well; later
+    # geometry still requires one stable component within the domain gap.
+    for x_fraction in (0.08, 0.22, 0.38, 0.55, 0.72, 0.88):
+        for y_fraction in (0.08, 0.20, 0.34, 0.50, 0.68, 0.85):
+            seed_points.add((max(0, min(crop_width - 1, round((crop_width - 1) * x_fraction))),
+                max(0, min(crop_height - 1, round((crop_height - 1) * y_fraction)))))
+    seeds = [(seed_x, seed_y, pixels[seed_y, seed_x])
+        for seed_x, seed_y in sorted(seed_points)]
+
+    raw_candidates: list[_SurfaceCandidate] = []
+    model_area = model_width * model_height
+    model_diagonal = max(1.0, math.hypot(model_width, model_height))
+    model_center = ((model[0] + model[2]) / 2.0, (model[1] + model[3]) / 2.0)
+    mask_cache: dict[tuple[int, int, int], np.ndarray] = {}
+    component_claims: dict[tuple[int, int, int], np.ndarray] = {}
+    for seed_x, seed_y, seed_color in seeds:
+        color_key = tuple(int(value) // 8 for value in seed_color)
+        mask_array = mask_cache.get(color_key)
+        if mask_array is None:
+            delta = np.abs(pixels - seed_color)
+            squared_delta = delta.astype(np.int32) ** 2
+            raw_mask = np.logical_and(np.max(delta, axis=2) <= 48,
+                np.sum(squared_delta, axis=2) <= 58 * 58)
+            mask = Image.fromarray(np.where(raw_mask, 255, 0).astype(np.uint8), mode='L')
+            mask = mask.filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))
+            mask_array = np.asarray(mask, dtype=np.uint8) > 0
+            mask_cache[color_key] = mask_array
+        claimed = component_claims.setdefault(color_key, np.zeros((crop_height, crop_width), dtype=bool))
+        if not mask_array[seed_y, seed_x] or claimed[seed_y, seed_x]:
+            continue
+        queue: deque[tuple[int, int]] = deque(((seed_x, seed_y),))
+        visited = np.zeros((crop_height, crop_width), dtype=bool)
+        visited[seed_y, seed_x] = True
+        points: list[tuple[int, int]] = []
+        while queue:
+            x, y = queue.popleft()
+            points.append((x, y))
+            for next_x, next_y in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if (0 <= next_x < crop_width and 0 <= next_y < crop_height
+                    and mask_array[next_y, next_x] and not visited[next_y, next_x]):
+                    visited[next_y, next_x] = True
+                    queue.append((next_x, next_y))
+        claimed |= visited
+        if not points:
+            continue
+        xs, ys = zip(*points)
+        local_bounds = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+        bounds = (local_bounds[0] + crop_box[0], local_bounds[1] + crop_box[1],
+            local_bounds[2] + crop_box[0], local_bounds[3] + crop_box[1])
+        area = len(points)
+        box_width, box_height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        fill_ratio = area / max(1, box_width * box_height)
+        touched_edges = sum((local_bounds[0] <= 1, local_bounds[1] <= 1,
+            local_bounds[2] >= crop_width - 1, local_bounds[3] >= crop_height - 1))
+        overlap = _box_intersection(bounds, model)
+        overlap_ratio = overlap / max(1, min(box_width * box_height, model_area))
+        horizontal_gap = max(0, bounds[0] - model[2], model[0] - bounds[2]) / width
+        vertical_gap = max(0, bounds[1] - model[3], model[1] - bounds[3]) / height
+        normalized_gap = math.hypot(horizontal_gap, vertical_gap)
+        if (area < max(20, round(model_area * 0.10)) or area > model_area * 8
+            or box_width < model_width * 0.25 or box_height < model_height * 0.22
+            or fill_ratio < 0.28 or touched_edges >= 2
+            or (overlap_ratio < 0.12 and normalized_gap > MAX_LOCAL_GROUNDING_BOX_GAP)):
+            continue
+        component = visited[local_bounds[1]:local_bounds[3], local_bounds[0]:local_bounds[2]]
+        point, interior_depth = _deepest_component_point(
+            component, offset_x=bounds[0], offset_y=bounds[1])
+        required_interior_depth = max(2, round(min(box_width, box_height) * 0.08))
+        if interior_depth < required_interior_depth:
+            continue
+        center_distance = math.dist(point, model_center) / model_diagonal
+        area_ratio = max(1e-6, area / model_area)
+        proximity_score = max(0.0, 1.0 - normalized_gap / MAX_LOCAL_GROUNDING_BOX_GAP)
+        depth_score = min(1.0, interior_depth / max(1.0, min(box_width, box_height) * 0.25))
+        score = (overlap_ratio * 3.0 + proximity_score * 1.5 + depth_score * 0.5
+            - center_distance - abs(math.log(area_ratio)) * 0.20)
+        raw_candidates.append(_SurfaceCandidate(bounds=bounds, point=point, area=area,
+            interior_depth=interior_depth, score=score))
+
+    deduplicated: list[_SurfaceCandidate] = []
+    for candidate in sorted(raw_candidates, key=lambda item: item.score, reverse=True):
+        if any(_box_iou(candidate.bounds, known.bounds) >= 0.72 for known in deduplicated):
+            continue
+        deduplicated.append(candidate)
+    return deduplicated
+
+
+def _stable_surface_grounding(frames: list[Image.Image], scene: UIScene,
+    element: UIElement) -> LocalPointGrounding | None:
+    if len({frame.size for frame in frames}) != 1:
+        return None
+    per_frame = [_surface_candidates(frame, element.bounds) for frame in reversed(frames)]
+    newest = per_frame[0]
+    if not newest:
+        return None
+    if len(newest) > 1 and newest[0].score - newest[1].score < 0.35:
+        raise LocalPointGroundingAmbiguousError("当前目标附近存在多个同等可信的控件表面，拒绝猜测落点。")
+    selected = newest[0]
+    stable = [selected]
+    inspected_frames = 1
+    for candidates in per_frame[1:]:
+        inspected_frames += 1
+        matches = [candidate for candidate in candidates
+            if _box_iou(candidate.bounds, selected.bounds) >= 0.60]
+        if len(matches) > 1 and matches[0].score - matches[1].score < 0.35:
+            raise LocalPointGroundingAmbiguousError("当前目标附近的控件表面跨帧不唯一，拒绝猜测落点。")
+        if matches:
+            stable.append(matches[0])
+        if len(stable) >= 2:
+            break
+    if len(stable) < 2:
+        return None
+
+    width, height = frames[-1].size
+    if width <= 0 or height <= 0:
+        return None
+    grounded_bounds = tuple(float(statistics.median(candidate.bounds[index] for candidate in stable))
+        / (width if index in (0, 2) else height) for index in range(4))
+    grounded_point = (float(statistics.median(candidate.point[0] for candidate in stable)) / width,
+        float(statistics.median(candidate.point[1] for candidate in stable)) / height)
+    if math.dist(element.center, grounded_point) <= 0.012:
+        return None
+    if math.dist(element.center, grounded_point) > 0.12:
+        return None
+    return _grounding_from_geometry(scene=scene, element=element, grounded_bounds=grounded_bounds,
+        grounded_point=grounded_point, matched_frames=len(stable), inspected_frames=inspected_frames)
+
+
+def stable_visual_point_grounding(frames: tuple[Image.Image, ...] | list[Image.Image], scene: UIScene,
+    action: SemanticAction, *, ocr_recognizer: Any=recognize_ocr) -> LocalPointGrounding | None:
+    """Refine one Qwen-selected point from stable OCR or generic surface geometry."""
+
+    frame_list = list(frames)[-3:]
+    if not frame_list or not scene.fingerprint:
+        return None
+    element = _target_for_local_point_grounding(scene, action)
+    if element is None:
+        return None
+
+    try:
+        text_grounding = _stable_exact_text_grounding(frame_list, scene, element,
+            ocr_recognizer=ocr_recognizer)
+    except Exception:
+        text_grounding = None
+    if text_grounding is not None:
+        return text_grounding
+    return _stable_surface_grounding(frame_list, scene, element)
 
 
 def _persist_qwen_failure_diagnostic(*, evidence_dir: Path | None, prefix: str, raw_response: str, error: Exception,
@@ -374,10 +614,37 @@ class GenericActionExecutionResult:
 class GenericSingleActionAdapter:
     """The only generic bridge from a verified scene to one robot action."""
 
-    PHYSICAL_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'swipe', 'reveal_system_navigation',
+    PHYSICAL_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'scroll', 'swipe_element', 'reveal_system_navigation',
         'back', 'home', 'open_recent_apps', 'input_verified_text', 'press_enter', 'clear_verified_text', 'long_press',
         'drag'})
     DEVICE_ACTION_KINDS = PHYSICAL_KINDS | {'launch_app'}
+
+    @staticmethod
+    def _post_action_goal(goal: GenericIntentDraft, *, authority: ConfirmationAuthority | None,
+        resolved: ResolvedSemanticAction, physical_actions: int) -> GenericIntentDraft:
+        """Project one scoped execution fact into the immediate post-action Qwen call."""
+
+        if authority is None or physical_actions != 1:
+            return goal
+        entities = dict(goal.entities)
+        active = entities.get('active_subgoal_visual_context')
+        if not isinstance(active, dict) or str(active.get('subgoal_id') or '') != authority.subgoal_id:
+            return goal
+        current_receipt = active.get('transition_receipt')
+        if not isinstance(current_receipt, dict):
+            return goal
+        active = dict(active)
+        active['transition_receipt'] = {
+            'state': 'executed',
+            'subgoal_id': authority.subgoal_id,
+            'required_operation': str(current_receipt.get('required_operation') or ''),
+            'executed_operation': resolved.kind,
+            'effect_ids': sorted(authority.effect_ids),
+        }
+        entities['active_subgoal_visual_context'] = active
+        projected = replace(goal, entities=entities)
+        projected.validate()
+        return projected
     GEOMETRY_BOUND_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'input_verified_text',
         'press_enter', 'clear_verified_text', 'long_press', 'drag'})
     INDEPENDENT_GEOMETRY_AUDIT_KINDS = GEOMETRY_BOUND_KINDS
@@ -386,7 +653,7 @@ class GenericSingleActionAdapter:
 
     def _local_qwerty_orientation_credential(self, *, requested: SemanticAction, scene: UIScene,
         frames: list[Image.Image]) -> OrientationCredential | None:
-        if (requested.params.get('text_transport') == 'companion_ime'
+        if (requested.params.get('text_transport') == 'adb_keyboard'
             or requested.action not in {'tap_semantic', 'press_enter', 'input_verified_text',
             'clear_verified_text'} or not callable(self.qwerty_row_snapper)):
             return None
@@ -441,7 +708,7 @@ class GenericSingleActionAdapter:
             True)) and callable(getattr(self.robot, method, None))))
         if (bool(declared.get('swipe', True)) and any((callable(getattr(self.robot, f'vision_swipe_{direction}',
             None)) for direction in ('up', 'down', 'left', 'right')))):
-            supported.add("swipe")
+            supported.update({"scroll", "swipe_element"})
         if 'tap_semantic' in supported:
             supported.add("press_enter")
         if bool(declared.get('input_verified_text', True)) and callable(getattr(self.robot, 'vision_clear_text', None)):
@@ -477,14 +744,13 @@ class GenericSingleActionAdapter:
     def __init__(self, *, capture: Callable[[], Image.Image], observer: SingleStepGenericSceneObserver, robot: Any,
         device_executor: DeviceExecutor | None=None, app_launcher: Any=None,
         text_transport: TrustedTextTransportPort | None=None,
-        foreground_identity_provider: Callable[[], ForegroundAppIdentity | None] | None=None,
         controller: UniversalActionController | None=None,
         frame_interval: float=0.37, post_action_settle: float=1.5, post_action_timeout: float | None=None,
         post_action_continuous_timeout: float | None=None,
         post_action_min_relative_sharpness: float=0.8, post_action_min_reference_sharpness: float=2.0,
         post_action_phone_view_delta_max: float=45.0, confirmation_frame_delta_max: float=6.0,
         qwerty_row_snapper: Callable[[tuple[Image.Image, ...] | list[Image.Image], dict[str, Any]], dict[str,
-        Any] | None] | None=None, text_point_grounder: Callable[[tuple[Image.Image, ...] | list[Image.Image], UIScene,
+        Any] | None] | None=None, point_grounder: Callable[[tuple[Image.Image, ...] | list[Image.Image], UIScene,
         SemanticAction], LocalPointGrounding | None] | None=None, require_local_qwerty_row_snap: bool=False,
         device_id: str) -> None:
         self.capture = capture
@@ -492,11 +758,10 @@ class GenericSingleActionAdapter:
         self.robot = robot
         self.app_launcher = app_launcher
         self.text_transport = text_transport
-        self.foreground_identity_provider = foreground_identity_provider
         if text_transport is not None:
             text_transport.profile.validate()
             reject_if(text_transport.profile.device_id != device_id,
-                ValueError('Companion IME profile 与 adapter device_id 不一致。'))
+                ValueError('ADB Keyboard profile 与 adapter device_id 不一致。'))
         self.device_executor = device_executor or RobotDeviceExecutor(robot, app_launcher=app_launcher,
             text_transport=text_transport)
         self.controller = controller or UniversalActionController()
@@ -512,7 +777,7 @@ class GenericSingleActionAdapter:
         self.post_action_phone_view_delta_max = max(0.0, float(post_action_phone_view_delta_max))
         self.confirmation_frame_delta_max = max(0.0, float(confirmation_frame_delta_max))
         self.qwerty_row_snapper = qwerty_row_snapper
-        self.text_point_grounder = text_point_grounder
+        self.point_grounder = point_grounder
         self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
         try:
             self.device_id = validate_device_id(device_id)
@@ -559,32 +824,29 @@ class GenericSingleActionAdapter:
         return frames, paths
 
     def _capture_scene_once(self, goal: GenericIntentDraft, *, evidence_dir: Path | None=None,
-        prefix: str) -> tuple[UIScene, list[Image.Image], tuple[str, ...], dict[str, Any]]:
+        prefix: str, available_action_kinds: frozenset[str] | None=None
+        ) -> tuple[UIScene, list[Image.Image], tuple[str, ...], dict[str, Any]]:
         frames = self._capture_frame_burst()
         paths = self._save_frames(frames, evidence_dir, prefix)
         try:
-            scene, model_decision = self._observe_scene(frames, goal.to_dict())
+            scene, model_decision = self._observe_scene(frames, goal.to_dict(),
+                available_action_kinds=available_action_kinds)
         except RuntimeError as exc:
             diagnostic_paths = persist_observer_failure_diagnostic(self.observer, evidence_dir=evidence_dir,
                 prefix=prefix, error=exc)
             raise GenericActionAdapterError(f'通用页面观察失败：{exc}', evidence=paths + diagnostic_paths) from exc
         return scene, frames, paths, model_decision
 
-    def _observe_scene(self, frames: list[Image.Image] | tuple[Image.Image, ...], goal_context: dict[str, Any]
+    def _observe_scene(self, frames: list[Image.Image] | tuple[Image.Image, ...], goal_context: dict[str, Any], *,
+        available_action_kinds: frozenset[str] | None=None
         ) -> tuple[UIScene, dict[str, Any]]:
         kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
         if getattr(self.observer, 'supports_runtime_action_contract', False) is True:
-            kwargs['available_action_kinds'] = self.supported_action_kinds()
-        if getattr(self.observer, 'supports_trusted_foreground_identity', False) is True:
-            kwargs["device_id"] = self.device_id
-        if (self.foreground_identity_provider is not None
-            and getattr(self.observer, 'supports_trusted_foreground_identity', False) is True):
-            identity = self.foreground_identity_provider()
-            if identity is not None:
-                identity.validate()
-                reject_if(identity.device_id != self.device_id,
-                    GenericActionAdapterError("Companion 前台 App 身份与当前设备不一致。"))
-                kwargs["trusted_foreground_identity"] = identity
+            supported = self.supported_action_kinds()
+            scoped = supported if available_action_kinds is None else frozenset(available_action_kinds)
+            reject_if(not scoped or scoped - supported,
+                GenericActionAdapterError('当前子目标动作集合为空或超出设备能力。'))
+            kwargs['available_action_kinds'] = scoped
         observe_with_decision = getattr(self.observer, "observe_with_decision", None)
         reject_if(not callable(observe_with_decision),
             GenericActionAdapterError("当前观察器不支持同一截图响应中的 scene + decision 合同。"))
@@ -599,10 +861,12 @@ class GenericSingleActionAdapter:
         *,
         evidence_dir: Path | None,
         prefix: str,
+        available_action_kinds: frozenset[str] | None=None,
     ) -> tuple[UIScene, list[Image.Image], tuple[str, ...], dict[str, Any]]:
         # One step permits one Qwen request; stability sampling never triggers model resampling.
         try:
-            return self._capture_scene_once(goal, evidence_dir=evidence_dir, prefix=f'{prefix}_attempt_1')
+            return self._capture_scene_once(goal, evidence_dir=evidence_dir, prefix=f'{prefix}_attempt_1',
+                available_action_kinds=available_action_kinds)
         except GenericActionAdapterError as exc:
             error = f"第1轮动作前观察失败：{exc}"
             raise GenericActionAdapterError('动作前通用页面观察失败：' + error, evidence=tuple(exc.evidence),
@@ -681,7 +945,8 @@ class GenericSingleActionAdapter:
 
     def _observe_stable_post_action_scene(self, goal: GenericIntentDraft, *, before: UIScene,
         before_frames: tuple[Image.Image, ...], resolved: ResolvedSemanticAction,
-        evidence_dir: Path | None, evidence_prefix: str) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str,
+        evidence_dir: Path | None, evidence_prefix: str,
+        available_action_kinds: frozenset[str] | None=None) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str,
         ...], tuple[str, ...], dict[str, Any]]:
         action_timeout = self._post_action_timeout_for(resolved)
         if self.post_action_settle:
@@ -697,7 +962,8 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'动作后画面采集失败：{exc}', evidence=tuple(exc.evidence)) from exc
         all_paths = paths
         try:
-            after, model_decision = self._observe_scene(frames, goal.to_dict())
+            after, model_decision = self._observe_scene(frames, goal.to_dict(),
+                available_action_kinds=available_action_kinds)
         except RuntimeError as exc:
             all_paths += persist_observer_failure_diagnostic(self.observer, evidence_dir=evidence_dir, prefix=prefix,
                 error=exc)
@@ -721,11 +987,10 @@ class GenericSingleActionAdapter:
             input_element = scene.get_element(str(resolved.target_element_id or ''))
         except UISceneError as exc:
             raise GenericActionAdapterError(f"当前文字输入缺少可信输入框：{exc}") from exc
-        if resolved.text_transport == 'companion_ime':
+        if resolved.text_transport == 'adb_keyboard':
             typed_field_id = str(input_element.states.get('input_field_id') or '').strip()
-            reject_if(typed_field_id in {'', 'unknown'} or typed_field_id != resolved.input_field_id
-                or input_element.states.get('focused') is not True,
-                GenericActionAdapterError("Companion IME 动作缺少当前聚焦 typed input_field_id。"))
+            reject_if(typed_field_id in {'', 'unknown'} or typed_field_id != resolved.input_field_id,
+                GenericActionAdapterError("ADB Keyboard 动作缺少当前 typed input_field_id。"))
             return None
         geometry = input_element.states.get("keyboard_geometry")
         allowed_types = {"input_verified_text": {"qwerty"}, "clear_verified_text": {"qwerty", "generic"}}
@@ -765,7 +1030,7 @@ class GenericSingleActionAdapter:
     def _arm_physical_execution(self, requested: SemanticAction, resolved: ResolvedSemanticAction, scene: UIScene,
         frames: tuple[Image.Image, ...] | list[Image.Image], paths: tuple[str,
         ...]) -> tuple[OrientationCredential | None, Callable[[], Any] | None]:
-        if resolved.text_transport == 'companion_ime' and resolved.kind in {'input_verified_text',
+        if resolved.text_transport == 'adb_keyboard' and resolved.kind in {'input_verified_text',
             'clear_verified_text'}:
             return None, None
         clear = getattr(self.robot, "clear_physical_execution_authorization", None)
@@ -791,7 +1056,8 @@ class GenericSingleActionAdapter:
                     credential = replace(credential, evidence_frame_fingerprint=frame_fingerprint(persisted.convert(
                         'RGB')))
             hardware_action = {'clear_verified_text': 'input_verified_text',
-                'press_enter': 'tap_semantic'}.get(resolved.kind, resolved.kind)
+                'press_enter': 'tap_semantic', 'scroll': 'swipe',
+                'swipe_element': 'swipe'}.get(resolved.kind, resolved.kind)
             credential.assert_authorizes(device_id=self.device_id, scene_fingerprint=scene.fingerprint,
                 frame_size=credential.frame_size, action=hardware_action)
             arm(credential, action=hardware_action, scene_fingerprint=scene.fingerprint)
@@ -802,7 +1068,9 @@ class GenericSingleActionAdapter:
 
     def execute(self, *, requested_action: SemanticAction, planned_scene: UIScene, goal: GenericIntentDraft,
         confirmed: bool, evidence_dir: Path | None=None, planned_frames: tuple[Image.Image,
-        ...] | list[Image.Image]=(), action_authority: ConfirmationAuthority | None=None
+        ...] | list[Image.Image]=(), action_authority: ConfirmationAuthority | None=None,
+        available_action_kinds: frozenset[str] | None=None,
+        post_action_available_action_kinds: frozenset[str] | None=None
         ) -> GenericActionExecutionResult:
         reject_if(confirmed is not True, GenericActionAdapterError("必须明确确认当前这一个语义动作。"))
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
@@ -827,11 +1095,13 @@ class GenericSingleActionAdapter:
         # device/scope/geometry, but it may not rewrite its semantic fields.
         rebound = requested_action
         local_point_grounding: LocalPointGrounding | None = None
-        if callable(self.text_point_grounder):
+        if callable(self.point_grounder):
             try:
-                local_point_grounding = self.text_point_grounder(before_frames, before, rebound)
+                local_point_grounding = self.point_grounder(before_frames, before, rebound)
+            except LocalPointGroundingAmbiguousError as exc:
+                raise GenericActionAdapterError(f'确认前本地视觉落点不唯一：{exc}', evidence=before_paths) from exc
             except Exception:
-                # OCR refines precision only; an inconclusive result keeps the canonical point.
+                # No positive local geometry evidence keeps Qwen's canonical point.
                 local_point_grounding = None
         try:
             resolved = self.controller.resolve_one(rebound, before, confirmed=True,
@@ -859,24 +1129,24 @@ class GenericSingleActionAdapter:
             return (max(0, min(1000, round(point[0] * 1000))), max(0, min(1000, round(point[1] * 1000))))
 
         text_scope = None
-        if resolved.text_transport == 'companion_ime':
+        if resolved.text_transport == 'adb_keyboard':
             transport = self.text_transport
             reject_if(transport is None or action_authority is None,
-                GenericActionAdapterError("Companion IME 动作缺少 transport 或已消费的一次性 authority。",
+                GenericActionAdapterError("ADB Keyboard 动作缺少 transport 或已消费的一次性 authority。",
                 evidence=before_paths))
             assert transport is not None and action_authority is not None
             reject_if(action_authority.device_id != self.device_id
                 or action_authority.fingerprint != before.fingerprint
                 or action_authority.decision_node_id != requested_action.node_id
                 or action_authority.action_digest != canonical_digest(requested_action.to_dict()),
-                GenericActionAdapterError("Companion IME 动作 authority 与当前设备、画面或 canonical 动作不一致。",
+                GenericActionAdapterError("ADB Keyboard 动作 authority 与当前设备、画面或 canonical 动作不一致。",
                 evidence=before_paths))
             prior = resolved.prior_input_value
             fragment = resolved.input_fragment if resolved.kind == 'input_verified_text' else ''
             expected = resolved.expected_input_value
             reject_if(not isinstance(prior, str) or not isinstance(fragment, str)
                 or not isinstance(expected, str) or not resolved.input_field_id,
-                GenericActionAdapterError("Companion IME 动作缺少精确 typed 文字事务。", evidence=before_paths))
+                GenericActionAdapterError("ADB Keyboard 动作缺少精确 typed 文字事务。", evidence=before_paths))
             try:
                 text_scope = transport.mint_action_scope(session_id=action_authority.session_id,
                     task_id=action_authority.task_id, revision=action_authority.revision,
@@ -884,7 +1154,7 @@ class GenericSingleActionAdapter:
                     observation_fingerprint=before.fingerprint, prior_text_digest=text_digest(prior),
                     fragment_text_digest=text_digest(fragment), expected_text_digest=text_digest(expected))
             except (RuntimeError, ValueError) as exc:
-                raise GenericActionAdapterError(f"Companion IME 单动作 scope 签发失败：{exc}",
+                raise GenericActionAdapterError(f"ADB Keyboard 单动作 scope 签发失败：{exc}",
                     evidence=before_paths) from exc
 
         execution_request = DeviceActionRequest(kind=resolved.kind, point=executor_point(resolved.normalized_point),
@@ -927,18 +1197,33 @@ class GenericSingleActionAdapter:
                 controller_transition_evidence,
                 after_model_decision,
             ) = self._observe_stable_post_action_scene(
-                goal,
+                self._post_action_goal(goal, authority=action_authority, resolved=resolved,
+                    physical_actions=physical_actions),
                 before=before,
                 before_frames=tuple(before_frames),
                 resolved=resolved,
                 evidence_dir=evidence_dir,
                 evidence_prefix=evidence_prefix,
+                available_action_kinds=(post_action_available_action_kinds
+                    if post_action_available_action_kinds is not None else available_action_kinds),
             )
         except (GenericActionAdapterError, UniversalActionError) as exc:
             evidence = before_paths + tuple(getattr(exc, "evidence", ()))
             raise GenericActionAdapterError(f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
                 observation_errors=tuple(getattr(exc, 'observation_errors', ())), verification_errors=tuple(getattr(exc,
                 'verification_errors', ())), execution_metadata=execution_metadata) from exc
+        if (action_authority is not None and action_authority.effect_ids
+            and str(after_model_decision.get('status') or '').strip() == 'finish'):
+            transition = measure_material_visual_transition(before_frames, after_frames)
+            execution_metadata = {**execution_metadata, 'effect_visual_transition': transition}
+            reject_if(not transition['material'], GenericActionAdapterError(
+                '外部效果动作后的真实帧没有可归因的新变化；动作前已有画面不能作为本次 finish 证据，'
+                '本次已执行1次且不会自动重复。',
+                physical_actions=physical_actions,
+                evidence=before_paths + all_after_paths,
+                verification_errors=('外部效果缺少动作前后真实帧变化',),
+                execution_metadata=execution_metadata,
+            ))
         return GenericActionExecutionResult(requested_action=requested_action, rebound_action=rebound,
             resolved_action=resolved, before_scene=before, after_scene=after,
             planned_scene_fingerprint=planned_scene.fingerprint,

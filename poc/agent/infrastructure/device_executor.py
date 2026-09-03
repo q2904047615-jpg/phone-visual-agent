@@ -34,7 +34,8 @@ class RobotDeviceExecutor:
         self.text_transport = text_transport
         self.sleep = sleep
         self._handlers: dict[str, Callable[[DeviceActionRequest], DeviceExecutionResult]] = {
-            'swipe': self._swipe,
+            'scroll': self._swipe,
+            'swipe_element': self._swipe,
             'input_verified_text': self._input_text,
             'clear_verified_text': self._clear_text,
             'long_press': self._long_press,
@@ -85,6 +86,22 @@ class RobotDeviceExecutor:
         reject_if(click_count != expected_count, DeviceExecutionError('点击事件栅栏的 click_count 与请求不一致。', physical_actions=1))
         return dict(raw)
 
+    def _consume_swipe_receipt(self, *, expected_direction: str) -> dict[str, Any]:
+        raw = self._method("consume_last_swipe_receipt")()
+        reject_if(not isinstance(raw, dict)
+            or raw.get('right_button_down_dispatched') is not True
+            or raw.get('right_button_up_dispatched') is not True
+            or raw.get('seller_position_barrier_confirmed') is not True
+            or raw.get('round_trip_position_confirmed') is not True
+            or raw.get('mechanical_contact_ack') is not False
+            or raw.get('requested_direction') != expected_direction,
+            DeviceExecutionError('机械控制端没有返回有效的滑动事件链凭据。', physical_actions=1))
+        steps = raw.get('step_count')
+        reject_if(isinstance(steps, bool) or not isinstance(steps, int) or steps < 4
+            or raw.get('interpolation_steps_completed') != steps,
+            DeviceExecutionError('机械控制端滑动路径没有完成全部插值步骤。', physical_actions=1))
+        return dict(raw)
+
     @staticmethod
     def _point(request: DeviceActionRequest) -> tuple[int, int]:
         assert request.point is not None
@@ -100,23 +117,27 @@ class RobotDeviceExecutor:
     def _swipe(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         assert request.direction is not None
         if request.point is not None and request.end_point is not None:
-            return DeviceExecutionResult(physical_actions=1,
-                transport_result=self._hardware_call('vision_swipe_relative', *request.point, *request.end_point,
-                request.direction))
+            result = self._hardware_call('vision_swipe_relative', *request.point, *request.end_point,
+                request.direction)
+            return DeviceExecutionResult(physical_actions=1, transport_result=result,
+                hardware_receipt=self._consume_swipe_receipt(expected_direction=request.direction))
         return DeviceExecutionResult(physical_actions=1, transport_result=self._hardware_call(f'vision_swipe_{
             request.direction}'))
 
     def _input_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
-        if request.text_transport == 'companion_ime':
+        if request.text_transport == 'adb_keyboard':
             assert request.text_scope is not None and request.input_fragment is not None
             transport = self.text_transport
-            reject_if(transport is None, DeviceExecutionError("Companion IME transport 未配置。",
-                metadata={'transport': 'companion_ime', 'transport_status': 'unavailable'}))
+            reject_if(transport is None, DeviceExecutionError("ADB Keyboard transport 未配置。",
+                metadata={'transport': 'adb_keyboard', 'transport_status': 'unavailable'}))
             result = transport.append_text(request.text_scope, request.input_fragment)
-            metadata = {'transport': 'companion_ime', 'mechanical_contact_ack': False,
+            metadata = {'transport': 'adb_keyboard', 'mechanical_contact_ack': False,
                 'transport_status': result.status, 'transport_receipt': result.to_dict()}
-            reject_if(not result.attempted, DeviceExecutionError("Companion IME 输入在发送前不可用。",
+            reject_if(not result.attempted, DeviceExecutionError("ADB Keyboard 输入在广播前不可用。",
                 physical_actions=0, metadata=metadata))
+            reject_if(not result.accepted, DeviceExecutionError(
+                f"ADB Keyboard 输入广播未被接受：{result.status}/"
+                f"{result.reason_code or 'unknown'}。", physical_actions=1, metadata=metadata))
             return DeviceExecutionResult(physical_actions=1, transport_result=result.to_dict(), metadata=metadata)
         geometry = dict(request.keyboard_geometry or {})
         if request.input_method == 'chinese_pinyin':
@@ -126,16 +147,19 @@ class RobotDeviceExecutor:
         return DeviceExecutionResult(physical_actions=1, transport_result=result)
 
     def _clear_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
-        if request.text_transport == 'companion_ime':
+        if request.text_transport == 'adb_keyboard':
             assert request.text_scope is not None
             transport = self.text_transport
-            reject_if(transport is None, DeviceExecutionError("Companion IME transport 未配置。",
-                metadata={'transport': 'companion_ime', 'transport_status': 'unavailable'}))
+            reject_if(transport is None, DeviceExecutionError("ADB Keyboard transport 未配置。",
+                metadata={'transport': 'adb_keyboard', 'transport_status': 'unavailable'}))
             result = transport.clear_text(request.text_scope)
-            metadata = {'transport': 'companion_ime', 'mechanical_contact_ack': False,
+            metadata = {'transport': 'adb_keyboard', 'mechanical_contact_ack': False,
                 'transport_status': result.status, 'transport_receipt': result.to_dict()}
-            reject_if(not result.attempted, DeviceExecutionError("Companion IME 清空在发送前不可用。",
+            reject_if(not result.attempted, DeviceExecutionError("ADB Keyboard 清空在广播前不可用。",
                 physical_actions=0, metadata=metadata))
+            reject_if(not result.accepted, DeviceExecutionError(
+                f"ADB Keyboard 清空广播未被接受：{result.status}/"
+                f"{result.reason_code or 'unknown'}。", physical_actions=1, metadata=metadata))
             return DeviceExecutionResult(physical_actions=1, transport_result=result.to_dict(), metadata=metadata)
         return DeviceExecutionResult(physical_actions=1,
             transport_result=self._hardware_call('vision_clear_text', dict(request.keyboard_geometry or {}),

@@ -46,8 +46,10 @@ class GenericIntentDraft(ValidatedDataclassWire):
         for value in (*self.constraints, *self.account_effects):
             reject_if(not isinstance(value, str) or not value.strip(), GenericIntentError("约束和账号影响必须是非空字符串。"))
 
-_ACTIVE_VISUAL_FIELDS = {'subgoal_id', 'objective', 'constraints', 'completion_conditions', 'execution_class',
-    'goal_entities'}
+_ACTIVE_VISUAL_REQUIRED_FIELDS = {'subgoal_id', 'objective', 'constraints', 'completion_conditions',
+    'execution_class', 'goal_entities'}
+_ACTIVE_VISUAL_FIELDS = _ACTIVE_VISUAL_REQUIRED_FIELDS | {'transition_receipt', 'current_effect_kinds',
+    'forbidden_future_effect_kinds', 'gesture_correction'}
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,9 @@ class ActiveVisualGoal:
         root_entities = context.get("entities")
         root_entities = root_entities if isinstance(root_entities, dict) else {}
         candidate = root_entities.get("active_subgoal_visual_context")
-        valid = bool(isinstance(candidate, dict) and set(candidate) == _ACTIVE_VISUAL_FIELDS
+        valid = bool(isinstance(candidate, dict)
+            and _ACTIVE_VISUAL_REQUIRED_FIELDS.issubset(candidate)
+            and set(candidate).issubset(_ACTIVE_VISUAL_FIELDS)
             and str(candidate.get('subgoal_id') or '').strip() and str(candidate.get('objective') or '').strip()
             and isinstance(candidate.get('constraints'), list) and isinstance(candidate.get('completion_conditions'),
             list) and isinstance(candidate.get('goal_entities'), dict))

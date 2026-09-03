@@ -20,7 +20,7 @@ class FakeProvider:
 
 
 def subgoal(subgoal_id, objective, *, depends_on=(), result="目标状态可见",
-    input_field_id="", input_operation=""):
+    input_field_id="", input_operation="", required_action_kind=""):
     value = {
         "subgoal_id": subgoal_id,
         "objective": objective,
@@ -31,6 +31,8 @@ def subgoal(subgoal_id, objective, *, depends_on=(), result="目标状态可见"
     if input_field_id:
         value["input_field_id"] = input_field_id
         value["input_operation"] = input_operation
+    if required_action_kind:
+        value["required_action_kind"] = required_action_kind
     return value
 
 
@@ -69,6 +71,48 @@ class DeepSeekOneShotTransportTests(unittest.TestCase):
         self.assertEqual(["active", "pending"], [item.status for item in graph.subgoals])
         self.assertEqual("ready", graph.status)
         self.assertFalse(hasattr(DeepSeekTaskGraphPlanner, "replan"))
+
+    def test_initial_prompt_requires_home_recents_clear_all_sequence(self):
+        _, prompt = self.plan(initial_plan(), goal="清理全部后台应用")
+
+        self.assertIn("先回到 Android Launcher/主屏幕", prompt)
+        self.assertIn("再打开系统最近任务页", prompt)
+        self.assertIn("最后点击当前截图中的系统一键清理全部按钮", prompt)
+        self.assertIn('required_action_kind="home"', prompt)
+        self.assertIn('required_action_kind="open_recent_apps"', prompt)
+        self.assertIn('required_action_kind="tap_semantic"', prompt)
+        self.assertIn("其它任务不得因此套用这个固定顺序", prompt)
+
+    def test_required_action_kind_is_structural_and_visible_to_qwen(self):
+        raw = initial_plan(subgoals=[subgoal(
+            "open-recents",
+            "打开系统最近任务页",
+            required_action_kind="open_recent_apps",
+        )])
+
+        graph, _ = self.plan(raw, goal="清理后台卡片")
+        context = QwenTaskContext.from_dict(graph.to_qwen_context())
+
+        self.assertEqual("open_recent_apps", graph.active_subgoal().required_action_kind)
+        self.assertEqual("open_recent_apps", context.current_subgoal["required_action_kind"])
+
+    def test_ordinary_subgoal_does_not_gain_required_action_kind(self):
+        graph, _ = self.plan(initial_plan(subgoals=[subgoal("browse", "查看当前页面详情")]))
+
+        self.assertEqual("", graph.active_subgoal().required_action_kind)
+        self.assertNotIn("required_action_kind", graph.to_qwen_context()["current_subgoal"])
+
+    def test_required_action_kind_cannot_duplicate_typed_operation_authority(self):
+        raw = initial_plan(entities={"input_text": "hello"}, subgoals=[subgoal(
+            "type",
+            "输入正文",
+            input_field_id="primary_input",
+            input_operation="input_verified_text",
+            required_action_kind="tap_semantic",
+        )])
+
+        with self.assertRaisesRegex(TaskGraphError, "不能同时声明 required_action_kind"):
+            self.plan(raw)
 
     def test_retired_runtime_copies_have_no_authority(self):
         raw = initial_plan(subgoals=[subgoal("first", "先处理目标"), subgoal("second", "再处理目标")])

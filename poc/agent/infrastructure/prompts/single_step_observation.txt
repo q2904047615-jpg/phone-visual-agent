@@ -34,6 +34,10 @@ command/coordinates等动作注入字段；中性的额外诊断字段会被本�
 "phone_content_rotation":"unknown","confidence":0.0,"evidence":[]},
 "elements":[],"overlays":[],"stable":true,"confidence":0.0,"fingerprint":""},
 "input_structure":null,"decision":DECISION_OBJECT}
+本轮唯一高层子目标合同：{{CURRENT_SUBGOAL_JSON}}。
+decision只能完成或推进这一个子目标，不得推进原始整任务中的后继子目标。
+若forbidden_future_effect_kinds非空，scene仍可如实报告这些可见控件，但decision绝不能选择
+meaning等于其中任一正式effect kind的元素；只有该kind进入current_effect_kinds后才能选择。
 上面的DECISION_OBJECT只是结构占位，最终输出必须替换为以下两种最小JSON对象之一：
 - 当前目标尚未由本图证明完成：
   {"status":"action","action":"本轮实际动作名"}
@@ -55,15 +59,35 @@ status=action时的action必须来自这个集合；未列出的协议动作在�
 - wait_for_change：仅用于当前画面正在加载或变化、应等待其稳定的情况，不得用它替代
   home、back或open_recent_apps等明确导航动作。
 decision规则：
+0. SCENE CONTRACT中的transition_receipt若存在，是本地按当前task/subgoal签发的只读过渡回执，
+   只用于区分“本次任务尚未执行”与“刚执行了一步”，不替代当前JPEG的完成证据。
+   state=pending时，截图里即使已有相同文字、消息、发布结果或其他既有状态，也不能把它归因于
+   本次输入/外部效果子目标，必须选择一个推进该子目标的动作。state=executed时，也只有
+   executed_operation符合required_operation（external_effect由本地effect scope约束），且当前JPEG
+   直接证明预期结果，才可以finish；否则继续选择一个动作。没有transition_receipt的普通观察或
+   导航目标仍可由当前截图零动作finish。
 1. 当前截图已经直接证明当前高层目标完成时才写status=finish；否则必须写status=action，
    并从上面的本轮可用动作集合中选出当前最能推进目标的一步。单个动作只需推进路径，
    不要求一步完成整个高层目标。协议允许的动作全集是
    tap_semantic、dismiss_overlay、input_verified_text、
-   press_enter、clear_verified_text、double_tap、long_press、drag、swipe、back、home、
+   press_enter、clear_verified_text、double_tap、long_press、drag、scroll、swipe_element、back、home、
    open_recent_apps、reveal_system_navigation、wait_for_change或launch_app。只选择当前
    画面和当前高层目标所需的一步，不预测下一页动作。
 2. 元素动作额外填写element_id；drag填写source_element_id和destination_element_id；
-   swipe填写direction，并可在绑定当前滚动/卡片容器时填写element_id；系统动作不填写元素引用。
+   scroll只用于移动页面或可滚动容器，填写direction，并可填写当前滚动容器element_id；
+   swipe_element只用于直接操纵一个明确元素（例如划除卡片、滑动开关或目标条目），必须填写
+   element_id、start和end。start/end使用本响应唯一coordinate_space中的[x,y]，start必须位于
+   该元素内部，end必须在当前画面内；根据当前界面的真实交互方式选择横向或纵向轨迹，不能默认向上。
+   清理全部后台或移除任意指定后台App时，必须严格服从当前高层子目标的三段顺序：先从非Launcher
+   画面执行一次home并等待新截图证明主屏幕，再从Launcher执行一次open_recent_apps并等待新截图
+   证明system_recent_tasks，最后才允许选择清理按钮；不得从App页面直接open_recent_apps，也不得重复
+   上一次未产生目标页面的home或open_recent_apps。当前scene.screen_id=system_recent_tasks且当前高层
+   子目标要求执行清理效果时，必须在当前scene中发布并选中唯一可见的系统“一键清理全部”按钮，再使用
+   tap_semantic点击该按钮。该按钮可能显示为圆形“×”、清理图标或等价系统控件；只能依据当前截图
+   的真实按钮元素绑定，不得使用固定坐标。不得用swipe_element移除任务卡片；上下方向只能使用
+   scroll寻找当前未显示的一键清理按钮，不得用横向scroll。按钮不可见或不唯一时不得猜点。
+   若当前子目标含gesture_correction，上一条近似轨迹已经未完成目标；必须选择实质不同的轨迹、
+   选择其他合法动作，或在当前图已证明完成时finish，绝不能重复原轨迹。系统动作不填写元素引用。
    不属于当前动作变体的null字段无需输出。本地只把你的明确选择映射到同一scene的canonical candidate，
    不会替你自动改选另一个动作。
    若scene报告了当前application_inputs对应的输入元素，application_inputs.element_id和decision.element_id
@@ -81,7 +105,8 @@ decision规则：
    最能推进目标的可执行元素；不得因为存在辅助容器、说明文字或多个非动作事实而拒绝选择。
    本地不会替你改选另一个动作，引用不存在或不能唯一映射的元素会作为模型合同错误停止。
 6. reason和confidence是可选诊断字段，缺失不影响动作语义；若提供，confidence为0..1。
-   action不携带完成证据。decision不得携带正文、包名、裸坐标、candidate ID或多步计划。
+   action不携带完成证据。除swipe_element受约束的start/end外，decision不得携带正文、包名、
+   裸坐标、candidate ID或多步计划。
 7. input_verified_text和clear_verified_text只能引用本响应已经证明聚焦的typed输入框；press_enter只能
    引用states.input_element_id绑定该输入框的明确Enter/换行键。聚焦证据只能是同一input_structure中
    keyboard.visible=true，或对应application_inputs的visible_editable_cues明确报告肯定式
@@ -89,6 +114,12 @@ decision规则：
    也不能推翻明确光标。若当前typed输入框尚无上述聚焦证据，必须先选择tap_semantic并引用同一个
    输入元素；执行后等待下一张新截图确认聚焦，再选择文字、清空或绑定的换行键。不得跳过聚焦，
    也不得把这两个物理步骤合并成一个动作。
+8. 当前子目标含input_operation时，只能用同一响应input_structure.application_inputs中当前字段的
+   text判断这个输入子目标是否完成；聊天气泡、帖子、历史记录、标签或页面其它相同文字均不是当前
+   输入框正文，必须忽略，不能作为该输入子目标的finish证据。若transition_receipt仍要求
+   input_verified_text/clear_verified_text/press_enter，当前唯一typed输入框已经由上述聚焦证据证明聚焦，
+   且application_inputs.text尚未达到目标，则必须选择该required_operation；即使页面其它位置已有
+   相同文字，或soft keyboard当前不可见，也不得再次点同一输入框或finish。
 
 scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯一标记；decision是
 同一次响应对下一步action或finish的唯一选择。canonical只验证并绑定该选择。

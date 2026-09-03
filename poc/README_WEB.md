@@ -30,66 +30,39 @@ npm test
 `npm test` 依次运行不启动浏览器的协议测试和 Playwright 浏览器合同测试。真实模式启动脚本
 使用 `agent_api_cli.py bootstrap` 校验当前服务的 OpenAPI 与认证，不再硬编码探测某个业务路由。
 
-### 可选 Companion IME 配置与首次配对
+### ADB Keyboard 文字 transport
 
-`ROBOT_COMPANION_IME_REGISTRY` 可指向本机 Companion IME JSON 注册表；未设置时读取
-`companion_ime_registry.json`。注册表只保存设备 profile、监听 host/port 和 TLS 证书/私钥路径，
-不得包含一次性 token、共享 key 或其明文副本。每个启用设备只能有一个 profile、pairing_id 和
-TLS bridge。最小结构为：
+`ROBOT_ADB_KEYBOARD_REGISTRY` 可指向本机 ADB Keyboard JSON 注册表；未设置时读取
+`adb_keyboard_registry.json`。每个启用设备只能登记一个固定 profile、一个固定 ADB 可执行文件和
+一个固定 serial。最小结构为：
 
 ```json
 {
-  "version": "2026-08-30-companion-ime-runtime-v1",
+  "version": "2026-09-02-adb-keyboard-runtime-v1",
   "devices": [{
     "profile": {
-      "protocol_version": "2026-08-30-companion-ime-v1",
-      "profile_id": "companion-device-local-01",
+      "protocol_version": "2026-09-02-adb-keyboard-v1",
+      "profile_id": "adb-keyboard-device-local-01",
       "device_id": "device-local-01",
-      "pairing_id": "pairing-device-local-01",
+      "adb_serial": "REPLACE_WITH_ADB_SERIAL",
       "enabled": true,
       "capabilities": ["append_text", "clear_text"],
-      "ack_timeout_seconds": 5.0
+      "command_timeout_seconds": 10.0
     },
-    "bind_host": "0.0.0.0",
-    "bind_port": 18766,
-    "tls_certificate_path": "tls/server.crt",
-    "tls_private_key_path": "tls/server.key"
+    "adb_executable": "C:\\path\\to\\platform-tools\\adb.exe"
   }]
 }
 ```
 
-可从 [`companion_ime_registry.example.json`](companion_ime_registry.example.json) 复制一份本机注册表；
-同时要在所填路径准备 PEM 格式的 TLS 证书和私钥。私钥、实际注册表、配对记录及 APK 均属于本机
-运行产物，不应提交到 Git。若实际注册表不放在 `poc/companion_ime_registry.json`，启动项目 API 和
-执行配对 CLI 时必须使用同一个 `ROBOT_COMPANION_IME_REGISTRY` 环境变量。
+可从 [`adb_keyboard_registry.example.json`](adb_keyboard_registry.example.json) 复制本机注册表。ADB
+Keyboard APK 必须先安装、在系统输入法设置中启用，并选为当前输入法；运行时只读核对这三个条件，
+任一不成立都在广播前以 0 动作停止。输入只执行一次固定 `ADB_INPUT_B64 --es msg <UTF-8 Base64>`
+广播，清空只执行一次固定 `ADB_CLEAR_TEXT` 广播。两者互不隐式组合，失败不重试、不回退机械键盘。
+广播完成只算 transport 回执；正文和高层完成仍由动作后新截图中的 Qwen 当前帧证据判断。
 
-首次配对时先确认项目 API 未运行，再从 `poc` 目录执行：
-
-```powershell
-python companion_ime_setup.py --device-id device-local-01 --advertise-host 192.168.1.20
-```
-
-`--advertise-host` 是手机能访问的电脑地址；注册表 `bind_host` 为 `0.0.0.0` 或 `::` 时必须提供。
-命令只为指定 device 启动注册表中的同一 TLS bridge，并以第一行 JSON 显示一次 host、port、证书
-SHA-256 指纹和一次性 token。把这四项填入 Android Companion IME 后，命令会继续等待，只有新的
-共享 key 已先由手机加密保存到不覆盖旧配对的 pending 槽、手机发回新 key 签名的 `pair_confirm`，收到
-PC 签名确认后才提升为 active，再发出签名 `pair_commit`；PC 收到这份“手机已提升”证明后才切换 active
-key，并且配对记录成功写入
-`output/web/state/companion_ime_pairings/` 的 Windows 当前用户 DPAPI 存储后，才输出
-`pairing_succeeded` 并退出；`pair_response` 和 `pair_confirm` 本身都不算成功，超时退出码为 1。token 只在内存中存在并
-只显示一次。配对 CLI 与项目
-API 不能同时占用同一 TLS 端口。Android 侧安装与输入法启用步骤见
-[`android/companion-ime/README.md`](../android/companion-ime/README.md)。本项目不提供 raw text 或
-pairing HTTP 路由。已有有效配对时，此流程只同步同一 active key，不在普通修复中隐式旋转；如需换 key，
-且只接受原 `installation_id`。重装 App、换手机或需要换 key 时，必须先由用户显式撤销两端旧配对再重新
-配对，不能让两个安装实例共享同一设备 key。
-
-APK `0.2.0` 还需在系统的“有权查看使用情况的应用/Usage Access”中启用 **Visual Agent Companion
-IME**。Companion 只在内存中选出最新 `ACTIVITY_RESUMED` 的包名和事件时间（输入连接活跃时优先使用
-系统校验的 `EditorInfo.packageName`），经现有配对密钥签名后发送；不上传或保存使用历史、停留时长、
-屏幕内容或 UI 节点。新观察有新鲜系统包名时，它是 App 身份的唯一权威，Qwen 仍只负责 App 内页面、
-控件和下一 canonical 动作；状态不可用或超过 6 秒时才明确回退到当前截图视觉身份。旧 APK 没有该帧，
-但仍保留原有文字 transport，不会因项目 API 加载新协议而失效；覆盖安装 `0.2.0` 可保留现有配对。
+Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册表自 2026-09-02 起永久退役，
+不再由项目 API 导入、启动或作为回退路径。ADB 可执行文件、serial、IME ID 和广播 action 均由本地
+可信代码与注册表固定，Qwen、网页和任务文本不能提供任意 ADB/Shell/Intent 参数。
 
 可选 App 包名直启配置：
 
@@ -131,7 +104,7 @@ Qwen 决定下一步，不进入本地 corrective selector。DeepSeek 只在会�
 受信任包名直启只是可选的单次设备 transport，不绕过同一 canonical、scope、执行回执和动作后新观察；
 App 内部操作继续完全使用当前视觉闭环和机械臂。
 文字输入时，`input_structure.application_inputs[*].text` 是当前应用输入内容的唯一视觉权威；scene 输入元素只是可选页面上下文，不要求重复正文、标签、状态或几何重合，也不得否决正文。
-配置 Companion IME 的设备只使用该设备唯一的文字 transport；IME ACK 只证明 transport 接受命令，
+配置 ADB Keyboard 的设备只使用该设备唯一的非机械文字 transport；广播回执只证明 transport 接受命令，
 仍须通过动作后的新截图验证输入结果。输入失败不得自动改用机械键盘重输。
 只有登录/身份认证和付款/资金交易要求用户确认，其余合法动作按任务授权自动执行。
 

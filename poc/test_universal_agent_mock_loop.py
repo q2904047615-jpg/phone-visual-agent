@@ -80,7 +80,7 @@ def scene(
                 evidence=("合成画面中的唯一候选",),
             ),
         )
-    elif action_kind == "swipe":
+    elif action_kind == "scroll":
         elements = (
             UIElement(
                 element_id="generic-scroll-surface",
@@ -140,7 +140,7 @@ def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str)
         if len(scene.elements) != 1:
             raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
         payload["element_id"] = scene.elements[0].element_id
-    elif action_kind == "swipe":
+    elif action_kind == "scroll":
         payload["direction"] = "up"
     return payload
 
@@ -303,17 +303,17 @@ class ScriptedQwen:
                 "system_navigation"
                 if action.action == "back"
                 else "screen"
-                if action.action == "swipe"
+                if action.action == "scroll"
                 else "element"
             ),
             element_id=(
                 ""
-                if action.action in {"back", "swipe"}
+                if action.action in {"back", "scroll"}
                 else trusted_observation.scene.elements[0].element_id
             ),
             bounds=(
                 (0.0, 0.0, 1.0, 1.0)
-                if action.action in {"back", "swipe"}
+                if action.action in {"back", "scroll"}
                 else trusted_observation.scene.elements[0].bounds
             ),
         )
@@ -463,14 +463,14 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, len(planner.plan_calls))
         self.assertEqual("synthetic.reader", session.goal_draft.app_id)
 
-    def test_third_unseen_app_combines_generic_swipe_without_code_branch(self):
+    def test_third_unseen_app_combines_generic_scroll_without_code_branch(self):
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, qwen, _capture, robot = self._session(
                 temp,
                 app_id="synthetic.timeline",
                 app_name="合成时间线",
                 raw_goal="这页没有我要的公开条目，往下翻一屏再判断",
-                action_kind="swipe",
+                action_kind="scroll",
             )
             result = orchestrator.confirm_one(session, _confirmation(session))
 

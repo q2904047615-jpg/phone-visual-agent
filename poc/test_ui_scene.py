@@ -26,13 +26,14 @@ def element(
     role: str = "button",
     confidence: float = 0.95,
     states=None,
+    bounds=(0.2, 0.3, 0.4, 0.5),
 ) -> UIElement:
     return UIElement(
         element_id=element_id,
         role=role,
         meaning=meaning,
         label=meaning,
-        bounds=(0.2, 0.3, 0.4, 0.5),
+        bounds=bounds,
         confidence=confidence,
         states=states or {},
         evidence=("visible",),
@@ -383,13 +384,13 @@ class UISceneTests(unittest.TestCase):
         )
         action = SemanticAction(
             node_id="scroll",
-            action="swipe",
+            action="scroll",
             params={"direction": "up"},
         )
 
         resolved = UniversalActionController().resolve_one(action, current)
 
-        self.assertEqual("swipe", resolved.kind)
+        self.assertEqual("scroll", resolved.kind)
 
     def test_invalid_bounds_and_duplicate_element_ids_still_fail(self) -> None:
         with self.assertRaisesRegex(UISceneError, "bounds"):
@@ -491,13 +492,71 @@ class UISceneTests(unittest.TestCase):
         resolved = UniversalActionController().resolve_one(
             SemanticAction(
                 node_id="scroll",
-                action="swipe",
+                action="scroll",
                 params={"direction": "up"},
             ),
             current,
         )
 
-        self.assertEqual("swipe", resolved.kind)
+        self.assertEqual("scroll", resolved.kind)
+
+    def test_recent_tasks_clear_all_uses_current_frame_button_tap(self) -> None:
+        target = element("clear-all", "clear_all_recent_tasks", role="button",
+            bounds=(0.45, 0.82, 0.57, 0.92))
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(node_id="clear-all-recents", action="tap_semantic", params={
+                "element_id": "clear-all", "target": "clear_all_recent_tasks",
+                "role": "button", "label": "×", "states": {},
+            }),
+            scene(target, app_id="system", screen_id="system_recent_tasks"),
+        )
+
+        self.assertEqual("tap_semantic", resolved.kind)
+        self.assertEqual("clear-all", resolved.target_element_id)
+        self.assertEqual(target.center, resolved.normalized_point)
+
+    def test_recent_tasks_rejects_every_element_swipe_before_execution(self) -> None:
+        target = element("recent-card", "recent_app_card", role="container",
+            bounds=(0.1, 0.2, 0.6, 0.75))
+        current = scene(target, app_id="system", screen_id="system_recent_tasks")
+        trajectories = {
+            "left": ((0.4, 0.5), (0.08, 0.5)),
+            "right": ((0.3, 0.5), (0.7, 0.5)),
+            "up": ((0.4, 0.5), (0.4, 0.1)),
+            "down": ((0.4, 0.5), (0.4, 0.9)),
+        }
+        for direction, (start, end) in trajectories.items():
+            with self.subTest(direction=direction), self.assertRaisesRegex(
+                UniversalActionError, "不得再用 swipe_element"):
+                UniversalActionController().resolve_one(
+                    SemanticAction(node_id="dismiss-card", action="swipe_element", params={
+                        "element_id": "recent-card", "start": start, "end": end,
+                    }), current)
+
+    def test_recent_tasks_uses_only_vertical_scroll_to_find_target(self) -> None:
+        current = scene(app_id="system", screen_id="system_recent_tasks")
+        controller = UniversalActionController()
+        for direction in ("up", "down"):
+            with self.subTest(direction=direction):
+                resolved = controller.resolve_one(SemanticAction(
+                    node_id="find-card", action="scroll", params={"direction": direction}), current)
+                self.assertEqual(direction, resolved.direction)
+        for direction in ("left", "right"):
+            with self.subTest(direction=direction), self.assertRaisesRegex(
+                UniversalActionError, "只允许上下 scroll"):
+                controller.resolve_one(SemanticAction(
+                    node_id="find-card", action="scroll", params={"direction": direction}), current)
+
+    def test_element_swipe_rejects_start_outside_target_safe_area(self) -> None:
+        target = element("recent-card", "recent_app_card", role="container",
+            bounds=(0.1, 0.2, 0.6, 0.75))
+        with self.assertRaisesRegex(UniversalActionError, "内部安全区域"):
+            UniversalActionController().resolve_one(
+                SemanticAction(node_id="dismiss-card", action="swipe_element", params={
+                    "element_id": "recent-card", "start": (0.7, 0.5), "end": (0.08, 0.5),
+                }),
+                scene(target),
+            )
 
     def test_container_is_valid_current_frame_point_target(self) -> None:
         content = element("content", "video_content", role="container")
@@ -1344,7 +1403,7 @@ class UISceneTests(unittest.TestCase):
             node_id="companion-input", action="input_verified_text",
             params={
                 "element_id": "field", "target": "application_text_input", "role": "input",
-                "text": expected, "text_transport": "companion_ime", "input_field_id": "body_field",
+                "text": expected, "text_transport": "adb_keyboard", "input_field_id": "body_field",
                 "prior_input_value": "first", "input_fragment": "\nsecond🙂",
                 "expected_input_value": expected,
             },
@@ -1364,6 +1423,51 @@ class UISceneTests(unittest.TestCase):
             controller.verify_after_action(resolved, before, after),
         )
 
+    def test_adb_keyboard_input_requires_focus_even_without_visible_soft_keyboard(self) -> None:
+        before_input = element(
+            "field", "application_text_input", role="input",
+            states={
+                "fully_visible": True, "value": "", "input_field_id": "body_field",
+                "input_multiline": False, "soft_keyboard_visible": False,
+                "ime_preedit_text": "",
+            },
+        )
+        before = scene(before_input, app_id="sample.app", screen_id="editor", fingerprint="before-adb")
+        action = SemanticAction(
+            node_id="adb-input", action="input_verified_text",
+            params={
+                "element_id": "field", "target": "application_text_input", "role": "input",
+                "text": "ADB测试？你好", "text_transport": "adb_keyboard",
+                "input_field_id": "body_field", "prior_input_value": "",
+                "input_fragment": "ADB测试？你好", "expected_input_value": "ADB测试？你好",
+            },
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "已聚焦"):
+            UniversalActionController().resolve_one(action, before)
+
+    def test_adb_keyboard_clear_requires_focus_before_broadcast(self) -> None:
+        before_input = element(
+            "field", "application_text_input", role="input",
+            states={
+                "fully_visible": True, "value": "aaazjie？你好", "input_field_id": "body_field",
+                "input_multiline": False, "soft_keyboard_visible": False,
+                "ime_preedit_text": "",
+            },
+        )
+        before = scene(before_input, app_id="sample.app", screen_id="editor", fingerprint="before-adb-clear")
+        action = SemanticAction(
+            node_id="adb-clear", action="clear_verified_text",
+            params={
+                "element_id": "field", "target": "application_text_input", "role": "input",
+                "text_transport": "adb_keyboard", "input_field_id": "body_field",
+                "prior_input_value": "aaazjie？你好", "expected_input_value": "",
+            },
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "已聚焦"):
+            UniversalActionController().resolve_one(action, before)
+
     def test_companion_clear_binds_typed_field_and_rejects_stale_preedit(self) -> None:
         before_input = element(
             "field", "application_text_input", role="input",
@@ -1378,7 +1482,7 @@ class UISceneTests(unittest.TestCase):
             node_id="companion-clear", action="clear_verified_text",
             params={
                 "element_id": "field", "target": "application_text_input", "role": "input",
-                "text_transport": "companion_ime", "input_field_id": "body_field",
+                "text_transport": "adb_keyboard", "input_field_id": "body_field",
                 "prior_input_value": "待清除🙂", "expected_input_value": "",
             },
         )

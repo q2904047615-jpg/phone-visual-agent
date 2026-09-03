@@ -22,6 +22,7 @@ class FakeRobot:
         self.calls = []
         self._click_receipt = None
         self._long_press_receipt = None
+        self._swipe_receipt = None
 
     def _record_click(self, count: int) -> None:
         self._click_receipt = {
@@ -55,6 +56,20 @@ class FakeRobot:
         self._long_press_receipt = {"hold_started_after_barrier": True}
         return (x, y)
 
+    def vision_swipe_relative(self, start_x, start_y, end_x, end_y, direction):
+        self.calls.append(("swipe", start_x, start_y, end_x, end_y, direction))
+        self._swipe_receipt = {
+            "right_button_down_dispatched": True,
+            "right_button_up_dispatched": True,
+            "seller_position_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+            "requested_direction": direction,
+            "step_count": 6,
+            "interpolation_steps_completed": 6,
+        }
+        return ((start_x, start_y), (end_x, end_y))
+
     def consume_last_click_receipt(self):
         receipt = self._click_receipt
         self._click_receipt = None
@@ -65,17 +80,22 @@ class FakeRobot:
         self._long_press_receipt = None
         return receipt
 
+    def consume_last_swipe_receipt(self):
+        receipt = self._swipe_receipt
+        self._swipe_receipt = None
+        return receipt
 
-def companion_scope(*, fragment: str, expected: str) -> TextTransportActionScope:
+
+def adb_keyboard_scope(*, fragment: str, expected: str) -> TextTransportActionScope:
     return TextTransportActionScope(protocol_version=TEXT_TRANSPORT_PROTOCOL, device_id="device-1",
         session_id="session-1", task_id="task-1", revision=1, action_id="action-1",
-        input_field_id="field-1", editor_session_id="editor-session-0001",
+        input_field_id="field-1",
         observation_fingerprint="observation-1", prior_text_digest=text_digest(""),
         fragment_text_digest=text_digest(fragment), expected_text_digest=text_digest(expected),
-        issued_at_epoch=100.0, expires_at_epoch=110.0, nonce="nonce-0000000000001")
+        issued_at_epoch=100.0, nonce="nonce-0000000000001")
 
 
-class FakeCompanionTransport:
+class FakeAdbKeyboardTransport:
     def __init__(self, *, status: str = "accepted") -> None:
         self.status = status
         self.calls = []
@@ -102,6 +122,31 @@ class FakeCompanionTransport:
 
 
 class DeviceExecutorTests(unittest.TestCase):
+    def test_relative_swipe_dispatches_once_and_consumes_path_receipt(self):
+        robot = FakeRobot()
+        executor = RobotDeviceExecutor(robot)
+
+        result = executor.execute(DeviceActionRequest(kind="swipe_element", point=(700, 500),
+            end_point=(100, 500), direction="left"))
+
+        self.assertEqual([("swipe", 700, 500, 100, 500, "left")], robot.calls)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("left", result.hardware_receipt["requested_direction"])
+        self.assertEqual(6, result.hardware_receipt["interpolation_steps_completed"])
+        self.assertIsNone(robot.consume_last_swipe_receipt())
+
+    def test_relative_swipe_without_valid_receipt_fails_after_one_attempt(self):
+        robot = FakeRobot()
+        robot.consume_last_swipe_receipt = lambda: None
+        executor = RobotDeviceExecutor(robot)
+
+        with self.assertRaises(DeviceExecutionError) as context:
+            executor.execute(DeviceActionRequest(kind="swipe_element", point=(700, 500),
+                end_point=(100, 500), direction="left"))
+
+        self.assertEqual(1, context.exception.physical_actions)
+        self.assertEqual([("swipe", 700, 500, 100, 500, "left")], robot.calls)
+
     def test_single_tap_dispatches_once_and_consumes_receipt(self):
         robot = FakeRobot()
         executor = RobotDeviceExecutor(robot)
@@ -166,38 +211,67 @@ class DeviceExecutorTests(unittest.TestCase):
         self.assertEqual(robot.calls[0][:2], ("type", "abc"))
         self.assertEqual(robot.calls[1][:3], ("pinyin", "你好", "nihao"))
 
-    def test_companion_append_and_clear_never_call_mechanical_keyboard(self):
+    def test_adb_keyboard_append_and_clear_never_call_mechanical_keyboard(self):
         robot = FakeRobot()
-        companion = FakeCompanionTransport()
-        executor = RobotDeviceExecutor(robot, text_transport=companion)
-        append_scope = companion_scope(fragment="你好🙂\nsecond", expected="你好🙂\nsecond")
-        clear_scope = companion_scope(fragment="", expected="")
+        transport = FakeAdbKeyboardTransport()
+        executor = RobotDeviceExecutor(robot, text_transport=transport)
+        append_scope = adb_keyboard_scope(fragment="你好🙂\nsecond", expected="你好🙂\nsecond")
+        clear_scope = adb_keyboard_scope(fragment="", expected="")
         self.assertEqual(EMPTY_TEXT_DIGEST, clear_scope.fragment_text_digest)
 
         append = executor.execute(DeviceActionRequest(kind="input_verified_text",
-            input_fragment="你好🙂\nsecond", input_method="unicode_commit", text_transport="companion_ime",
+            input_fragment="你好🙂\nsecond", input_method="unicode_commit", text_transport="adb_keyboard",
             text_scope=append_scope))
-        clear = executor.execute(DeviceActionRequest(kind="clear_verified_text", text_transport="companion_ime",
+        clear = executor.execute(DeviceActionRequest(kind="clear_verified_text", text_transport="adb_keyboard",
             text_scope=clear_scope))
 
         self.assertEqual([], robot.calls)
-        self.assertEqual(["append_text", "clear_text"], [item[0] for item in companion.calls])
+        self.assertEqual(["append_text", "clear_text"], [item[0] for item in transport.calls])
         self.assertEqual((1, 1), (append.physical_actions, clear.physical_actions))
         self.assertEqual("accepted", append.metadata["transport_status"])
 
-    def test_companion_pre_send_unavailable_is_zero_action_and_never_falls_back(self):
+    def test_adb_keyboard_pre_send_unavailable_is_zero_action_and_never_falls_back(self):
         robot = FakeRobot()
-        companion = FakeCompanionTransport(status="unavailable")
-        executor = RobotDeviceExecutor(robot, text_transport=companion)
+        transport = FakeAdbKeyboardTransport(status="unavailable")
+        executor = RobotDeviceExecutor(robot, text_transport=transport)
 
         with self.assertRaises(DeviceExecutionError) as context:
             executor.execute(DeviceActionRequest(kind="input_verified_text", input_fragment="🙂",
-                input_method="unicode_commit", text_transport="companion_ime",
-                text_scope=companion_scope(fragment="🙂", expected="🙂")))
+                input_method="unicode_commit", text_transport="adb_keyboard",
+                text_scope=adb_keyboard_scope(fragment="🙂", expected="🙂")))
 
         self.assertEqual(0, context.exception.physical_actions)
         self.assertEqual([], robot.calls)
-        self.assertEqual(1, len(companion.calls))
+        self.assertEqual(1, len(transport.calls))
+
+    def test_adb_keyboard_rejected_input_is_one_failed_action_and_never_falls_back(self):
+        robot = FakeRobot()
+        transport = FakeAdbKeyboardTransport(status="rejected")
+        executor = RobotDeviceExecutor(robot, text_transport=transport)
+
+        with self.assertRaises(DeviceExecutionError) as context:
+            executor.execute(DeviceActionRequest(kind="input_verified_text", input_fragment="你好",
+                input_method="unicode_commit", text_transport="adb_keyboard",
+                text_scope=adb_keyboard_scope(fragment="你好", expected="你好")))
+
+        self.assertEqual(1, context.exception.physical_actions)
+        self.assertEqual("rejected", context.exception.metadata["transport_status"])
+        self.assertEqual([], robot.calls)
+        self.assertEqual(1, len(transport.calls))
+
+    def test_adb_keyboard_unknown_clear_is_one_failed_action_and_never_falls_back(self):
+        robot = FakeRobot()
+        transport = FakeAdbKeyboardTransport(status="unknown")
+        executor = RobotDeviceExecutor(robot, text_transport=transport)
+
+        with self.assertRaises(DeviceExecutionError) as context:
+            executor.execute(DeviceActionRequest(kind="clear_verified_text", text_transport="adb_keyboard",
+                text_scope=adb_keyboard_scope(fragment="", expected="")))
+
+        self.assertEqual(1, context.exception.physical_actions)
+        self.assertEqual("unknown", context.exception.metadata["transport_status"])
+        self.assertEqual([], robot.calls)
+        self.assertEqual(1, len(transport.calls))
 
     def test_wait_is_zero_action(self):
         slept = []
@@ -250,7 +324,7 @@ class DeviceExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(DeviceExecutionError, "请求方向不一致"):
             executor.execute(
                 DeviceActionRequest(
-                    kind="swipe",
+                    kind="swipe_element",
                     direction="up",
                     point=(500, 100),
                     end_point=(500, 900),

@@ -50,7 +50,9 @@ def oriented_navigation_ratio(x_ratio: float, y_ratio: float, *, landscape: bool
 DEFAULT_CONTROLLER_CONFIG: dict[str, Any] = {'tap_hold': 0.35, 'android_home_x_ratio': 0.5,
     'android_home_y_ratio': 0.976, 'android_recents_x_ratio': 0.33, 'android_recents_y_ratio': 0.976,
     'android_back_x_ratio': 0.685, 'android_back_y_ratio': 0.976, 'keyboard_backspace_x_ratio': 0.862,
-    'keyboard_backspace_y_ratio': 0.844, 'pinyin_keyboard': {'rows': [{'keys': 'qwertyuiop', 'x_start': 0.115,
+    'keyboard_backspace_y_ratio': 0.844, 'swipe_touch_down_seconds': 0.35,
+    'swipe_movement_seconds': 0.30, 'swipe_steps': 6,
+    'pinyin_keyboard': {'rows': [{'keys': 'qwertyuiop', 'x_start': 0.115,
     'x_step': 0.0844, 'y': 0.704}, {'keys': 'asdfghjkl', 'x_start': 0.157, 'x_step': 0.0844, 'y': 0.773},
     {'keys': 'zxcvbnm', 'x_start': 0.241, 'x_step': 0.0844, 'y': 0.844}], 'key_hold': 0.18, 'inter_key_wait': 0.12,
     'pre_key_wait': 0.45, 'first_key_settle': 0.35}, 'digit_long_press_hold': 0.78}
@@ -180,6 +182,7 @@ class RobotController:
         self.capture_lock = threading.RLock()
         self._last_click_receipt: dict[str, Any] | None = None
         self._last_long_press_receipt: dict[str, Any] | None = None
+        self._last_swipe_receipt: dict[str, Any] | None = None
         default_actions = {'tap_semantic', 'dismiss_overlay', 'swipe', 'back', 'home', 'open_recent_apps',
             'wait_for_change'}
         self.verified_actions = frozenset(default_actions if verified_actions is None else verified_actions)
@@ -206,6 +209,8 @@ class RobotController:
                 'mechanical_contact_ack': False}
         actions["long_press"]["duration_ms"] = {"min": 500, "max": 2000}
         actions["drag"]["duration_ms"] = {"fixed": 800}
+        actions["swipe"].update({'relative_path_receipt': 'seller_position_barrier',
+            'touch_down_ms': 350, 'movement_ms': 300, 'steps': 6})
         actions['input_verified_text']['text'] = {'canonical_max_chars': 4000,
             'max_chars_per_physical_step': MAX_DIRECT_LATIN_SEGMENT_CHARS,
             'direct_latin_transport': 'audited_visible_key_sequence',
@@ -235,6 +240,11 @@ class RobotController:
     def consume_last_click_receipt(self) -> dict[str, Any] | None:
         receipt = self._last_click_receipt
         self._last_click_receipt = None
+        return dict(receipt) if receipt is not None else None
+
+    def consume_last_swipe_receipt(self) -> dict[str, Any] | None:
+        receipt = self._last_swipe_receipt
+        self._last_swipe_receipt = None
         return dict(receipt) if receipt is not None else None
 
     def _require_verified_action(self, action: str, label: str) -> None:
@@ -379,7 +389,25 @@ class RobotController:
             'down': delta_y > 0 and abs(delta_y) > abs(delta_x), 'left': delta_x < 0 and abs(delta_x) > abs(delta_y),
             'right': delta_x > 0 and abs(delta_x) > abs(delta_y)}.get(str(direction or '').strip().lower())
         reject_if(direction_matches is not True, ValueError("元素滑动轨迹与请求方向不一致。"))
-        return self._vision_path_relative(start_x, start_y, end_x, end_y, action='swipe', label='元素绑定滑动')
+        self._require_verified_action('swipe', '元素绑定滑动')
+        values = (start_x, start_y, end_x, end_y)
+        reject_if(any((not 0 <= value <= 1000 for value in values)), ValueError("元素绑定滑动视觉坐标必须全部在0～1000之间。"))
+        hwnd, frame = self._authorized_frame('swipe')
+        from agent.infrastructure.tap_calibration import corrected_grid_point
+
+        start, end = (self._grid_pixel(frame, corrected_grid_point(x, y, frame.size, self.calibration_path))
+            for x, y in ((start_x, start_y), (end_x, end_y)))
+        reject_if(start == end, ValueError("标定后的元素绑定滑动起点和终点重合。"))
+        cfg = load_controller_config()
+        self._last_swipe_receipt = None
+        self._checkpoint()
+        receipt = seller_gui.swipe_client_path(hwnd, start, end,
+            touch_down_seconds=float(cfg['swipe_touch_down_seconds']),
+            movement_seconds=float(cfg['swipe_movement_seconds']), steps=int(cfg['swipe_steps']))
+        reject_if(not isinstance(receipt, dict), RuntimeError("控制端没有返回滑动路径凭据。"))
+        self._last_swipe_receipt = {**receipt, 'requested_direction': str(direction).strip().lower()}
+        seller_gui.clear_seller_camera_overlay(hwnd)
+        return start, end
 
     def _vision_path_relative(self, start_x: int, start_y: int, end_x: int, end_y: int, *, action: str,
         label: str) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -661,8 +689,16 @@ class MockRobotController(RobotController):
 
     def vision_swipe_relative(self, start_x: int, start_y: int, end_x: int, end_y: int,
         direction: str) -> tuple[tuple[int, int], tuple[int, int]]:
-        return self._mock('swipe', 'swipe_relative', result=((start_x, start_y), (end_x, end_y)),
+        result = self._mock('swipe', 'swipe_relative', result=((start_x, start_y), (end_x, end_y)),
             direction=direction, start=[start_x, start_y], end=[end_x, end_y])
+        self._last_swipe_receipt = {'version': '2026-09-03-mock-swipe-path-v1',
+            'channel': 'mock_swipe_path', 'right_button_down_dispatched': True,
+            'right_button_up_dispatched': True, 'interpolation_steps_completed': 6,
+            'seller_position_barrier_confirmed': True, 'round_trip_position_confirmed': True,
+            'touch_down_seconds': 0.35, 'movement_seconds': 0.3, 'step_count': 6,
+            'client_start': [start_x, start_y], 'client_end': [end_x, end_y],
+            'mechanical_contact_ack': False, 'requested_direction': direction}
+        return result
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
         self._require_verified_action('reveal_system_navigation', '系统边缘唤出导航栏')

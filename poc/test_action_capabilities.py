@@ -11,7 +11,7 @@ class ActionCapabilityTests(unittest.TestCase):
     def test_snapshot_fills_every_known_action_and_stable_digest(self):
         first = build_device_capability_snapshot(
             device_id="device-1",
-            supported_actions={"tap_semantic", "swipe", "input_verified_text"},
+            supported_actions={"tap_semantic", "scroll", "swipe_element", "input_verified_text"},
             raw_profile={
                 "actions": {
                     "input_verified_text": {
@@ -23,7 +23,7 @@ class ActionCapabilityTests(unittest.TestCase):
         )
         second = build_device_capability_snapshot(
             device_id="device-1",
-            supported_actions={"input_verified_text", "swipe", "tap_semantic"},
+            supported_actions={"input_verified_text", "swipe_element", "scroll", "tap_semantic"},
             raw_profile={
                 "actions": {
                     "input_verified_text": {
@@ -55,6 +55,16 @@ class ActionCapabilityTests(unittest.TestCase):
         self.assertEqual("requires_double_tap_live_acceptance", gap.reason_code)
         self.assertEqual(("interval_ms",), gap.required_parameters)
         self.assertRegex(gap.profile_digest, r"^[0-9a-f]{64}$")
+
+    def test_device_level_swipe_expands_to_both_canonical_gesture_capabilities(self):
+        snapshot = build_device_capability_snapshot(
+            device_id="device-1",
+            supported_actions={"swipe"},
+        )
+
+        self.assertIsNone(snapshot.gap("scroll"))
+        self.assertIsNone(snapshot.gap("swipe_element"))
+        self.assertNotIn("swipe", snapshot.actions)
 
     def test_supported_action_has_no_gap_and_unknown_action_is_rejected(self):
         snapshot = build_device_capability_snapshot(

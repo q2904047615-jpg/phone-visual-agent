@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import agent.domain.generic_goal as generic_goal_domain
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.vision_model import VisionAgentError
 
 
-SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-20-deepseek-typed-task-graph-v4"
+SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-09-03-deepseek-required-action-v6"
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 ALLOWED_TASK_STATUSES = {'ready', 'running', 'awaiting_confirmation', 'completed', 'blocked'}
@@ -65,7 +66,7 @@ class QwenTaskContext(Mapping[str, Any]):
         reject_if(self.task_status not in ALLOWED_TASK_STATUSES, VisionAgentError(f"task_status 无效：{self.task_status}"))
         reject_if(self.current_execution_class not in ALLOWED_EXECUTION_CLASSES, VisionAgentError(f'current_execution_class 无效：{self.current_execution_class}'))
         subgoal_allowed = {'subgoal_id', 'objective', 'status', 'depends_on', 'constraints', 'completion_conditions',
-            'completion_evidence', 'execution_class', 'input_field_id', 'input_operation'}
+            'completion_evidence', 'execution_class', 'input_field_id', 'input_operation', 'required_action_kind'}
         unexpected_subgoal = set(self.current_subgoal) - subgoal_allowed
         reject_if(unexpected_subgoal, VisionAgentError('current_subgoal 包含协议外字段：' + ', '.join(sorted(unexpected_subgoal))))
         reject_if(not str(self.current_subgoal.get('subgoal_id') or '').strip(), VisionAgentError("current_subgoal 缺少 subgoal_id。"))
@@ -78,6 +79,11 @@ class QwenTaskContext(Mapping[str, Any]):
             'current_subgoal typed input 绑定必须同时包含 input_field_id 与 input_operation。'))
         reject_if(operation and operation not in ALLOWED_INPUT_OPERATIONS, VisionAgentError(
             f'current_subgoal.input_operation 无效：{operation}'))
+        required_action_kind = str(self.current_subgoal.get('required_action_kind') or '').strip()
+        reject_if(required_action_kind and required_action_kind not in CANONICAL_ACTION_KINDS,
+            VisionAgentError(f'current_subgoal.required_action_kind 无效：{required_action_kind}'))
+        reject_if(bool(required_action_kind) and bool(operation), VisionAgentError(
+            'current_subgoal 不能同时声明 required_action_kind 与 input_operation。'))
         generic_goal_domain.safe_goal_context(self.to_dict())
 
         effect_allowed = {'effect_id', 'kind', 'target_entity_roles', 'payload_entity_roles', 'source_subgoal_ids',

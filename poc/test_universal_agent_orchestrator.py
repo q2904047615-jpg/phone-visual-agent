@@ -15,11 +15,13 @@ from agent.application.universal_agent_orchestrator import (
     UniversalAgentOrchestratorError,
 )
 from agent.domain.canonical_action_protocol import (
+    CanonicalActionProtocolError,
     GenericStepProposal,
     bind_same_response_action,
     normalize_model_step_decision,
 )
 from agent.domain.task_graph import (
+    build_exact_input_task_graph,
     CompletionCondition,
     DynamicTaskGraph,
     GraphGoal,
@@ -141,12 +143,18 @@ def _same_frame_model_decision(scene: UIScene, *, status: str,
         if len(scene.elements) != 1:
             raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
         payload["element_id"] = scene.elements[0].element_id
-    elif action_kind == "swipe":
+    elif action_kind == "scroll":
         payload["direction"] = "up"
+    elif action_kind == "swipe_element":
+        if len(scene.elements) != 1:
+            raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
+        payload["element_id"] = scene.elements[0].element_id
+        payload["start"] = [300, 250]
+        payload["end"] = [50, 250]
     return payload
 
 
-def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
+def _graph(*, device_id: str = "device-1", required_action_kind: str = "") -> DynamicTaskGraph:
     graph = DynamicTaskGraph(
         task_id="task-1",
         device_id=device_id,
@@ -177,10 +185,39 @@ def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
                 completion_evidence=(),
                 risk_action_ids=(),
                 external_impact="navigation_only",
+                required_action_kind=required_action_kind,
             ),
         ),
         active_subgoal_id="subgoal-1",
         raw_user_goal="看看图片工具里的风景分类",
+    )
+    graph.validate()
+    return graph
+
+
+def _clear_graph(*, device_id: str="device-1") -> DynamicTaskGraph:
+    graph = DynamicTaskGraph(
+        task_id="task-clear-input",
+        device_id=device_id,
+        revision=1,
+        status="running",
+        goal=GraphGoal(
+            objective="清空当前聊天输入框",
+            target_apps=(TargetApp(app_id="messenger", app_name="消息应用"),),
+            entities={"input_fields": [{"field_id": "primary_input", "field_label": "聊天输入框",
+                "text": "", "target_only": True}]},
+        ),
+        constraints=("不发送消息",),
+        completion_conditions=(CompletionCondition(condition_id="input-empty",
+            description="聊天输入框为空", evidence_required=("当前输入框正文为空",)),),
+        risk_actions=(),
+        subgoals=(Subgoal(subgoal_id="clear-input", objective="清空当前聊天输入框",
+            status="active", depends_on=(), constraints=("不发送消息",),
+            completion_conditions=("聊天输入框为空",), completion_evidence=(), risk_action_ids=(),
+            external_impact="external_state", input_field_id="primary_input",
+            input_operation="clear_verified_text"),),
+        active_subgoal_id="clear-input",
+        raw_user_goal="清空当前聊天输入框",
     )
     graph.validate()
     return graph
@@ -234,6 +271,61 @@ def _effect_graph(
         ),
         active_subgoal_id="subgoal-1",
         raw_user_goal=f"完成一次{kind}目标",
+    )
+    graph.validate()
+    return graph
+
+
+def _graph_with_future_send_effect(*, device_id: str = 'device-1') -> DynamicTaskGraph:
+    graph = DynamicTaskGraph(
+        task_id='task-future-send',
+        device_id=device_id,
+        revision=1,
+        status='ready',
+        goal=GraphGoal(
+            objective='打开消息应用并发送内容',
+            target_apps=(TargetApp(app_id='messenger', app_name='消息应用'),),
+            entities={'input_text': 'hello'},
+        ),
+        constraints=(),
+        completion_conditions=(CompletionCondition(
+            condition_id='message-sent',
+            description='消息已发送',
+            evidence_required=('新消息气泡可见',),
+        ),),
+        risk_actions=(RiskAction(
+            risk_id='send-effect',
+            subgoal_ids=('send-message',),
+            confirmation_required=False,
+            effect_kind='send_message',
+            expected_result_texts=('新消息气泡可见',),
+        ),),
+        subgoals=(
+            Subgoal(
+                subgoal_id='open-app',
+                objective='打开消息应用',
+                status='active',
+                depends_on=(),
+                constraints=(),
+                completion_conditions=('消息应用可见',),
+                completion_evidence=(),
+                risk_action_ids=(),
+                external_impact='navigation_only',
+            ),
+            Subgoal(
+                subgoal_id='send-message',
+                objective='发送内容',
+                status='pending',
+                depends_on=('open-app',),
+                constraints=(),
+                completion_conditions=('新消息气泡可见',),
+                completion_evidence=(),
+                risk_action_ids=('send-effect',),
+                external_impact='external_state',
+            ),
+        ),
+        active_subgoal_id='open-app',
+        raw_user_goal='打开消息应用并发送内容',
     )
     graph.validate()
     return graph
@@ -297,6 +389,7 @@ class FakeAdapter:
             scene, status="action", action_kind="tap_semantic"
         )
         self.followup_model_decision = dict(self.initial_model_decision)
+        self.capture_action_kinds = []
 
     def configure_model_decisions(self, *, status: str, after_status: str,
         action_kind: str, after_action_kind: str | None = None) -> None:
@@ -310,8 +403,9 @@ class FakeAdapter:
             action_kind=after_action_kind or action_kind,
         )
 
-    def capture_scene(self, goal, *, evidence_dir, prefix):
+    def capture_scene(self, goal, *, evidence_dir, prefix, available_action_kinds=None):
         del goal
+        self.capture_action_kinds.append(frozenset(available_action_kinds or ()))
         self.capture_calls += 1
         frames = [Image.new("RGB", (540, 960), "white") for _ in range(4)]
         model_decision = (
@@ -319,6 +413,18 @@ class FakeAdapter:
             if self.capture_calls == 1
             else self.followup_model_decision
         )
+        available = frozenset(available_action_kinds or ())
+        if (model_decision.get("status") == "action"
+            and model_decision.get("action") not in available
+            and "input_verified_text" in available
+            and len(self.scene.elements) == 1
+            and self.scene.elements[0].states.get("focused") is True):
+            # Production's strict response schema cannot emit an action omitted from the
+            # runtime set. Mirror that behavior when a corrective observation removes a
+            # redundant focus tap but leaves the required typed action available.
+            model_decision = _same_frame_model_decision(
+                self.scene, status="action", action_kind="input_verified_text"
+            )
         return self.scene, frames, tuple(
             str(evidence_dir / f"{prefix}_{index}.jpg") for index in range(1, 5)
         ), dict(model_decision)
@@ -349,6 +455,7 @@ class FakeExecutingAdapter(FakeAdapter):
         self.action_outcome = action_outcome
         self.verification_errors = verification_errors
         self.action_authorities = []
+        self.post_action_available_sets = []
 
     def execute(
         self,
@@ -360,8 +467,11 @@ class FakeExecutingAdapter(FakeAdapter):
         confirmed,
         evidence_dir,
         action_authority=None,
+        available_action_kinds=None,
+        post_action_available_action_kinds=None,
     ):
-        del planned_frames, goal, confirmed, evidence_dir
+        del planned_frames, goal, confirmed, evidence_dir, available_action_kinds
+        self.post_action_available_sets.append(frozenset(post_action_available_action_kinds or ()))
         self.action_authorities.append(action_authority)
         self.execute_calls += 1
         if self.execute_error is not None:
@@ -425,6 +535,38 @@ class StaleOnceExecutingAdapter(FakeExecutingAdapter):
         return super().execute(**kwargs)
 
 
+class FocusThenInputExecutingAdapter(FakeExecutingAdapter):
+    """Mirror the runtime schema: focus first, then expose the typed action."""
+
+    def __init__(self, initial_scene: UIScene, focused_scene: UIScene, completed_scene: UIScene, *,
+        typed_action_kind: str="input_verified_text", completed_status: str="finish",
+        completed_action_kind: str="tap_semantic") -> None:
+        super().__init__(initial_scene, focused_scene)
+        self.focused_scene = focused_scene
+        self.completed_scene = completed_scene
+        self.typed_action_kind = typed_action_kind
+        self.completed_status = completed_status
+        self.completed_action_kind = completed_action_kind
+
+    def configure_model_decisions(self, **_kwargs) -> None:
+        self.initial_model_decision = _same_frame_model_decision(
+            self.scene, status="action", action_kind="tap_semantic")
+        self.followup_model_decision = _same_frame_model_decision(
+            self.focused_scene, status="action", action_kind=self.typed_action_kind)
+
+    def execute(self, **kwargs):
+        if self.execute_calls == 0:
+            self.after_scene = self.focused_scene
+            self.followup_model_decision = _same_frame_model_decision(
+                self.focused_scene, status="action", action_kind=self.typed_action_kind)
+        else:
+            self.after_scene = self.completed_scene
+            self.followup_model_decision = _same_frame_model_decision(
+                self.completed_scene, status=self.completed_status,
+                action_kind=self.completed_action_kind)
+        return super().execute(**kwargs)
+
+
 class FocusCorrectionExecutingAdapter(FakeExecutingAdapter):
     """Use a third scene for the one read-only correction after a focus click."""
 
@@ -437,7 +579,7 @@ class FocusCorrectionExecutingAdapter(FakeExecutingAdapter):
         super().__init__(scene, after_scene)
         self.correction_scene = correction_scene
 
-    def capture_scene(self, goal, *, evidence_dir, prefix):
+    def capture_scene(self, goal, *, evidence_dir, prefix, available_action_kinds=None):
         if self.capture_calls:
             self.scene = self.correction_scene
             self.followup_model_decision = _same_frame_model_decision(
@@ -445,7 +587,56 @@ class FocusCorrectionExecutingAdapter(FakeExecutingAdapter):
                 status="action",
                 action_kind="tap_semantic",
             )
-        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix)
+        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix,
+            available_action_kinds=available_action_kinds)
+
+
+class ExactInputCompletionCorrectionAdapter(FocusThenInputExecutingAdapter):
+    """Mirror the strict model schema after a verified input leaves only finish valid."""
+
+    def __init__(self, initial_scene: UIScene, focused_scene: UIScene, completed_scene: UIScene) -> None:
+        super().__init__(initial_scene, focused_scene, completed_scene,
+            completed_status='action', completed_action_kind='tap_semantic')
+
+    def capture_scene(self, goal, *, evidence_dir, prefix, available_action_kinds=None):
+        if self.capture_calls and 'input_verified_text' not in frozenset(available_action_kinds or ()):
+            self.scene = self.after_scene
+            self.followup_model_decision = _same_frame_model_decision(
+                self.after_scene,
+                status='finish',
+                action_kind='input_verified_text',
+            )
+        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix,
+            available_action_kinds=available_action_kinds)
+
+
+class ChangedElementGestureCorrectionAdapter(FakeExecutingAdapter):
+    """After one skipped repeat, return a materially different element trajectory."""
+
+    def capture_scene(self, goal, *, evidence_dir, prefix, available_action_kinds=None):
+        if self.capture_calls:
+            changed = _same_frame_model_decision(
+                self.scene, status="action", action_kind="swipe_element"
+            )
+            changed["start"] = [300, 250]
+            changed["end"] = [300, 600]
+            self.followup_model_decision = changed
+        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix,
+            available_action_kinds=available_action_kinds)
+
+
+class FutureEffectCorrectionAdapter(FakeAdapter):
+    """Emit finish when the one forbidden future-effect action is scoped out."""
+
+    def capture_scene(self, goal, *, evidence_dir, prefix, available_action_kinds=None):
+        if self.capture_calls and 'tap_semantic' not in frozenset(available_action_kinds or ()):
+            self.followup_model_decision = _same_frame_model_decision(
+                self.scene,
+                status='finish',
+                action_kind='tap_semantic',
+            )
+        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix,
+            available_action_kinds=available_action_kinds)
 
 
 class FakeQwenObserver:
@@ -467,6 +658,7 @@ class FakeQwenObserver:
         self.after_action_kind = after_action_kind
         self.calls = []
         self.text_transport_profiles = []
+        self.available_action_sets = []
 
     def decide(
         self,
@@ -482,6 +674,7 @@ class FakeQwenObserver:
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         self.text_transport_profiles.append(text_transport_profile)
+        self.available_action_sets.append(frozenset(available_action_kinds or ()))
         current_status = model_decision.get("status") if isinstance(model_decision, dict) else None
         if current_status in {"action", "finish"}:
             payload = normalize_model_step_decision(model_decision)
@@ -598,6 +791,192 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(1, len(planner.plan_calls))
         self.assertEqual(1, len(qwen.calls))
         self.assertEqual(0, adapter.execute_calls)
+        for actions in (adapter.capture_action_kinds[0], qwen.available_action_sets[0]):
+            self.assertNotIn("input_verified_text", actions)
+            self.assertNotIn("clear_verified_text", actions)
+            self.assertNotIn("press_enter", actions)
+
+    def test_navigation_subgoal_rejects_future_effect_target_before_action(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph_with_future_send_effect())
+        qwen = FakeQwenObserver(action_kind='tap_semantic')
+        adapter = FutureEffectCorrectionAdapter(_scene(meaning='send_message', label='发送'))
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self.orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id='session-no-future-effect',
+                raw_goal='打开消息应用并发送内容',
+                device_id='device-1',
+                run_dir=Path(temp),
+            )
+            self.assertEqual('needs_reobservation', session.status)
+            self.assertIn('后继子目标效果 send_message', session.failed_reason)
+            orchestrator.refresh_decision(session)
+
+        self.assertEqual('needs_reobservation', session.status)
+        self.assertEqual('send-message', session.task_graph.active_subgoal_id)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertNotIn('tap_semantic', adapter.capture_action_kinds[-1])
+        self.assertIsNone(session.confirmation_authority)
+
+    def test_terminal_refresh_failure_releases_device_lease(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind='tap_semantic', after_status='finish')
+        adapter = FakeAdapter(_input_scene(focused=True, value=''))
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id='session-refresh-terminal-release',
+                raw_goal='在当前输入框输入指定文字',
+                exact_input_text='cross-app text',
+                device_id='device-1',
+                run_dir=Path(temp),
+            )
+            self.assertEqual('needs_reobservation', session.status)
+            orchestrator.refresh_decision(session)
+
+        self.assertEqual('failed', session.status)
+        self.assertIn('尚无本会话动作回执', session.failed_reason)
+        self.assertEqual(0, session.physical_actions)
+        self.assertIsNone(orchestrator.device_registry.active_session(session.device_id))
+
+    def test_redundant_home_on_launcher_stops_before_physical_action(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="home")
+        adapter = FakeAdapter(_scene(app_id="launcher"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-redundant-home-on-launcher",
+                raw_goal="继续处理当前任务",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("failed", session.status)
+        self.assertIn("home 不会推进当前目标", session.failed_reason)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertIsNone(session.confirmation_authority)
+
+    def test_home_from_app_surface_remains_executable(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="home")
+        adapter = FakeAdapter(_scene(app_id="gallery"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-home-from-app",
+                raw_goal="回到系统主屏幕",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("home", session.qwen_decision.proposal.action.action)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_required_open_recents_stage_exposes_only_canonical_system_action(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph(required_action_kind="open_recent_apps"))
+        qwen = FakeQwenObserver(action_kind="open_recent_apps")
+        adapter = FakeAdapter(_scene(app_id="launcher"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-required-open-recents",
+                raw_goal="清理全部后台卡片",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(frozenset({"open_recent_apps"}), adapter.capture_action_kinds[0])
+        self.assertEqual(frozenset({"open_recent_apps"}), qwen.available_action_sets[0])
+        self.assertEqual("open_recent_apps", session.qwen_decision.proposal.action.action)
+
+    def test_ordinary_navigation_stage_keeps_visual_tap_available(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="tap_semantic")
+        adapter = FakeAdapter(_scene(app_id="gallery"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-ordinary-navigation-actions",
+                raw_goal="查看当前页面详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertIn("tap_semantic", adapter.capture_action_kinds[0])
+        self.assertIn("open_recent_apps", adapter.capture_action_kinds[0])
+
+    def test_repeated_home_stops_after_first_action_reaches_launcher(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(after_status="action", action_kind="home")
+        adapter = FakeExecutingAdapter(
+            _scene(app_id="gallery"),
+            _scene(fingerprint="launcher-after-home", app_id="launcher"),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-stop-repeated-home",
+                raw_goal="从当前页面返回系统主屏幕后继续",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", result["status"])
+        self.assertIn("home 不会推进当前目标", session.failed_reason)
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+
+    def test_repeated_open_recents_stops_after_first_action_without_transition(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(after_status="action", action_kind="open_recent_apps")
+        adapter = FakeExecutingAdapter(
+            _scene(app_id="messenger"),
+            _scene(fingerprint="still-in-app", app_id="messenger"),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-stop-repeated-recents",
+                raw_goal="打开系统最近任务页",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", result["status"])
+        self.assertIn("open_recent_apps 上一次物理动作后没有到达 recent_tasks", session.failed_reason)
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+
+    def test_navigation_subgoal_rejects_a_future_typed_input_choice_before_execution(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="input_verified_text")
+        adapter = FakeAdapter(_input_scene())
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(CanonicalActionProtocolError, "canonical 动作"):
+                self.orchestrator(planner, qwen, adapter).start(
+                    session_id="session-navigation-future-input",
+                    raw_goal="先打开目标页面再输入",
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
+
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertNotIn("input_verified_text", adapter.capture_action_kinds[0])
 
     def test_action_then_new_screenshot_finish_completes_in_one_loop(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
@@ -683,6 +1062,10 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(1, len(adapter.action_authorities))
         self.assertEqual(("effect-1",), adapter.action_authorities[0].effect_ids)
         self.assertIsNone(session.confirmation_authority)
+        for actions in (adapter.capture_action_kinds[0], qwen.available_action_sets[0]):
+            self.assertNotIn("input_verified_text", actions)
+            self.assertNotIn("clear_verified_text", actions)
+            self.assertNotIn("press_enter", actions)
         self.assertIsNone(session.controller_decision)
 
     def test_automatic_send_effect_accepts_finish_after_exactly_one_physical_effect(self) -> None:
@@ -719,6 +1102,86 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual(("effect-1",), adapter.action_authorities[0].effect_ids)
         self.assertIsNone(session.confirmation_authority)
 
+    def test_automatic_effect_cannot_finish_from_preexisting_first_screenshot(self) -> None:
+        planner = FakeDeepSeekPlanner(
+            _effect_graph("send_message", confirmation_required=False)
+        )
+        qwen = FakeQwenObserver(status="finish")
+        adapter = FakeAdapter(
+            _scene(meaning="sent_content", label="先前已发送内容")
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-old-effect-must-not-finish",
+                raw_goal="发送当前已准备的内容",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("failed", session.status)
+        self.assertIn("尚无本会话动作回执", session.failed_reason)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_exact_input_cannot_finish_from_preexisting_matching_text(self) -> None:
+        graph = build_exact_input_task_graph(
+            "输入本次文字",
+            exact_input_text="same text",
+            device_id="device-1",
+            task_id="task-input-old-state",
+        )
+        planner = FakeDeepSeekPlanner(graph)
+        qwen = FakeQwenObserver(status="finish")
+        adapter = FakeAdapter(_input_scene(value="same text"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self.orchestrator(planner, qwen, adapter).start(
+                session_id="session-old-input-must-not-finish",
+                raw_goal="输入本次文字",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("failed", session.status)
+        self.assertIn("尚无本会话动作回执", session.failed_reason)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_exact_input_accepts_finish_after_matching_current_session_input_action(self) -> None:
+        graph = build_exact_input_task_graph(
+            "输入本次文字",
+            exact_input_text="new text",
+            device_id="device-1",
+            task_id="task-input-new-transition",
+        )
+        planner = FakeDeepSeekPlanner(graph)
+        qwen = FakeQwenObserver(action_kind="tap_semantic", after_status="action",
+            after_action_kind="input_verified_text")
+        adapter = FocusThenInputExecutingAdapter(
+            _input_scene(value="", focused=False),
+            _input_scene(fingerprint="input-focused", value="", focused=True),
+            _input_scene(fingerprint="input-after", value="new text", focused=True),
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-current-input-finishes",
+                raw_goal="输入本次文字",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            orchestrator.confirm_one(session, _confirmation(session))
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertNotIn("input_verified_text", adapter.capture_action_kinds[0])
+        self.assertIn("input_verified_text", adapter.post_action_available_sets[0])
+        self.assertIn("clear_verified_text", adapter.post_action_available_sets[0])
+        self.assertNotIn("press_enter", adapter.capture_action_kinds[0])
+
     def test_automatic_publish_effect_rejects_a_different_followup_action(self) -> None:
         planner = FakeDeepSeekPlanner(
             _effect_graph("publish_content", confirmation_required=False)
@@ -726,7 +1189,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         qwen = FakeQwenObserver(
             after_status="action",
             action_kind="tap_semantic",
-            after_action_kind="swipe",
+            after_action_kind="scroll",
         )
         adapter = FakeExecutingAdapter(
             _scene(meaning="publish_content", label="发布"),
@@ -840,13 +1303,12 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
     def test_exact_input_uses_typed_current_subgoal(self) -> None:
         exact_text = "aaazjie？你好"
         planner = FakeDeepSeekPlanner(_graph())
-        qwen = FakeQwenObserver(
-            action_kind="input_verified_text",
-            after_status="finish",
-        )
-        adapter = FakeExecutingAdapter(
-            _input_scene(),
-            _input_scene(fingerprint="input-after", value=exact_text),
+        qwen = FakeQwenObserver(action_kind="tap_semantic", after_status="action",
+            after_action_kind="input_verified_text")
+        adapter = FocusThenInputExecutingAdapter(
+            _input_scene(focused=False),
+            _input_scene(fingerprint="input-focused", focused=True),
+            _input_scene(fingerprint="input-after", value=exact_text, focused=True),
         )
         orchestrator = self.orchestrator(planner, qwen, adapter)
         with tempfile.TemporaryDirectory() as temp:
@@ -858,6 +1320,10 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
             action = session.qwen_decision.proposal.action
+            self.assertEqual("tap_semantic", action.action)
+            self.assertNotIn("input_verified_text", adapter.capture_action_kinds[0])
+            orchestrator.confirm_one(session, _confirmation(session))
+            action = session.qwen_decision.proposal.action
             self.assertEqual("input_verified_text", action.action)
             self.assertEqual("primary_input", action.params["input_field_id"])
             self.assertEqual(exact_text, action.params["text"])
@@ -867,7 +1333,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
 
         self.assertEqual("succeeded", session.status)
         self.assertEqual(0, len(planner.plan_calls))
-        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, session.physical_actions)
 
     def test_public_snapshot_keeps_compatibility_keys_without_runtime_authority(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
@@ -885,10 +1351,60 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual("awaiting_confirmation", snapshot["status"])
         self.assertTrue(snapshot["confirmation_ready"])
         self.assertEqual([], snapshot["corrective_retry_history"])
-        self.assertIsNone(snapshot["corrective_retry_protocol"])
+        self.assertEqual("2026-09-03-bounded-element-gesture-correction-v1",
+            snapshot["corrective_retry_protocol"])
         self.assertIsNone(snapshot["verified_app_surface_lineage"])
         self.assertIsNone(snapshot["effect_verification"])
         self.assertEqual("tap_semantic", snapshot["proposal"]["action"]["action"])
+
+    def test_near_same_element_swipe_reobserves_once_then_stops_before_repeat(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="swipe_element", after_status="action")
+        adapter = FakeExecutingAdapter(_scene(), _scene(fingerprint="gesture-after-one"))
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-element-gesture-repeat",
+                raw_goal="移走当前目标卡片",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertIn("一次新观察纠正后仍选择近似滑动轨迹", session.failed_reason)
+        self.assertEqual(
+            ["needs_reobservation", "rejected_after_reobservation"],
+            [item["state"] for item in session.gesture_correction_history],
+        )
+
+    def test_changed_element_swipe_may_execute_twice_but_never_a_third_time(self) -> None:
+        planner = FakeDeepSeekPlanner(_graph())
+        qwen = FakeQwenObserver(action_kind="swipe_element", after_status="action")
+        adapter = ChangedElementGestureCorrectionAdapter(
+            _scene(), _scene(fingerprint="gesture-after-two")
+        )
+        orchestrator = self.orchestrator(planner, qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-element-gesture-two-attempts",
+                raw_goal="移走当前目标卡片",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.run_autonomous_safe_loop(session)
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(2, result["physical_actions"])
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertIn("已经执行两次滑动", session.failed_reason)
+        self.assertIn("未执行第三次", session.failed_reason)
+        self.assertIn("accepted_changed_trajectory",
+            [item["state"] for item in session.gesture_correction_history])
 
     def test_hard_adapter_error_is_terminal_and_releases_device_lease(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
@@ -952,8 +1468,8 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
         self.assertEqual("finish", session.qwen_decision.proposal.status)
         self.assertIsNone(session.confirmation_authority)
 
-    def test_autonomous_loop_stops_repeated_unprogressed_input_focus_across_visual_drift(self) -> None:
-        """Caret/keyboard state drift may not reopen one already-clicked typed field."""
+    def test_corrective_observation_removes_redundant_focus_but_keeps_qwen_selection(self) -> None:
+        """A fresh corrective frame scopes out only the proven-redundant focus tap."""
         initial_scene = _input_scene(
             fingerprint="focus-before",
             element_id="input-visible-1",
@@ -980,7 +1496,7 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
             fingerprint="focus-correction-caret-blink",
             element_id="input-renumbered-99",
             bounds=(0.083, 0.781, 0.825, 0.904),
-            focused=False,
+            focused=True,
             state_overrides={
                 "soft_keyboard_visible": False,
                 "keyboard_layout": "unknown",
@@ -1003,21 +1519,18 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
                 device_id="device-1",
                 run_dir=Path(temp),
             )
-            with self.assertRaisesRegex(
-                UniversalAgentOrchestratorError,
-                "输入框聚焦动作.*仍无推进.*未重复点击",
-            ):
-                orchestrator.run_autonomous_safe_loop(
-                    session,
-                    max_physical_actions=6,
-                    max_iterations=12,
-                )
+            orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("needs_reobservation", session.status)
+            orchestrator.refresh_decision(session)
 
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(2, adapter.capture_calls)
         self.assertEqual(3, len(qwen.calls))
-        self.assertEqual("failed", session.status)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("input_verified_text", session.qwen_decision.proposal.action.action)
+        self.assertNotIn("tap_semantic", adapter.capture_action_kinds[-1])
+        self.assertIn("input_verified_text", adapter.capture_action_kinds[-1])
         self.assertEqual("primary_input", initial_scene.elements[0].states["input_field_id"])
         self.assertEqual("primary_input", after_scene.elements[0].states["input_field_id"])
         self.assertEqual("primary_input", correction_scene.elements[0].states["input_field_id"])
@@ -1064,6 +1577,36 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
             "primary_input",
             session.qwen_decision.proposal.action.params["input_field_id"],
         )
+        self.assertNotIn("input_verified_text", adapter.capture_action_kinds[0])
+        self.assertIn("input_verified_text", adapter.post_action_available_sets[0])
+
+    def test_clear_is_not_exposed_until_same_field_focus_action_has_matched(self) -> None:
+        old_text = "aaazjie？你好"
+        initial = _input_scene(fingerprint="clear-before", value=old_text, focused=False,
+            state_overrides={"soft_keyboard_visible": False})
+        focused = _input_scene(fingerprint="clear-focused", value=old_text, focused=True,
+            state_overrides={"soft_keyboard_visible": False})
+        cleared = _input_scene(fingerprint="clear-after", value="", focused=True,
+            state_overrides={"soft_keyboard_visible": False})
+        qwen = FakeQwenObserver(action_kind="tap_semantic", after_status="action",
+            after_action_kind="clear_verified_text")
+        adapter = FocusThenInputExecutingAdapter(initial, focused, cleared,
+            typed_action_kind="clear_verified_text")
+        orchestrator = self.orchestrator(FakeDeepSeekPlanner(_clear_graph()), qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(session_id="session-focus-before-clear",
+                raw_goal="清空当前聊天输入框", device_id="device-1", run_dir=Path(temp))
+            self.assertEqual("tap_semantic", session.qwen_decision.proposal.action.action)
+            self.assertNotIn("clear_verified_text", adapter.capture_action_kinds[0])
+            orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("clear_verified_text", session.qwen_decision.proposal.action.action)
+            self.assertIn("clear_verified_text", adapter.post_action_available_sets[0])
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual(2, adapter.execute_calls)
 
     def test_focused_input_is_not_physically_tapped_again_when_qwen_repeats_focus(self) -> None:
         initial_scene = _input_scene(fingerprint="focus-before", focused=False)
@@ -1085,16 +1628,92 @@ class UniversalAgentSingleAuthorityLoopTests(unittest.TestCase):
                 device_id="device-1",
                 run_dir=Path(temp),
             )
-            with self.assertRaisesRegex(
-                UniversalAgentOrchestratorError,
-                "输入框聚焦动作.*仍无推进.*未重复点击",
-            ):
-                orchestrator.run_autonomous_safe_loop(session)
+            orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("needs_reobservation", session.status)
+            orchestrator.refresh_decision(session)
 
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(2, adapter.capture_calls)
         self.assertEqual(3, len(qwen.calls))
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("input_verified_text", session.qwen_decision.proposal.action.action)
+        self.assertNotIn("tap_semantic", adapter.capture_action_kinds[-1])
+
+    def test_initially_focused_input_gets_one_zero_action_scoped_correction(self) -> None:
+        adapter = FakeAdapter(_input_scene(
+            fingerprint="already-focused-before-input",
+            focused=True,
+            state_overrides={"soft_keyboard_visible": False},
+        ))
+        qwen = FakeQwenObserver(action_kind="tap_semantic", after_status="action")
+        orchestrator = self.orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-already-focused-input",
+                raw_goal="在当前输入框输入指定文字",
+                exact_input_text="cross-app text",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            self.assertEqual("needs_reobservation", session.status)
+            self.assertEqual(0, session.physical_actions)
+            orchestrator.refresh_decision(session)
+
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(2, adapter.capture_calls)
+        self.assertIn("tap_semantic", adapter.capture_action_kinds[0])
+        self.assertNotIn("tap_semantic", adapter.capture_action_kinds[1])
+        self.assertIn("input_verified_text", adapter.capture_action_kinds[1])
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("input_verified_text", session.qwen_decision.proposal.action.action)
+
+    def test_verified_exact_input_correction_removes_all_duplicate_text_actions(self) -> None:
+        initial_scene = _input_scene(
+            fingerprint='exact-input-before',
+            value='',
+            focused=False,
+            state_overrides={'soft_keyboard_visible': False},
+        )
+        after_scene = _input_scene(
+            fingerprint='exact-input-after',
+            value='cross-app text',
+            focused=True,
+            state_overrides={'soft_keyboard_visible': False},
+        )
+        qwen = FakeQwenObserver(
+            action_kind='input_verified_text',
+            after_status='action',
+            after_action_kind='tap_semantic',
+        )
+        focused_scene = _input_scene(
+            fingerprint='exact-input-focused', value='', focused=True,
+            state_overrides={'soft_keyboard_visible': False},
+        )
+        adapter = ExactInputCompletionCorrectionAdapter(initial_scene, focused_scene, after_scene)
+        orchestrator = self.orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id='session-exact-input-finish-correction',
+                raw_goal='在当前输入框输入指定文字',
+                exact_input_text='cross-app text',
+                device_id='device-1',
+                run_dir=Path(temp),
+            )
+            orchestrator.confirm_one(session, _confirmation(session))
+            orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual('needs_reobservation', session.status)
+            orchestrator.refresh_decision(session)
+
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual('succeeded', session.status)
+        self.assertEqual('finish', session.qwen_decision.proposal.status)
+        self.assertNotIn('tap_semantic', adapter.capture_action_kinds[-1])
+        self.assertNotIn('input_verified_text', adapter.capture_action_kinds[-1])
+        self.assertNotIn('clear_verified_text', adapter.capture_action_kinds[-1])
 
     def test_autonomous_loop_keeps_physical_action_error_terminal(self) -> None:
         planner = FakeDeepSeekPlanner(_graph())
@@ -1237,6 +1856,27 @@ class ObservationBridgeTests(unittest.TestCase):
         self.assertEqual("gallery", payload["app_id"])
         self.assertNotIn("steps", str(payload).casefold())
         self.assertNotIn("coordinate", str(payload).casefold())
+
+    def test_projection_exposes_current_and_forbidden_future_effect_kinds(self) -> None:
+        payload = ObservationBridge().goal_draft(_graph_with_future_send_effect()).to_dict()
+        focus = payload['entities']['active_subgoal_visual_context']
+
+        self.assertEqual([], focus['current_effect_kinds'])
+        self.assertEqual(['send_message'], focus['forbidden_future_effect_kinds'])
+
+    def test_input_projection_marks_current_transition_pending(self) -> None:
+        graph = build_exact_input_task_graph(
+            "输入新文字",
+            exact_input_text="new text",
+            device_id="device-1",
+            task_id="task-input-projection",
+        )
+        payload = ObservationBridge().goal_draft(graph).to_dict()
+        receipt = payload["entities"]["active_subgoal_visual_context"]["transition_receipt"]
+
+        self.assertEqual("pending", receipt["state"])
+        self.assertEqual("input_verified_text", receipt["required_operation"])
+        self.assertEqual("", receipt["executed_operation"])
 
 
 if __name__ == "__main__":

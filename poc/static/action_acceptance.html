@@ -71,7 +71,7 @@
 
     function showIndex() {
       content.innerHTML = `<div class="card"><strong>选择单一验收模式</strong>
-        <a class="mode-link" href="/actions?mode=swipe">向上滑动</a>
+        <a class="mode-link" href="/actions?mode=scroll">页面向上滚动</a>
         <a class="mode-link" href="/actions?mode=tap">语义点击</a>
         <a class="mode-link" href="/actions?mode=back">系统返回</a>
         <a class="mode-link" href="/actions?mode=input">输入并核对文字</a>
@@ -99,7 +99,7 @@
       const endpoint = document.querySelector('#swipe-end');
       const observer = new IntersectionObserver(entries => {
         if (entries.some(entry => entry.isIntersecting)) {
-          report('swipe', 'passed', {direction: 'up', endpoint_visible: true});
+          report('scroll', 'passed', {direction: 'up', endpoint_visible: true});
           observer.disconnect();
         }
       }, {threshold: 0.75});
@@ -267,7 +267,7 @@
         if (visibleHeight / rect.height < 0.75) return;
         targetVisible = true;
         removeEventListener('scroll', markTargetVisible);
-        report('swipe', 'passed', {direction: 'up', sequence_step: 1, target_visible: true}, 'sequence-1');
+        report('scroll', 'passed', {direction: 'up', sequence_step: 1, target_visible: true}, 'sequence-1');
       };
       const observer = new IntersectionObserver(entries => {
         if (entries.some(entry => entry.isIntersecting)) {
@@ -285,7 +285,7 @@
       }, {once: true});
     }
 
-    ({index: showIndex, swipe: showSwipe, tap: showTap, input: showInput, 'input-long': showLongInput, 'input-multiline': showMultilineInput, 'input-multifield': showMultifieldInput, long_press: showLongPress, drag: showDrag, back: showBack, replan: showReplan, 'replan-replacement': showReplanReplacement, sequence: showSequence}[mode] || showIndex)();
+    ({index: showIndex, scroll: showSwipe, tap: showTap, input: showInput, 'input-long': showLongInput, 'input-multiline': showMultilineInput, 'input-multifield': showMultifieldInput, long_press: showLongPress, drag: showDrag, back: showBack, replan: showReplan, 'replan-replacement': showReplanReplacement, sequence: showSequence}[mode] || showIndex)();
   </script>
 </body>
 </html>

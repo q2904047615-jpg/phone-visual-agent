@@ -8,7 +8,7 @@
 - 本项目是可扩展到不同 App、不同自然语言表达和多台手机的通用视觉操作 Agent，不得退化为微信、抖音、点赞、评论、客户寻找或任何固定命令的专用脚本。
 - 新命令能由现有通用底层动作组合完成时，必须无需修改代码即可执行。主要增加 App 名称分支、固定命令、固定步骤、截图坐标补丁或单功能状态机的方案，必须停止并先向用户说明其不具通用性的原因。
 - App 专用内容只能作为视觉提示、语义别名、用户批准的可信包名映射、安全策略和测试样本，不能承担任务编排。
-- 同一时间只有一个任务可以控制当前真实设备的机械臂或 Companion IME；其他任务只能进行文档、代码、离线截图和自动测试。
+- 同一时间只有一个任务可以控制当前真实设备的机械臂或 ADB Keyboard 文字 transport；其他任务只能进行文档、代码、离线截图和自动测试。
 
 ## 产品边界与正式运行权威
 
@@ -18,13 +18,14 @@
 - 未经用户批准，不得新增风险类别、敏感词、动作词黑名单、App/目标限制、人工确认、失败关闭，或其他会让合法任务变成 `blocked`、`confirmation_required`、`unsupported` 的边界。
 - 所有会改变产品能力的边界必须先更新根目录 `用户决策与协议边界.md`，并在回复中明确告知用户；禁止只改代码、不告知用户。
 - 同一类判断只能有一套正式权威。新协议启用时必须删除旧运行时入口、旧否决权、旧正则和旧默认值；历史协议只能作为只读证据或显式隔离测试。
-- 当前唯一动作语义协议是 `2026-08-20-canonical-action-v1`：DeepSeek 首次生成轻量有序目标定义后退出运行循环；本地只派生一份运行进度；Qwen 在同一次当前截图响应中发布 scene，并只选择一个推进当前目标的 canonical candidate，或以同帧证据报告 `finish`。
+- 当前唯一动作语义协议是 `2026-09-03-canonical-recents-home-clear-v5`，高层目标协议是 `2026-09-03-deepseek-required-action-v6`：DeepSeek 首次生成轻量有序目标定义后退出运行循环；本地只派生一份运行进度；只有用户或正式协议已唯一确定当前子目标动作时，子目标才可声明 `required_action_kind`，本地据此只向 Qwen 开放这一种 canonical 动作，不得从普通目标描述猜动作。Qwen 在同一次当前截图响应中发布 scene，并只选择一个推进当前目标的 canonical candidate，或以同帧证据报告 `finish`。页面/容器滚动使用 `scroll`；直接操纵一个当前元素通常使用 `swipe_element`，并由 Qwen 同帧给出绑定该元素的起点与终点。清理全部后台或移除任意指定后台 App 时，固定状态顺序为“从非 Launcher 执行一次 Home 并以新截图确认主屏幕 → 从 Launcher 执行一次 `open_recent_apps` 并以新截图确认 `system_recent_tasks` → 绑定当前截图中唯一可见的系统一键清理按钮并执行一次 `tap_semantic`”，三个子目标分别声明对应 `required_action_kind`；该固定顺序只适用于清理后台卡片，不得扩展到普通查看后台、切换 App 或其他任务。用户当前允许同时清除其他可清理后台，后续需要精确单卡片移除时再变更协议。不得从 App 页面直接反复打开后台；Home/最近任务动作无目标页面变化时不得重复。按钮不可见或不唯一时不得猜点，上下只用于 `scroll` 寻找按钮，任务卡片不得再用 `swipe_element` 移除。该规则不得扩展为 App、截图或固定坐标特例。旧 `swipe` 只可作为设备层物理 transport 名，不得再作为模型或 API 的 canonical 动作。
 - Qwen 不拥有普通语义 `blocked` 否决权。Controller 只处理当前设备、scope、几何和一次执行结果；本地 selector、动作后 DeepSeek replan、可见进度和 App lineage 不得建立第二套动作或完成权威。
 - `matched` 只证明刚才动作符合预期；只有当前截图上的 Qwen `finish` 才能推进高层目标或结束。若还有下一目标，必须按新目标取得新截图，不能向旧观察投影后继目标。
+- `swipe_element` 的起点必须位于当前目标元素内部安全区，终点必须在屏幕可执行区，轨迹必须具有唯一主方向和合法距离。同一子目标/目标在动作后若再次出现近似轨迹，只允许一次带纠正提示的只读新观察；仍近似则在下一次物理动作前停止。同一目标最多执行两次元素滑动，禁止第三次；该边界不取代 Qwen `finish`，也不限制普通 `scroll`。
 - 当前输入正文的唯一视觉权威是同一单步响应中的 `input_structure.application_inputs[*].text`。scene 输入元素只是可选页面上下文，不得被要求与 `input_structure` 重复存在、重复正文或达到几何重合阈值，也不得因 `states.value`、文字、占位符、光标、标签、证据或其它可选视觉事实缺失而生成、覆盖或否决正文。当前 typed 输入事务及 active field 已唯一确定时，唯一合法 bounds 的空字符串字段可以成立；聚焦前唯一可界定的完整编辑栏中心空白面可以只签发一次聚焦点击。
 - Qwen 输出的 scene/element/decision `confidence` 只作诊断，不得成为普通动作候选、canonical 映射或动作后验证的第二否决权。独立本地方向凭据、真实帧稳定性/清晰度、合法坐标、唯一候选、设备与 scope/fingerprint 校验继续保留。
-- 用户批准的项目自有 Companion IME 仅作为 `input_verified_text` / `clear_verified_text` 的可信文字 transport，操作当前已聚焦的 Android 编辑连接；它不观察页面、不选择字段，也不形成第二套视觉、字段或动作权威。
-- 用户批准的 `launch_app` 只可使用本地可信包名注册表。Companion IME 与 `launch_app` 均不得扩展为任意 ADB/Shell、ADB Keyboard、卖家文字对话框、剪贴板、Accessibility、force-stop、清数据或后台脚本。
+- 用户于 2026-09-02 批准的 ADB Keyboard 是正式运行中唯一的非机械文字 transport，仅执行本地可信设备配置签发的固定 `ADB_INPUT_B64` / `ADB_CLEAR_TEXT` 广播；它不观察页面、不选择字段，也不形成第二套视觉、字段或动作权威。Visual Agent Companion IME 及其 bridge、配对和 editor session 全部退役，不得保留运行时兼容或回退入口。
+- 用户批准的 `launch_app` 只可使用本地可信包名注册表。ADB Keyboard 与 `launch_app` 均不得扩展为任意 ADB/Shell、卖家文字对话框、剪贴板、Accessibility、force-stop、清数据或后台脚本；ADB Keyboard 只允许固定可执行文件、固定设备 serial、固定 IME 和上述固定广播命令族，任何参数均不得来自 Qwen 或网页。
 
 ## API 与运行环境
 

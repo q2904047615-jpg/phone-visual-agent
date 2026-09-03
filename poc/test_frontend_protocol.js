@@ -66,7 +66,7 @@ test("typed v4 graph is the only formal executable DeepSeek protocol", () => {
   assert.equal(view.currentSubgoal.executionClass, "navigate");
 });
 
-test("same-response Qwen v9 is the only executable visual decision protocol", () => {
+test("same-response current Qwen contract is the only executable visual decision protocol", () => {
   const view = Protocol.adaptSession(navigationSession());
   assert.equal(view.visualAction.protocol, "qwen-same-response-action-finish-v9");
   assert.equal(view.visualAction.status, "action");

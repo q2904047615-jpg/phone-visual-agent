@@ -268,7 +268,7 @@ class FixedAppRetirementTests(unittest.TestCase):
         self.assertNotIn("background_compatibility_worker", architecture)
         self.assertNotIn("generic_orchestrator", architecture)
         self.assertEqual(
-            "2026-08-20-deepseek-typed-task-graph-v4",
+            "2026-09-03-deepseek-required-action-v6",
             architecture["universal_agent"]["goal_protocol"],
         )
 

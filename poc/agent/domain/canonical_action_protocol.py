@@ -16,9 +16,9 @@ from .text_transport import TextTransportProfile
 from .ui_scene import UIElement
 from .validation import dataclass_wire, reject_if
 
-CANONICAL_ACTION_PROTOCOL = "2026-08-20-canonical-action-v1"
+CANONICAL_ACTION_PROTOCOL = "2026-09-03-canonical-recents-home-clear-v5"
 MODEL_STEP_DECISION_FIELDS = frozenset({"status", "action", "element_id", "source_element_id",
-    "destination_element_id", "direction", "evidence_refs", "confidence", "reason"})
+    "destination_element_id", "direction", "start", "end", "evidence_refs", "confidence", "reason"})
 MODEL_STEP_SINGLE_ELEMENT_ACTIONS = frozenset({"tap_semantic", "dismiss_overlay", "input_verified_text",
     "press_enter", "clear_verified_text", "double_tap", "long_press"})
 _ACTION_INJECTION_FIELDS = frozenset({"actions", "plan", "plans", "step", "steps", "tap", "click", "swipe",
@@ -63,37 +63,68 @@ def normalize_model_step_decision(value: Any) -> dict[str, Any]:
     source_id = value.get("source_element_id")
     destination_id = value.get("destination_element_id")
     direction = value.get("direction")
+    start = value.get("start")
+    end = value.get("end")
     for name, part in {"action": action, "element_id": element_id, "source_element_id": source_id,
         "destination_element_id": destination_id, "direction": direction}.items():
         reject_if(part is not None and (not isinstance(part, str) or not part.strip()),
             CanonicalActionProtocolError(f"同响应decision.{name}必须是非空字符串或null。"))
     if status == "finish":
         reject_if(any(part is not None for part in (action, element_id, source_id, destination_id, direction))
-            or not refs, CanonicalActionProtocolError("finish必须只引用同一scene完成证据。"))
+            or start is not None or end is not None or not refs,
+            CanonicalActionProtocolError("finish必须只引用同一scene完成证据。"))
     else:
         # evidence_refs is optional diagnostic metadata for an action. It never
         # becomes completion evidence or an executability gate.
         reject_if(action not in CANONICAL_ACTION_KINDS,
             CanonicalActionProtocolError("action必须是canonical动作。"))
         if action in MODEL_STEP_SINGLE_ELEMENT_ACTIONS:
-            reject_if(element_id is None or any(part is not None for part in (source_id, destination_id, direction)),
+            reject_if(element_id is None or any(part is not None for part in (source_id, destination_id, direction))
+                or start is not None or end is not None,
                 CanonicalActionProtocolError("元素动作必须且只能引用一个element_id。"))
         elif action == "drag":
             reject_if(element_id is not None or direction is not None or source_id is None or destination_id is None
-                or source_id == destination_id,
+                or source_id == destination_id or start is not None or end is not None,
                 CanonicalActionProtocolError("drag必须且只能引用不同起点和终点。"))
-        elif action == "swipe":
+        elif action == "scroll":
             reject_if(source_id is not None or destination_id is not None
-                or direction not in {"up", "down", "left", "right"},
-                CanonicalActionProtocolError("swipe必须声明唯一方向。"))
+                or direction not in {"up", "down", "left", "right"}
+                or start is not None or end is not None,
+                CanonicalActionProtocolError("scroll必须声明唯一方向且不得携带自由轨迹。"))
+        elif action == "swipe_element":
+            reject_if(element_id is None or source_id is not None or destination_id is not None
+                or direction is not None or start is None or end is None,
+                CanonicalActionProtocolError("swipe_element必须绑定一个元素以及起点和终点。"))
+            _validate_model_gesture_point(start, "start")
+            _validate_model_gesture_point(end, "end")
+            reject_if(tuple(start) == tuple(end),
+                CanonicalActionProtocolError("swipe_element起点和终点不能相同。"))
         else:
-            reject_if(any(part is not None for part in (element_id, source_id, destination_id, direction)),
+            reject_if(any(part is not None for part in (element_id, source_id, destination_id, direction))
+                or start is not None or end is not None,
                 CanonicalActionProtocolError("系统动作不得携带元素或方向字段。"))
     normalized_reason = reason.strip()[:500] or ("当前截图同帧证据证明目标完成" if status == "finish"
         else "当前截图选择一个推进目标的动作")
     return {"status": status, "action": action, "element_id": element_id,
         "source_element_id": source_id, "destination_element_id": destination_id, "direction": direction,
+        "start": list(start) if start is not None else None, "end": list(end) if end is not None else None,
         "evidence_refs": list(refs), "confidence": float(confidence), "reason": normalized_reason}
+
+
+def _validate_model_gesture_point(value: Any, name: str) -> None:
+    reject_if(not isinstance(value, (list, tuple)) or len(value) != 2
+        or any(isinstance(part, bool) or not isinstance(part, (int, float)) for part in value),
+        CanonicalActionProtocolError(f"swipe_element.{name}必须是两个数值。"))
+    reject_if(any(not float(part) >= 0.0 or not float(part) < float("inf") for part in value),
+        CanonicalActionProtocolError(f"swipe_element.{name}包含非法数值。"))
+
+
+def _canonical_gesture_point(value: Any, name: str) -> tuple[float, float]:
+    _validate_model_gesture_point(value, name)
+    x, y = (float(part) for part in value)
+    reject_if(not 0.0 <= x <= 1000.0 or not 0.0 <= y <= 1000.0,
+        CanonicalActionProtocolError(f"swipe_element.{name}超出当前截图坐标范围。"))
+    return (x / 1000.0, y / 1000.0)
 
 
 @dataclass(frozen=True)
@@ -151,14 +182,19 @@ def bind_same_response_action(payload: Mapping[str, Any], *, context: Any, obser
             CanonicalActionProtocolError("drag 起点和终点不能相同。"))
         params.update(_element_params(source, prefix="source_"))
         params.update(_element_params(destination, prefix="destination_"))
-    elif kind == "swipe":
+    elif kind == "scroll":
         direction = str(payload.get("direction") or "").strip().lower()
         reject_if(direction not in {"up", "down", "left", "right"},
-            CanonicalActionProtocolError("swipe 必须声明一个合法方向。"))
+            CanonicalActionProtocolError("scroll 必须声明一个合法方向。"))
         params["direction"] = direction
         element_id = str(payload.get("element_id") or "").strip()
         if element_id:
             params.update(_element_params(_selected_element(observation, element_id, kind)))
+    elif kind == "swipe_element":
+        element = _selected_element(observation, payload.get("element_id"), kind)
+        params.update(_element_params(element))
+        params["start"] = _canonical_gesture_point(payload.get("start"), "start")
+        params["end"] = _canonical_gesture_point(payload.get("end"), "end")
     elif kind == "launch_app":
         params.update(_launch_params(launch_target))
     elif kind not in {"back", "home", "open_recent_apps", "reveal_system_navigation", "wait_for_change"}:
@@ -239,8 +275,17 @@ def _typed_input_text(context: Any, element: UIElement) -> str:
 
 def _text_action_params(kind: str, *, context: Any, element: UIElement,
     profile: TextTransportProfile | None) -> dict[str, Any]:
-    reject_if(element.role != "input" or element.states.get("focused") is not True,
-        CanonicalActionProtocolError("文字动作必须引用当前已聚焦输入框。"))
+    reject_if(element.role != "input",
+        CanonicalActionProtocolError("文字动作必须引用当前输入框。"))
+    enabled_profile = None
+    if profile is not None:
+        profile.validate()
+        reject_if(profile.device_id != context.device_id,
+            CanonicalActionProtocolError("ADB Keyboard profile 与当前设备不一致。"))
+        if profile.enabled:
+            enabled_profile = profile
+    reject_if(element.states.get("focused") is not True,
+        CanonicalActionProtocolError("文字动作必须引用当前画面明确已聚焦的输入框。"))
     prior = element.states.get("value")
     reject_if(not isinstance(prior, str), CanonicalActionProtocolError("文字动作缺少当前输入值。"))
     field_id = str(element.states.get("input_field_id") or "").strip()
@@ -248,21 +293,13 @@ def _text_action_params(kind: str, *, context: Any, element: UIElement,
     reject_if(field_id != expected_field_id or (kind == "clear_verified_text"
         and operation not in {"clear_verified_text", "input_verified_text"}),
         CanonicalActionProtocolError("文字动作与当前 typed 字段或操作不一致。"))
-    enabled_profile = None
-    if profile is not None:
-        profile.validate()
-        reject_if(profile.device_id != context.device_id,
-            CanonicalActionProtocolError("Companion IME profile 与当前设备不一致。"))
-        if profile.enabled:
-            enabled_profile = profile
-
     if kind == "clear_verified_text":
         reject_if(not prior and not str(element.states.get("ime_preedit_text") or ""),
             CanonicalActionProtocolError("当前输入框已经为空，不得重复清空。"))
         if enabled_profile is not None:
             reject_if("clear_text" not in enabled_profile.capabilities or field_id in {"", "unknown"},
-                CanonicalActionProtocolError("当前 Companion IME 不能唯一清空该 typed 字段。"))
-            return {"text_transport": "companion_ime", "input_field_id": field_id,
+                CanonicalActionProtocolError("当前 ADB Keyboard 不能唯一清空该 typed 字段。"))
+            return {"text_transport": "adb_keyboard", "input_field_id": field_id,
                 "prior_input_value": prior, "expected_input_value": ""}
         return {"text_transport": "mechanical_keyboard", "input_field_id": field_id,
             "prior_input_value": prior, "expected_input_value": ""}
@@ -272,9 +309,9 @@ def _text_action_params(kind: str, *, context: Any, element: UIElement,
     if enabled_profile is not None:
         reject_if("append_text" not in enabled_profile.capabilities or field_id in {"", "unknown"}
             or not target.startswith(prior) or target == prior,
-            CanonicalActionProtocolError("当前 Companion IME 不能建立唯一 prior/fragment/expected 事务。"))
+            CanonicalActionProtocolError("当前 ADB Keyboard 不能建立唯一 prior/fragment/expected 事务。"))
         fragment = target[len(prior):]
-        return {"text": target, "text_transport": "companion_ime", "input_field_id": field_id,
+        return {"text": target, "text_transport": "adb_keyboard", "input_field_id": field_id,
             "prior_input_value": prior, "input_fragment": fragment, "expected_input_value": target}
     return {"text": target, "text_transport": "mechanical_keyboard", "input_field_id": field_id,
         "prior_input_value": prior, "expected_input_value": target}

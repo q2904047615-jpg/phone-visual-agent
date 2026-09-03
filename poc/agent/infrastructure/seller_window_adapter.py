@@ -81,6 +81,9 @@ SELLER_POSITION_RETURN_PIXEL_MAX = 24
 SELLER_POSITION_BARRIER_OFFSET = 3
 SELLER_POSITION_BARRIER_TIMEOUT = 2.5
 SELLER_TOUCH_DOWN_SETTLE_SECONDS = 0.45
+SELLER_SWIPE_TOUCH_DOWN_SECONDS = 0.35
+SELLER_SWIPE_MOVEMENT_SECONDS = 0.30
+SELLER_SWIPE_STEPS = 6
 
 
 class POINT(ctypes.Structure):
@@ -551,6 +554,78 @@ def drag_client_path(hwnd: int, start: tuple[int, int], end: tuple[int, int], *,
             if pressed:
                 user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
                 time.sleep(0.12)
+
+
+def swipe_client_path(hwnd: int, start: tuple[int, int], end: tuple[int, int], *,
+    touch_down_seconds: float=SELLER_SWIPE_TOUCH_DOWN_SECONDS,
+    movement_seconds: float=SELLER_SWIPE_MOVEMENT_SECONDS, steps: int=SELLER_SWIPE_STEPS) -> dict[str, object]:
+    """Dispatch one bounded swipe and return an honest seller-event receipt.
+
+    Unlike drag, a swipe first gives the actuator the same proven contact-establishment
+    window as an atomic tap, then moves quickly and continuously. The post-release
+    position barrier proves only that the seller GUI processed the local event chain;
+    it deliberately does not claim mechanical contact with the phone.
+    """
+
+    _, _, width, height = client_geometry(hwnd)
+    camera_height = seller_camera_height(width, height)
+    for (name, (x, y)) in (('起点', start), ('终点', end)):
+        reject_if(not (0 <= x < width and 0 <= y < camera_height),
+            ValueError(f'滑动{name} ({x}, {y}) 超出摄像头客户区 {width}×{camera_height}。'))
+    reject_if(start == end, ValueError("滑动起点和终点不能相同。"))
+    reject_if(not 0.1 <= float(touch_down_seconds) <= 0.45,
+        ValueError("滑动触点建立时间必须在0.1～0.45秒之间。"))
+    reject_if(not 0.15 <= float(movement_seconds) <= 0.6,
+        ValueError("滑动移动时间必须在0.15～0.6秒之间。"))
+    reject_if(isinstance(steps, bool) or not 4 <= int(steps) <= 12,
+        ValueError("滑动插值步数必须在4～12之间。"))
+
+    start_point = POINT(*start)
+    end_point = POINT(*end)
+    reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(start_point)), ctypes.WinError())
+    reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(end_point)), ctypes.WinError())
+
+    pressed = False
+    right_up_dispatched = False
+    changed_pixels = 0
+    return_changed_pixels = 0
+    barrier_seconds = 0.0
+    with _active_cursor_lease(hwnd):
+        user32.SetCursorPos(start_point.x, start_point.y)
+        _check_escape("用户按下 Esc，已取消滑动。")
+        try:
+            user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+            pressed = True
+            sleep_interruptible(float(touch_down_seconds))
+            step_count = int(steps)
+            step_delay = float(movement_seconds) / step_count
+            for index in range(1, step_count + 1):
+                _check_escape("用户按下 Esc，已停止滑动。")
+                ratio = index / step_count
+                user32.SetCursorPos(round(start_point.x + (end_point.x - start_point.x) * ratio),
+                    round(start_point.y + (end_point.y - start_point.y) * ratio))
+                sleep_interruptible(step_delay)
+            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+            pressed = False
+            right_up_dispatched = True
+            time.sleep(0.12)
+            end_state = _stable_seller_position_baseline(hwnd)
+            offset, changed_pixels, return_changed_pixels, barrier_seconds = _round_trip_position_barrier(
+                hwnd, end_point, client_x=end[0], client_width=width, baseline=end_state)
+        finally:
+            if pressed:
+                user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                time.sleep(0.12)
+
+    return {'version': '2026-09-03-seller-gui-swipe-path-v1', 'channel': 'right_button_swipe_path',
+        'right_button_down_dispatched': True, 'right_button_up_dispatched': right_up_dispatched,
+        'interpolation_steps_completed': int(steps), 'seller_position_barrier_confirmed': True,
+        'round_trip_position_confirmed': True, 'touch_down_seconds': float(touch_down_seconds),
+        'movement_seconds': float(movement_seconds), 'step_count': int(steps),
+        'client_start': [int(start[0]), int(start[1])], 'client_end': [int(end[0]), int(end[1])],
+        'barrier_offset_pixels': abs(int(offset)), 'changed_pixels': int(changed_pixels),
+        'return_changed_pixels': int(return_changed_pixels), 'barrier_elapsed_ms': round(barrier_seconds * 1000.0, 3),
+        'mechanical_contact_ack': False}
 
 
 def _check_escape(message: str='用户按下 Esc，已停止执行。') -> None:

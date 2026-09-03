@@ -19,6 +19,7 @@ from agent.application.vision_usage import VisionSessionUsageLedger
 
 
 POST_ACTION_TRANSITION_PROTOCOL_VERSION = '2026-08-16-universal-post-action-transition-v1'
+GESTURE_CORRECTION_PROTOCOL_VERSION = '2026-09-03-bounded-element-gesture-correction-v1'
 
 
 @dataclass
@@ -49,6 +50,10 @@ class UniversalAgentSessionState:
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
     input_focus_retry_key: str = field(default='', repr=False)
+    future_effect_retry: tuple[str, str] | None = field(default=None, repr=False)
+    gesture_correction: dict[str, Any] | None = field(default=None, repr=False)
+    element_gesture_attempts: dict[str, int] = field(default_factory=dict, repr=False)
+    gesture_correction_history: list[dict[str, Any]] = field(default_factory=list)
     effect_previews: tuple[dict[str, Any], ...] = ()
     failed_reason: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().astimezone().isoformat(timespec='seconds'))
@@ -86,7 +91,8 @@ class UniversalAgentSessionState:
             'qwen_decision': decision, 'proposal': proposal, 'controller_decision': controller,
             'history': list(self.history), 'evidence': list(dict.fromkeys(self.evidence_paths)),
             'automatic_loop_enabled': self.automatic_loop_enabled, 'auto_pause_reason': self.auto_pause_reason,
-            'corrective_retry_protocol': None, 'corrective_retry_history': [],
+            'corrective_retry_protocol': GESTURE_CORRECTION_PROTOCOL_VERSION,
+            'corrective_retry_history': [dict(item) for item in self.gesture_correction_history],
             'post_action_transition_protocol': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             'last_post_action_transition': self._serialize(self.last_post_action_transition),
             'last_confirmation_failure': None,

@@ -304,6 +304,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             ("dismiss", lambda c: c.vision_dismiss_overlay_relative(500, 500)),
             ("long_press", lambda c: c.vision_long_press_relative(500, 500)),
             ("drag", lambda c: c.vision_drag_relative(200, 300, 700, 600)),
+            ("swipe_relative", lambda c: c.vision_swipe_relative(700, 500, 200, 500, "left")),
             ("reveal", lambda c: c.vision_reveal_system_navigation()),
             ("home", lambda c: c.vision_android_home()),
             ("back", lambda c: c.vision_android_back()),
@@ -331,7 +332,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
         )
         physical_names = (
             "configure_single_click_count", "click_client_point",
-            "long_press_client_point", "drag_client_path", "configure_swipe",
+            "long_press_client_point", "drag_client_path", "swipe_client_path", "configure_swipe",
             "trigger_selected_action",
         )
         for label, invoke in calls:
@@ -344,6 +345,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                     patch("agent.infrastructure.robot_controller.seller_gui.click_client_point") as click,
                     patch("agent.infrastructure.robot_controller.seller_gui.long_press_client_point") as long_press,
                     patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+                    patch("agent.infrastructure.robot_controller.seller_gui.swipe_client_path") as swipe_path,
                     patch("agent.infrastructure.robot_controller.seller_gui.configure_swipe") as configure_swipe,
                     patch("agent.infrastructure.robot_controller.seller_gui.trigger_selected_action") as trigger,
                 ):
@@ -354,6 +356,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         click,
                         long_press,
                         drag,
+                        swipe_path,
                         configure_swipe,
                         trigger,
                     )

@@ -1735,7 +1735,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_universal_action_controller_has_one_domain_entry(self) -> None:
         import agent.domain.universal_action_controller as controller_module
         from agent.domain.universal_action_controller import (
-            LocalPointGrounding,
             ResolvedSemanticAction,
             UniversalActionController,
             UniversalActionError,
@@ -1748,7 +1747,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse((root / "universal_action_controller.py").exists())
         self.assertTrue(domain_path.is_file())
         for symbol in (
-            LocalPointGrounding,
             ResolvedSemanticAction,
             UniversalActionController,
             UniversalActionError,
@@ -1758,7 +1756,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 symbol.__module__,
             )
         self.assertEqual(
-            "2026-09-03-universal-action-v22",
+            "2026-09-03-universal-action-v23",
             controller_module.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
         )
 
@@ -1784,6 +1782,20 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "robot_core",
         ):
             self.assertNotIn(forbidden, source)
+
+        production_point_path = (
+            root / "agent" / "infrastructure" / "generic_action_adapter.py"
+        )
+        production_point_sources = source + production_point_path.read_text(
+            encoding="utf-8"
+        ) + (root / "web_app.py").read_text(encoding="utf-8")
+        for retired_point_authority in (
+            "LocalPointGrounding",
+            "stable_visual_point_grounding",
+            "point_grounder",
+            "local_point_grounding",
+        ):
+            self.assertNotIn(retired_point_authority, production_point_sources)
 
         legacy_imports: list[str] = []
         for path in root.rglob("*.py"):

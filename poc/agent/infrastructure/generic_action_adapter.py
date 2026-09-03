@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedBounds, NormalizedPoint, canonical_digest, dataclass_wire, reject_if
+from agent.domain.validation import NormalizedPoint, canonical_digest, dataclass_wire, reject_if
 import math
 import statistics
 import time
 import re
 import uuid
-from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-import numpy as np
-from PIL import Image, ImageChops, ImageFilter, ImageStat
+from PIL import Image, ImageChops, ImageStat
 
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutor
 from agent.domain.confirmation_authority import ConfirmationAuthority
@@ -26,7 +24,7 @@ from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.action_capabilities import build_device_capability_snapshot
-from agent.infrastructure.windows_ocr_runtime import find_text, recognize as recognize_ocr
+from agent.infrastructure.windows_ocr_runtime import recognize as recognize_ocr
 from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
@@ -45,11 +43,8 @@ from agent.infrastructure.orientation_safety import (
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
 from agent.infrastructure.model_failure_diagnostics import model_failure_payload, persist_model_failure_payload
 from agent.domain.semantic_action import SemanticAction
-from agent.domain.ui_scene import UIElement, UIScene, UISceneError
+from agent.domain.ui_scene import UIScene, UISceneError
 from agent.domain.universal_action_controller import (
-    LOCAL_POINT_GROUNDING_SOURCE,
-    MAX_LOCAL_GROUNDING_BOX_GAP,
-    LocalPointGrounding,
     ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
@@ -208,325 +203,6 @@ def stable_qwerty_ocr_anchors(frames: tuple[Image.Image, ...] | list[Image.Image
         return snapped
     except Exception:
         return None
-
-
-class LocalPointGroundingAmbiguousError(RuntimeError):
-    """Positive local evidence found multiple equally plausible surfaces."""
-
-
-@dataclass(frozen=True)
-class _SurfaceCandidate:
-    bounds: tuple[int, int, int, int]
-    point: tuple[int, int]
-    area: int
-    interior_depth: int
-    score: float
-
-
-def _target_for_local_point_grounding(scene: UIScene, action: SemanticAction) -> UIElement | None:
-    if action.action not in {'tap_semantic', 'dismiss_overlay', 'double_tap', 'long_press'}:
-        return None
-    element_id = str(action.params.get("element_id") or "").strip()
-    try:
-        element = scene.get_element(element_id)
-    except UISceneError:
-        return None
-    if (element.role not in {'button', 'icon', 'text', 'tab', 'toggle', 'image', 'list_item'}
-        or element.element_id.startswith('local_audited_')
-        or element.meaning == 'application_text_input'
-        or element.meaning.startswith(('input_', 'ime_', 'switch_keyboard_'))
-        or str(action.params.get('label') or '') != element.label
-        or str(action.params.get('target') or '') != element.meaning
-        or str(action.params.get('role') or '') != element.role):
-        return None
-    return element
-
-
-def _grounding_from_geometry(*, scene: UIScene, element: UIElement,
-    grounded_bounds: NormalizedBounds, grounded_point: NormalizedPoint,
-    matched_frames: int, inspected_frames: int) -> LocalPointGrounding:
-    grounding = LocalPointGrounding(source=LOCAL_POINT_GROUNDING_SOURCE, scene_fingerprint=scene.fingerprint,
-        element_id=element.element_id, label=element.label,
-        model_bounds=tuple(float(value) for value in element.bounds),
-        proposed_point=tuple(float(value) for value in element.center),
-        grounded_bounds=tuple(float(value) for value in grounded_bounds),
-        grounded_point=tuple(float(value) for value in grounded_point),
-        matched_frames=matched_frames, inspected_frames=inspected_frames)
-    grounding.validate_for(scene, element)
-    return grounding
-
-
-def _stable_exact_text_grounding(frames: list[Image.Image], scene: UIScene, element: UIElement,
-    *, ocr_recognizer: Any) -> LocalPointGrounding | None:
-    """Return stable unique exact-label geometry without owning fallback policy."""
-
-    label = element.label.strip()
-    compact_label = re.sub(r"[\s\u3000]+", "", label)
-    if len(compact_label) < 2 or len(compact_label) > 64:
-        return None
-
-    def unique_match_geometry(frame: Image.Image) -> tuple[NormalizedBounds, NormalizedPoint] | None:
-        payload = ocr_recognizer(frame.convert('RGB'), 'zh-Hans-CN', scale=1.5)
-        matches = find_text(payload, label)
-        if len(matches) != 1 or frame.width <= 0 or frame.height <= 0:
-            return None
-        match = matches[0]
-        bounds = (float(match.left) / frame.width, float(match.top) / frame.height,
-            float(match.left + match.width) / frame.width, float(match.top + match.height) / frame.height)
-        left, top, right, bottom = bounds
-        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
-            return None
-        return bounds, ((left + right) / 2.0, (top + bottom) / 2.0)
-
-    inspected_frames = 1
-    newest = unique_match_geometry(frames[-1])
-    if newest is None:
-        return None
-    proposed_point = element.center
-    if math.dist(proposed_point, newest[1]) <= 0.025:
-        return None
-
-    stable_matches = [newest]
-    for frame in reversed(frames[:-1]):
-        inspected_frames += 1
-        candidate = unique_match_geometry(frame)
-        if candidate is None or math.dist(candidate[1], newest[1]) > 0.015:
-            continue
-        if any(abs(candidate[0][index + 2] - candidate[0][index]
-            - (newest[0][index + 2] - newest[0][index])) > 0.03 for index in (0, 1)):
-            continue
-        stable_matches.append(candidate)
-        if len(stable_matches) >= 2:
-            break
-    if len(stable_matches) < 2:
-        return None
-
-    grounded_bounds = tuple(float(statistics.median(match[0][index] for match in stable_matches))
-        for index in range(4))
-    grounded_point = ((grounded_bounds[0] + grounded_bounds[2]) / 2.0,
-        (grounded_bounds[1] + grounded_bounds[3]) / 2.0)
-    if math.dist(proposed_point, grounded_point) <= 0.025:
-        return None
-    return _grounding_from_geometry(scene=scene, element=element, grounded_bounds=grounded_bounds,
-        grounded_point=grounded_point, matched_frames=len(stable_matches), inspected_frames=inspected_frames)
-
-
-def _box_intersection(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> int:
-    return max(0, min(first[2], second[2]) - max(first[0], second[0])) * max(
-        0, min(first[3], second[3]) - max(first[1], second[1]))
-
-
-def _box_iou(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> float:
-    intersection = _box_intersection(first, second)
-    first_area = max(0, first[2] - first[0]) * max(0, first[3] - first[1])
-    second_area = max(0, second[2] - second[0]) * max(0, second[3] - second[1])
-    union = first_area + second_area - intersection
-    return float(intersection) / union if union > 0 else 0.0
-
-
-def _deepest_component_point(component: np.ndarray, *, offset_x: int,
-    offset_y: int) -> tuple[tuple[int, int], int]:
-    """Choose a maximum-depth point after surrounding the component with background."""
-
-    # A connected component is cropped to its own bounds.  Eroding that tight crop
-    # lets Pillow replicate foreground edge pixels outside the image and can leave a
-    # false "deepest" point on the component boundary.  An explicit background pad
-    # makes every visible edge participate in the distance-to-boundary calculation.
-    padded = np.pad(np.asarray(component, dtype=bool), 1, mode='constant', constant_values=False)
-    mask = Image.fromarray(np.where(padded, 255, 0).astype(np.uint8), mode='L')
-    deepest = np.argwhere(padded)
-    interior_depth = 0
-    for _ in range(max(1, min(component.shape) // 2 + 1)):
-        eroded = mask.filter(ImageFilter.MinFilter(3))
-        coordinates = np.argwhere(np.asarray(eroded, dtype=np.uint8) > 0)
-        if coordinates.size == 0:
-            break
-        mask = eroded
-        deepest = coordinates
-        interior_depth += 1
-    center_y = float(np.median(deepest[:, 0]))
-    center_x = float(np.median(deepest[:, 1]))
-    nearest = min(deepest, key=lambda value: (float(value[0]) - center_y) ** 2
-        + (float(value[1]) - center_x) ** 2)
-    return ((offset_x + int(nearest[1]) - 1, offset_y + int(nearest[0]) - 1),
-        interior_depth)
-
-
-def _surface_candidates(frame: Image.Image, model_bounds: NormalizedBounds) -> list[_SurfaceCandidate]:
-    """Detect generic filled control surfaces near one already-selected model box."""
-
-    rgb = frame.convert('RGB')
-    width, height = rgb.size
-    if width <= 0 or height <= 0:
-        return []
-    model = (round(model_bounds[0] * width), round(model_bounds[1] * height),
-        round(model_bounds[2] * width), round(model_bounds[3] * height))
-    model_width = max(1, model[2] - model[0])
-    model_height = max(1, model[3] - model[1])
-    margin_x = round(min(width * 0.05, model_width * 0.50))
-    margin_y = round(min(height * 0.055, model_height * 1.20))
-    crop_box = (max(0, model[0] - margin_x), max(0, model[1] - margin_y),
-        min(width, model[2] + margin_x), min(height, model[3] + margin_y))
-    if crop_box[2] - crop_box[0] < 3 or crop_box[3] - crop_box[1] < 3:
-        return []
-    pixels = np.asarray(rgb.crop(crop_box).filter(ImageFilter.GaussianBlur(2)), dtype=np.int16)
-    crop_height, crop_width = pixels.shape[:2]
-    seed_points: set[tuple[int, int]] = set()
-    for x_fraction in (0.10, 0.30, 0.50, 0.70, 0.90):
-        for y_fraction in (0.12, 0.32, 0.52, 0.72):
-            seed_x = max(0, min(crop_width - 1,
-                round(model[0] + model_width * x_fraction) - crop_box[0]))
-            seed_y = max(0, min(crop_height - 1,
-                round(model[1] + model_height * y_fraction) - crop_box[1]))
-            seed_points.add((seed_x, seed_y))
-    # A model box can be slightly beyond a visible control instead of merely
-    # overlapping it.  Probe the already-bounded neighborhood as well; later
-    # geometry still requires one stable component within the domain gap.
-    for x_fraction in (0.08, 0.22, 0.38, 0.55, 0.72, 0.88):
-        for y_fraction in (0.08, 0.20, 0.34, 0.50, 0.68, 0.85):
-            seed_points.add((max(0, min(crop_width - 1, round((crop_width - 1) * x_fraction))),
-                max(0, min(crop_height - 1, round((crop_height - 1) * y_fraction)))))
-    seeds = [(seed_x, seed_y, pixels[seed_y, seed_x])
-        for seed_x, seed_y in sorted(seed_points)]
-
-    raw_candidates: list[_SurfaceCandidate] = []
-    model_area = model_width * model_height
-    model_diagonal = max(1.0, math.hypot(model_width, model_height))
-    model_center = ((model[0] + model[2]) / 2.0, (model[1] + model[3]) / 2.0)
-    mask_cache: dict[tuple[int, int, int], np.ndarray] = {}
-    component_claims: dict[tuple[int, int, int], np.ndarray] = {}
-    for seed_x, seed_y, seed_color in seeds:
-        color_key = tuple(int(value) // 8 for value in seed_color)
-        mask_array = mask_cache.get(color_key)
-        if mask_array is None:
-            delta = np.abs(pixels - seed_color)
-            squared_delta = delta.astype(np.int32) ** 2
-            raw_mask = np.logical_and(np.max(delta, axis=2) <= 48,
-                np.sum(squared_delta, axis=2) <= 58 * 58)
-            mask = Image.fromarray(np.where(raw_mask, 255, 0).astype(np.uint8), mode='L')
-            mask = mask.filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))
-            mask_array = np.asarray(mask, dtype=np.uint8) > 0
-            mask_cache[color_key] = mask_array
-        claimed = component_claims.setdefault(color_key, np.zeros((crop_height, crop_width), dtype=bool))
-        if not mask_array[seed_y, seed_x] or claimed[seed_y, seed_x]:
-            continue
-        queue: deque[tuple[int, int]] = deque(((seed_x, seed_y),))
-        visited = np.zeros((crop_height, crop_width), dtype=bool)
-        visited[seed_y, seed_x] = True
-        points: list[tuple[int, int]] = []
-        while queue:
-            x, y = queue.popleft()
-            points.append((x, y))
-            for next_x, next_y in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                if (0 <= next_x < crop_width and 0 <= next_y < crop_height
-                    and mask_array[next_y, next_x] and not visited[next_y, next_x]):
-                    visited[next_y, next_x] = True
-                    queue.append((next_x, next_y))
-        claimed |= visited
-        if not points:
-            continue
-        xs, ys = zip(*points)
-        local_bounds = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
-        bounds = (local_bounds[0] + crop_box[0], local_bounds[1] + crop_box[1],
-            local_bounds[2] + crop_box[0], local_bounds[3] + crop_box[1])
-        area = len(points)
-        box_width, box_height = bounds[2] - bounds[0], bounds[3] - bounds[1]
-        fill_ratio = area / max(1, box_width * box_height)
-        touched_edges = sum((local_bounds[0] <= 1, local_bounds[1] <= 1,
-            local_bounds[2] >= crop_width - 1, local_bounds[3] >= crop_height - 1))
-        overlap = _box_intersection(bounds, model)
-        overlap_ratio = overlap / max(1, min(box_width * box_height, model_area))
-        horizontal_gap = max(0, bounds[0] - model[2], model[0] - bounds[2]) / width
-        vertical_gap = max(0, bounds[1] - model[3], model[1] - bounds[3]) / height
-        normalized_gap = math.hypot(horizontal_gap, vertical_gap)
-        if (area < max(20, round(model_area * 0.10)) or area > model_area * 8
-            or box_width < model_width * 0.25 or box_height < model_height * 0.22
-            or fill_ratio < 0.28 or touched_edges >= 2
-            or (overlap_ratio < 0.12 and normalized_gap > MAX_LOCAL_GROUNDING_BOX_GAP)):
-            continue
-        component = visited[local_bounds[1]:local_bounds[3], local_bounds[0]:local_bounds[2]]
-        point, interior_depth = _deepest_component_point(
-            component, offset_x=bounds[0], offset_y=bounds[1])
-        required_interior_depth = max(2, round(min(box_width, box_height) * 0.08))
-        if interior_depth < required_interior_depth:
-            continue
-        center_distance = math.dist(point, model_center) / model_diagonal
-        area_ratio = max(1e-6, area / model_area)
-        proximity_score = max(0.0, 1.0 - normalized_gap / MAX_LOCAL_GROUNDING_BOX_GAP)
-        depth_score = min(1.0, interior_depth / max(1.0, min(box_width, box_height) * 0.25))
-        score = (overlap_ratio * 3.0 + proximity_score * 1.5 + depth_score * 0.5
-            - center_distance - abs(math.log(area_ratio)) * 0.20)
-        raw_candidates.append(_SurfaceCandidate(bounds=bounds, point=point, area=area,
-            interior_depth=interior_depth, score=score))
-
-    deduplicated: list[_SurfaceCandidate] = []
-    for candidate in sorted(raw_candidates, key=lambda item: item.score, reverse=True):
-        if any(_box_iou(candidate.bounds, known.bounds) >= 0.72 for known in deduplicated):
-            continue
-        deduplicated.append(candidate)
-    return deduplicated
-
-
-def _stable_surface_grounding(frames: list[Image.Image], scene: UIScene,
-    element: UIElement) -> LocalPointGrounding | None:
-    if len({frame.size for frame in frames}) != 1:
-        return None
-    per_frame = [_surface_candidates(frame, element.bounds) for frame in reversed(frames)]
-    newest = per_frame[0]
-    if not newest:
-        return None
-    if len(newest) > 1 and newest[0].score - newest[1].score < 0.35:
-        raise LocalPointGroundingAmbiguousError("当前目标附近存在多个同等可信的控件表面，拒绝猜测落点。")
-    selected = newest[0]
-    stable = [selected]
-    inspected_frames = 1
-    for candidates in per_frame[1:]:
-        inspected_frames += 1
-        matches = [candidate for candidate in candidates
-            if _box_iou(candidate.bounds, selected.bounds) >= 0.60]
-        if len(matches) > 1 and matches[0].score - matches[1].score < 0.35:
-            raise LocalPointGroundingAmbiguousError("当前目标附近的控件表面跨帧不唯一，拒绝猜测落点。")
-        if matches:
-            stable.append(matches[0])
-        if len(stable) >= 2:
-            break
-    if len(stable) < 2:
-        return None
-
-    width, height = frames[-1].size
-    if width <= 0 or height <= 0:
-        return None
-    grounded_bounds = tuple(float(statistics.median(candidate.bounds[index] for candidate in stable))
-        / (width if index in (0, 2) else height) for index in range(4))
-    grounded_point = (float(statistics.median(candidate.point[0] for candidate in stable)) / width,
-        float(statistics.median(candidate.point[1] for candidate in stable)) / height)
-    if math.dist(element.center, grounded_point) <= 0.012:
-        return None
-    if math.dist(element.center, grounded_point) > 0.12:
-        return None
-    return _grounding_from_geometry(scene=scene, element=element, grounded_bounds=grounded_bounds,
-        grounded_point=grounded_point, matched_frames=len(stable), inspected_frames=inspected_frames)
-
-
-def stable_visual_point_grounding(frames: tuple[Image.Image, ...] | list[Image.Image], scene: UIScene,
-    action: SemanticAction, *, ocr_recognizer: Any=recognize_ocr) -> LocalPointGrounding | None:
-    """Refine one Qwen-selected point from stable OCR or generic surface geometry."""
-
-    frame_list = list(frames)[-3:]
-    if not frame_list or not scene.fingerprint:
-        return None
-    element = _target_for_local_point_grounding(scene, action)
-    if element is None:
-        return None
-
-    try:
-        text_grounding = _stable_exact_text_grounding(frame_list, scene, element,
-            ocr_recognizer=ocr_recognizer)
-    except Exception:
-        text_grounding = None
-    if text_grounding is not None:
-        return text_grounding
-    return _stable_surface_grounding(frame_list, scene, element)
 
 
 def _persist_qwen_failure_diagnostic(*, evidence_dir: Path | None, prefix: str, raw_response: str, error: Exception,
@@ -750,8 +426,7 @@ class GenericSingleActionAdapter:
         post_action_min_relative_sharpness: float=0.8, post_action_min_reference_sharpness: float=2.0,
         post_action_phone_view_delta_max: float=45.0, confirmation_frame_delta_max: float=6.0,
         qwerty_row_snapper: Callable[[tuple[Image.Image, ...] | list[Image.Image], dict[str, Any]], dict[str,
-        Any] | None] | None=None, point_grounder: Callable[[tuple[Image.Image, ...] | list[Image.Image], UIScene,
-        SemanticAction], LocalPointGrounding | None] | None=None, require_local_qwerty_row_snap: bool=False,
+        Any] | None] | None=None, require_local_qwerty_row_snap: bool=False,
         device_id: str) -> None:
         self.capture = capture
         self.observer = observer
@@ -777,7 +452,6 @@ class GenericSingleActionAdapter:
         self.post_action_phone_view_delta_max = max(0.0, float(post_action_phone_view_delta_max))
         self.confirmation_frame_delta_max = max(0.0, float(confirmation_frame_delta_max))
         self.qwerty_row_snapper = qwerty_row_snapper
-        self.point_grounder = point_grounder
         self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
         try:
             self.device_id = validate_device_id(device_id)
@@ -1094,18 +768,8 @@ class GenericSingleActionAdapter:
         # Qwen's action is immutable after selection.  Local code may validate
         # device/scope/geometry, but it may not rewrite its semantic fields.
         rebound = requested_action
-        local_point_grounding: LocalPointGrounding | None = None
-        if callable(self.point_grounder):
-            try:
-                local_point_grounding = self.point_grounder(before_frames, before, rebound)
-            except LocalPointGroundingAmbiguousError as exc:
-                raise GenericActionAdapterError(f'确认前本地视觉落点不唯一：{exc}', evidence=before_paths) from exc
-            except Exception:
-                # No positive local geometry evidence keeps Qwen's canonical point.
-                local_point_grounding = None
         try:
-            resolved = self.controller.resolve_one(rebound, before, confirmed=True,
-                local_point_grounding=local_point_grounding)
+            resolved = self.controller.resolve_one(rebound, before, confirmed=True)
         except UniversalActionError as exc:
             raise GenericActionAdapterError(f'确认前控制器拒绝动作：{exc}', evidence=before_paths) from exc
 

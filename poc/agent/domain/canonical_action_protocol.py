@@ -124,7 +124,7 @@ def normalize_model_step_decision(value: Any) -> dict[str, Any]:
                 target = _normalize_direct_target(target)
                 _validate_model_point(tap_point, f"{action}.tap_point")
             else:
-                if target is not None:
+                if target is not None and action == "input_verified_text":
                     # Some Qwen responses include a plain description of the
                     # focused input alongside a text action.  It is
                     # diagnostic only: the binder always consumes the unique

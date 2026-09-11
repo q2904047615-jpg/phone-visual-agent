@@ -6,6 +6,7 @@ import re
 import secrets
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 import webbrowser
@@ -433,6 +434,9 @@ class Runtime:
 
 
 runtime = Runtime()
+_GENERIC_START_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-start")
+_GENERIC_START_TASKS: dict[str, dict[str, Any]] = {}
+_GENERIC_START_TASKS_LOCK = threading.RLock()
 
 
 @asynccontextmanager
@@ -1239,6 +1243,36 @@ def cancel_capability_acceptance(
             status_code=409,
             detail=_capability_failure(trial, exc),
         ) from exc
+
+
+def _run_generic_start_task(task_id: str, body: GenericSupervisedStartRequest, request: Request, token: str | None) -> None:
+    try:
+        result = start_generic_supervised_session(body, request, token)
+        with _GENERIC_START_TASKS_LOCK:
+            _GENERIC_START_TASKS[task_id] = {"status": "completed", "result": result}
+    except Exception as exc:
+        with _GENERIC_START_TASKS_LOCK:
+            _GENERIC_START_TASKS[task_id] = {"status": "failed", "error": str(exc)}
+
+
+@app.post("/api/agent/generic-supervised/start-async")
+def start_generic_supervised_async(body: GenericSupervisedStartRequest, request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    task_id = uuid.uuid4().hex
+    with _GENERIC_START_TASKS_LOCK:
+        _GENERIC_START_TASKS[task_id] = {"status": "running"}
+    _GENERIC_START_EXECUTOR.submit(_run_generic_start_task, task_id, body, request, x_control_token)
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/agent/generic-supervised/start-async/{task_id}")
+def get_generic_supervised_start_task(task_id: str) -> dict[str, Any]:
+    with _GENERIC_START_TASKS_LOCK:
+        task = _GENERIC_START_TASKS.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="启动任务不存在或已过期。")
+    return {"task_id": task_id, **task}
 
 
 @app.post("/api/agent/generic-supervised/start")

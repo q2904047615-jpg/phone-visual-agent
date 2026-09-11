@@ -868,6 +868,16 @@ function apiWithTimeout(path, options = {}, timeoutMs = 35000) {
     throw error;
   }).finally(() => clearTimeout(timer));
 }
+async function startAsyncAndWait(payload) {
+  const ticket = await apiWithTimeout("/api/agent/generic-supervised/start-async", {method: "POST", body: JSON.stringify(payload)}, 10000);
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const status = await api(`/api/agent/generic-supervised/start-async/${encodeURIComponent(ticket.task_id)}`);
+    if (status.status === "completed") return status.result;
+    if (status.status === "failed") throw new Error(status.error || "任务启动失败。");
+  }
+  throw new Error("任务启动超过120秒仍未完成，请检查Qwen服务或网络状态。");
+}
 
 async function startSupervisedAgent() {
   const text = document.querySelector("#agentText").value.trim();
@@ -886,10 +896,7 @@ async function startSupervisedAgent() {
   try {
     const payload = Protocol.buildRequestPayload(state.sessionDeviceId, { text, ...taskBudgetPayload() });
     const response = await withVisionProgress("理解目标并观察当前画面", () =>
-      api("/api/agent/generic-supervised/start", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      })
+      startAsyncAndWait(payload)
     );
     state.taskAttemptStatus = null;
     state.supervisedSession = response.session;

@@ -97,7 +97,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     {
                         "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                         "coordinate_space": {
-                            "kind": "normalized_1000",
+                            "kind": "axis_grid",
                             "width": 1000,
                             "height": 1000,
                         },
@@ -169,7 +169,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
         observed = SingleStepGenericSceneObserver(SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene, "input_structure": audit,
         }])).observe(frames=stable_frames(), goal_context=context, device_id="device-local-01")
 
@@ -203,7 +203,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },
@@ -262,7 +262,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         envelope = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {
-                "kind": "normalized_1000",
+                "kind": "axis_grid",
                 "width": 1000,
                 "height": 1000,
             },
@@ -318,7 +318,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         envelope = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {
-                "kind": "normalized_1000",
+                "kind": "axis_grid",
                 "width": 1000,
                 "height": 1000,
             },
@@ -430,7 +430,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 envelope = {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },
@@ -501,7 +501,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                         {
                             "protocol_version": (SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION),
                             "coordinate_space": {
-                                "kind": "normalized_1000",
+                                "kind": "axis_grid",
                                 "width": 1000,
                                 "height": 1000,
                             },
@@ -595,7 +595,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 observed = SingleStepGenericSceneObserver(SequenceProvider([{
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },
@@ -622,7 +622,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     visible_editable_cues=[])])
                 provider = SequenceProvider([{
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+                    "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
                     "scene": scene, "input_structure": audit,
                     "decision": {"status": "action", "action": "tap_semantic",
                         "element_id": "local_audited_input_1", "tap_point": [500, 900]},
@@ -751,7 +751,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 }])
                 observer = SingleStepGenericSceneObserver(SequenceProvider([{
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+                    "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
                     "scene": scene,
                     "input_structure": audit,
                     "decision": {"status": "action", "action": "input_verified_text", "text": "sample",
@@ -802,7 +802,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         }}}
         provider = SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
             "input_structure": input_audit_payload(application_inputs=[{
                 "element_id": "form-note",
@@ -855,7 +855,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },
@@ -919,7 +919,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         )
         provider = SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
             "input_structure": audit,
             "decision": {"status": "action", "action": "input_verified_text", "text": "sample",
@@ -947,7 +947,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         }]
         provider = SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
             "decision": {"status": "action", "action": "tap_semantic",
                 "element_id": "search-field", "tap_point": [500, 500]},
@@ -1062,7 +1062,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                             {
                                 "protocol_version": (SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION),
                                 "coordinate_space": {
-                                    "kind": "normalized_1000",
+                                    "kind": "axis_grid",
                                     "width": 1000,
                                     "height": 1000,
                                 },
@@ -1113,7 +1113,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },
@@ -1156,7 +1156,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },
@@ -1195,7 +1195,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         audit["protocol_version"] = "conflicting-version"
         provider = SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "coordinate_space": {"kind": "normalized_1000", "width": 1000, "height": 1000},
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene, "input_structure": audit,
         }])
         context = {"entities": {"active_subgoal_visual_context": {
@@ -1297,7 +1297,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 {
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {
-                        "kind": "normalized_1000",
+                        "kind": "axis_grid",
                         "width": 1000,
                         "height": 1000,
                     },

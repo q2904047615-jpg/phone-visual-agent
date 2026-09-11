@@ -229,7 +229,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     prompt,
                 )
                 self.assertNotIn(
-                    '"coordinate_space":{"kind":"normalized_1000",' '"width":1000,"height":1000}',
+                    '"coordinate_space":{"kind":"axis_grid",' '"width":1000,"height":1000}',
                     prompt,
                 )
 

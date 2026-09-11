@@ -47,17 +47,17 @@ class VisionModelConfigTests(unittest.TestCase):
             {
                 "model_config_version": VISION_MODEL_CONFIG_VERSION,
                 "provider": "aliyun_model_studio",
-                "model": "qwen3.7-plus",
+                "model": "qwen3-vl-plus",
                 "thinking_enabled": False,
                 "coordinate_scale": 1000,
-                "response_model": "qwen3.7-plus-2026-05-26",
+                "response_model": "qwen3-vl-plus-2026-05-26",
                 "base_url": "https://secret-workspace.example/v1",
                 "last_usage": {"total_tokens": 10},
             }
         )
         self.assertNotIn("base_url", identity)
         self.assertNotIn("last_usage", identity)
-        self.assertEqual(identity["model"], "qwen3.7-plus")
+        self.assertEqual(identity["model"], "qwen3-vl-plus")
 
 
 class DashScopeVisionModelRequestTests(unittest.TestCase):
@@ -72,7 +72,7 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
             request=request,
             json={
                 "id": "request-37",
-                "model": "qwen3.7-plus-2026-05-26",
+                "model": "qwen3-vl-plus-2026-05-26",
                 "choices": [
                     {
                         "finish_reason": "stop",
@@ -87,7 +87,7 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
-                "VISION_MODEL": "qwen3.7-plus",
+                "VISION_MODEL": "qwen3-vl-plus",
                 "DASHSCOPE_API_KEY": "test-key",
             },
             clear=True,
@@ -102,13 +102,13 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
                 '{"ok":true}',
             )
         body = mocked.call_args.kwargs["json"]
-        self.assertEqual(body["model"], "qwen3.7-plus")
+        self.assertEqual(body["model"], "qwen3-vl-plus")
         self.assertIs(body["enable_thinking"], False)
         self.assertEqual(body["max_tokens"], 1200)
         status = provider.status()
         self.assertEqual(status["model_config_version"], VISION_MODEL_CONFIG_VERSION)
         self.assertFalse(status["thinking_enabled"])
-        self.assertEqual(status["response_model"], "qwen3.7-plus-2026-05-26")
+        self.assertEqual(status["response_model"], "qwen3-vl-plus-2026-05-26")
         self.assertEqual(status["last_finish_reason"], "stop")
 
     def test_json_object_mode_is_forwarded_only_when_requested(self) -> None:
@@ -175,7 +175,7 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
 
     def test_explicit_model_config_is_atomic(self) -> None:
         config = VisionModelConfig(
-            model="qwen3.7-plus-2026-05-26",
+            model="qwen3-vl-plus-2026-05-26",
             base_url=DEFAULT_VISION_BASE_URL,
         )
         provider = DashScopeVisionProvider(api_key="test-key", model_config=config)
@@ -183,7 +183,7 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不能与"):
             DashScopeVisionProvider(
                 api_key="test-key",
-                model="qwen3.7-plus",
+                model="qwen3-vl-plus",
                 model_config=config,
             )
 
@@ -199,7 +199,7 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
             request=request,
             json={
                 "id": "request-38",
-                "model": "qwen3.7-plus",
+                "model": "qwen3-vl-plus",
                 "choices": [
                     {"finish_reason": "stop", "message": {"content": "{}"}}
                 ],

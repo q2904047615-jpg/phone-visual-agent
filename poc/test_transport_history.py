@@ -82,7 +82,7 @@ class TransportHistoryTests(unittest.TestCase):
                 executor = RobotDeviceExecutor(Mock(), app_launcher=launcher)
                 frames = stable_frames()
                 payload = wire(decision('home'), audit=input_audit_payload(application_inputs=[]))
-                payload['coordinate_space'] = {'kind': 'normalized_1000', 'width': 1000, 'height': 1000}
+                payload['coordinate_space'] = {'kind': 'axis_grid', 'width': 1000, 'height': 1000}
                 provider = SequenceProvider([payload])
                 observer = SingleStepGenericSceneObserver(provider)
                 controller = Mock(spec=['resolve_one', 'verify_after_action'])

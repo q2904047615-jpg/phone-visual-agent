@@ -77,7 +77,7 @@ def _positive_env_int(name: str, default: int) -> int:
 
 # One request per fresh scene remains mandatory. These values only bound the
 # cloud wait and transient retry cost; they never skip the post-action scene.
-OBSERVATION_TIMEOUT_SECONDS = _positive_env_float("VISION_OBSERVATION_TIMEOUT_SECONDS", 120.0)
+OBSERVATION_TIMEOUT_SECONDS = _positive_env_float("VISION_OBSERVATION_TIMEOUT_SECONDS", 30.0)
 OBSERVATION_MAX_ATTEMPTS = _positive_env_int("VISION_OBSERVATION_MAX_ATTEMPTS", 1)
 
 _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe',
@@ -1013,3 +1013,4 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
         item["states"].pop("independent_geometry_verified", None)
         item["states"].pop("geometry_audit_source", None)
         item["states"].pop("focus_only_input_surface", None)
+

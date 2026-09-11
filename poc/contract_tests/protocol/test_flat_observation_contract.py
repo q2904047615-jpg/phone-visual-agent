@@ -106,7 +106,7 @@ class FlatObservationContractTests(unittest.TestCase):
                     parsed = _parse_single_step_observation_envelope(
                         json.dumps([payload] if wrapped else payload, ensure_ascii=False),
                         input_structure_required=False, request_image_size=(720, height))
-                    self.assertEqual([500, round(y * 1000 / height)], parsed['decision']['tap_point'])
+                    self.assertEqual([500, y], parsed['decision']['tap_point'])
                     self.assertEqual([], parsed['scene']['elements'])
             payload['scene']['elements'] = [{'element_id': 'entry', 'bounds': [10, 10, 900, 900]}]
             extra = _parse_single_step_observation_envelope(json.dumps(payload),

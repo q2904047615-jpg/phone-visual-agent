@@ -3,7 +3,7 @@
   "coordinate_space": {
     "kind": "axis_grid",
     "width": 1000,
-    "height": 1280
+    "height": 1000
   },
   "scene": {
     "protocol_version": "2026-08-14-ui-scene-v3",
@@ -28,9 +28,9 @@
         "label": "微信",
         "bounds": [
           370,
-          750,
+          586,
           530,
-          910
+          711
         ],
         "confidence": 1,
         "states": {
@@ -62,7 +62,7 @@
     },
     "tap_point": [
       450,
-      830
+      648
     ],
     "evidence_refs": [
       "element:e1"

@@ -136,7 +136,7 @@ class PointSceneProjectionTests(unittest.TestCase):
         self.assertEqual('旧草稿', scene.get_element(bound_id).states['value'])
         self.assertIsNot(scene.get_element(bound_id).states.get('focused'), True)
         self.assertEqual(1, len([item for item in scene.elements if item.role == 'input']))
-        self.assertEqual((.61, .771), resolved.normalized_point)
+        self.assertEqual((.61, .37), resolved.normalized_point)
         broken = deepcopy(payload)
         broken['input_structure']['application_inputs'][0]['bounds'] = [0, 0, 0, 0]
         with self.assertRaises(VisionAgentError):

@@ -124,6 +124,7 @@ class MONITORINFO(ctypes.Structure):
 
 def find_window(title_fragment: str) -> tuple[int, str]:
     matches: list[tuple[int, str]] = []
+    visible_titles: list[str] = []
 
     @EnumWindowsProc
     def callback(hwnd: int, _lparam: int) -> bool:
@@ -135,12 +136,19 @@ def find_window(title_fragment: str) -> tuple[int, str]:
         buffer = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         title = buffer.value
+        visible_titles.append(title)
         if title_fragment.lower() in title.lower():
             matches.append((hwnd, title))
         return True
 
     user32.EnumWindows(callback, 0)
-    reject_if(not matches, RuntimeError(f'没有找到标题包含“{title_fragment}”的窗口。请先打开 main.exe，并保持控制端窗口可见。'))
+    if not matches:
+        sample = "、".join(visible_titles[:5]) or "无"
+        raise RuntimeError(
+            f'没有找到标题包含“{title_fragment}”的可见窗口；'
+            f'当前服务桌面可见窗口数={len(visible_titles)}，标题样本={sample}。'
+            "请在运行服务的同一交互式桌面保持 main.exe 窗口可见。"
+        )
     return matches[0]
 
 

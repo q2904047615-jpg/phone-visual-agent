@@ -1669,9 +1669,11 @@ def preview_jpg(device_id: str) -> Response:
         UniversalAgentOrchestratorError,
     ) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception:
-        content = MockRobotController(device_id="mock-preview").capture_preview()
-        cached = True
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"实时相机预览不可用：{exc}",
+        ) from exc
     return Response(
         content,
         media_type="image/jpeg",
@@ -1698,9 +1700,7 @@ def preview_mjpg(device_id: str) -> StreamingResponse:
             try:
                 frame, _cached = runtime.capture_preview(device_id, quality=68)
             except Exception:
-                frame = MockRobotController(
-                    device_id="mock-preview"
-                ).capture_preview(quality=68)
+                return
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n"
                 + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")

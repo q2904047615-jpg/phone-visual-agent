@@ -1201,6 +1201,20 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertEqual([72], phone_a.calls)
         self.assertEqual([72], phone_b.calls)
 
+    def test_preview_reports_live_capture_failure_instead_of_mock_frame(self) -> None:
+        with patch.object(
+            web_app.runtime,
+            "capture_preview",
+            side_effect=RuntimeError("控制端窗口不可用"),
+        ):
+            response = self.client.get(
+                "/api/preview.jpg?device_id=device-local-01"
+            )
+
+        self.assertEqual(503, response.status_code)
+        self.assertIn("实时相机预览不可用", response.json()["detail"])
+        self.assertIn("控制端窗口不可用", response.json()["detail"])
+
     def test_preview_uses_one_cached_frame_while_device_is_coordinated(self) -> None:
         class PreviewController:
             def __init__(self):

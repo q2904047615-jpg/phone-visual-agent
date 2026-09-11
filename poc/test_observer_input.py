@@ -1248,7 +1248,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "coordinate_space": {
                         "kind": "axis_grid",
                         "width": 1000,
-                        "height": 960,
+                        "height": 1000,
                     },
                     "scene": scene,
                     "input_structure": None,
@@ -1332,4 +1332,5 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

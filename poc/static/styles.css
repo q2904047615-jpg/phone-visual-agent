@@ -502,3 +502,9 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 .action-content, .goal-summary { background: rgba(255, 255, 255, .028); }
 .capability-panel { background: linear-gradient(145deg, rgba(18, 27, 46, .95), rgba(13, 19, 33, .96)); }
 @media (max-width: 1180px) { main { padding: 28px 25px 50px; } }
+
+/* Keep first-run command entry focused; advanced budgets stay available on demand. */
+.advanced-settings { margin-top: 11px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.018); }
+.advanced-settings summary { padding: 9px 11px; color: var(--muted); cursor: pointer; font-size: 10px; font-weight: 800; list-style-position: inside; }
+.advanced-settings[open] summary { color: var(--accent); border-bottom: 1px solid var(--line); }
+.advanced-settings .task-budget-fields { margin: 0; padding: 10px 11px 11px; }

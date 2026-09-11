@@ -118,7 +118,8 @@ def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str)
         "status": "action",
         "action": action_kind,
         "confidence": 0.97,
-        "reason": "合成观察在同一帧直接选择一个动作。",`n        "postcondition": {"status": "unknown", "fact": "等待动作后重新观察"},
+        "reason": "合成观察在同一帧直接选择一个动作。",
+        "postcondition": {"status": "unknown", "fact": "等待动作后重新观察"},
     }
     if action_kind in {
         "tap_semantic",
@@ -431,5 +432,6 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

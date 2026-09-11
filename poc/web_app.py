@@ -12,7 +12,7 @@ import webbrowser
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -34,7 +34,6 @@ from agent.domain import (
     EvidenceStoreError,
 )
 from agent.infrastructure import (
-    CameraPreviewUnavailable,
     DeviceControllerRegistry as InfrastructureDeviceControllerRegistry,
     DeviceControllerRegistryError,
     DeviceRuntimeResourceError,
@@ -51,18 +50,10 @@ from agent.infrastructure.capability_acceptance import (
 from agent.infrastructure.capability_acceptance_runtime import (
     CapabilityAcceptanceManager,
 )
-from agent.application.capability_acceptance_planner import (
-    CapabilityAcceptanceTaskGraphPlanner,
-)
-from agent.domain.action_capabilities import PROMOTABLE_ACTIONS, physical_capability_for_action
-from agent.infrastructure.deepseek_intent_provider import (
-    DeepSeekIntentProvider,
-    IntentProviderError,
-)
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS, physical_capability_for_action, unverified_promotable_actions
 from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter,
     persist_observer_failure_diagnostic,
-    stable_qwerty_ocr_anchors,
 )
 from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
 from agent.application.action_adapter import GenericActionAdapterError
@@ -71,18 +62,11 @@ from agent.infrastructure.trusted_observation_frames import (
     build_trusted_observation,
     validate_trusted_observation_against_frames,
 )
-from agent.application.deepseek_task_graph import (
-    DeepSeekTaskGraphPlanner,
-)
-from agent.domain.task_graph import TaskGraphError
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.application.universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
-)
-from agent.infrastructure.deepseek_failure_diagnostics import (
-    persist_deepseek_failure_diagnostic,
 )
 from agent.domain.universal_action_controller import (
     UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
@@ -92,6 +76,7 @@ from agent.domain.universal_action_controller import (
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
+from agent.domain.recent_navigation import RECENT_NAVIGATION_PROTOCOL
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
 from agent.infrastructure.adb_keyboard_transport import (
     AdbKeyboardRuntimeRegistry,
@@ -171,17 +156,21 @@ class StrictAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+from agent.domain.execution_budget import DEFAULT_DEVICE_ACTION_BUDGET, DEFAULT_OBSERVATION_BUDGET
+
+
 class GenericSupervisedStartRequest(StrictAgentRequest):
-    text: StrictStr = Field(min_length=1, max_length=500)
+    text: StrictStr = Field(min_length=1)
     exact_input_text: StrictStr | None = Field(
         default=None,
         min_length=1,
-        max_length=4000,
     )
     exact_action_kind: StrictStr | None = Field(default=None, max_length=32)
-    exact_target_label: StrictStr = Field(default="", max_length=120)
+    exact_target_label: StrictStr = Field(default="")
     device_id: StrictStr = Field(min_length=1, max_length=128)
     auto_advance: StrictBool = True
+    max_physical_actions: StrictInt = Field(default=DEFAULT_DEVICE_ACTION_BUDGET, ge=1)
+    max_observations: StrictInt = Field(default=DEFAULT_OBSERVATION_BUDGET, ge=1)
 
 
 class GenericSupervisedDeviceRequest(StrictAgentRequest):
@@ -193,7 +182,7 @@ class BaseActionConfirmationScopeRequest(StrictAgentRequest):
     task_id: StrictStr = Field(min_length=1, max_length=128)
     device_id: StrictStr = Field(min_length=1, max_length=128)
     revision: StrictInt = Field(ge=1)
-    subgoal_id: StrictStr = Field(min_length=1, max_length=128)
+    step_id: StrictStr = Field(min_length=1, max_length=128)
     effect_ids: list[StrictStr] = Field(default_factory=list)
     observation_id: StrictStr = Field(min_length=1, max_length=128)
     fingerprint: StrictStr = Field(min_length=1, max_length=256)
@@ -209,7 +198,7 @@ class GenericEffectConfirmationScopeRequest(StrictAgentRequest):
     task_id: StrictStr = Field(min_length=1, max_length=128)
     device_id: StrictStr = Field(min_length=1, max_length=128)
     revision: StrictInt = Field(ge=1)
-    subgoal_id: StrictStr = Field(min_length=1, max_length=128)
+    step_id: StrictStr = Field(min_length=1, max_length=128)
     effect_ids: list[StrictStr] = Field(min_length=1)
     intent_digest: StrictStr = Field(min_length=64, max_length=64)
 
@@ -228,17 +217,22 @@ class GenericSupervisedAutoRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
     confirmed: StrictBool = False
     confirmation: GenericConfirmationScopeRequest | None = None
-    max_physical_actions: StrictInt = Field(default=12, ge=1, le=20)
-    max_iterations: StrictInt = Field(default=24, ge=1, le=40)
+    max_physical_actions: StrictInt | None = Field(default=None, ge=1)
+    max_observations: StrictInt | None = Field(default=None, ge=1)
 
 
 class CapabilityAcceptanceStartRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
     action: StrictStr = Field(min_length=1, max_length=64)
-    text: StrictStr = Field(min_length=1, max_length=500)
+    text: StrictStr = Field(min_length=1)
 
 
-class CapabilityActionConfirmationScopeRequest(BaseActionConfirmationScopeRequest):
+class CapabilityActionConfirmationScopeRequest(GenericConfirmationScopeRequest):
+    """Trial action confirmation carries the complete canonical action scope.
+
+    Capability metadata extends, rather than replaces, the normal session
+    scope.  The page receives this exact object from ``trial.json``.
+    """
     trial_id: StrictStr = Field(min_length=1, max_length=128)
     action: StrictStr = Field(min_length=1, max_length=64)
 
@@ -284,14 +278,11 @@ class Runtime:
             self.device_controllers.default_device_id
         )
         self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
-        self.vision_provider = DashScopeVisionProvider()
-        self.intent_provider = DeepSeekIntentProvider()
+        self.vision_provider = DashScopeVisionProvider(enable_thinking=True)
         self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(ADB_KEYBOARD_REGISTRY_PATH)
         self.generic_scene_observer = SingleStepGenericSceneObserver(
             self.vision_provider,
-            qwerty_row_snapper=stable_qwerty_ocr_anchors,
         )
-        self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(self.intent_provider)
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider,
             trusted_observation_frame_validator=(
@@ -302,7 +293,6 @@ class Runtime:
             lease_directory=SHARED_DEVICE_LEASE_DIR
         )
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
-            deepseek_planner=self.deepseek_task_graph_planner,
             qwen_observer=self.qwen_visual_decision_observer,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=lambda: self.capture_agent_frame(device_id),
@@ -310,20 +300,12 @@ class Runtime:
                 robot=self.controller_for_device(device_id),
                 app_launcher=self.app_launcher_for_device(device_id),
                 controller=UniversalActionController(),
-                qwerty_row_snapper=stable_qwerty_ocr_anchors,
-                require_local_qwerty_row_snap=not isinstance(
-                    self.controller_for_device(device_id),
-                    MockRobotController,
-                ),
                 device_id=device_id,
                 text_transport=self.text_transport_for_device(device_id),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
-            deepseek_failure_diagnostic_writer=(
-                persist_deepseek_failure_diagnostic
-            ),
         )
         self.agent_session_repository = InMemoryAgentSessionRepository()
         self.universal_agent_session_service = (
@@ -388,9 +370,7 @@ class Runtime:
         """Build one isolated primitive-certification orchestrator."""
 
         return UniversalAgentOrchestrator(
-            deepseek_planner=CapabilityAcceptanceTaskGraphPlanner(
-                candidate_action
-            ),
+            required_action_kind=candidate_action,
             qwen_observer=self.qwen_visual_decision_observer,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=lambda: self.capture_agent_frame(
@@ -400,20 +380,12 @@ class Runtime:
                 observer=self.generic_scene_observer,
                 robot=provisional_controller,
                 controller=UniversalActionController(),
-                qwerty_row_snapper=stable_qwerty_ocr_anchors,
-                require_local_qwerty_row_snap=not isinstance(
-                    provisional_controller,
-                    MockRobotController,
-                ),
                 device_id=device_id,
                 text_transport=self.text_transport_for_device(device_id),
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
-            deepseek_failure_diagnostic_writer=(
-                persist_deepseek_failure_diagnostic
-            ),
         )
 
     def capture_agent_frame(
@@ -529,14 +501,6 @@ def apps() -> dict[str, Any]:
             else ["DASHSCOPE_API_KEY"]
         ),
     }}
-    readiness["intent_agent"] = {
-        "ready": bool(runtime.intent_provider.configured),
-        "mode": runtime.intent_provider.model,
-        "missing_templates": [],
-        "missing_capabilities": (
-            [] if runtime.intent_provider.configured else ["DEEPSEEK_API_KEY"]
-        ),
-    }
     return {"apps": APP_CATALOG, "readiness": readiness}
 
 
@@ -598,26 +562,27 @@ def device() -> dict[str, Any]:
             runtime.controller_for_device(descriptor["device_id"]).device_status()
         )
         public_status.pop("readiness", None)
-        devices.append({**descriptor, **public_status})
+        devices.append({**descriptor, **public_status,
+            "capability_acceptance_actions": unverified_promotable_actions(descriptor.get("verified_actions", []))})
     status["devices"] = devices
     status["vision_agent"] = runtime.vision_provider.status()
-    status["intent_agent"] = runtime.intent_provider.status()
     status["execution_architecture"] = {
-        "model_role": "observation_only",
+        "model_role": "whole_task_visual_agent",
         "controller": "universal_action_controller",
         "fixed_app_workflows_retired": True,
         "active_orchestrator": "universal_agent",
         "universal_agent": {
-            "goal_protocol": "2026-09-03-deepseek-required-action-v6",
+            "goal_protocol": "2026-09-06-single-visual-task-v1",
             "scene_protocol": UI_SCENE_PROTOCOL_VERSION,
             "action_protocol": CANONICAL_ACTION_PROTOCOL,
+            "recent_navigation_protocol": RECENT_NAVIGATION_PROTOCOL,
             "controller_protocol": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
             "goal_preview_enabled": False,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
             "automatic_loop_enabled": True,
-            "automatic_loop_max_physical_actions": 12,
-            "automatic_loop_max_iterations": 24,
+            "task_budget_default_actions": DEFAULT_DEVICE_ACTION_BUDGET,
+            "task_budget_default_observations": DEFAULT_OBSERVATION_BUDGET,
             "supervised_single_step_enabled": False,
             "enabled_physical_actions": sorted(enabled_physical_actions),
             "protocol_physical_actions": sorted(
@@ -631,7 +596,7 @@ def device() -> dict[str, Any]:
                 "semantic_ir_protocol": None,
                 "authority_protocol": "2026-09-02-typed-effect-kind-v1",
                 "effect_policy_protocol": "2026-09-02-auth-payment-only-v1",
-                "authority_scope": "deepseek_typed_effect_kind",
+                "authority_scope": "qwen_current_action_effect_kind",
                 "retired_remote_risk_diagnostics_enabled": False,
                 "canonical_action_protocol": CANONICAL_ACTION_PROTOCOL,
             },
@@ -654,9 +619,6 @@ def device() -> dict[str, Any]:
         "enabled": True,
         "automatic_loop_enabled": True,
         "max_physical_actions_per_confirmation": 1,
-        "max_safe_loop_physical_actions": 12,
-        "max_safe_loop_iterations": 24,
-        "external_effect_confirmation_count": 1,
         "post_action_transition_protocol": (
             POST_ACTION_TRANSITION_PROTOCOL_VERSION
         ),
@@ -690,12 +652,11 @@ def runtime_doctor(device_id: str) -> dict[str, Any]:
             return run_runtime_doctor(
                 device_id=device_id,
                 controller=controller,
-                deepseek_provider=runtime.intent_provider,
                 qwen_provider=runtime.vision_provider,
                 text_transport=runtime.text_transport_for_device(device_id),
                 active_session=active_session,
                 protocols={
-                    "goal": "2026-09-03-deepseek-required-action-v6",
+                    "goal": "2026-09-06-single-visual-task-v1",
                     "scene": UI_SCENE_PROTOCOL_VERSION,
                     "action": CANONICAL_ACTION_PROTOCOL,
                     "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
@@ -969,8 +930,6 @@ CAPABILITY_ACCEPTANCE_ERRORS = (
     DeviceRuntimeResourceError,
     DeviceTaskRegistryError,
     GenericActionAdapterError,
-    IntentProviderError,
-    TaskGraphError,
     UniversalActionError,
     EvidenceStoreError,
     UniversalAgentOrchestratorError,
@@ -1309,6 +1268,8 @@ def start_generic_supervised_session(
                 device_id=body.device_id,
                 run_dir=run_dir,
                 auto_advance=body.auto_advance,
+                max_physical_actions=body.max_physical_actions,
+                max_observations=body.max_observations,
             )
         )
         session = started.session
@@ -1335,13 +1296,11 @@ def start_generic_supervised_session(
         DeviceControllerRegistryError,
         DeviceRuntimeResourceError,
         DeviceTaskRegistryError,
-        IntentProviderError,
         GenericActionAdapterError,
         UniversalActionError,
         EvidenceStoreError,
         UniversalAgentOrchestratorError,
-        TaskGraphError,
-        VisionAgentError,
+            VisionAgentError,
     ) as exc:
         if session is None:
             try:
@@ -1415,9 +1374,7 @@ def approve_generic_supervised_effect(
         UniversalActionError,
         EvidenceStoreError,
         UniversalAgentOrchestratorError,
-        IntentProviderError,
-        TaskGraphError,
-        VisionAgentError,
+            VisionAgentError,
     ) as exc:
         request_actions = max(0, session.physical_actions - before_actions)
         raise HTTPException(
@@ -1472,9 +1429,7 @@ def confirm_generic_supervised_session(
         UniversalActionError,
         EvidenceStoreError,
         UniversalAgentOrchestratorError,
-        IntentProviderError,
-        TaskGraphError,
-        VisionAgentError,
+            VisionAgentError,
     ) as exc:
         request_actions = max(0, session.physical_actions - before_actions)
         raise HTTPException(
@@ -1525,11 +1480,9 @@ def plan_next_generic_supervised_step(
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
-        IntentProviderError,
         EvidenceStoreError,
         UniversalAgentOrchestratorError,
-        TaskGraphError,
-        VisionAgentError,
+            VisionAgentError,
     ) as exc:
         raise HTTPException(
             status_code=409,
@@ -1550,7 +1503,7 @@ def run_generic_supervised_safe_loop(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Continue only safe read/navigation work without user action confirmation."""
+    """Continue the task within cumulative limits; only login/payment require confirmation."""
 
     verify_local_request(request, x_control_token)
     session = _require_generic_supervised_session(session_id)
@@ -1566,7 +1519,7 @@ def run_generic_supervised_safe_loop(
                 else None
             ),
             max_physical_actions=body.max_physical_actions,
-            max_iterations=body.max_iterations,
+            max_observations=body.max_observations,
         )
         result = automatic.operation
         report = _write_generic_supervised_report(session)
@@ -1590,9 +1543,7 @@ def run_generic_supervised_safe_loop(
         UniversalActionError,
         EvidenceStoreError,
         UniversalAgentOrchestratorError,
-        IntentProviderError,
-        TaskGraphError,
-        VisionAgentError,
+            VisionAgentError,
     ) as exc:
         raise HTTPException(
             status_code=409,

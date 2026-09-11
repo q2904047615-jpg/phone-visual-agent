@@ -1,5 +1,4 @@
 import unittest
-
 from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
@@ -26,8 +25,8 @@ class FakeRobot:
 
     def _record_click(self, count: int) -> None:
         self._click_receipt = {
-            "seller_event_barrier_confirmed": True,
-            "round_trip_position_confirmed": True,
+            "input_events_dispatched": True,
+
             "mechanical_contact_ack": False,
             "click_count": count,
         }
@@ -42,15 +41,6 @@ class FakeRobot:
         self._record_click(2)
         return (x, y)
 
-    def vision_type_text_with_layout(self, text, geometry):
-        self.calls.append(("type", text, geometry))
-
-    def vision_type_pinyin(self, text, pinyin, geometry):
-        self.calls.append(("pinyin", text, pinyin, geometry))
-
-    def vision_clear_text(self, geometry, delete_count):
-        self.calls.append(("clear", geometry, delete_count))
-
     def vision_long_press_relative(self, x, y, hold_seconds):
         self.calls.append(("long_press", x, y, hold_seconds))
         self._long_press_receipt = {"hold_started_after_barrier": True}
@@ -59,10 +49,10 @@ class FakeRobot:
     def vision_swipe_relative(self, start_x, start_y, end_x, end_y, direction):
         self.calls.append(("swipe", start_x, start_y, end_x, end_y, direction))
         self._swipe_receipt = {
-            "right_button_down_dispatched": True,
+            "right_button_down_dispatched": True, "input_events_dispatched": True,
             "right_button_up_dispatched": True,
-            "seller_position_barrier_confirmed": True,
-            "round_trip_position_confirmed": True,
+
+
             "mechanical_contact_ack": False,
             "requested_direction": direction,
             "step_count": 6,
@@ -185,31 +175,6 @@ class DeviceExecutorTests(unittest.TestCase):
         self.assertEqual(context.exception.physical_actions, 1)
         self.assertEqual(robot.calls, [("tap", 100, 200)])
 
-    def test_input_transports_are_selected_from_typed_method(self):
-        robot = FakeRobot()
-        executor = RobotDeviceExecutor(robot)
-        geometry = {"type": "qwerty", "source": "input_structure_audit"}
-
-        executor.execute(
-            DeviceActionRequest(
-                kind="input_verified_text",
-                input_fragment="abc",
-                input_method="direct_latin",
-                keyboard_geometry=geometry,
-            )
-        )
-        executor.execute(
-            DeviceActionRequest(
-                kind="input_verified_text",
-                input_fragment="你好",
-                input_method="chinese_pinyin",
-                input_pinyin="nihao",
-                keyboard_geometry=geometry,
-            )
-        )
-
-        self.assertEqual(robot.calls[0][:2], ("type", "abc"))
-        self.assertEqual(robot.calls[1][:3], ("pinyin", "你好", "nihao"))
 
     def test_adb_keyboard_append_and_clear_never_call_mechanical_keyboard(self):
         robot = FakeRobot()
@@ -220,7 +185,7 @@ class DeviceExecutorTests(unittest.TestCase):
         self.assertEqual(EMPTY_TEXT_DIGEST, clear_scope.fragment_text_digest)
 
         append = executor.execute(DeviceActionRequest(kind="input_verified_text",
-            input_fragment="你好🙂\nsecond", input_method="unicode_commit", text_transport="adb_keyboard",
+            input_fragment="你好🙂\nsecond", text_transport="adb_keyboard",
             text_scope=append_scope))
         clear = executor.execute(DeviceActionRequest(kind="clear_verified_text", text_transport="adb_keyboard",
             text_scope=clear_scope))
@@ -237,7 +202,7 @@ class DeviceExecutorTests(unittest.TestCase):
 
         with self.assertRaises(DeviceExecutionError) as context:
             executor.execute(DeviceActionRequest(kind="input_verified_text", input_fragment="🙂",
-                input_method="unicode_commit", text_transport="adb_keyboard",
+                text_transport="adb_keyboard",
                 text_scope=adb_keyboard_scope(fragment="🙂", expected="🙂")))
 
         self.assertEqual(0, context.exception.physical_actions)
@@ -251,7 +216,7 @@ class DeviceExecutorTests(unittest.TestCase):
 
         with self.assertRaises(DeviceExecutionError) as context:
             executor.execute(DeviceActionRequest(kind="input_verified_text", input_fragment="你好",
-                input_method="unicode_commit", text_transport="adb_keyboard",
+                text_transport="adb_keyboard",
                 text_scope=adb_keyboard_scope(fragment="你好", expected="你好")))
 
         self.assertEqual(1, context.exception.physical_actions)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent.domain.confirmation_authority import normalize_action_scope
+
 from agent.domain.validation import DataclassWire, reject_if
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -170,24 +172,13 @@ def _observation(value: Any, *, field: str) -> dict[str, str]:
 
 
 def _confirmation_scope(value: Any, *, session_id: str, task_id: str, device_id: str) -> dict[str, Any]:
-    reject_if(not isinstance(value, dict), CapabilityAcceptanceError("验收报告 confirmation_scope 必须是对象。"))
-    required = {'session_id', 'task_id', 'device_id', 'revision', 'subgoal_id', 'effect_ids', 'observation_id',
-        'fingerprint'}
-    reject_if(set(value) != required, CapabilityAcceptanceError("验收报告 confirmation_scope 字段不完整。"))
-    normalized = dict(value)
-    for (field, expected) in (('session_id', session_id), ('task_id', task_id), ('device_id', device_id)):
-        reject_if(normalized.get(field) != expected, CapabilityAcceptanceError(f'验收报告 confirmation_scope.{field} 与报告范围不一致。'))
-    revision = normalized.get("revision")
-    reject_if(isinstance(revision, bool) or not isinstance(revision, int) or revision < 1, CapabilityAcceptanceError("验收报告 confirmation_scope.revision 无效。"))
-    _required_text(normalized.get("subgoal_id"), field="confirmation_scope.subgoal_id")
-    _required_text(normalized.get('observation_id'), field='confirmation_scope.observation_id')
-    _required_text(normalized.get('fingerprint'), field='confirmation_scope.fingerprint')
-    effect_ids = normalized.get("effect_ids")
-    reject_if(
-        not isinstance(effect_ids, list) or any((not isinstance(item, str) or not item.strip() for item in effect_ids)),
-        CapabilityAcceptanceError("验收报告 confirmation_scope.effect_ids 无效。"),
-    )
-    reject_if(effect_ids != sorted(set(effect_ids)), CapabilityAcceptanceError('验收报告 confirmation_scope.effect_ids 必须去重并排序。'))
+    try:
+        normalized = normalize_action_scope(value)
+    except ValueError as exc:
+        raise CapabilityAcceptanceError(f"验收报告 confirmation_scope: {exc}") from exc
+    for field, expected in (('session_id', session_id), ('task_id', task_id), ('device_id', device_id)):
+        reject_if(normalized[field] != expected,
+            CapabilityAcceptanceError(f'验收报告 confirmation_scope.{field} 与报告范围不一致。'))
     return normalized
 
 
@@ -262,7 +253,10 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     reject_if(report.get('status') != 'passed', CapabilityAcceptanceError("验收报告结果不是 passed，不能晋级。"))
     physical_actions = report.get("physical_actions")
     reject_if(isinstance(physical_actions, bool) or physical_actions != 1, CapabilityAcceptanceError("验收报告物理动作数必须严格等于 1。"))
-    reject_if(report.get('action_outcome') != 'matched', CapabilityAcceptanceError("验收结果不是 matched，不能晋级。"))
+    reject_if(report.get('action_outcome') != 'executed', CapabilityAcceptanceError("验收结果未确认执行，不能晋级。"))
+
+    reject_if(report.get('visual_outcome') != 'matched',
+        CapabilityAcceptanceError("动作后Qwen新图未确认本次动作结果，不能晋级。"))
 
     before = _observation(report.get("before_observation"), field="before_observation")
     after = _observation(report.get("after_observation"), field="after_observation")
@@ -273,8 +267,9 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
         or confirmation_scope['fingerprint'] != before['fingerprint'],
         CapabilityAcceptanceError('动作前 observation/fingerprint 与确认作用域不一致。'),
     )
-    reject_if(after['observation_id'] == before['observation_id'], CapabilityAcceptanceError("动作后 observation_id 未变化。"))
-    reject_if(after['fingerprint'] == before['fingerprint'], CapabilityAcceptanceError("动作后 fingerprint 未变化。"))
+    # observation identity is diagnostic only; a dynamic or unchanged screen is
+    # not itself an acceptance failure.  Qwen's post-action decision remains the
+    # semantic result authority.
 
     execution = report.get("execution")
     reject_if(not isinstance(execution, dict), CapabilityAcceptanceError("验收报告 execution 必须是对象。"))
@@ -284,19 +279,14 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     reject_if(not isinstance(observation_errors, list) or observation_errors, CapabilityAcceptanceError("验收报告包含观察错误，不能晋级。"))
     verification_errors = execution.get("verification_errors")
     reject_if(not isinstance(verification_errors, list) or verification_errors, CapabilityAcceptanceError("验收报告包含验证错误，不能晋级。"))
-    transition_evidence = execution.get("controller_transition_evidence")
-    reject_if(
-        not isinstance(transition_evidence, list) or not transition_evidence
-        or any(not isinstance(item, str) or not item.strip() for item in transition_evidence),
-        CapabilityAcceptanceError("验收报告缺少 Controller 已验证的 typed transition evidence。"),
-    )
     before_scene = execution.get("before_scene")
     after_scene = execution.get("after_scene")
     reject_if(not isinstance(before_scene, dict) or not isinstance(after_scene, dict), CapabilityAcceptanceError("验收报告缺少动作前后场景。"))
     reject_if(str(after_scene.get('fingerprint') or '') != after['fingerprint'], CapabilityAcceptanceError("动作后场景 fingerprint 与验收观察不一致。"))
     execution_before_fingerprint = str(before_scene.get("fingerprint") or "")
     reject_if(not execution_before_fingerprint, CapabilityAcceptanceError("执行前场景缺少 fingerprint。"))
-    reject_if(execution_before_fingerprint == after['fingerprint'], CapabilityAcceptanceError("动作后 fingerprint 与执行前场景相同。"))
+    # Do not require a pixel/fingerprint transition: valid actions may leave the
+    # visible frame unchanged or return to the same frame.
 
     trial_root = resolved_report.parent
     before_paths = _validate_frame_paths(report.get('before_frame_paths'), field='before_frame_paths',
@@ -363,7 +353,7 @@ def _validate_live_promotion_source(*, report: Mapping[str, Any], orientation_cr
     reject_if(getattr(execution_result, 'orientation_credential', None) is not orientation_credential, CapabilityAcceptanceError("能力晋级方向凭据不是本次动作结果持有的同一对象。"))
     physical_actions = getattr(execution_result, "physical_actions", None)
     reject_if(isinstance(physical_actions, bool) or physical_actions != 1, CapabilityAcceptanceError("能力晋级来源必须是恰好一次物理动作结果。"))
-    reject_if(str(getattr(execution_result, 'action_outcome', '') or '') != 'matched', CapabilityAcceptanceError("能力晋级来源动作结果未通过闭环验证。"))
+    reject_if(str(getattr(execution_result, 'action_outcome', '') or '') != 'executed', CapabilityAcceptanceError("能力晋级来源动作未确认执行。"))
     action = str(report.get("candidate_action") or "")
     reject_if(_resolved_execution_kind(execution_result) != action, CapabilityAcceptanceError("能力晋级来源动作类型与报告不一致。"))
     reject_if(orientation_credential.device_id != report.get('device_id'), CapabilityAcceptanceError("能力晋级 live 方向凭据与报告设备不一致。"))

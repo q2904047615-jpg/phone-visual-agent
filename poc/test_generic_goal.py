@@ -1,12 +1,11 @@
 from __future__ import annotations
-
 import unittest
-
 from agent.domain.generic_goal import (
     GenericIntentDraft,
     GenericIntentError,
-    _parse_json_object,
+    safe_goal_context,
 )
+from agent.domain.vision_model import VisionAgentError
 
 
 class GenericGoalProjectionTests(unittest.TestCase):
@@ -34,17 +33,22 @@ class GenericGoalProjectionTests(unittest.TestCase):
         )
         self.assertFalse(draft.to_dict()["needs_confirmation"])
 
-    def test_json_object_parser_accepts_a_fenced_object(self) -> None:
-        self.assertEqual(
-            {"objective": "点击并输入"},
-            _parse_json_object('```json\n{"objective":"点击并输入"}\n```'),
-        )
+    def test_current_context_preserves_history_without_aliasing(self) -> None:
+        context = {"task": "打开应用", "history": [{"text": "你好"}]}
+        projected = safe_goal_context(context)
+        self.assertEqual(context, projected)
+        projected["history"][0]["text"] = "changed"
+        self.assertEqual("你好", context["history"][0]["text"])
 
-    def test_json_object_parser_rejects_invalid_or_non_object_roots(self) -> None:
-        with self.assertRaisesRegex(GenericIntentError, "没有返回有效 JSON"):
-            _parse_json_object("not-json")
-        with self.assertRaisesRegex(GenericIntentError, "不是 JSON 对象"):
-            _parse_json_object("[]")
+    def test_current_context_keeps_json_normalization_and_validation(self) -> None:
+        self.assertEqual(
+            {"items": ["输入", None, False]},
+            safe_goal_context({"items": ("输入", None, False)}),
+        )
+        with self.assertRaises(VisionAgentError):
+            safe_goal_context([])
+        with self.assertRaises(GenericIntentError):
+            safe_goal_context({"value": {"not-json"}})
 
     def test_projection_rejects_blank_keys_and_unsupported_values(self) -> None:
         with self.assertRaisesRegex(GenericIntentError, "目标参数字段无效"):

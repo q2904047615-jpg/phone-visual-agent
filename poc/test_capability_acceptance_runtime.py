@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-
 from PIL import Image
 import agent.infrastructure.capability_acceptance_runtime as acceptance_runtime
 from agent.infrastructure import (
@@ -18,11 +17,9 @@ from agent.infrastructure.orientation_safety import (
     _mint_single_step_scene_credential,
     frame_fingerprint,
 )
-
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
-    validate_acceptance_report,
 )
 from agent.infrastructure.capability_acceptance_runtime import (
     CapabilityAcceptanceManager,
@@ -155,10 +152,12 @@ class FakeTrialSession:
                 "task_id": "task-001",
                 "device_id": self.device_id,
                 "revision": 1,
-                "subgoal_id": "subgoal-001",
+                "step_id": "subgoal-001",
                 "effect_ids": [],
                 "observation_id": "obs-before",
                 "fingerprint": "fingerprint-before",
+            "decision_node_id": "action-node",
+            "action_digest": "a" * 64,
             },
         }
 
@@ -166,13 +165,14 @@ class FakeTrialSession:
 class FakeTrialResult:
     def __init__(self, run_dir: Path, action: str):
         self.physical_actions = 1
-        self.action_outcome = "matched"
+        self.action_outcome = "executed"
         self.resolved_action = SimpleNamespace(kind=action)
         self.before_scene = SimpleNamespace(fingerprint="fingerprint-execution-before")
         self.after_scene = SimpleNamespace(fingerprint="fingerprint-after")
         self.observation_errors = ()
         self.verification_errors = ()
-        self.controller_transition_evidence = ("Controller 已验证动作后状态",)
+        self.controller_transition_evidence = ()
+        self.after_model_decision = {"previous_action_outcome": "matched"}
         self.robot_result = (
             ((2, 4), (12, 8))
             if action == "drag"
@@ -184,8 +184,8 @@ class FakeTrialResult:
             {
                 "version": "2026-08-16-seller-gui-contact-barrier-v3",
                 "channel": "right_button_stationary_touch",
-                "seller_event_barrier_confirmed": True,
-                "round_trip_position_confirmed": True,
+                "input_events_dispatched": True,
+
                 "hold_started_after_barrier": True,
                 "requested_hold_seconds": 0.8,
                 "barrier_offset_pixels": 3,
@@ -722,7 +722,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             "drag",
         )
         self.assertIsNone(self.device_registry.active_session("device-a"))
-        self.assertIn(("pause", "capability-trial-trial-001"), self.orchestrator_calls)
+        self.assertIn(("cancel", "capability-trial-trial-001"), self.orchestrator_calls)
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "禁止重复执行"):
             self.manager.confirm("trial-001", confirmation)
@@ -840,12 +840,12 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         )
         self.assertIsNone(trial.promotion_authority)
 
-    def test_controller_input_mismatch_is_preserved_without_reinterpretation(self):
-        self.proposed_action = "input_verified_text"
+    def test_controller_mismatch_is_preserved_without_reinterpretation(self):
+        self.proposed_action = "long_press"
         trial = self.manager.start(
             device_id="device-a",
-            candidate_action="input_verified_text",
-            text="让当前空输入框显示 agent，但不要提交。",
+            candidate_action="long_press",
+            text="长按当前本地验收对象。",
         )
         confirmation = trial.session.snapshot()["confirmation_scope"]
         original_confirm = trial.orchestrator.confirm_one
@@ -853,7 +853,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         def confirm_with_controller_mismatch(session, scope):
             result = original_confirm(session, scope)
             result.action_outcome = "mismatched"
-            result.verification_errors = ("文字不匹配",)
+            result.verification_errors = ("长按结果不匹配",)
             return result
 
         trial.orchestrator.confirm_one = confirm_with_controller_mismatch
@@ -868,7 +868,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         report = json.loads(trial.report_path.read_text(encoding="utf-8"))
         self.assertEqual("failed", report["status"])
         self.assertEqual("mismatched", report["action_outcome"])
-        self.assertRegex(report["execution"]["verification_errors"][0], "文字不匹配")
+        self.assertRegex(report["execution"]["verification_errors"][0], "长按结果不匹配")
         self.assertIsNone(trial.promotion_authority)
 
     def test_post_action_failure_records_one_action_without_promotion_or_retry(self):
@@ -931,7 +931,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         self.assertEqual(report["physical_actions"], 1)
         self.assertIn("证据无法读取", report["error"])
         self.assertIsNone(self.device_registry.active_session("device-a"))
-        self.assertIn(("pause", "capability-trial-trial-001"), self.orchestrator_calls)
+        self.assertIn(("cancel", "capability-trial-trial-001"), self.orchestrator_calls)
         self.assertIsNone(trial.promotion_authority)
         with self.assertRaisesRegex(CapabilityAcceptanceError, "禁止重复执行"):
             self.manager.confirm("trial-001", confirmation)

@@ -1,9 +1,6 @@
 from __future__ import annotations
-
 import unittest
-
 from PIL import Image, ImageDraw
-
 from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
     detect_top_edge_opaque_bands,

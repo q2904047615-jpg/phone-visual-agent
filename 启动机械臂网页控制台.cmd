@@ -16,7 +16,7 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :failed
 )
 
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, httpx, pypinyin" >nul 2>&1
+".venv\Scripts\python.exe" -c "import fastapi, uvicorn, httpx" >nul 2>&1
 if errorlevel 1 (
   echo [2/3] Installing web console dependencies...
   ".venv\Scripts\python.exe" -m pip install -r requirements-web.txt

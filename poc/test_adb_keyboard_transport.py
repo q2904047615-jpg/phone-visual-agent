@@ -1,12 +1,11 @@
 from __future__ import annotations
-
 import base64
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-
 from agent.domain.text_transport import (EMPTY_TEXT_DIGEST, TEXT_TRANSPORT_PROTOCOL,
     TextTransportProfile, TextTransportReplayError, text_digest)
 from agent.infrastructure.adb_keyboard_transport import (ADB_KEYBOARD_IME_ID,
@@ -83,6 +82,27 @@ class AdbKeyboardTransportTests(unittest.TestCase):
         self.assertEqual(EMPTY_TEXT_DIGEST, transport.profile.to_dict() and text_digest(""))
         self.assertEqual([str(self.adb), "-s", "serial-01", "shell", "am", "broadcast", "-a",
             "ADB_CLEAR_TEXT"], runner.calls[-1][0])
+
+    def test_command_and_receipt_digests_keep_exact_wire_bytes(self):
+        def expected(value):
+            return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                separators=(',', ':')).encode('utf-8')).hexdigest()
+
+        for text in ('你好🙂e\u0301\n', ''):
+            with self.subTest(text=text):
+                reply = completed('Broadcast completed: result=0\n')
+                runner = ScriptedRunner(self.ready_results(reply))
+                transport = self.transport(runner)
+                scope = self.scope(transport, fragment=text, expected=text)
+                operation = 'append_text' if text else 'clear_text'
+                result = transport.append_text(scope, text) if text else transport.clear_text(scope)
+                command_digest = expected({'protocol_version': TEXT_TRANSPORT_PROTOCOL,
+                    'operation': operation, 'device_id': transport.profile.device_id,
+                    'adb_serial': transport.profile.adb_serial, 'scope': scope.to_dict(),
+                    'payload_digest': text_digest(text)})
+                self.assertEqual(command_digest, result.command_digest)
+                self.assertEqual(expected({'returncode': reply.returncode, 'stdout': reply.stdout,
+                    'stderr': reply.stderr, 'command_digest': command_digest}), result.receipt_digest)
 
     def test_offline_device_stops_before_any_broadcast(self):
         runner = ScriptedRunner([completed("unknown\n", returncode=1)])

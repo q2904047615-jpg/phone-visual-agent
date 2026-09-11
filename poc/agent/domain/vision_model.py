@@ -7,7 +7,7 @@ from typing import Mapping
 
 
 VISION_MODEL_CONFIG_VERSION = "2026-08-15-vision-model-config-v1"
-DEFAULT_VISION_MODEL = "qwen3.7-plus"
+DEFAULT_VISION_MODEL = "qwen3-vl-plus"
 DEFAULT_VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_VISION_PROVIDER = "aliyun_model_studio"
 VISION_COORDINATE_SCALE = 1000
@@ -40,7 +40,7 @@ class VisionModelConfig:
         object.__setattr__(self, "base_url", base_url)
 
     def request_options(self) -> dict[str, bool]:
-        return {"enable_thinking": self.enable_thinking}
+        return {"enable_thinking": self.enable_thinking, "vl_high_resolution_images": True}
 
 
 def public_model_identity(status: Mapping[str, object]) -> dict[str, object]:

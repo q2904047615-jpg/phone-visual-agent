@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -11,6 +10,7 @@ import subprocess
 import time
 from typing import Any, Callable, Mapping
 
+from agent.domain.validation import canonical_digest
 from agent.domain.text_transport import (EMPTY_TEXT_DIGEST, TEXT_TRANSPORT_PROTOCOL,
     TextTransportActionScope, TextTransportContractError, TextTransportProfile,
     TextTransportReplayError, TextTransportResult, TextTransportScopeError, text_digest)
@@ -27,11 +27,6 @@ class AdbKeyboardConfigError(RuntimeError):
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
-
-
-def _safe_digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 class AdbKeyboardTextTransport:
@@ -134,7 +129,7 @@ class AdbKeyboardTextTransport:
         reason = self._preflight_reason()
         if reason is not None:
             return self._result(scope, operation, status="unavailable", reason=reason)
-        command_digest = _safe_digest({"protocol_version": TEXT_TRANSPORT_PROTOCOL, "operation": operation,
+        command_digest = canonical_digest({"protocol_version": TEXT_TRANSPORT_PROTOCOL, "operation": operation,
             "device_id": self._profile.device_id, "adb_serial": self._profile.adb_serial,
             "scope": scope.to_dict(), "payload_digest": payload_digest})
         self._consumed_nonces.add(scope.nonce)
@@ -146,7 +141,7 @@ class AdbKeyboardTextTransport:
         except (OSError, ValueError):
             return self._result(scope, operation, status="unknown", reason="broadcast_unavailable",
                 command_digest=command_digest)
-        receipt_digest = _safe_digest({"returncode": completed.returncode, "stdout": completed.stdout,
+        receipt_digest = canonical_digest({"returncode": completed.returncode, "stdout": completed.stdout,
             "stderr": completed.stderr, "command_digest": command_digest})
         accepted = completed.returncode == 0 and "Broadcast completed" in completed.stdout
         return self._result(scope, operation, status="accepted" if accepted else "rejected",

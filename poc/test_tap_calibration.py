@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 import tempfile
 import unittest
@@ -7,9 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
-
 from PIL import Image
-
 import run_xy_calibration
 from agent.infrastructure import DeviceTaskRegistry, InterProcessLease
 from agent.infrastructure.tap_calibration import (

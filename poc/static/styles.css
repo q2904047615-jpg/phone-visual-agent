@@ -451,3 +451,54 @@ dialog h2 { margin-bottom: 11px; font-size: 21px; }
   .capability-form .capability-goal, .capability-form button { grid-column: auto; }
   .capability-evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Console refresh: clearer hierarchy and a quieter workspace surface. */
+:root {
+  --bg: #070b13;
+  --sidebar: #0a101b;
+  --panel: rgba(16, 24, 40, .94);
+  --panel-solid: #111b2d;
+  --line: rgba(172, 193, 232, .14);
+  --line-strong: rgba(172, 193, 232, .26);
+  --muted: #96a4c1;
+  --accent: #8ef0cf;
+  --accent-strong: #4cd9ad;
+  --blue: #8eafff;
+}
+body {
+  background:
+    radial-gradient(900px 500px at 78% -8%, rgba(91, 126, 255, .18), transparent 65%),
+    radial-gradient(700px 420px at 8% 8%, rgba(54, 209, 169, .09), transparent 68%),
+    var(--bg);
+}
+.app-shell { grid-template-columns: 230px minmax(0, 1fr); }
+.sidebar {
+  padding: 24px 17px 20px;
+  background: linear-gradient(180deg, rgba(10, 16, 28, .96), rgba(8, 12, 21, .94));
+  border-right-color: rgba(172, 193, 232, .16);
+}
+.brand-mark { border-radius: 12px; box-shadow: 0 9px 26px rgba(72, 212, 170, .22); }
+.side-section { margin-top: 45px; }
+.loop-list li { min-height: 37px; }
+main { max-width: 1680px; padding: 32px 42px 66px; margin: 0 auto; width: 100%; }
+.topbar { padding-bottom: 5px; }
+h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
+.page-subtitle { font-size: 12px; }
+.status-strip { margin-top: 23px; border-radius: 13px; background: rgba(14, 21, 36, .76); }
+.command-card {
+  grid-template-columns: minmax(250px, .68fr) minmax(430px, 1.8fr);
+  padding: 27px;
+  border-radius: 18px;
+  background: linear-gradient(120deg, rgba(20, 33, 52, .98), rgba(12, 25, 37, .95));
+  box-shadow: 0 22px 75px rgba(0, 0, 0, .24);
+}
+.command-copy h2 { font-size: 23px; }
+.command-entry textarea { min-height: 102px; background: rgba(5, 10, 19, .72); }
+.primary-button { padding: 11px 16px; border-radius: 10px; }
+.task-run-status, .panel { border-radius: 16px; }
+.panel { padding: 21px; background: linear-gradient(145deg, rgba(20, 29, 48, .95), rgba(13, 19, 33, .96)); }
+.panel-head { margin-bottom: 14px; }
+.preview-wrap { min-height: 430px; border-radius: 12px; background: #02050b; box-shadow: inset 0 0 0 1px rgba(255,255,255,.03); }
+.action-content, .goal-summary { background: rgba(255, 255, 255, .028); }
+.capability-panel { background: linear-gradient(145deg, rgba(18, 27, 46, .95), rgba(13, 19, 33, .96)); }
+@media (max-width: 1180px) { main { padding: 28px 25px 50px; } }

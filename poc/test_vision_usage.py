@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-
 from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
 from agent.infrastructure.dashscope_vision_provider import (
     DashScopeVisionProvider,

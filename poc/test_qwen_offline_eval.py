@@ -1,11 +1,9 @@
 from __future__ import annotations
-
 import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
-
 from eval_qwen_visual_decision import (
     _evaluate_case,
     _build_report,
@@ -25,6 +23,7 @@ from agent.infrastructure.qwen_runtime_errors import (
 )
 from agent.domain.vision_model import VisionAgentError
 from agent.domain.qwen_task_context import QwenTaskContext
+from agent.infrastructure.generic_scene_observer import SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
 
 
 ROOT = Path(__file__).resolve().parent
@@ -67,7 +66,7 @@ class SuccessfulEvalProvider(EvalProvider):
         self.calls += 1
         return json.dumps(
             {
-                "protocol_version": "2026-09-03-single-step-required-action-v10",
+                "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                 "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 960},
                 "scene": {
                     "protocol_version": "2026-08-10-ui-scene-v2",
@@ -84,22 +83,7 @@ class SuccessfulEvalProvider(EvalProvider):
                         "confidence": 0.9,
                         "evidence": [],
                     },
-                    "elements": [
-                        {
-                            "element_id": "settings-icon",
-                            "role": "icon",
-                            "meaning": "settings_app_icon",
-                            "label": "设置",
-                            "bounds": [650, 240, 830, 430],
-                            "confidence": 0.98,
-                            "states": {
-                                "enabled": True,
-                                "fully_visible": True,
-                                "goal_relevant": True,
-                            },
-                            "evidence": ["设置"],
-                        }
-                    ],
+                    "elements": [],
                     "overlays": [],
                     "stable": True,
                     "confidence": 0.97,
@@ -109,12 +93,14 @@ class SuccessfulEvalProvider(EvalProvider):
                 "decision": {
                     "status": "action",
                     "action": "tap_semantic",
-                    "element_id": "settings-icon",
-                    "source_element_id": None,
-                    "destination_element_id": None,
-                    "direction": None,
-                    "evidence_refs": [],
-                    "confidence": 0.96,
+                    "target": {
+                        "element_id": "settings-icon",
+                        "role": "icon",
+                        "meaning": "settings_app_icon",
+                        "label": "设置",
+                        "evidence": ["设置"],
+                    },
+                    "tap_point": [740, 335],
                     "reason": "设置图标与当前目标逐字对应",
                 },
             },
@@ -151,6 +137,22 @@ class QwenRuntimeErrorTests(unittest.TestCase):
 
 
 class QwenOfflineReportTests(unittest.TestCase):
+    def test_manifest_input_scoring_uses_current_field_facts_without_keyboard_metadata(self):
+        manifest = _load_manifest(ROOT / 'evals' / 'qwen_visual_decision' / 'cases.json')
+        for case_id, preedit in [('symbol_keyboard_finish', ''),
+            ('pinyin_preedit_ihao_finish', 'ihao'), ('partial_pinyin_preedit_finish', "san'jiao'zhou")]:
+            case = next(item for item in manifest['cases'] if item['id'] == case_id)
+            expectation = dict(case['expectations']['input'], text_exact='正文')
+            case = {'accepted_statuses': ['finish'], 'expectations': {'input': expectation}}
+            for mutation, should_pass in [({}, True), ({'focused': False}, False),
+                ({'value': '错误正文'}, False), ({'ime_preedit_text': '错误预编辑'}, not bool(preedit))]:
+                with self.subTest(case_id=case_id, mutation=mutation):
+                    states = dict(value='正文', focused=True, ime_preedit_text=preedit)
+                    states.update(mutation)
+                    score = _score(case, status='finish', decision={'reason': '当前字段事实'},
+                        observation={'scene': {'elements': [{'role': 'input', 'states': states}]}})
+                    self.assertEqual(should_pass, score['dimensions']['input']['passed'])
+
     def test_manifest_contains_only_action_or_finish_expectations(self) -> None:
         manifest_path = ROOT / "evals" / "qwen_visual_decision" / "cases.json"
         manifest = _load_manifest(manifest_path)
@@ -298,13 +300,12 @@ class QwenOfflineReportTests(unittest.TestCase):
                         "present": True,
                         "text_exact": ".com",
                         "focused": True,
-                        "keyboard_layouts": ["symbol"],
                     },
                     "finish": {"evidence_required": True},
                 },
             },
             status="finish",
-            decision={"completion_evidence": ["输入框逐字显示 .com"]},
+            decision={"reason": "输入框逐字显示 .com"},
             observation={
                 "scene": {
                     "foreground_app_id": "generic_surface",
@@ -320,7 +321,6 @@ class QwenOfflineReportTests(unittest.TestCase):
                             "states": {
                                 "value": ".com",
                                 "focused": True,
-                                "keyboard_layout": "symbol",
                             },
                         }
                     ],

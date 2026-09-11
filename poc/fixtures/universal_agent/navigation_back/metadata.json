@@ -1,9 +1,0 @@
-{
-  "fixture_type": "owned_synthetic_ui",
-  "scenario": "navigation_back",
-  "before": "generic nested content page",
-  "after": "generic parent page",
-  "execution_class": "navigate",
-  "expected_physical_actions": 1,
-  "generator": "test_universal_agent_mock_loop.synthetic_frame"
-}

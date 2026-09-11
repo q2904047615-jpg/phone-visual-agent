@@ -1,10 +1,7 @@
 from __future__ import annotations
-
 import unittest
 from unittest.mock import patch
-
 from PIL import Image
-
 from agent.infrastructure import seller_window_adapter as seller
 
 
@@ -57,8 +54,6 @@ class SellerDpiScalingTests(unittest.TestCase):
             patch.object(seller, "client_geometry", return_value=(10, 20, 810, 1515)),
             patch.object(seller, "seller_camera_height", return_value=1440),
             patch.object(seller, "_check_escape"),
-            patch.object(seller, "_stable_seller_position_baseline", return_value=object()),
-            patch.object(seller, "_round_trip_position_barrier", return_value=(3, 240, 235, 0.035)) as barrier,
             patch.object(seller, "sleep_interruptible", side_effect=lambda seconds: sleeps.append(seconds)),
             patch.object(seller.time, "sleep"),
         ):
@@ -73,10 +68,10 @@ class SellerDpiScalingTests(unittest.TestCase):
         self.assertEqual(6, len(sleeps[1:]))
         for delay in sleeps[1:]:
             self.assertAlmostEqual(0.05, delay)
-        barrier.assert_called_once()
         self.assertTrue(receipt["right_button_down_dispatched"])
         self.assertTrue(receipt["right_button_up_dispatched"])
-        self.assertTrue(receipt["seller_position_barrier_confirmed"])
+        self.assertTrue(receipt["input_events_dispatched"])
+        self.assertNotIn("seller_position_barrier_confirmed", receipt)
         self.assertEqual(6, receipt["interpolation_steps_completed"])
         self.assertFalse(receipt["mechanical_contact_ack"])
 

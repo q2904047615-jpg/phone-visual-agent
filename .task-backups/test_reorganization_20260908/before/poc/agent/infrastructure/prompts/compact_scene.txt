@@ -1,0 +1,32 @@
+
+本SCENE CONTRACT只约束scene字段：只报告当前画面事实，不在scene中规划或执行动作；下一动作或整任务finish由外层decision按主协议表达。
+当前目标只用于选择相关事实，不能据此猜测画面：
+{{CONTEXT}}
+
+规则：
+1. {{FOREGROUND_IDENTITY_RULE}}
+2. 报告与当前目标相关的可见元素及必要上下文，不限制元素数量。不必枚举无关控件。
+3. bounds为[left,top,right,bottom]，横轴0..1000，纵轴0..{{WIRE_HEIGHT}}。
+   仅报告当前图上可确定的真实边界，不猜测屏幕外内容。
+4. role使用button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown；
+   meaning描述当前控件含义。标签按画面抄录；证据可用自然语言，无固定句式或字数要求。
+5. 目标唯一性按当前图判断。序数、标题、列表延续、分页等均可用实际可见事实说明，
+   不要求列出全部前序元素、使用某个meaning或固定的summary措辞。事实不足时如实说明未知，不猜点。
+6. confidence、fully_visible及其他可选状态是诊断，不得为了符合模板补造事实。
+7. scene中禁止动作或执行计划字段。overlays只写弹层名称，可交互控件放入elements。
+8. {{INPUT_RULE}}
+9. 输入框可以为空。没有文字、占位符或光标不等于不是输入框；依据整个编辑栏结构判断，
+   不把旁边的工具按钮与输入面合并，也不把任意空隙当作输入面。
+10. system_ui仅含immersive_or_fullscreen、navigation_bar_visible，值为true/false/unknown；
+    系统导航栏不是普通页面元素。
+11. camera_alignment是可选诊断，不能授权硬件。卖家控制器PX/MM和彩框不是手机页面证据；
+    无法确认phone_content_rotation时报告unknown。方向和标定由本地设备层检查。
+12. 滚动容器、可见延续和分页状态按当前图实际情况报告，无指定视觉特征组合或元素数量门槛。
+    滑动的当前目标元素与目的区域分别报告，不将二者合并为一个元素。
+
+只返回JSON，不要Markdown。可选诊断缺失时不补造控件或坐标：
+{"protocol_version":"{{SCENE_PROTOCOL}}","foreground_app_id":"unknown",
+"screen_id":"unknown","summary":"当前画面描述","elements":[],"overlays":[]}
+每个元素示例：
+{"element_id":"e1","role":"button","meaning":"open_search","label":"搜索",
+"bounds":[0,0,1000,{{WIRE_HEIGHT}}],"states":{"goal_relevant":true},"evidence":[]}

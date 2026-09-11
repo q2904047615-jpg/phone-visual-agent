@@ -1,0 +1,457 @@
+"""File-backed lifecycle manager for live capability acceptance trials."""
+
+from __future__ import annotations
+
+from agent.domain.validation import reject_if
+from dataclasses import dataclass, field
+from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import threading
+import uuid
+from typing import Any, Callable, Mapping
+
+from agent.infrastructure.capability_acceptance import (
+    ACCEPTANCE_REPORT_VERSION,
+    CapabilityAcceptanceError,
+    CapabilityRegistryPromoter,
+    PromotionAuthority,
+    PromotionScope,
+    validated_calibration_evidence,
+    validate_acceptance_report,
+)
+from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
+from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
+
+
+def _payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    method = getattr(value, "to_dict", None)
+    if callable(method):
+        result = method()
+        if isinstance(result, Mapping):
+            return dict(result)
+    raise CapabilityAcceptanceError("验收对象不能转换为 JSON 对象。")
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
+    try:
+        return atomic_replace_bytes(Path(path), json_bytes(payload))
+    except OSError as exc:
+        raise CapabilityAcceptanceError(f"验收状态无法原子写入：{exc}") from exc
+
+
+def _sha256_paths(paths: list[str]) -> list[str]:
+    digests: list[str] = []
+    for value in paths:
+        try:
+            digests.append(hashlib.sha256(Path(value).read_bytes()).hexdigest())
+        except OSError as exc:
+            raise CapabilityAcceptanceError(f"验收证据无法读取：{value}：{exc}") from exc
+    return digests
+
+
+def _proposal_action(snapshot: Mapping[str, Any]) -> str:
+    proposal = snapshot.get("proposal")
+    if not isinstance(proposal, Mapping) or proposal.get('status') != 'action':
+        return ""
+    action = proposal.get("action")
+    if not isinstance(action, Mapping):
+        return ""
+    return str(action.get("action") or "").strip()
+
+
+class _RecoveredSession:
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self._payload = dict(payload)
+        self.physical_actions = int(payload.get("physical_actions", 0) or 0)
+        self.session_id = str(payload.get("session_id") or "")
+
+    def snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._payload, ensure_ascii=False))
+
+
+@dataclass
+class CapabilityTrial:
+    trial_id: str
+    candidate_action: str
+    text: str
+    device_id: str
+    run_dir: Path
+    controller: Any = field(repr=False)
+    orchestrator: Any = field(repr=False)
+    session: Any = field(repr=False)
+    code_revision: str
+    report_path: Path
+    calibration_evidence: dict[str, Any] | None = None
+    promotion_authority: PromotionAuthority | None = field(default=None, repr=False)
+    promotion_result: dict[str, Any] | None = None
+    confirmation_attempted: bool = False
+    read_only_recovered: bool = False
+    stored_snapshot: dict[str, Any] | None = field(default=None, repr=False)
+    operation_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def snapshot(self) -> dict[str, Any]:
+        payload = json.loads(json.dumps(self.stored_snapshot, ensure_ascii=False)) if self.stored_snapshot else {}
+        report: dict[str, Any] | None = None
+        if self.report_path.is_file():
+            try:
+                loaded = json.loads(self.report_path.read_text(encoding="utf-8"))
+                report = loaded if isinstance(loaded, dict) else None
+            except (OSError, UnicodeError, ValueError, TypeError):
+                pass
+        payload.update({'trial_id': self.trial_id, 'candidate_action': self.candidate_action, 'text': self.text,
+            'device_id': self.device_id, 'code_revision': self.code_revision,
+            'calibration_evidence': self.calibration_evidence, 'session': self.session.snapshot(), 'report': report,
+            'promotion_scope': self.promotion_authority.scope.to_dict() if self.promotion_authority is not None
+            and (not self.promotion_authority.consumed) else None, 'promotion': self.promotion_result,
+            'requires_restart': bool(self.promotion_result and self.promotion_result.get('requires_restart')),
+            'confirmation_attempted': self.confirmation_attempted})
+        if self.read_only_recovered:
+            payload['read_only_recovered'] = True
+        return payload
+
+class CapabilityAcceptanceManager:
+    """Run one provisional generic action without mutating product controllers."""
+
+    def __init__(self, *, provisional_controller_factory: Callable[[str, str], Any],
+        orchestrator_factory: Callable[[Any, str], Any], device_registry: Any, output_dir: Path, registry_path: Path,
+        code_revision_provider: Callable[[], str], id_factory: Callable[[], str] | None=None,
+        promoter_factory: Callable[[Path], CapabilityRegistryPromoter] | None=None) -> None:
+        self.provisional_controller_factory = provisional_controller_factory
+        self.orchestrator_factory = orchestrator_factory
+        self.device_registry = device_registry
+        self.output_dir = Path(output_dir)
+        self.registry_path = Path(registry_path)
+        self.code_revision_provider = code_revision_provider
+        self.id_factory = id_factory or (lambda: uuid.uuid4().hex)
+        self.promoter_factory = promoter_factory or CapabilityRegistryPromoter
+        self._trials: dict[str, CapabilityTrial] = {}
+        self._guard = threading.RLock()
+        self._recover_read_only_trials()
+
+    def _recover_read_only_trials(self) -> None:
+        if not self.output_dir.is_dir():
+            return
+        output_root = self.output_dir.resolve()
+        for run_dir in sorted(self.output_dir.glob('capability_acceptance_*')):
+            try:
+                resolved_dir = run_dir.resolve(strict=True)
+                if output_root not in resolved_dir.parents:
+                    continue
+                stored = json.loads((resolved_dir / 'trial.json').read_text(encoding='utf-8'))
+                if not isinstance(stored, dict):
+                    continue
+                trial_id = str(stored.get("trial_id") or "").strip()
+                device_id = str(stored.get("device_id") or "").strip()
+                action = str(stored.get("candidate_action") or "").strip()
+                text_value = str(stored.get("text") or "").strip()
+                revision = str(stored.get("code_revision") or "").strip()
+                if (not re.fullmatch('[A-Za-z0-9_-]{1,128}', trial_id)
+                    or resolved_dir.name != f'capability_acceptance_{trial_id}' or (not device_id) or (action not
+                    in PROMOTABLE_ACTIONS) or (not text_value) or (not revision)):
+                    continue
+                promotion = stored.get('promotion')
+                if not isinstance(promotion, Mapping):
+                    try:
+                        promotion = json.loads((resolved_dir / 'promotion.json').read_text(encoding='utf-8'))
+                    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                        promotion = None
+                raw_session = stored.get('session')
+                raw_calibration = stored.get('calibration_evidence')
+                self._trials[trial_id] = CapabilityTrial(trial_id=trial_id, candidate_action=action,
+                    text=text_value, device_id=device_id, run_dir=resolved_dir, controller=None, orchestrator=None,
+                    session=_RecoveredSession(raw_session if isinstance(raw_session, Mapping) else {}),
+                    code_revision=revision, report_path=resolved_dir / 'acceptance_report.json',
+                    calibration_evidence=dict(raw_calibration) if isinstance(raw_calibration, Mapping) else None,
+                    promotion_result=dict(promotion) if isinstance(promotion, Mapping) else None,
+                    confirmation_attempted=bool(stored.get('confirmation_attempted')), read_only_recovered=True,
+                    stored_snapshot=stored)
+            except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+
+    @staticmethod
+    def _require_live_trial(trial: Any) -> CapabilityTrial:
+        reject_if(trial.read_only_recovered, CapabilityAcceptanceError('该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。'))
+        return trial
+
+    @staticmethod
+    def _validate_start_values(device_id: str, action: str, text: str) -> tuple[str, str, str]:
+        resolved_device = str(device_id or "").strip()
+        candidate = str(action or "").strip()
+        goal = " ".join(str(text or "").split())
+        reject_if(not resolved_device or len(resolved_device) > 128, CapabilityAcceptanceError("验收 device_id 格式无效。"))
+        reject_if(candidate not in PROMOTABLE_ACTIONS, CapabilityAcceptanceError(f'动作 {candidate or 'missing'} 不能进入真机能力验收。'))
+        reject_if(not goal or len(goal) > 500, CapabilityAcceptanceError("验收目标长度必须在 1～500 个字符之间。"))
+        return resolved_device, candidate, goal
+
+    @staticmethod
+    def _ensure_candidate(trial: CapabilityTrial) -> None:
+        snapshot = trial.session.snapshot()
+        if snapshot.get('status') != 'awaiting_confirmation':
+            return
+        proposed = _proposal_action(snapshot)
+        if proposed != trial.candidate_action:
+            try:
+                trial.orchestrator.cancel(trial.session)
+            finally:
+                raise CapabilityAcceptanceError(
+                    "Qwen 当前唯一动作不是本次候选动作："
+                    f"期望 {trial.candidate_action}，实际 {proposed or 'missing'}。"
+                )
+
+    @staticmethod
+    def _controller_calibration_evidence(controller: Any, action: str) -> dict[str, Any] | None:
+        if action not in CALIBRATION_BOUND_ACTIONS:
+            return None
+        calibration_path = getattr(controller, "calibration_path", None)
+        reject_if(calibration_path is None, CapabilityAcceptanceError('正式长按/拖动/系统边缘唤栏验收要求设备控制器提供触控标定路径。'))
+        return validated_calibration_evidence(Path(calibration_path))
+
+    def start(self, *, device_id: str, candidate_action: str, text: str) -> CapabilityTrial:
+        resolved_device, action, goal = self._validate_start_values(device_id, candidate_action, text)
+        active = self.device_registry.active_session(resolved_device)
+        reject_if(active is not None, CapabilityAcceptanceError(f'设备 {resolved_device} 已有活动任务：{active}。'))
+        trial_id = str(self.id_factory() or "").strip()
+        reject_if(not re.fullmatch('[A-Za-z0-9_-]{1,128}', trial_id), CapabilityAcceptanceError("验收 trial_id 格式无效。"))
+        with self._guard:
+            reject_if(trial_id in self._trials, CapabilityAcceptanceError(f"验收 trial_id 已存在：{trial_id}。"))
+
+        revision = str(self.code_revision_provider() or "").strip()
+        reject_if(not revision or len(revision) > 128, CapabilityAcceptanceError("无法记录当前代码提交，验收已取消。"))
+        reject_if(revision.endswith('+dirty'), CapabilityAcceptanceError("当前代码存在未提交修改，不能开始真机验收。"))
+
+        controller = self.provisional_controller_factory(resolved_device, action)
+        calibration_evidence = self._controller_calibration_evidence(controller, action)
+        orchestrator = self.orchestrator_factory(controller, action)
+        session_id = f"capability-trial-{trial_id}"
+        run_dir = self.output_dir / f"capability_acceptance_{trial_id}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+        session = orchestrator.start(session_id=session_id, raw_goal=goal, device_id=resolved_device, run_dir=run_dir)
+        if int(getattr(session, 'physical_actions', 0)) != 0:
+            try:
+                orchestrator.cancel(session)
+            finally:
+                raise CapabilityAcceptanceError("验收启动阶段错误地产生了物理动作。")
+        trial = CapabilityTrial(trial_id=trial_id, candidate_action=action, text=goal, device_id=resolved_device,
+            run_dir=run_dir, controller=controller, orchestrator=orchestrator, session=session, code_revision=revision,
+            report_path=run_dir / 'acceptance_report.json', calibration_evidence=calibration_evidence)
+        self._ensure_candidate(trial)
+        with self._guard:
+            self._trials[trial_id] = trial
+        _atomic_write_json(run_dir / "trial.json", trial.snapshot())
+        return trial
+
+    def get(self, trial_id: str) -> CapabilityTrial:
+        with self._guard:
+            trial = self._trials.get(str(trial_id or "").strip())
+        reject_if(trial is None, CapabilityAcceptanceError("真机能力验收会话不存在。"))
+        return trial
+
+    def snapshots(self) -> list[dict[str, Any]]:
+        with self._guard:
+            trials = list(self._trials.values())
+        return [trial.snapshot() for trial in trials]
+
+    def request_stop_all(self) -> list[str]:
+        with self._guard:
+            trials = list(self._trials.values())
+        requested: list[str] = []
+        for trial in trials:
+            if trial.read_only_recovered or trial.report_path.exists():
+                continue
+            request_stop = getattr(trial.controller, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
+                requested.append(trial.trial_id)
+        return requested
+
+    def approve_effects(self, trial_id: str, confirmation: Mapping[str, Any]) -> Any:
+        trial = self._require_live_trial(self.get(trial_id))
+        result = trial.orchestrator.approve_effects(trial.session, confirmation)
+        reject_if(int(getattr(trial.session, 'physical_actions', 0)) != 0, CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。"))
+        self._ensure_candidate(trial)
+        _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+        return result
+
+    @staticmethod
+    def _task_id(snapshot: Mapping[str, Any]) -> str:
+        scope = snapshot.get("confirmation_scope")
+        if isinstance(scope, Mapping) and isinstance(scope.get('task_id'), str):
+            return str(scope["task_id"])
+        return str(snapshot.get("task_id") or "")
+
+    def _report_identity(self, trial: CapabilityTrial, before_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        return {'version': ACCEPTANCE_REPORT_VERSION, 'trial_id': trial.trial_id,
+            'session_id': str(getattr(trial.session, 'session_id', '')), 'task_id': self._task_id(before_snapshot),
+            'device_id': trial.device_id, 'candidate_action': trial.candidate_action,
+            'calibration_evidence': trial.calibration_evidence, 'code_revision': trial.code_revision,
+            'created_at': datetime.now().astimezone().isoformat(timespec='seconds')}
+
+    def _write_pass_or_fail_report(self, trial: CapabilityTrial, *, before_snapshot: Mapping[str, Any],
+        result: Any) -> dict[str, Any]:
+        execution = _payload(result)
+        visual_outcome = getattr(result, "after_model_decision", {}).get("previous_action_outcome")
+        before_paths = [str(path) for path in getattr(result, "before_frame_paths", ())]
+        after_paths = [str(path) for path in getattr(result, "after_frame_paths", ())]
+        resolved = getattr(result, "resolved_action", None)
+        resolved_kind = str(getattr(resolved, "kind", "") or "").strip()
+        physical_actions = getattr(result, "physical_actions", 0)
+        action_outcome = str(getattr(result, "action_outcome", "") or "").strip()
+        observation_errors = list(getattr(result, "observation_errors", ()) or ())
+        verification_errors = list(getattr(result, "verification_errors", ()) or ())
+        before_scene = getattr(result, "before_scene", None)
+        after_scene = getattr(result, "after_scene", None)
+        before_fingerprint = str(getattr(before_scene, "fingerprint", "") or "")
+        after_fingerprint = str(getattr(after_scene, "fingerprint", "") or "")
+        after_observation = getattr(trial.session, "trusted_observation", None)
+        after_observation_id = str(getattr(after_observation, 'observation_id', '') or '')
+        confirmation_scope = before_snapshot.get("confirmation_scope")
+        confirmation_scope = dict(confirmation_scope) if isinstance(confirmation_scope, Mapping) else {}
+        before_observation_id = str(confirmation_scope.get('observation_id') or '')
+        scoped_before_fingerprint = str(confirmation_scope.get('fingerprint') or '')
+        passed = bool(not isinstance(physical_actions, bool) and physical_actions == 1
+            and (resolved_kind == trial.candidate_action) and (action_outcome == 'executed')
+            and visual_outcome == 'matched'
+            and (not observation_errors) and (not verification_errors) and (len(before_paths) == 4)
+            and (len(after_paths) == 4) and before_fingerprint and scoped_before_fingerprint and after_fingerprint
+            and (before_fingerprint != after_fingerprint) and (scoped_before_fingerprint != after_fingerprint)
+            and before_observation_id and after_observation_id and (before_observation_id != after_observation_id))
+        execution['resolved_action'] = {**(execution.get('resolved_action') if isinstance(execution.get(
+            'resolved_action'), dict) else {}), 'kind': resolved_kind}
+        execution["observation_errors"] = observation_errors
+        execution["verification_errors"] = verification_errors
+        report = {**self._report_identity(trial, before_snapshot), 'status': 'passed' if passed else 'failed',
+            'physical_actions': physical_actions,
+            'action_outcome': action_outcome, 'visual_outcome': visual_outcome, 'confirmation_scope': confirmation_scope,
+            'before_observation': {'observation_id': before_observation_id, 'fingerprint': scoped_before_fingerprint},
+            'after_observation': {'observation_id': after_observation_id, 'fingerprint': after_fingerprint},
+            'execution': execution, 'before_frame_paths': before_paths, 'after_frame_paths': after_paths,
+            'before_frame_sha256': _sha256_paths(before_paths), 'after_frame_sha256': _sha256_paths(after_paths)}
+        if passed:
+            candidate_path = trial.run_dir / "acceptance_report.candidate.json"
+            _atomic_write_json(candidate_path, report)
+            try:
+                validate_acceptance_report(candidate_path)
+            finally:
+                candidate_path.unlink(missing_ok=True)
+        _atomic_write_json(trial.report_path, report)
+        return report
+
+    def _write_exception_report(self, trial: CapabilityTrial, *, before_snapshot: Mapping[str, Any],
+        before_actions: int, exc: Exception, result: Any | None=None) -> dict[str, Any]:
+        current_actions = int(getattr(trial.session, "physical_actions", 0))
+        request_actions = max(0, current_actions - before_actions, int(getattr(exc, 'physical_actions', 0) or 0),
+            int(getattr(result, 'physical_actions', 0) or 0) if result is not None else 0)
+        evidence = list(getattr(exc, "evidence", ()) or ())
+        if result is not None:
+            evidence.extend(getattr(result, "before_frame_paths", ()) or ())
+            evidence.extend(getattr(result, "after_frame_paths", ()) or ())
+        evidence = list(dict.fromkeys(str(path) for path in evidence))
+        observation_errors = [str(value) for value in getattr(exc, 'observation_errors', ()) or ()]
+        verification_errors = [str(value) for value in getattr(exc, 'verification_errors', ()) or ()]
+        if result is not None:
+            observation_errors.extend((str(value) for value in getattr(result, 'observation_errors', ()) or ()))
+            verification_errors.extend((str(value) for value in getattr(result, 'verification_errors', ()) or ()))
+        failure = {**self._report_identity(trial, before_snapshot), 'status': 'failed',
+            'physical_actions': request_actions,
+            'action_outcome': str(getattr(result, 'action_outcome', '') or 'observation_failed'),
+            'confirmation_scope': dict(before_snapshot.get('confirmation_scope')) if isinstance(before_snapshot.get(
+            'confirmation_scope'), Mapping) else {}, 'error': str(exc), 'evidence': evidence,
+            'observation_errors': list(dict.fromkeys(observation_errors)),
+            'verification_errors': list(dict.fromkeys(verification_errors))}
+        _atomic_write_json(trial.report_path, failure)
+        return failure
+
+    def _close_if_owned(self, trial: CapabilityTrial) -> None:
+        active_session = self.device_registry.active_session(trial.device_id)
+        if active_session == getattr(trial.session, 'session_id', None):
+            trial.orchestrator.cancel(trial.session)
+
+    def confirm(self, trial_id: str, confirmation: Mapping[str, Any]) -> Any:
+        trial = self._require_live_trial(self.get(trial_id))
+        reject_if(not trial.operation_lock.acquire(blocking=False), CapabilityAcceptanceError("验收确认或晋级正在处理中。"))
+        try:
+            reject_if(trial.report_path.exists(), CapabilityAcceptanceError("验收报告已经生成，禁止重复执行或覆盖。"))
+            reject_if(trial.confirmation_attempted, CapabilityAcceptanceError("验收动作确认已经尝试，禁止重复执行。"))
+            self._ensure_candidate(trial)
+            before_snapshot = trial.session.snapshot()
+            before_actions = int(getattr(trial.session, "physical_actions", 0))
+            trial.confirmation_attempted = True
+            result = None
+            try:
+                current_calibration = self._controller_calibration_evidence(trial.controller, trial.candidate_action)
+                reject_if(current_calibration != trial.calibration_evidence, CapabilityAcceptanceError('验收开始后触控标定发生变化；本次会话已失效，必须重新创建。'))
+                result = trial.orchestrator.confirm_one(trial.session, confirmation)
+                request_actions = int(getattr(trial.session, 'physical_actions', 0)) - before_actions
+                reject_if(request_actions != 1 or int(getattr(result, 'physical_actions', 0)) != 1, CapabilityAcceptanceError(f'验收确认必须恰好产生一个物理动作，实际为 {request_actions}。'))
+                report = self._write_pass_or_fail_report(trial, before_snapshot=before_snapshot, result=result)
+                reject_if(report['status'] != 'passed', CapabilityAcceptanceError("真机动作未满足验收通过标准。"))
+            except Exception as exc:
+                if not trial.report_path.exists():
+                    self._write_exception_report(trial, before_snapshot=before_snapshot, before_actions=before_actions,
+                        exc=exc, result=result)
+                raise
+            finally:
+                self._close_if_owned(trial)
+                _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+
+            promoter = self.promoter_factory(self.registry_path)
+            orientation_credential = getattr(result, "orientation_credential", None)
+            trial.promotion_authority = promoter.preview(trial.report_path,
+                orientation_credential=orientation_credential, execution_result=result)
+            try:
+                _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+            except Exception:
+                trial.promotion_authority.invalidate()
+                trial.promotion_authority = None
+                raise
+            return result
+        finally:
+            trial.operation_lock.release()
+
+    def promotion_scope(self, trial_id: str) -> PromotionScope:
+        trial = self._require_live_trial(self.get(trial_id))
+        authority = trial.promotion_authority
+        reject_if(authority is None or authority.consumed, CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。"))
+        return authority.scope
+
+    def promote(self, trial_id: str, confirmation: Mapping[str, Any]) -> dict[str, Any]:
+        trial = self._require_live_trial(self.get(trial_id))
+        reject_if(not trial.operation_lock.acquire(blocking=False), CapabilityAcceptanceError("验收确认或晋级正在处理中。"))
+        try:
+            authority = trial.promotion_authority
+            reject_if(authority is None, CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。"))
+            active_session = self.device_registry.active_session(trial.device_id)
+            reject_if(active_session is not None, CapabilityAcceptanceError(f'设备 {trial.device_id} 仍有活动任务：{active_session}，不能晋级。'))
+            try:
+                current_revision = str(self.code_revision_provider() or "").strip()
+            except Exception:
+                authority.invalidate()
+                raise
+            if current_revision != trial.code_revision:
+                authority.invalidate()
+                raise CapabilityAcceptanceError('验收后代码状态发生变化，晋级确认已作废；请重启后重新验收。')
+            result = self.promoter_factory(self.registry_path).promote(trial.report_path, confirmation=confirmation,
+                authority=authority)
+            trial.promotion_result = dict(result)
+            _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+            return result
+        finally:
+            trial.operation_lock.release()
+
+    def cancel(self, trial_id: str) -> None:
+        trial = self._require_live_trial(self.get(trial_id))
+        with trial.operation_lock:
+            try:
+                request_stop = getattr(trial.controller, "request_stop", None)
+                if callable(request_stop):
+                    request_stop()
+                trial.orchestrator.cancel(trial.session)
+            finally:
+                if trial.promotion_authority is not None:
+                    trial.promotion_authority.invalidate()
+                _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())

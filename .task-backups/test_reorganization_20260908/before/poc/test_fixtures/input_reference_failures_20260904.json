@@ -1,0 +1,142 @@
+[
+  {
+    "response": {
+      "protocol_version": "2026-09-04-single-step-explicit-focus-v15",
+      "coordinate_space": {
+        "kind": "axis_grid",
+        "width": 1000,
+        "height": 1280
+      },
+      "scene": {
+        "protocol_version": "2026-08-14-ui-scene-v3",
+        "foreground_app_id": "com.tencent.mm",
+        "screen_id": "chat_file_transfer_helper",
+        "summary": "微信文件传输助手聊天界面，底部输入框为空且处于聚焦状态，显示AI输入中提示。",
+        "system_ui": {
+          "immersive_or_fullscreen": false,
+          "navigation_bar_visible": true
+        },
+        "camera_alignment": {
+          "camera_layout_orientation": "portrait",
+          "phone_content_rotation": "unknown",
+          "confidence": 0,
+          "evidence": []
+        },
+        "elements": [],
+        "overlays": [],
+        "stable": true,
+        "confidence": 1,
+        "fingerprint": "wechat_chat_fta_empty_input_focused"
+      },
+      "input_structure": {
+        "protocol_version": "2026-09-04-input-structure-explicit-focus-v13",
+        "application_inputs": [
+          {
+            "bounds": [
+              120,
+              1130,
+              780,
+              1190
+            ],
+            "text": "",
+            "focused": true,
+            "element_id": "primary_input"
+          }
+        ],
+        "ime_preedit_regions": [],
+        "keyboard": {
+          "visible": false
+        }
+      },
+      "decision": {
+        "status": "finish",
+        "action": null,
+        "target": null,
+        "tap_point": null,
+        "evidence_refs": [
+          "scene.summary",
+          "input_structure.application_inputs[0].text"
+        ],
+        "confidence": 1,
+        "reason": "当前输入框正文为空且已聚焦，满足清空输入框子目标的完成条件。",
+        "element_id": null,
+        "source_element_id": null,
+        "destination_element_id": null,
+        "direction": null,
+        "start": null,
+        "end": null
+      }
+    },
+    "source": "poc\\output\\web\\generic_supervised_20260904_194443_a14b08e9\\f28d5fe6f0174b088b64c3a5abc274fa_model_response.json"
+  },
+  {
+    "response": {
+      "protocol_version": "2026-09-04-single-step-explicit-focus-v15",
+      "coordinate_space": {
+        "kind": "axis_grid",
+        "width": 1000,
+        "height": 1280
+      },
+      "scene": {
+        "protocol_version": "2026-08-14-ui-scene-v3",
+        "foreground_app_id": "com.tencent.mm",
+        "screen_id": "chat_file_transfer_assistant",
+        "summary": "微信文件传输助手聊天界面，底部输入框为空且处于聚焦状态，显示AI输入中提示。",
+        "system_ui": {
+          "immersive_or_fullscreen": false,
+          "navigation_bar_visible": true
+        },
+        "camera_alignment": {
+          "camera_layout_orientation": "portrait",
+          "phone_content_rotation": "unknown",
+          "confidence": 0,
+          "evidence": []
+        },
+        "elements": [],
+        "overlays": [],
+        "stable": true,
+        "confidence": 1,
+        "fingerprint": "wechat_chat_fta_empty_input_focused"
+      },
+      "input_structure": {
+        "protocol_version": "2026-09-04-input-structure-explicit-focus-v13",
+        "application_inputs": [
+          {
+            "bounds": [
+              120,
+              1140,
+              780,
+              1200
+            ],
+            "text": "",
+            "focused": true,
+            "element_id": "primary_input"
+          }
+        ],
+        "ime_preedit_regions": [],
+        "keyboard": {
+          "visible": false
+        }
+      },
+      "decision": {
+        "status": "action",
+        "action": "input_verified_text",
+        "target": null,
+        "tap_point": null,
+        "evidence_refs": [
+          "input_structure.application_inputs[0].focused=true",
+          "input_structure.application_inputs[0].text=''"
+        ],
+        "confidence": 1,
+        "reason": "当前输入框已聚焦且为空，符合input_verified_text执行条件，直接输入目标文本。",
+        "element_id": "primary_input",
+        "source_element_id": null,
+        "destination_element_id": null,
+        "direction": null,
+        "start": null,
+        "end": null
+      }
+    },
+    "source": "poc\\output\\web\\generic_supervised_20260904_200708_9854a016\\62dcfa9cbb3447da8c79b9cb39570f9c_model_response.json"
+  }
+]

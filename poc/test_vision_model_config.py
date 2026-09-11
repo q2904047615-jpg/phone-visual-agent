@@ -1,9 +1,7 @@
 import unittest
 import base64
 from unittest.mock import patch
-
 import httpx
-
 from agent.infrastructure.dashscope_vision_provider import (
     DashScopeVisionProvider,
 )
@@ -20,10 +18,10 @@ from agent.infrastructure.environment_vision_model_config import (
 
 
 class VisionModelConfigTests(unittest.TestCase):
-    def test_default_is_qwen37_plus_non_thinking(self) -> None:
+    def test_default_is_qwen3_vl_plus_non_thinking(self) -> None:
         config = load_vision_model_config(environ={})
-        self.assertEqual(DEFAULT_VISION_MODEL, "qwen3.7-plus")
-        self.assertEqual(config.model, "qwen3.7-plus")
+        self.assertEqual(DEFAULT_VISION_MODEL, "qwen3-vl-plus")
+        self.assertEqual(config.model, "qwen3-vl-plus")
         self.assertEqual(config.base_url, DEFAULT_VISION_BASE_URL)
         self.assertFalse(config.enable_thinking)
         self.assertEqual(config.coordinate_scale, 1000)
@@ -31,11 +29,11 @@ class VisionModelConfigTests(unittest.TestCase):
     def test_current_environment_names_override_defaults(self) -> None:
         config = load_vision_model_config(
             environ={
-                "VISION_MODEL": "qwen3.7-plus",
+                "VISION_MODEL": "qwen3-vl-plus",
                 "VISION_MODEL_BASE_URL": "https://new.example/v1/",
             }
         )
-        self.assertEqual(config.model, "qwen3.7-plus")
+        self.assertEqual(config.model, "qwen3-vl-plus")
         self.assertEqual(config.base_url, "https://new.example/v1")
 
     def test_invalid_model_or_remote_http_url_fails_closed(self) -> None:

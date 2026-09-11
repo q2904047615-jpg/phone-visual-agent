@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 import json
 import unittest
-
 import httpx
 
 try:
@@ -66,10 +64,15 @@ def _openapi(*, version="0.2.0", include_start=True):
                 "exact_target_label": {"type": "string", "maxLength": 120},
                 "device_id": string,
                 "auto_advance": {"type": "boolean"},
+                "max_physical_actions": {"type": "integer", "minimum": 1},
+                "max_observations": {"type": "integer", "minimum": 1},
             },
             ("text", "device_id"),
         ),
         "Device": _schema_object({"device_id": string}, ("device_id",)),
+        "Auto": _schema_object({"device_id": string,
+            "max_physical_actions": {"type": "integer", "minimum": 1},
+            "max_observations": {"type": "integer", "minimum": 1}}, ("device_id",)),
         "Scope": scope,
         "Confirm": _schema_object(
             {
@@ -101,6 +104,7 @@ def _openapi(*, version="0.2.0", include_start=True):
             "post": body("#/components/schemas/Confirm")
         },
         session_path + "/next": {"post": body("#/components/schemas/Device")},
+        session_path + "/auto": {"post": body("#/components/schemas/Auto")},
         session_path + "/cancel": {"post": body("#/components/schemas/Device")},
         session_path + "/pause": {"post": body("#/components/schemas/Device")},
     }
@@ -133,6 +137,29 @@ def _scope(**changes):
 
 
 class LocalAgentApiClientTests(unittest.TestCase):
+    def test_budget_start_and_auto_are_typed_and_preserve_omitted_limits(self):
+        posts = []
+
+        def handler(request):
+            if request.url.path == "/api/session":
+                return httpx.Response(200, json={"token": "secret", "version": "0.2.0"})
+            if request.url.path == "/openapi.json":
+                return httpx.Response(200, json=_openapi())
+            if request.method == "POST":
+                posts.append((request.url.path, json.loads(request.read())))
+            return httpx.Response(200, json={"session": {"session_id": "abc", "device_id": "phone-02"}})
+
+        with self._client(handler) as client:
+            client.start_session(text="查看详情", device_id="phone-02",
+                max_physical_actions=101, max_observations=202)
+            client.continue_automatic("abc", max_observations=400)
+            client.continue_automatic("abc")
+        self.assertEqual(101, posts[0][1]["max_physical_actions"])
+        self.assertEqual(202, posts[0][1]["max_observations"])
+        self.assertEqual(("/api/agent/generic-supervised/abc/auto",
+            {"device_id": "phone-02", "max_observations": 400}), posts[1])
+        self.assertEqual({"device_id": "phone-02"}, posts[2][1])
+
     def _client(self, handler):
         return LocalAgentApiClient(transport=httpx.MockTransport(handler))
 

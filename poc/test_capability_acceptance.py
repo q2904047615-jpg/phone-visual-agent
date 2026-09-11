@@ -7,9 +7,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-
 from PIL import Image
-
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
@@ -126,7 +124,8 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             "status": "passed",
             "code_revision": "86b63d8",
             "physical_actions": 1,
-            "action_outcome": "matched",
+            "action_outcome": "executed",
+            "visual_outcome": "matched",
             "before_observation": {
                 "observation_id": "obs-before",
                 "fingerprint": "fingerprint-confirmed",
@@ -140,10 +139,12 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 "task_id": "task-001",
                 "device_id": "device-a",
                 "revision": 1,
-                "subgoal_id": "subgoal-001",
+                "step_id": "subgoal-001",
                 "effect_ids": [],
                 "observation_id": "obs-before",
                 "fingerprint": "fingerprint-confirmed",
+                "decision_node_id": "action-node",
+                "action_digest": "a" * 64,
             },
             "execution": {
                 "orientation_credential": {
@@ -285,7 +286,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         result = SimpleNamespace(
             orientation_credential=credential,
             physical_actions=1,
-            action_outcome="matched",
+            action_outcome="executed",
             resolved_action=SimpleNamespace(kind=report["candidate_action"]),
             before_scene=SimpleNamespace(fingerprint=credential.scene_fingerprint),
             before_frames=before_frames,
@@ -389,14 +390,12 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(CapabilityAcceptanceError, message):
                     validate_acceptance_report(self.report_path)
 
-    def test_report_requires_controller_transition_evidence(self) -> None:
+    def test_report_requires_current_visual_result(self) -> None:
         self._mutate_report(
-            lambda report: report["execution"].__setitem__(
-                "controller_transition_evidence", []
-            )
+            lambda report: report.__setitem__("visual_outcome", "uncertain")
         )
 
-        with self.assertRaisesRegex(CapabilityAcceptanceError, "transition evidence"):
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "Qwen新图"):
             validate_acceptance_report(self.report_path)
 
     def test_report_rejects_confirmation_scope_fingerprint_drift(self) -> None:
@@ -506,17 +505,19 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityAcceptanceError, "未提交代码"):
             validate_acceptance_report(self.report_path)
 
-    def test_report_rejects_unchanged_observation_or_fingerprint(self) -> None:
+    def test_report_allows_unchanged_observation_or_fingerprint(self) -> None:
         mutations = (
             lambda report: report["after_observation"].__setitem__("observation_id", "obs-before"),
-            lambda report: report["after_observation"].__setitem__("fingerprint", "fingerprint-confirmed"),
+            lambda report: (
+                report["after_observation"].__setitem__("fingerprint", report["before_observation"]["fingerprint"]),
+                report["execution"]["after_scene"].__setitem__("fingerprint", report["before_observation"]["fingerprint"]),
+            ),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 self._write_valid_report()
                 self._mutate_report(mutation)
-                with self.assertRaisesRegex(CapabilityAcceptanceError, "动作后.*未变化"):
-                    validate_acceptance_report(self.report_path)
+                validate_acceptance_report(self.report_path)
 
     def test_report_rejects_missing_or_outside_frame(self) -> None:
         outside = self.root / "outside.jpg"

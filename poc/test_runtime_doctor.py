@@ -1,10 +1,7 @@
 from __future__ import annotations
-
 import json
 import unittest
-
 from PIL import Image
-
 from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
 
@@ -78,12 +75,11 @@ def stable_frames():
     return [Image.new("RGB", (540, 960), "#203040") for _ in range(4)]
 
 
-def run(controller, *, active_session=None, deepseek=None, qwen=None):
+def run(controller, *, active_session=None, qwen=None):
     return run_runtime_doctor(
         device_id="device-a",
         controller=controller,
-        deepseek_provider=deepseek or FakeProvider(model="deepseek-chat"),
-        qwen_provider=qwen or FakeProvider(model="qwen3.7-plus"),
+        qwen_provider=qwen or FakeProvider(model="qwen3-vl-plus"),
         active_session=active_session,
         protocols={"action": "2026-08-20-canonical-action-v1"},
         sleep=lambda _seconds: None,
@@ -102,6 +98,8 @@ class RuntimeDoctorTests(unittest.TestCase):
         self.assertTrue(result["camera"]["stability"]["stable"])
         self.assertEqual(4, len(result["camera"]["frame_fingerprints"]))
         self.assertIn("tap_semantic", result["capabilities"]["supported_actions"])
+        self.assertIsNone(result["text_transport"])
+        self.assertEqual([], result["blockers"])
 
     def test_active_session_is_reported_without_camera_capture(self):
         controller = FakeDoctorController()
@@ -112,18 +110,20 @@ class RuntimeDoctorTests(unittest.TestCase):
         self.assertFalse(result["camera"]["captured"])
         self.assertIn("设备已有活动会话：session-active", result["blockers"])
 
-    def test_unstable_frames_are_a_runtime_blocker(self):
+    def test_changing_frames_are_diagnostic_not_a_runtime_blocker(self):
         frames = stable_frames()
         frames[3] = Image.new("RGB", (540, 960), "white")
         result = run(FakeDoctorController(frames))
 
-        self.assertFalse(result["ready"])
-        self.assertTrue(any("不稳定" in item for item in result["blockers"]))
+        self.assertTrue(result["ready"])
+        self.assertFalse(result["camera"]["stability"]["stable"])
+        self.assertTrue(result["camera"]["stability"]["diagnostic_only"])
+        self.assertEqual([], result["blockers"])
 
     def test_provider_errors_and_secrets_are_redacted(self):
         result = run(
             FakeDoctorController(),
-            deepseek=ExplodingProvider(),
+            qwen=ExplodingProvider(),
         )
         serialized = json.dumps(result, ensure_ascii=False)
 
@@ -138,7 +138,7 @@ class RuntimeDoctorTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ready"])
-        self.assertTrue(any("不是 qwen3.7-plus" in item for item in result["blockers"]))
+        self.assertTrue(any("不是 qwen3-vl-plus" in item for item in result["blockers"]))
 
 if __name__ == "__main__":
     unittest.main()

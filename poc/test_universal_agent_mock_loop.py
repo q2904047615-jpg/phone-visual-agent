@@ -1,34 +1,26 @@
 from __future__ import annotations
-
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 import tempfile
 import unittest
-
 from PIL import Image, ImageDraw
-
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
-from agent.domain.task_graph import TargetApp
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
 from agent.domain.canonical_action_protocol import (
     GenericStepProposal,
     bind_same_response_action,
-    normalize_model_step_decision,
 )
 from agent.infrastructure.orientation_safety import _claim_audit_seal
 from agent.domain.ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from agent.application.universal_agent_orchestrator import (
     UniversalAgentOrchestrator,
 )
+from test_universal_agent_orchestrator import CountingQwen
+from test_single_visual_loop import Observation as _trusted_factory
 
-from test_universal_agent_orchestrator import (
-    FakeDeepSeekPlanner,
-    _confirmation,
-    _graph,
-    _trusted_factory,
-)
+def _confirmation(session):
+    return session.confirmation_authority.scope()
 
 
 def synthetic_frame(*, page: str, unstable_variant: int = 0) -> Image.Image:
@@ -117,7 +109,7 @@ def scene(
 def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str) -> dict:
     if status == "finish":
         return {
-            "status": "finish",
+            "status": "finish", "previous_action_outcome": "matched",
             "evidence_refs": ["scene.summary"],
             "confidence": 0.97,
             "reason": "合成的新截图已经证明当前目标完成。",
@@ -139,7 +131,19 @@ def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str)
     }:
         if len(scene.elements) != 1:
             raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
-        payload["element_id"] = scene.elements[0].element_id
+        element = scene.elements[0]
+        if action_kind in {"tap_semantic", "dismiss_overlay", "press_enter", "double_tap", "long_press"}:
+            payload["target"] = {
+                "element_id": element.element_id,
+                "role": element.role,
+                "meaning": element.meaning,
+                "label": element.label,
+                "evidence": list(element.evidence),
+            }
+            center_x, center_y = element.center
+            payload["tap_point"] = [round(center_x * 1000), round(center_y * 1000)]
+        else:
+            payload["element_id"] = element.element_id
     elif action_kind == "scroll":
         payload["direction"] = "up"
     return payload
@@ -152,7 +156,7 @@ class ScriptedObserver:
         self.action_kind = action_kind
         self.calls = 0
 
-    def observe_with_decision(self, *, frames, goal_context):
+    def observe_with_decision(self, *, frames, goal_context, **_comparison):
         del goal_context
         self.calls += 1
         pixel = frames[-1].getpixel((0, 0))
@@ -209,8 +213,8 @@ class RecordingRobot:
         self._consume("tap_semantic")
         self.calls.append(("tap", (x, y)))
         self._click_receipt = {
-            "seller_event_barrier_confirmed": True,
-            "round_trip_position_confirmed": True,
+            "input_events_dispatched": True,
+
             "mechanical_contact_ack": False,
             "click_count": 1,
         }
@@ -225,8 +229,8 @@ class RecordingRobot:
         self._consume("back")
         self.calls.append(("back", ()))
         self._click_receipt = {
-            "seller_event_barrier_confirmed": True,
-            "round_trip_position_confirmed": True,
+            "input_events_dispatched": True,
+
             "mechanical_contact_ack": False,
             "click_count": 1,
         }
@@ -236,125 +240,6 @@ class RecordingRobot:
         self._consume("swipe")
         self.calls.append(("swipe_up", ()))
         return {"ok": True, "kind": "swipe"}
-
-
-class ScriptedQwen:
-    def __init__(self) -> None:
-        self.calls = []
-
-    def decide(
-        self,
-        *,
-        frames,
-        task_context,
-        trusted_observation,
-        decision_number=1,
-        available_action_kinds=None,
-        launch_target=None,
-        text_transport_profile=None,
-        model_decision,
-    ):
-        self.calls.append((frames, task_context, trusted_observation, decision_number))
-        payload = normalize_model_step_decision(model_decision)
-        if payload["status"] == "finish":
-            proposal = GenericStepProposal(
-                status="finish",
-                reason=payload["reason"],
-            )
-            decision = SimpleNamespace(
-                task_id=task_context["task_id"],
-                device_id=task_context["device_id"],
-                revision=task_context["revision"],
-                observation_id=trusted_observation.observation_id,
-                fingerprint=trusted_observation.fingerprint,
-                trusted_observation=trusted_observation,
-                target_region=None,
-                confidence=payload["confidence"],
-                proposal=proposal,
-                completion_evidence=(trusted_observation.scene.summary,),
-            )
-            decision.to_dict = lambda: {
-                "task_id": decision.task_id,
-                "device_id": decision.device_id,
-                "revision": decision.revision,
-                "observation_id": decision.observation_id,
-                "fingerprint": decision.fingerprint,
-                "status": "finish",
-                "next_action": None,
-                "reason": proposal.reason,
-                "completion_evidence": list(decision.completion_evidence),
-            }
-            return decision
-        action = bind_same_response_action(
-            payload,
-            context=task_context,
-            observation=trusted_observation,
-            available_action_kinds=available_action_kinds or (),
-            launch_target=launch_target,
-            text_transport_profile=text_transport_profile,
-        )
-        proposal = GenericStepProposal(
-            status="action",
-            action=action,
-            reason=payload["reason"],
-        )
-        region = SimpleNamespace(
-            kind=(
-                "system_navigation"
-                if action.action == "back"
-                else "screen"
-                if action.action == "scroll"
-                else "element"
-            ),
-            element_id=(
-                ""
-                if action.action in {"back", "scroll"}
-                else trusted_observation.scene.elements[0].element_id
-            ),
-            bounds=(
-                (0.0, 0.0, 1.0, 1.0)
-                if action.action in {"back", "scroll"}
-                else trusted_observation.scene.elements[0].bounds
-            ),
-        )
-        decision = SimpleNamespace(
-            task_id=task_context["task_id"],
-            device_id=task_context["device_id"],
-            revision=task_context["revision"],
-            observation_id=trusted_observation.observation_id,
-            fingerprint=trusted_observation.fingerprint,
-            trusted_observation=trusted_observation,
-            target_region=region,
-            confidence=payload["confidence"],
-            proposal=proposal,
-            completion_evidence=(),
-        )
-        decision.to_dict = lambda: {
-            "task_id": decision.task_id,
-            "device_id": decision.device_id,
-            "revision": decision.revision,
-            "observation_id": decision.observation_id,
-            "fingerprint": decision.fingerprint,
-            "status": "action",
-            "next_action": action.to_dict(),
-            "reason": proposal.reason,
-        }
-        return decision
-
-
-def graph_for(*, app_id: str, app_name: str, raw_goal: str):
-    graph = _graph(device_id="device-1")
-    graph = replace(
-        graph,
-        goal=replace(
-            graph.goal,
-            objective=raw_goal,
-            target_apps=(TargetApp(app_id=app_id, app_name=app_name),),
-        ),
-        raw_user_goal=raw_goal,
-    )
-    graph.validate()
-    return graph
 
 
 class UniversalAgentMockLoopTests(unittest.TestCase):
@@ -369,8 +254,6 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         unsafe: bool = False,
         unstable_after: bool = False,
     ):
-        initial = graph_for(app_id=app_id, app_name=app_name, raw_goal=raw_goal)
-        planner = FakeDeepSeekPlanner(initial)
         before = scene(
             app_id=app_id,
             fingerprint=f"{app_id}-before",
@@ -395,9 +278,8 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             post_action_settle=0,
             post_action_timeout=0.02,
         )
-        qwen = ScriptedQwen()
+        qwen = CountingQwen()
         orchestrator = UniversalAgentOrchestrator(
-            deepseek_planner=planner,
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
@@ -410,7 +292,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             device_id="device-1",
             run_dir=Path(temp),
         )
-        return orchestrator, session, planner, qwen, capture, robot
+        return orchestrator, session, None, qwen, capture, robot
 
     def test_unseen_open_goal_executes_one_navigation_tap_then_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -425,9 +307,6 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             evidence_names = {item.name for item in Path(temp).iterdir()}
             self.assertTrue(
                 {
-                    "task_graph_revision_1.json",
-                    "task_graph_revision_2.json",
-                    "effect_policy_revision_1.json",
                     "trusted_observation_step_1.json",
                     "trusted_observation_step_2.json",
                     "qwen_decision_step_1.json",
@@ -440,10 +319,9 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
-        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(2, session.step_number)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual(1, len(planner.plan_calls))
-        self.assertEqual("synthetic.catalog", session.goal_draft.app_id)
+        self.assertEqual("current_surface", session.goal_draft.app_id)
 
     def test_rephrased_back_goal_executes_one_back_then_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -458,10 +336,9 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("back", ())], robot.calls)
-        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(2, session.step_number)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual(1, len(planner.plan_calls))
-        self.assertEqual("synthetic.reader", session.goal_draft.app_id)
+        self.assertEqual("current_surface", session.goal_draft.app_id)
 
     def test_third_unseen_app_combines_generic_scroll_without_code_branch(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -476,9 +353,9 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("swipe_up", ())], robot.calls)
-        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(2, session.step_number)
         self.assertEqual(2, len(qwen.calls))
-        self.assertEqual("synthetic.timeline", session.goal_draft.app_id)
+        self.assertEqual("current_surface", session.goal_draft.app_id)
 
     def test_two_phrasings_use_the_same_generic_action_contract(self):
         outcomes = []
@@ -512,8 +389,6 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             evidence_names = {item.name for item in Path(temp).iterdir()}
             self.assertTrue(
                 {
-                    "task_graph_revision_1.json",
-                    "effect_policy_revision_1.json",
                     "trusted_observation_step_1.json",
                     "qwen_decision_step_1.json",
                     "controller_decision_step_1.json",
@@ -536,7 +411,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
 
-    def test_unstable_after_frames_fail_after_one_action_without_retry(self):
+    def test_changing_after_frames_continue_after_one_action_without_retry(self):
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, qwen, _capture, robot = self._session(
                 temp,
@@ -546,13 +421,12 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
                 action_kind="tap_semantic",
                 unstable_after=True,
             )
-            with self.assertRaisesRegex(GenericActionAdapterError, "没有稳定"):
-                orchestrator.confirm_one(session, _confirmation(session))
+            orchestrator.confirm_one(session, _confirmation(session))
 
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
-        self.assertEqual(1, len(qwen.calls))
-        self.assertEqual("failed", session.status)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("awaiting_confirmation", session.status)  # new model action; never force finish
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+{
+  "source": "Synthetic single-visual whole-task fixture; not live evidence",
+  "task": {
+    "task_context_protocol": "2026-09-06-single-visual-task-v1",
+    "task_id": "task-map-001",
+    "revision": 1,
+    "step_number": 1,
+    "raw_goal": "在支付演示页核对订单并付款"
+  }
+}

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.domain.validation import NormalizedPoint, dataclass_wire, reject_if
+from agent.domain.validation import dataclass_wire, reject_if
 import re
 import threading
 import uuid
@@ -10,38 +10,24 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from agent.infrastructure.observation_images import local_frame_fingerprint as frame_fingerprint
 
 
 ORIENTATION_CREDENTIAL_VERSION = "2026-08-24-orientation-credential-v2"
 MIN_ORIENTATION_CONFIDENCE = 0.80
-MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA = 18.0
-MAX_ORIENTATION_CENTERED_MAE = 6.0
 ORIENTATION_AUDIT_SOURCE = "independent_orientation_audit"
-LOCAL_QWERTY_ORIENTATION_SOURCE = "stable_local_qwerty_orientation_audit"
 SINGLE_STEP_SCENE_ORIENTATION_SOURCE = "single_step_scene_orientation"
 FIXED_SYSTEM_NAVIGATION_ACTIONS = frozenset({'back', 'home', 'open_recent_apps'})
 _PLACEHOLDER_DEVICE_IDS = frozenset({"", "unbound", "unknown", "none", "null"})
 _AUDIT_SEAL_LOCK = threading.Lock()
-_LIVE_AUDIT_SEALS: dict[object, "_FrameVisualBinding"] = {}
+_LIVE_AUDIT_SEALS: dict[object, tuple[int, int]] = {}
 _CLAIMED_AUDIT_CREDENTIALS: weakref.WeakValueDictionary[object, Any] = weakref.WeakValueDictionary()
 
 
 class OrientationSafetyError(RuntimeError):
     pass
-
-
-class OrientationFrameMismatchError(OrientationSafetyError):
-    """Carry the exact rejected frame for session-local diagnostic evidence."""
-
-    def __init__(self, message: str, *, actual_frame: Image.Image, brightness_delta: float,
-        centered_mae: float) -> None:
-        super().__init__(message)
-        self.actual_frame = actual_frame.convert("RGB").copy()
-        self.brightness_delta = float(brightness_delta)
-        self.centered_mae = float(centered_mae)
 
 
 def validate_device_id(value: str) -> str:
@@ -58,32 +44,6 @@ def camera_layout_orientation(size: tuple[int, int]) -> str:
     if height > width:
         return "portrait"
     return "square"
-
-
-@dataclass(frozen=True)
-class _FrameVisualBinding:
-    size: tuple[int, int]
-    pixels: tuple[int, ...]
-    mean: float
-
-
-def _frame_visual_binding(frame: Image.Image) -> _FrameVisualBinding:
-    compact = frame.convert('L').resize((64, 96), Image.Resampling.BILINEAR).filter(ImageFilter.GaussianBlur(
-        radius=0.8))
-    pixels = tuple(compact.tobytes())
-    return _FrameVisualBinding(size=tuple(frame.size), pixels=pixels, mean=sum(pixels) / len(pixels))
-
-
-def _assert_visually_bound(reference: _FrameVisualBinding, actual_frame: Image.Image) -> None:
-    actual = _frame_visual_binding(actual_frame)
-    reject_if(actual.size != reference.size, OrientationSafetyError("动作前实际捕获帧尺寸发生变化。"))
-    brightness_delta = abs(actual.mean - reference.mean)
-    centered_mae = sum((abs(current - actual.mean - (prior - reference.mean)) for prior,
-        current in zip(reference.pixels, actual.pixels))) / len(reference.pixels)
-    if brightness_delta > MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA or centered_mae > MAX_ORIENTATION_CENTERED_MAE:
-        message = f'动作前实际捕获帧与独立方向审计帧发生视觉漂移：亮度差{brightness_delta:.2f}，结构差{centered_mae:.2f}。'
-        raise OrientationFrameMismatchError(message, actual_frame=actual_frame, brightness_delta=brightness_delta,
-            centered_mae=centered_mae)
 
 
 @dataclass(frozen=True)
@@ -105,7 +65,7 @@ class OrientationCredential:
     def validate(self) -> None:
         reject_if(self.version != ORIENTATION_CREDENTIAL_VERSION, OrientationSafetyError("方向凭据版本无效。"))
         reject_if(
-            self.source not in {ORIENTATION_AUDIT_SOURCE, LOCAL_QWERTY_ORIENTATION_SOURCE,
+            self.source not in {ORIENTATION_AUDIT_SOURCE,
             SINGLE_STEP_SCENE_ORIENTATION_SOURCE},
             OrientationSafetyError("方向凭据不是正式独立审计产生。"),
         )
@@ -187,46 +147,6 @@ class OrientationCredential:
         return item
 
 
-def _mint_locally_verified_qwerty_credential(*, device_id: str, scene_fingerprint: str, frame: Image.Image,
-    anchors: dict[str, Any]) -> OrientationCredential:
-    """Bind independently validated upright QWERTY rows to one consumed-frame credential."""
-
-    required = ("q", "p", "a", "l", "z", "m", "backspace")
-    reject_if(not isinstance(anchors, dict) or set(anchors) != set(required), OrientationSafetyError("本地方向审计缺少完整 QWERTY 七点。"))
-
-    points: dict[str, NormalizedPoint] = {}
-    for key in required:
-        value = anchors.get(key)
-        reject_if(
-            not isinstance(value, (list, tuple)) or len(value) != 2 or any((isinstance(part,
-            bool) or not isinstance(part, (int, float)) or (not 0 <= float(part) <= 1000) for part in value)),
-            OrientationSafetyError("本地方向审计的 QWERTY 锚点无效。"),
-        )
-        points[key] = (float(value[0]), float(value[1]))
-
-    top_y = (points["q"][1] + points["p"][1]) / 2.0
-    middle_y = (points["a"][1] + points["l"][1]) / 2.0
-    bottom_y = (points['z'][1] + points['m'][1] + points['backspace'][1]) / 3.0
-    reject_if(
-        not (points['q'][0] < points['p'][0] and points['a'][0] < points['l'][0]
-        and (points['z'][0] < points['m'][0] < points['backspace'][0]) and (top_y + 20 <= middle_y)
-        and (middle_y + 20 <= bottom_y) and (abs(points['q'][1] - points['p'][1]) <= 18)
-        and (abs(points['a'][1] - points['l'][1]) <= 18) and (max(points['z'][1], points['m'][1],
-        points['backspace'][1]) - min(points['z'][1], points['m'][1], points['backspace'][1]) <= 18)),
-        OrientationSafetyError("本地方向审计的 QWERTY 行序或水平结构无效。"),
-    )
-
-    seal = object()
-    item = OrientationCredential(version=ORIENTATION_CREDENTIAL_VERSION, credential_id=uuid.uuid4().hex,
-        source=LOCAL_QWERTY_ORIENTATION_SOURCE, device_id=validate_device_id(device_id),
-        scene_fingerprint=str(scene_fingerprint or '').strip(), frame_fingerprint=frame_fingerprint(frame),
-        evidence_frame_fingerprint='', frame_size=tuple(frame.size),
-        camera_layout_orientation=camera_layout_orientation(frame.size), phone_content_rotation='upright',
-        confidence=1.0, evidence=('本地连续多帧OCR确认完整QWERTY三行保持正向排列',), _audit_seal=seal)
-    item.validate()
-    with _AUDIT_SEAL_LOCK:
-        _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
-    return item
 
 
 def _mint_single_step_scene_credential(*, device_id: str, scene_fingerprint: str,
@@ -247,17 +167,17 @@ def _mint_single_step_scene_credential(*, device_id: str, scene_fingerprint: str
         evidence=('本地当前帧尺寸与像素形成一次性方向绑定',), _audit_seal=seal)
     item.validate()
     with _AUDIT_SEAL_LOCK:
-        _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
+        _LIVE_AUDIT_SEALS[seal] = tuple(frame.size)
     return item
 
 
-def _claim_audit_seal(credential: OrientationCredential) -> _FrameVisualBinding:
+def _claim_audit_seal(credential: OrientationCredential) -> tuple[int, int]:
     seal = credential._audit_seal
     with _AUDIT_SEAL_LOCK:
         reject_if(seal is None or seal not in _LIVE_AUDIT_SEALS, OrientationSafetyError('方向凭据不是本进程实际独立审计直接签发，或已使用。'))
-        visual_binding = _LIVE_AUDIT_SEALS.pop(seal)
+        frame_size = _LIVE_AUDIT_SEALS.pop(seal)
         _CLAIMED_AUDIT_CREDENTIALS[seal] = credential
-        return visual_binding
+        return frame_size
 
 
 class PhysicalExecutionGate:
@@ -266,7 +186,7 @@ class PhysicalExecutionGate:
     def __init__(self, device_id: str) -> None:
         self.device_id = validate_device_id(device_id)
         self._lock = threading.Lock()
-        self._armed: tuple[str, OrientationCredential, _FrameVisualBinding] | None = None
+        self._armed: tuple[str, OrientationCredential, tuple[int, int]] | None = None
 
     def arm(self, credential: OrientationCredential, *, action: str, scene_fingerprint: str) -> None:
         with self._lock:
@@ -276,8 +196,8 @@ class PhysicalExecutionGate:
             self._armed = None
             credential.assert_authorizes(device_id=self.device_id, scene_fingerprint=scene_fingerprint,
                 frame_size=credential.frame_size, action=action)
-            visual_binding = _claim_audit_seal(credential)
-            self._armed = (action, credential, visual_binding)
+            frame_size = _claim_audit_seal(credential)
+            self._armed = (action, credential, frame_size)
 
     def clear(self) -> None:
         with self._lock:
@@ -288,9 +208,12 @@ class PhysicalExecutionGate:
             armed = self._armed
             self._armed = None
         reject_if(armed is None, OrientationSafetyError("物理执行缺少一次性方向授权。"))
-        armed_action, credential, visual_binding = armed
+        armed_action, credential, minted_frame_size = armed
         reject_if(armed_action != action, OrientationSafetyError("一次性方向授权与物理动作不匹配。"))
         credential.assert_authorizes(device_id=self.device_id, scene_fingerprint=credential.scene_fingerprint,
             frame_size=tuple(frame.size), action=action)
-        _assert_visually_bound(visual_binding, frame)
+        # Pixel motion is not a second UI authority. The live seal still binds
+        # the original canvas, including against a modified credential copy.
+        reject_if(tuple(frame.size) != minted_frame_size,
+            OrientationSafetyError("动作前实际捕获帧尺寸发生变化。"))
         return credential

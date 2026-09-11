@@ -1,5 +1,4 @@
 import unittest
-
 from agent.domain.action_capabilities import (
     ActionCapabilityError,
     KNOWN_ACTION_CAPABILITIES,

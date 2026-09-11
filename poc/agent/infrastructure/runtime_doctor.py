@@ -78,7 +78,7 @@ def _capture_stable_frames(controller: Any, *, sleep: Callable[[float], None]) -
     return frames, None
 
 
-def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: Any, qwen_provider: Any,
+def run_runtime_doctor(*, device_id: str, controller: Any, qwen_provider: Any,
     active_session: str | None, protocols: Mapping[str, str], text_transport: Any=None,
     sleep: Callable[[float], None]=time.sleep) -> dict[str,
     Any]:
@@ -100,14 +100,11 @@ def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: An
     if active_session:
         blockers.append(f"设备已有活动会话：{active_session}")
 
-    deepseek_status, deepseek_blocker = _public_provider_status(deepseek_provider, role='DeepSeek')
     qwen_status, qwen_blocker = _public_provider_status(qwen_provider, role='Qwen')
-    if deepseek_blocker:
-        blockers.append(deepseek_blocker)
     if qwen_blocker:
         blockers.append(qwen_blocker)
     if qwen_status.get('configured') and qwen_status.get('model') != DEFAULT_VISION_MODEL:
-        blockers.append('正式视觉模型不是 qwen3.7-plus：' + str(qwen_status.get('model') or 'unknown'))
+        blockers.append('正式视觉模型不是 qwen3-vl-plus：' + str(qwen_status.get('model') or 'unknown'))
 
     text_transport_status: dict[str, Any] | None = None
     if text_transport is not None:
@@ -161,8 +158,7 @@ def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: An
         else:
             measured = measure_local_stability(frames, allow_leading_outlier=True)
             stability = measured.to_dict()
-            if not measured.stable:
-                blockers.append("连续四帧不稳定：" + measured.reason)
+            stability["diagnostic_only"] = True
 
     unique_blockers = list(dict.fromkeys(blockers))
     return {'schema_version': RUNTIME_DOCTOR_VERSION, 'checked_at': datetime.now().astimezone().isoformat(
@@ -171,7 +167,7 @@ def run_runtime_doctor(*, device_id: str, controller: Any, deepseek_provider: An
         'active_session': active_session}, 'controller': controller_status, 'camera': {'captured': may_capture,
         'frame_count': len(frames), 'frame_sizes': [list(frame.size) for frame in frames],
         'frame_fingerprints': [_frame_fingerprint(frame) for frame in frames], 'stability': stability,
-        'capture_error_type': capture_error}, 'providers': {'deepseek': deepseek_status, 'qwen': qwen_status},
+        'capture_error_type': capture_error}, 'providers': {'qwen': qwen_status},
         'protocols': {str(key): str(value) for key, value in protocols.items()},
         'text_transport': text_transport_status, 'capabilities': capability_snapshot,
         'blockers': unique_blockers}

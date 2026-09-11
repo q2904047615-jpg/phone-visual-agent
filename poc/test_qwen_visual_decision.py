@@ -1,20 +1,9 @@
 from __future__ import annotations
-
 from dataclasses import replace
 import unittest
-
 from PIL import Image, ImageDraw
-
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.qwen_task_context import QwenTaskContext
-from agent.domain.task_graph import (
-    CompletionCondition,
-    DynamicTaskGraph,
-    GraphGoal,
-    Subgoal,
-    TargetApp,
-    build_exact_action_task_graph,
-)
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.vision_model import VisionAgentError
 from agent.infrastructure.observation_images import local_frame_fingerprint
@@ -34,14 +23,14 @@ def patterned_frames() -> list[Image.Image]:
     return [image.copy() for _ in range(4)]
 
 
-def action_payload(*, element_id: str, confidence: float = 0.91) -> dict:
+def action_payload(*, element_id: str, confidence: float = 0.91, role: str = "button",
+    meaning: str = "目标控件", label: str = "目标控件") -> dict:
     return {
         "status": "action",
         "action": "tap_semantic",
-        "element_id": element_id,
-        "source_element_id": None,
-        "destination_element_id": None,
-        "direction": None,
+        "target": {"element_id": element_id, "role": role, "meaning": meaning, "label": label,
+            "evidence": [label or meaning]},
+        "tap_point": [325, 260],
         "evidence_refs": [],
         "confidence": confidence,
         "reason": "当前画面中的目标控件与用户目标精确对应",
@@ -137,16 +126,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
             scene=self.scene,
             observation_id="obs_0123456789abcdef0123456789abcdef",
         )
-        graph = build_exact_action_task_graph(
-            "点击目标控件",
-            action_kind="tap_semantic",
-            target_label="目标控件",
-            device_id="device-local-01",
-            task_id="task_same_response_decision",
-        )
-        graph = replace(graph, status="running")
-        graph.validate()
-        self.context = QwenTaskContext.from_dict(graph.to_qwen_context())
+        self.context = QwenTaskContext(task_id="task_same_response_decision", device_id="device-local-01",
+            revision=1, raw_goal="点击目标控件")
         self.context.validate()
 
     def decide(
@@ -175,46 +156,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         return payload, observer, decision
 
     def wrong_app_target_case(self) -> tuple[QwenTaskContext, object]:
-        graph = DynamicTaskGraph(
-            task_id="task-open-target-app",
-            device_id="device-local-01",
-            revision=1,
-            status="running",
-            goal=GraphGoal(
-                objective="打开目标应用",
-                target_apps=(
-                    TargetApp(app_id="target_app", app_name="目标应用"),
-                ),
-                entities={"target_ui_label": "目标应用"},
-            ),
-            constraints=(),
-            completion_conditions=(
-                CompletionCondition(
-                    condition_id="goal-complete",
-                    description="目标应用已在前台",
-                    evidence_required=("目标应用前台画面",),
-                ),
-            ),
-            risk_actions=(),
-            subgoals=(
-                Subgoal(
-                    subgoal_id="open-target-app",
-                    objective="打开目标应用",
-                    status="active",
-                    depends_on=(),
-                    constraints=(),
-                    completion_conditions=("目标应用已在前台",),
-                    completion_evidence=(),
-                    risk_action_ids=(),
-                    external_impact="navigation_only",
-                ),
-            ),
-            active_subgoal_id="open-target-app",
-            raw_user_goal="打开目标应用",
-        )
-        graph.validate()
-        context = QwenTaskContext.from_dict(graph.to_qwen_context())
-        context.validate()
+        context = QwenTaskContext(task_id="task-open-target-app", device_id="device-local-01",
+            revision=1, raw_goal="打开目标应用")
         scene = UIScene(
             app_id="other.app",
             screen_id="other_main",
@@ -242,7 +185,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         self.assertEqual(
             "target-button", decision.proposal.action.params["element_id"]
         )
-        self.assertEqual("target-button", payload["element_id"])
+        self.assertEqual("target-button", payload["target"]["element_id"])
         self.assertEqual(0, observer.last_diagnostics["model_calls"])
         self.assertTrue(
             observer.last_diagnostics["decision_from_same_observation_response"]
@@ -253,11 +196,11 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         self.assertFalse({"expected_effect", "formal_candidate_id", "formal_transition"}
             .intersection(decision.proposal.action.params))
 
-    def test_local_code_does_not_fallback_when_model_reference_is_wrong(self) -> None:
-        with self.assertRaisesRegex(
-            VisionAgentError, "不存在或不唯一"
-        ):
-            self.decide(action_payload(element_id="missing-button"))
+    def test_local_code_rejects_geometry_in_strict_direct_target(self) -> None:
+        payload = action_payload(element_id="missing-button")
+        payload["target"]["bounds"] = [0.1, 0.2, 0.3, 0.4]
+        with self.assertRaisesRegex(VisionAgentError, "decision.target不得携带几何"):
+            self.decide(payload)
 
     def test_current_container_or_dialog_is_not_rejected_only_by_role(self) -> None:
         for role in ("container", "dialog"):
@@ -266,7 +209,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
                     self.scene.elements[1]))
                 observation = build_trusted_observation(frames=self.frames, device_id="device-local-01",
                     scene=scene, observation_id=f"obs_{role}000000000000000000000000")
-                _source, _observer, decision = self.decide(action_payload(element_id="target-button"),
+                _source, _observer, decision = self.decide(action_payload(element_id="target-button", role=role),
                     trusted_observation=observation)
                 self.assertEqual(role, decision.proposal.action.params["role"])
 
@@ -313,20 +256,22 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         )
 
         self.assertEqual("action", decision.proposal.status)
-        self.assertAlmostEqual(0.01, decision.confidence)
+        self.assertFalse(hasattr(decision, "confidence"))
 
     def test_minimal_action_omits_unrelated_null_reason_and_confidence(self) -> None:
         _source, _observer, decision = self.decide(
             {
                 "status": "action",
                 "action": "tap_semantic",
-                "element_id": "target-button",
+                "target": {"element_id": "target-button", "role": "button", "meaning": "目标控件",
+                    "label": "目标控件", "evidence": ["目标控件"]},
+                "tap_point": [325, 260],
             }
         )
 
         self.assertEqual("action", decision.proposal.status)
         self.assertEqual("target-button", decision.proposal.action.params["element_id"])
-        self.assertAlmostEqual(0.97, decision.confidence)
+        self.assertFalse(hasattr(decision, "confidence"))
 
     def test_finish_uses_only_current_scene_evidence(self) -> None:
         _source, observer, decision = self.decide(
@@ -335,13 +280,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
 
         self.assertEqual("finish", decision.proposal.status)
         self.assertIsNone(decision.proposal.action)
-        self.assertEqual(
-            (
-                "页面显示目标控件和一个无关控件",
-                "目标控件文字清晰可见",
-            ),
-            decision.completion_evidence,
-        )
+        self.assertEqual("当前截图已经直接证明本目标完成", decision.proposal.reason)
+        self.assertNotIn("completion_evidence", decision.to_dict())
         self.assertEqual(1, observer.status()["model_finish_count"])
 
     def test_minimal_finish_omits_action_nulls_reason_and_confidence(self) -> None:
@@ -354,9 +294,8 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
 
         self.assertEqual("finish", decision.proposal.status)
         self.assertIsNone(decision.proposal.action)
-        self.assertAlmostEqual(1.0, decision.confidence)
-        self.assertTrue(decision.reason)
-        self.assertEqual(decision.reason, decision.proposal.reason)
+        self.assertFalse(hasattr(decision, "confidence"))
+        self.assertTrue(decision.proposal.reason)
 
     def test_duplicate_finish_evidence_is_deduplicated(self) -> None:
         _source, _observer, decision = self.decide(
@@ -370,17 +309,13 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            (
-                "页面显示目标控件和一个无关控件",
-                "目标控件文字清晰可见",
-            ),
-            decision.completion_evidence,
-        )
+        self.assertEqual("当前截图已经直接证明本目标完成", decision.proposal.reason)
 
-    def test_finish_rejects_evidence_outside_current_scene(self) -> None:
-        with self.assertRaisesRegex(VisionAgentError, "未知scene证据"):
-            self.decide(finish_payload(evidence_refs=["history:old-frame"]))
+    def test_old_reference_strings_neither_authorize_nor_veto_finish(self) -> None:
+        payload = finish_payload(evidence_refs=["history:old-frame"])
+        _, _, decision = self.decide(payload)
+        self.assertEqual(payload['reason'], decision.proposal.reason)
+        self.assertNotIn('history:old-frame', decision.proposal.reason)
 
     def test_finish_is_not_vetoed_by_redundant_launch_registry_lineage(self) -> None:
         context, observation = self.wrong_app_target_case()
@@ -397,7 +332,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
             launch_target={"launch_ref": "settings", "expected_app_id": "com.android.settings"})
 
         self.assertEqual("finish", decision.proposal.status)
-        self.assertEqual(("微信当前可见，系统设置尚未打开",), decision.completion_evidence)
+        self.assertEqual("当前截图已经直接证明本目标完成", decision.proposal.reason)
 
     def test_finish_allows_matching_trusted_target_package(self) -> None:
         context, observation = self.wrong_app_target_case()
@@ -417,7 +352,9 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         payload = {
             "status": "action",
             "action": "tap_semantic",
-            "element_id": "target-button",
+            "target": {"element_id": "target-button", "role": "button", "meaning": "目标控件",
+                "label": "目标控件", "evidence": ["目标控件"]},
+            "tap_point": [325, 260],
             "choice_id": "qwen-observation-local-note",
         }
 
@@ -433,7 +370,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
         _source, _observer, decision = self.decide(payload)
 
         self.assertEqual("action", decision.proposal.status)
-        self.assertEqual((), decision.completion_evidence)
+        self.assertNotIn("completion_evidence", decision.to_dict())
         self.assertEqual("target-button", decision.proposal.action.params["element_id"])
 
     def test_multi_action_plan_and_raw_coordinates_are_rejected(self) -> None:
@@ -461,10 +398,12 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
                 {
                     "status": "action",
                     "action": "tap_semantic",
-                    "element_id": "target-button",
+                    "target": {"element_id": "target-button", "role": "button", "meaning": "目标控件",
+                        "label": "目标控件", "evidence": ["目标控件"]},
                     "direction": "down",
+                    "tap_point": [325, 260],
                 },
-                "元素动作必须且只能引用一个element_id",
+                "点按动作必须且只能使用decision.target",
             ),
             (
                 {
@@ -481,7 +420,7 @@ class QwenSameResponseDecisionTests(unittest.TestCase):
                     "element_id": "target-button",
                     "evidence_refs": ["scene.summary"],
                 },
-                "finish必须只引用同一scene完成证据",
+                "finish必须陈述当前截图完成事实",
             ),
         )
         for payload, message in invalid_payloads:

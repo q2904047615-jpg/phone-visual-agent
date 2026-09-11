@@ -1,0 +1,157 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - link "返回控制台顶部" [ref=e4] [cursor=pointer]:
+        - /url: "#top"
+        - generic [ref=e5]: VA
+        - generic [ref=e6]:
+          - strong [ref=e7]: Visual Agent
+          - generic [ref=e8]: 通用手机操作控制台
+      - generic [ref=e9]:
+        - paragraph [ref=e10]: 执行闭环
+        - list [ref=e11]:
+          - listitem [ref=e12]:
+            - generic [ref=e13]: "1"
+            - text: 理解目标
+          - listitem [ref=e14]:
+            - generic [ref=e15]: "2"
+            - text: 观察画面
+          - listitem [ref=e16]:
+            - generic [ref=e17]: "3"
+            - text: 提出一步
+          - listitem [ref=e18]:
+            - generic [ref=e19]: "4"
+            - text: 确认与执行
+          - listitem [ref=e20]:
+            - generic [ref=e21]: "5"
+            - text: 重新观察
+      - generic [ref=e24]:
+        - strong [ref=e25]: 动态计划
+        - paragraph [ref=e26]: 步骤由目标和新画面实时生成，不使用 App 固定流程。
+      - generic [ref=e27]:
+        - generic [ref=e28]: 实机接口已连接
+        - text: 本机服务 · 127.0.0.1
+    - main [ref=e29]:
+      - generic [ref=e30]:
+        - generic [ref=e31]:
+          - paragraph [ref=e32]: UNIVERSAL PHONE OPERATOR
+          - heading "Agent 控制台" [level=1] [ref=e33]
+          - paragraph [ref=e34]: 描述结果，不必编写点击步骤。系统每次只处理一个可验证动作。
+        - generic [ref=e35]:
+          - generic [ref=e36]:
+            - generic [ref=e37]: 设备
+            - combobox "目标设备" [disabled] [ref=e38]:
+              - option "device-local-01" [selected]
+            - generic [ref=e39]: 接口预留 · 当前仅单设备
+          - button "Ⅱ 暂停推进" [ref=e40] [cursor=pointer]
+          - button "■ 停止任务" [ref=e41] [cursor=pointer]
+      - region "系统状态" [ref=e42]:
+        - generic [ref=e43]:
+          - generic [ref=e45]: 控制端
+          - emphasis [ref=e46]: 当前动作执行中
+        - generic [ref=e47]:
+          - generic [ref=e49]: 画面
+          - emphasis [ref=e50]: 实时画面可用
+        - generic [ref=e51]:
+          - generic [ref=e53]: Agent
+          - emphasis [ref=e54]: 进行中
+        - generic [ref=e55]:
+          - generic [ref=e57]: 安全门
+          - emphasis [ref=e58]: 一次一动作
+      - region [ref=e59]:
+        - generic [ref=e60]:
+          - paragraph [ref=e61]: NATURAL LANGUAGE GOAL
+          - heading "你希望手机完成什么？" [level=2] [ref=e62]
+          - paragraph [ref=e63]: 可以更换 App、措辞和目标；请直接描述期望结果与限制条件。
+        - generic [ref=e64]:
+          - textbox "例如：打开系统设置，找到蓝牙页面，但不要更改任何开关。" [disabled] [ref=e65]: 打开微信，打开文件传输助手，发送aaazjie？你好
+          - generic [ref=e66]:
+            - generic [ref=e67]:
+              - text: 整任务设备动作预算
+              - spinbutton "整任务设备动作预算" [ref=e68]: "100"
+            - generic [ref=e69]:
+              - text: 整任务观察预算
+              - spinbutton "整任务观察预算" [ref=e70]: "200"
+            - text: 累计不清零；观察含初始、动作后和纠正申请，实际模型联网次数另记。
+          - generic [ref=e71]:
+            - generic [ref=e72]: 开始后先理解目标并观察当前画面，不会立即执行物理动作。
+            - button "生成动态计划" [disabled] [ref=e73]
+      - region [ref=e74]:
+        - generic [ref=e77]:
+          - paragraph [ref=e78]: ORDINARY AGENT TASK
+          - heading "普通 Agent 任务状态" [level=2] [ref=e79]
+        - strong [ref=e80]: 进行中
+        - paragraph [ref=e81]: 等待千问单步完整观察
+        - generic [ref=e82]:
+          - generic [ref=e83]:
+            - text: 会话
+            - code [ref=e84]: 未创建
+          - generic [ref=e85]:
+            - text: 更新时间
+            - time [ref=e86]: 2026/9/6 21:37:05
+      - generic [ref=e87]:
+        - generic [ref=e88]:
+          - region [ref=e89]:
+            - generic [ref=e90]:
+              - generic [ref=e91]:
+                - paragraph [ref=e92]: LIVE PLAN
+                - heading "动态计划" [level=2] [ref=e93]
+              - generic [ref=e94]: 等待目标
+            - generic [ref=e95]: 输入目标后，这里会展示整任务、当前动作和实际执行历史。
+          - region [ref=e96]:
+            - generic [ref=e97]:
+              - generic [ref=e98]:
+                - paragraph [ref=e99]: STEP TRACE
+                - heading "步骤记录" [level=2] [ref=e100]
+              - generic [ref=e101]: 0 个轮次
+            - generic [ref=e102]: 还没有执行记录。每次观察、确认、动作和验证都会显示在这里。
+        - generic [ref=e103]:
+          - region [ref=e104]:
+            - generic [ref=e105]:
+              - generic [ref=e106]:
+                - paragraph [ref=e107]: CURRENT OBSERVATION
+                - heading "当前画面" [level=2] [ref=e108]
+              - generic [ref=e109]: ● LIVE
+            - generic [ref=e110]:
+              - img "当前所选手机摄像头画面" [ref=e111]
+              - generic [ref=e154]: 等待千问单步完整观察
+            - generic [ref=e112]:
+              - generic [ref=e155]:
+                - generic [ref=e156]: 页面
+                - emphasis [ref=e157]: 尚未识别
+              - generic [ref=e158]:
+                - generic [ref=e159]: 稳定性
+                - emphasis [ref=e160]: —
+              - generic [ref=e161]:
+                - generic [ref=e162]: 置信度
+                - emphasis [ref=e163]: —
+          - region [ref=e122]:
+            - generic [ref=e123]:
+              - generic [ref=e124]:
+                - paragraph [ref=e125]: NEXT VERIFIED ACTION
+                - heading "当前步骤" [level=2] [ref=e126]
+              - generic [ref=e127]: 未开始
+            - generic [ref=e128]: Agent 将结合目标和当前画面，只提出一个下一动作。
+      - region [ref=e129]:
+        - generic [ref=e130]:
+          - generic [ref=e131]:
+            - paragraph [ref=e132]: LIVE DEVICE CAPABILITY ACCEPTANCE
+            - heading "真机能力验收" [level=2] [ref=e133]
+          - generic [ref=e134]: 未开始
+        - paragraph [ref=e135]: 为当前设备尚未验证的通用动作生成一次真机计划。启动只观察，物理动作数为 0；动作与能力启用分别需要一次精确确认。
+        - generic [ref=e136]:
+          - generic [ref=e137]:
+            - generic [ref=e138]: 待验收动作
+            - combobox "待验收通用动作" [disabled] [ref=e139]:
+              - option "滚动当前页面" [selected]
+              - option "滑动目标元素"
+              - option "唤出系统导航栏"
+              - option "输入并核对文字"
+              - option "双击目标控件"
+          - generic [ref=e140]:
+            - generic [ref=e141]: 通用验收目标
+            - textbox "通用验收目标" [disabled] [ref=e142]:
+              - /placeholder: 例如：将当前页面中明确标记为测试对象的滑块拖到右侧终点。
+          - button "生成验收计划（0 动作）" [disabled] [ref=e143]
+        - generic [ref=e144]: 选择一个尚未验证的通用动作。生成计划只调用规划和视觉观察，物理动作数为 0。
+  - status

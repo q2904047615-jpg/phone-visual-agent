@@ -1,7 +1,6 @@
 import copy
 import unittest
 from pathlib import Path
-
 from eval_task_sequences import evaluate_manifest, load_manifest
 
 

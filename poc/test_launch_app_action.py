@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import copy
 import json
 import subprocess
@@ -7,9 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-
 from PIL import Image
-
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.canonical_action_protocol import (
@@ -23,7 +20,6 @@ from agent.domain.trusted_observation import TrustedObservation
 from agent.domain.ui_scene import UIElement, UIScene
 from agent.domain.universal_action_controller import (
     UniversalActionController,
-    UniversalActionError,
 )
 from agent.domain.visual_evidence import LocalFrameStability
 from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
@@ -67,44 +63,8 @@ def _launcher_icon(app_name: str) -> UIElement:
 
 
 def _launch_context(*, app_id: str, app_name: str) -> QwenTaskContext:
-    task_id = f"task-open-{app_id}"
-    subgoal_id = f"open_{app_id}"
-    return QwenTaskContext(
-        protocol_version="2026-09-03-deepseek-required-action-v6",
-        task_id=task_id,
-        device_id="device-1",
-        revision=1,
-        task_status="running",
-        goal={
-            "objective": f"打开{app_name}",
-            "target_apps": [{"app_id": app_id, "app_name": app_name}],
-            "entities": {},
-        },
-        global_constraints=(),
-        goal_completion_conditions=(),
-        current_subgoal={
-            "subgoal_id": subgoal_id,
-            "objective": f"打开{app_name}",
-            "status": "active",
-            "depends_on": (),
-            "constraints": (),
-            "completion_conditions": (f"{app_name}已在前台",),
-            "completion_evidence": (),
-            "execution_class": "navigate",
-        },
-        current_execution_class="navigate",
-        effect_intents=(),
-        effect_gate={
-            "state": "not_required",
-            "effect_action_allowed": False,
-            "scope": {
-                "task_id": task_id,
-                "device_id": "device-1",
-                "revision": 1,
-                "subgoal_id": subgoal_id,
-            },
-        },
-    )
+    return QwenTaskContext(task_id=f"task-open-{app_id}",device_id="device-1",revision=1,
+        raw_goal=f"打开{app_name}")
 
 
 def _trusted(scene: UIScene) -> TrustedObservation:
@@ -254,7 +214,7 @@ class LaunchAppCanonicalTests(unittest.TestCase):
             },
             model_decision={
                 "status": "action",
-                "action": "launch_app",
+                "action": "launch_app", "app": "设置",
                 "element_id": None,
                 "source_element_id": None,
                 "destination_element_id": None,
@@ -567,7 +527,7 @@ class LaunchAppVerificationTests(unittest.TestCase):
         self.assertEqual(8, capture_calls)
         self.assertEqual(1, observer_calls)
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual("executed", result.action_outcome)
         execution_metadata = result.to_dict()["execution_metadata"]
         self.assertEqual("adb_package_launch", execution_metadata["transport"])
         self.assertIs(False, execution_metadata["mechanical_contact_ack"])
@@ -588,36 +548,29 @@ class LaunchAppVerificationTests(unittest.TestCase):
                 self.assertEqual(8, capture_calls)
                 self.assertEqual(1, observer_calls)
                 self.assertEqual(1, result.physical_actions)
-                self.assertEqual("matched", result.action_outcome)
+                self.assertEqual("executed", result.action_outcome)
                 execution_metadata = result.to_dict()["execution_metadata"]
                 self.assertEqual("adb_package_launch", execution_metadata["transport"])
                 self.assertIs(False, execution_metadata["mechanical_contact_ack"])
 
-    def test_controller_verifies_trusted_package_or_current_app_identity(self) -> None:
+    def test_controller_does_not_rejudge_post_launch_app_identity(self) -> None:
         before, action = self._candidate_action()
         controller = UniversalActionController()
         resolved = controller.resolve_one(action, before, confirmed=True)
         self.assertEqual("launch_app", resolved.kind)
         self.assertEqual("launch_ref.sample_app", resolved.launch_ref)
 
-        valid_after_scenes = (
+        after_scenes = (
             _scene(app_id="com.example.sample", fingerprint="after-package"),
             _scene(app_id="sample_app", fingerprint="after-semantic-id"),
             _scene(app_id="示例应用", fingerprint="after-semantic-name"),
-        )
-        for after in valid_after_scenes:
-            with self.subTest(valid_app=after.foreground_app_id):
-                controller.verify_after_action(resolved, before, after)
-
-        invalid_after_scenes = (
             _scene(app_id="com.example.other", fingerprint="after-other"),
             _scene(app_id="unknown", fingerprint="after-unknown"),
             _scene(app_id="launcher", fingerprint="after-launcher"),
         )
-        for after in invalid_after_scenes:
+        for after in after_scenes:
             with self.subTest(after_app=after.foreground_app_id, fingerprint=after.fingerprint):
-                with self.assertRaises(UniversalActionError):
-                    controller.verify_after_action(resolved, before, after)
+                self.assertEqual((), controller.verify_after_action(resolved, before, after))
 
 if __name__ == "__main__":
     unittest.main()

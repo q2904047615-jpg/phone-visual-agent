@@ -13,6 +13,7 @@ import threading
 import time
 from contextlib import contextmanager
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Iterator
 
 import httpx
@@ -21,6 +22,7 @@ from PIL import Image
 from agent.domain.vision_model import VisionAgentError, VisionModelConfig
 from agent.infrastructure.environment_vision_model_config import load_vision_model_config
 from agent.application.vision_usage import VisionSessionUsageLedger
+from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
 
 
 class _DuplicateJSONKeyError(ValueError):
@@ -92,10 +94,7 @@ def _extract_json_object(raw: str, *, reject_duplicate_keys: bool=False,
 
 def _image_request_size(image: Image.Image) -> tuple[int, int]:
     """Return the exact JPEG dimensions sent to the visual model."""
-
-    if image.width <= 720:
-        return image.width, image.height
-    return 720, int(round(image.height * 720 / image.width))
+    return image.width, image.height
 
 
 def _image_data_url(image: Image.Image) -> str:
@@ -175,6 +174,8 @@ class DashScopeVisionProvider:
             None] = contextvars.ContextVar(f'qwen_usage_ledger_{id(self)}', default=None)
         self._active_call_metadata: contextvars.ContextVar[tuple[str,
             str]] = contextvars.ContextVar(f'qwen_call_metadata_{id(self)}', default=('unscoped', ''))
+        self._active_request_evidence: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+            f'qwen_request_evidence_{id(self)}', default=None)
 
     @property
     def configured(self) -> bool:
@@ -198,11 +199,14 @@ class DashScopeVisionProvider:
             self._active_usage_ledger.reset(token)
 
     @contextmanager
-    def call_scope(self, *, stage: str, fingerprint: str='') -> Iterator[None]:
+    def call_scope(self, *, stage: str, fingerprint: str='',
+        request_evidence_path: Path | None=None) -> Iterator[None]:
         token = self._active_call_metadata.set((str(stage or 'unscoped'), str(fingerprint or '')))
+        evidence_token = self._active_request_evidence.set(request_evidence_path)
         try:
             yield
         finally:
+            self._active_request_evidence.reset(evidence_token)
             self._active_call_metadata.reset(token)
 
     def _chat(
@@ -266,16 +270,22 @@ class DashScopeVisionProvider:
         reject_if(max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
             or max_tokens <= 0), VisionAgentError("千问视觉 max_tokens 必须为正整数或省略。"))
         response_format = _validated_response_format(response_format)
+        request_body = {'model': self.model, 'messages': messages, 'temperature': 0.0,
+            **({'max_tokens': max_tokens} if max_tokens is not None else {}),
+            **({'response_format': response_format} if response_format is not None else {}),
+            **self.model_config.request_options()}
+        evidence_path = self._active_request_evidence.get()
+        if evidence_path is not None:
+            # Preserve the actual JSON body and encoded images, never auth headers.
+            # Saving before I/O also retains requests whose response/parse fails.
+            # This is request content evidence, not a claim of server receipt.
+            atomic_replace_bytes(evidence_path, json_bytes(request_body))
         last_error: Exception | None = None
         for attempt in range(1, effective_attempts + 1):
             self.last_network_attempts = attempt
             try:
                 response = httpx.post(f'{self.base_url}/chat/completions', headers={'Authorization': f'Bearer {
-                    self.api_key}', 'Content-Type': 'application/json'}, json={'model': self.model,
-                    'messages': messages, 'temperature': 0.0, **({'max_tokens': max_tokens}
-                    if max_tokens is not None else {}), **({
-                    'response_format': response_format} if response_format is not None else {}),
-                    **self.model_config.request_options()}, timeout=effective_timeout)
+                    self.api_key}', 'Content-Type': 'application/json'}, json=request_body, timeout=effective_timeout)
                 response.raise_for_status()
                 payload = response.json()
                 break

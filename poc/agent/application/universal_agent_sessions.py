@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agent.domain.validation import reject_if
+from agent.domain.execution_budget import DEFAULT_DEVICE_ACTION_BUDGET, DEFAULT_OBSERVATION_BUDGET
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,7 @@ class UniversalAgentOrchestratorPort(Protocol):
 
     def refresh_decision(self, session: AgentSession) -> Any: ...
 
-    def run_autonomous_safe_loop( self, session: AgentSession, *, max_physical_actions: int, max_iterations: int,
+    def run_autonomous_safe_loop( self, session: AgentSession, *, max_physical_actions: int | None=None, max_observations: int | None=None,
     ) -> dict[str, Any]: ...
 
     def invalidate_confirmation( self, session: AgentSession, *, reason: str,
@@ -62,6 +63,8 @@ class StartUniversalAgentSessionCommand:
     device_id: str
     run_dir: Path
     auto_advance: bool
+    max_physical_actions: int = DEFAULT_DEVICE_ACTION_BUDGET
+    max_observations: int = DEFAULT_OBSERVATION_BUDGET
 
 
 @dataclass(frozen=True)
@@ -132,14 +135,18 @@ class UniversalAgentSessionApplicationService:
             self._begin_new_task(command.device_id)
             session = orchestrator.start(session_id=command.session_id, raw_goal=command.raw_goal,
                 exact_input_text=command.exact_input_text, exact_action_kind=command.exact_action_kind,
-                exact_target_label=command.exact_target_label, device_id=command.device_id, run_dir=command.run_dir)
+                exact_target_label=command.exact_target_label, device_id=command.device_id, run_dir=command.run_dir,
+                max_physical_actions=command.max_physical_actions, max_observations=command.max_observations)
         self._sessions.add(session)
         automatic_progress = {'physical_actions': 0, 'iterations': 0, 'status': session.status,
             'pause_reason': '当前没有可自动推进的安全动作。'}
-        if command.auto_advance and session.status in {'awaiting_confirmation', 'needs_reobservation'}:
+        # The initial observation may leave the session in another transient
+        # state (for example while the first decision is being persisted).  An
+        # enabled automatic run must still enter the loop; it already handles
+        # awaiting confirmations and terminal states safely.
+        if command.auto_advance and session.status not in orchestrator.TERMINAL_STATUSES:
             with self._exclusive_device_session(command.device_id):
-                automatic_progress = orchestrator.run_autonomous_safe_loop(session, max_physical_actions=12,
-                    max_iterations=24)
+                automatic_progress = orchestrator.run_autonomous_safe_loop(session)
         return StartUniversalAgentSessionResult(session=session, automatic_progress=automatic_progress)
 
     def approve_effects(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
@@ -165,14 +172,14 @@ class UniversalAgentSessionApplicationService:
         return self._exclusive_operation(session, lambda: self._orchestrator().refresh_decision(session))
 
     def run_automatic(self, session: AgentSession, *, requested_device_id: str, confirmed: bool,
-        confirmation: Mapping[str, Any] | None, max_physical_actions: int,
-        max_iterations: int) -> AgentSessionOperationResult:
+        confirmation: Mapping[str, Any] | None, max_physical_actions: int | None=None,
+        max_observations: int | None=None) -> AgentSessionOperationResult:
         require_session_device(session, requested_device_id)
         orchestrator = self._orchestrator()
         self._ensure_ready_or_invalidate(orchestrator, session)
         reject_if(confirmed is True or confirmation is not None, AgentSessionCommandError('安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。'))
         return self._exclusive_operation(session, lambda: orchestrator.run_autonomous_safe_loop(session,
-            max_physical_actions=max_physical_actions, max_iterations=max_iterations))
+            max_physical_actions=max_physical_actions, max_observations=max_observations))
 
     def cancel(self, session_id: str, *, requested_device_id: str) -> AgentSessionOperationResult:
         with self._sessions.locked(session_id) as session:

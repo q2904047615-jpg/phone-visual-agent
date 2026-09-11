@@ -271,8 +271,13 @@ class CapabilityAcceptanceManager:
 
     def approve_effects(self, trial_id: str, confirmation: Mapping[str, Any]) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
-        result = trial.orchestrator.approve_effects(trial.session, confirmation)
-        reject_if(int(getattr(trial.session, 'physical_actions', 0)) != 0, CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。"))
+        before_actions = int(getattr(trial.session, 'physical_actions', 0))
+        approve_without_execution = getattr(trial.orchestrator, 'approve_effects_without_execution', None)
+        reject_if(not callable(approve_without_execution), CapabilityAcceptanceError(
+            "验收编排器缺少零动作风险确认接口，拒绝回退到会执行动作的普通确认。"))
+        result = approve_without_execution(trial.session, confirmation)
+        reject_if(int(getattr(trial.session, 'physical_actions', 0)) != before_actions,
+            CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。"))
         self._ensure_candidate(trial)
         _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
         return result
@@ -282,10 +287,7 @@ class CapabilityAcceptanceManager:
         scope = snapshot.get("confirmation_scope")
         if isinstance(scope, Mapping) and isinstance(scope.get('task_id'), str):
             return str(scope["task_id"])
-        graph = snapshot.get("task_graph")
-        if isinstance(graph, Mapping) and isinstance(graph.get('task_id'), str):
-            return str(graph["task_id"])
-        return ""
+        return str(snapshot.get("task_id") or "")
 
     def _report_identity(self, trial: CapabilityTrial, before_snapshot: Mapping[str, Any]) -> dict[str, Any]:
         return {'version': ACCEPTANCE_REPORT_VERSION, 'trial_id': trial.trial_id,
@@ -297,6 +299,7 @@ class CapabilityAcceptanceManager:
     def _write_pass_or_fail_report(self, trial: CapabilityTrial, *, before_snapshot: Mapping[str, Any],
         result: Any) -> dict[str, Any]:
         execution = _payload(result)
+        visual_outcome = getattr(result, "after_model_decision", {}).get("previous_action_outcome")
         before_paths = [str(path) for path in getattr(result, "before_frame_paths", ())]
         after_paths = [str(path) for path in getattr(result, "after_frame_paths", ())]
         resolved = getattr(result, "resolved_action", None)
@@ -316,19 +319,19 @@ class CapabilityAcceptanceManager:
         before_observation_id = str(confirmation_scope.get('observation_id') or '')
         scoped_before_fingerprint = str(confirmation_scope.get('fingerprint') or '')
         passed = bool(not isinstance(physical_actions, bool) and physical_actions == 1
-            and (resolved_kind == trial.candidate_action) and (action_outcome == 'matched')
+            and (resolved_kind == trial.candidate_action) and (action_outcome == 'executed')
+            and visual_outcome == 'matched'
             and (not observation_errors) and (not verification_errors) and (len(before_paths) == 4)
             and (len(after_paths) == 4) and before_fingerprint and scoped_before_fingerprint and after_fingerprint
-            and (before_fingerprint != after_fingerprint) and (scoped_before_fingerprint != after_fingerprint)
-            and before_observation_id and after_observation_id and (before_observation_id != after_observation_id)
-            and bool(execution.get('controller_transition_evidence')))
+            # A post-action pixel transition is diagnostic, not a pass/fail gate.
+            and before_observation_id and after_observation_id and (before_observation_id != after_observation_id))
         execution['resolved_action'] = {**(execution.get('resolved_action') if isinstance(execution.get(
             'resolved_action'), dict) else {}), 'kind': resolved_kind}
         execution["observation_errors"] = observation_errors
         execution["verification_errors"] = verification_errors
         report = {**self._report_identity(trial, before_snapshot), 'status': 'passed' if passed else 'failed',
             'physical_actions': physical_actions,
-            'action_outcome': action_outcome, 'confirmation_scope': confirmation_scope,
+            'action_outcome': action_outcome, 'visual_outcome': visual_outcome, 'confirmation_scope': confirmation_scope,
             'before_observation': {'observation_id': before_observation_id, 'fingerprint': scoped_before_fingerprint},
             'after_observation': {'observation_id': after_observation_id, 'fingerprint': after_fingerprint},
             'execution': execution, 'before_frame_paths': before_paths, 'after_frame_paths': after_paths,
@@ -368,10 +371,10 @@ class CapabilityAcceptanceManager:
         _atomic_write_json(trial.report_path, failure)
         return failure
 
-    def _pause_if_owned(self, trial: CapabilityTrial) -> None:
+    def _close_if_owned(self, trial: CapabilityTrial) -> None:
         active_session = self.device_registry.active_session(trial.device_id)
         if active_session == getattr(trial.session, 'session_id', None):
-            trial.orchestrator.pause(trial.session)
+            trial.orchestrator.cancel(trial.session)
 
     def confirm(self, trial_id: str, confirmation: Mapping[str, Any]) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
@@ -398,7 +401,7 @@ class CapabilityAcceptanceManager:
                         exc=exc, result=result)
                 raise
             finally:
-                self._pause_if_owned(trial)
+                self._close_if_owned(trial)
                 _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
 
             promoter = self.promoter_factory(self.registry_path)

@@ -1,22 +1,16 @@
 from __future__ import annotations
-
 import gc
 import unittest
 import weakref
 from dataclasses import replace
 from unittest.mock import patch
-
 from PIL import Image, ImageDraw, ImageEnhance
-
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
 from agent.infrastructure.orientation_safety import (
-    LOCAL_QWERTY_ORIENTATION_SOURCE,
     OrientationCredential,
-    OrientationFrameMismatchError,
     OrientationSafetyError,
     PhysicalExecutionGate,
     _CLAIMED_AUDIT_CREDENTIALS,
-    _mint_locally_verified_qwerty_credential,
     _mint_single_step_scene_credential,
 )
 from agent.infrastructure.robot_controller import RobotController
@@ -92,51 +86,7 @@ class OrientationCredentialTests(unittest.TestCase):
                 consumed = gate.consume(action=action, frame=FRAME.copy())
                 self.assertEqual(rotation, consumed.phone_content_rotation)
 
-    def test_stable_local_qwerty_rows_mint_one_shot_upright_credential(self):
-        reference = patterned_frame()
-        credential = _mint_locally_verified_qwerty_credential(
-            device_id="device-a",
-            scene_fingerprint="scene-qwerty",
-            frame=reference,
-            anchors={
-                "q": [115, 704],
-                "p": [875, 704],
-                "a": [157, 773],
-                "l": [832, 773],
-                "z": [241, 844],
-                "m": [747, 844],
-                "backspace": [875, 844],
-            },
-        )
-        self.assertEqual(LOCAL_QWERTY_ORIENTATION_SOURCE, credential.source)
-        self.assertEqual("upright", credential.phone_content_rotation)
 
-        gate = PhysicalExecutionGate("device-a")
-        gate.arm(
-            credential,
-            action="input_verified_text",
-            scene_fingerprint="scene-qwerty",
-        )
-        gate.consume(action="input_verified_text", frame=reference.copy())
-        with self.assertRaisesRegex(OrientationSafetyError, "一次性方向授权"):
-            gate.consume(action="input_verified_text", frame=reference.copy())
-
-    def test_local_qwerty_orientation_rejects_rotated_row_order(self):
-        with self.assertRaisesRegex(OrientationSafetyError, "行序"):
-            _mint_locally_verified_qwerty_credential(
-                device_id="device-a",
-                scene_fingerprint="scene-rotated",
-                frame=patterned_frame(),
-                anchors={
-                    "q": [115, 844],
-                    "p": [875, 844],
-                    "a": [157, 773],
-                    "l": [832, 773],
-                    "z": [241, 704],
-                    "m": [747, 704],
-                    "backspace": [875, 704],
-                },
-            )
 
     def test_live_execution_source_claim_is_exact_once_and_weakly_held(self):
         gate = PhysicalExecutionGate("device-a")
@@ -159,7 +109,7 @@ class OrientationCredentialTests(unittest.TestCase):
         self.assertIsNone(pending_ref())
         self.assertNotIn(pending_seal, _CLAIMED_AUDIT_CREDENTIALS)
 
-    def test_gate_binds_device_scene_size_and_exact_action_frame(self):
+    def test_gate_keeps_canvas_binding_but_does_not_veto_pixel_motion(self):
         reference = patterned_frame()
         gate = PhysicalExecutionGate("device-a")
         credential = audited_credential(frame=reference)
@@ -170,13 +120,9 @@ class OrientationCredentialTests(unittest.TestCase):
         changed.paste((255, 255, 255), (180, 360, 360, 600))
         credential = audited_credential(frame=reference)
         gate.arm(credential, action="tap_semantic", scene_fingerprint="scene-a")
-        with self.assertRaisesRegex(
-            OrientationFrameMismatchError,
-            "实际捕获帧.*视觉漂移",
-        ) as caught:
+        self.assertIs(credential, gate.consume(action="tap_semantic", frame=changed))
+        with self.assertRaisesRegex(OrientationSafetyError, "缺少一次性"):
             gate.consume(action="tap_semantic", frame=changed)
-        self.assertEqual(changed.size, caught.exception.actual_frame.size)
-        self.assertGreater(caught.exception.centered_mae, 6.0)
 
         credential = audited_credential(frame=reference)
         gate.arm(credential, action="tap_semantic", scene_fingerprint="scene-a")
@@ -207,7 +153,7 @@ class OrientationCredentialTests(unittest.TestCase):
 
         self.assertIs(consumed, credential)
 
-    def test_small_camera_noise_and_exposure_pass_but_rotation_is_rejected(self):
+    def test_pixel_noise_exposure_and_same_canvas_rotation_are_not_identity_vetoes(self):
         reference = patterned_frame()
         exposure = ImageEnhance.Brightness(reference).enhance(1.04)
         darker_exposure = ImageEnhance.Brightness(reference).enhance(0.90)
@@ -231,8 +177,19 @@ class OrientationCredentialTests(unittest.TestCase):
         gate = PhysicalExecutionGate("device-a")
         credential = audited_credential(frame=reference)
         gate.arm(credential, action="tap_semantic", scene_fingerprint="scene-a")
-        with self.assertRaisesRegex(OrientationSafetyError, "视觉漂移"):
-            gate.consume(action="tap_semantic", frame=rotated)
+        # Accepted tradeoff: same-canvas UI movement is no longer locally
+        # classified. Explicit rotated credentials and wrong sizes still fail.
+        self.assertIs(credential, gate.consume(action="tap_semantic", frame=rotated))
+
+    def test_live_seal_canvas_cannot_be_changed_by_copying_credential(self):
+        original = audited_credential()
+        forged = replace(original, frame_size=(600, 1000))
+        gate = PhysicalExecutionGate("device-a")
+        gate.arm(forged, action="tap_semantic", scene_fingerprint="scene-a")
+        with self.assertRaisesRegex(OrientationSafetyError, "实际捕获帧尺寸发生变化"):
+            gate.consume(action="tap_semantic", frame=Image.new("RGB", (600, 1000)))
+        with self.assertRaisesRegex(OrientationSafetyError, "缺少一次性"):
+            gate.consume(action="tap_semantic", frame=FRAME)
 
     def test_serialized_or_manually_copied_credential_cannot_arm(self):
         original = audited_credential()
@@ -293,7 +250,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             device_id="device-a",
             verified_actions={
                 "tap_semantic", "dismiss_overlay", "swipe", "back", "home",
-                "input_verified_text", "long_press", "drag",
+                "long_press", "drag",
                 "reveal_system_navigation",
             },
         )
@@ -312,23 +269,6 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             ("swipe_down", lambda c: c.vision_swipe_down()),
             ("swipe_left", lambda c: c.vision_swipe_left()),
             ("swipe_right", lambda c: c.vision_swipe_right()),
-            (
-                "type_text",
-                lambda c: c.vision_type_text_with_layout(
-                    "agent",
-                    {
-                        "type": "qwerty",
-                        "anchors": {
-                            "q": [115, 704], "p": [875, 704],
-                            "a": [157, 773], "l": [832, 773],
-                            "z": [241, 844], "m": [747, 844],
-                            "backspace": [862, 844],
-                        },
-                    },
-                ),
-            ),
-            ("type_pinyin", lambda c: c.vision_type_pinyin("agent", "agent")),
-            ("clear_text", lambda c: c.vision_clear_text(delete_count=2)),
         )
         physical_names = (
             "configure_single_click_count", "click_client_point",

@@ -1,0 +1,79 @@
+{
+  "protocol_version": "2026-09-04-single-step-flat-target-point-v13",
+  "coordinate_space": {
+    "kind": "axis_grid",
+    "width": 1000,
+    "height": 1280
+  },
+  "scene": {
+    "protocol_version": "2026-08-14-ui-scene-v3",
+    "foreground_app_id": "launcher",
+    "screen_id": "home_screen",
+    "summary": "当前为Android主屏幕，可见多个应用图标，包括微信、支付宝、抖音等。微信图标位于屏幕中下部，清晰可见且无遮挡。",
+    "system_ui": {
+      "immersive_or_fullscreen": false,
+      "navigation_bar_visible": true
+    },
+    "camera_alignment": {
+      "camera_layout_orientation": "portrait",
+      "phone_content_rotation": "unknown",
+      "confidence": 0,
+      "evidence": []
+    },
+    "elements": [
+      {
+        "element_id": "e1",
+        "role": "icon",
+        "meaning": "open_wechat",
+        "label": "微信",
+        "bounds": [
+          370,
+          750,
+          530,
+          910
+        ],
+        "confidence": 1,
+        "states": {
+          "goal_relevant": true,
+          "fully_visible": true
+        },
+        "evidence": [
+          "绿色双气泡图标，下方标注'微信'"
+        ]
+      }
+    ],
+    "overlays": [],
+    "stable": true,
+    "confidence": 1,
+    "fingerprint": "wechat_icon_visible_on_home"
+  },
+  "input_structure": null,
+  "decision": {
+    "status": "action",
+    "action": "tap_semantic",
+    "target": {
+      "element_id": "e1",
+      "role": "icon",
+      "meaning": "open_wechat",
+      "label": "微信",
+      "evidence": [
+        "绿色双气泡图标，下方标注'微信'"
+      ]
+    },
+    "tap_point": [
+      450,
+      830
+    ],
+    "evidence_refs": [
+      "element:e1"
+    ],
+    "confidence": 1,
+    "reason": "微信图标在主屏幕清晰可见，直接点按可打开应用，符合当前子目标'打开微信应用'",
+    "element_id": null,
+    "source_element_id": null,
+    "destination_element_id": null,
+    "direction": null,
+    "start": null,
+    "end": null
+  }
+}

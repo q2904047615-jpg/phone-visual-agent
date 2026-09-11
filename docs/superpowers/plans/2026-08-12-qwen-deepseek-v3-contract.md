@@ -1,3 +1,5 @@
+> 历史/参考材料，不是当前运行权威。现行结论见[项目交接文档](../../../项目交接文档.md)，产品方向见[项目最终目标](../../../项目最终目标.md)。正文保留用于追溯，不据此恢复旧代码或执行旧步骤。
+
 # Qwen DeepSeek v3 Contract Implementation Plan
 
 > **ARCHIVED — DO NOT EXECUTE.** DeepSeek v3 and every migration step in this plan are retired. The only formal protocol is `2026-08-20-deepseek-typed-task-graph-v4`.

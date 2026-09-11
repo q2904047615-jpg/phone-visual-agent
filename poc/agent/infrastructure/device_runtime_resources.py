@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections import defaultdict
 from collections.abc import Iterable
 
 from .camera_coordinator import DeviceCameraCoordinator
@@ -15,9 +16,9 @@ class DeviceRuntimeResourceRegistry:
 
     def __init__(self, initial_device_ids: Iterable[str]=()) -> None:
         self._coordination_lock_guard = threading.RLock()
-        self._coordination_locks: dict[str, threading.Lock] = {}
+        self._coordination_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._camera_coordinator_guard = threading.RLock()
-        self._camera_coordinators: dict[str, DeviceCameraCoordinator] = {}
+        self._camera_coordinators: dict[str, DeviceCameraCoordinator] = defaultdict(DeviceCameraCoordinator)
         for device_id in initial_device_ids:
             resolved = self._resolved_device_id(device_id)
             self._coordination_locks[resolved] = threading.Lock()
@@ -33,9 +34,9 @@ class DeviceRuntimeResourceRegistry:
     def coordination_lock(self, device_id: str) -> threading.Lock:
         resolved = self._resolved_device_id(device_id)
         with self._coordination_lock_guard:
-            return self._coordination_locks.setdefault(resolved, threading.Lock())
+            return self._coordination_locks[resolved]
 
     def camera_coordinator(self, device_id: str) -> DeviceCameraCoordinator:
         resolved = self._resolved_device_id(device_id)
         with self._camera_coordinator_guard:
-            return self._camera_coordinators.setdefault(resolved, DeviceCameraCoordinator())
+            return self._camera_coordinators[resolved]

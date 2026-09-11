@@ -1,11 +1,9 @@
 from __future__ import annotations
-
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-
 from agent.domain import DeviceTaskRegistryError
 from agent.infrastructure import (
     DeviceTaskRegistry,

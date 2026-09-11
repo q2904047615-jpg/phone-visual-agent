@@ -1,0 +1,2742 @@
+from __future__ import annotations
+
+import ctypes
+from contextlib import nullcontext
+import json
+import tempfile
+import threading
+import time
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import httpx
+import numpy as np
+from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
+
+from agent.infrastructure import seller_window_adapter as robot_gui_poc
+import web_app
+from agent.domain import EvidenceStoreError
+from agent.infrastructure import (
+    CameraPreviewUnavailable,
+    DeviceCameraCoordinator,
+    DeviceControllerRegistry,
+    DeviceControllerRegistryError,
+    DeviceRuntimeResourceError,
+    DeviceRuntimeResourceRegistry,
+    DeviceTaskRegistry,
+    FileSystemAgentEvidenceStore,
+    InterProcessLease,
+)
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
+from agent.domain.canonical_action_protocol import GenericStepProposal
+from agent.infrastructure.generic_scene_observer import (
+    SINGLE_STEP_SCENE_OBSERVER_VERSION,
+)
+from agent.infrastructure.robot_controller import (
+    DEFAULT_CONTROLLER_CONFIG,
+    MockRobotController as _MockRobotController,
+    RobotController as _RobotController,
+    controller_client_has_camera,
+    oriented_navigation_ratio,
+)
+from agent.infrastructure.orientation_safety import (
+    _mint_single_step_scene_credential,
+)
+from agent.domain.ui_scene import UIScene
+
+
+class _TestDirectionCredentialMixin:
+    """Keep no-hardware tests behind the same one-shot gate."""
+
+    def _consume_physical_execution(self, action, frame):
+        credential = _mint_single_step_scene_credential(
+            device_id=self.device_id,
+            scene_fingerprint="test-scene",
+            frame=frame,
+        )
+        self._physical_execution_gate.arm(
+            credential,
+            action=action,
+            scene_fingerprint="test-scene",
+        )
+        return super()._consume_physical_execution(action, frame)
+
+
+class RobotController(_TestDirectionCredentialMixin, _RobotController):
+    def __init__(self, *args, device_id="test-device", **kwargs):
+        super().__init__(*args, device_id=device_id, **kwargs)
+
+
+class MockRobotController(_TestDirectionCredentialMixin, _MockRobotController):
+    def __init__(self, *args, device_id="test-device", **kwargs):
+        super().__init__(*args, device_id=device_id, **kwargs)
+
+
+web_app.RobotController = RobotController
+web_app.MockRobotController = MockRobotController
+from agent.domain.vision_model import VisionAgentError
+
+
+class PhysicalNavigationSafetyTests(unittest.TestCase):
+    @staticmethod
+    def _click_barrier_receipt(click_count=1):
+        return {
+            "version": "2026-08-19-seller-gui-click-barrier-v1",
+            "channel": "left_button_atomic_click",
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "requested_mouse_hold_seconds": 0.35,
+            "barrier_offset_pixels": 3,
+            "changed_pixels": 240,
+            "return_changed_pixels": 235,
+            "barrier_elapsed_ms": 35.0,
+            "mechanical_contact_ack": False,
+            "click_count": click_count,
+        }
+
+    def test_live_preview_uses_passive_capture_without_active_capture_path(self):
+        controller = RobotController(title="test")
+        frame = Image.new("RGB", (540, 1038), "white")
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.capture_client_passive",
+                return_value=frame,
+            ) as passive,
+            patch("agent.infrastructure.robot_controller.seller_gui.capture_client") as active,
+        ):
+            payload = controller.capture_preview()
+
+        self.assertTrue(payload.startswith(b"\xff\xd8"))
+        passive.assert_called_once_with(123)
+        active.assert_not_called()
+
+    def test_passive_capture_never_invokes_window_activation(self):
+        frame = Image.new("RGB", (540, 1038), "white")
+
+        with (
+            patch("agent.infrastructure.seller_window_adapter._window_is_minimized", return_value=False),
+            patch("agent.infrastructure.seller_window_adapter._validate_camera_region_unoccluded") as validate,
+            patch(
+                "agent.infrastructure.seller_window_adapter.client_geometry",
+                return_value=(10, 20, 540, 1038),
+            ),
+            patch("agent.infrastructure.seller_window_adapter.ImageGrab.grab", return_value=frame) as grab,
+            patch("agent.infrastructure.seller_window_adapter.ensure_camera_region_unoccluded") as activate,
+        ):
+            result = robot_gui_poc.capture_client_passive(123)
+
+        self.assertEqual((540, 1038), result.size)
+        validate.assert_called_once_with(123)
+        grab.assert_called_once_with(
+            bbox=(10, 20, 550, 1058),
+            all_screens=True,
+        )
+        activate.assert_not_called()
+
+    def test_passive_capture_keeps_minimized_window_minimized(self):
+        with (
+            patch("agent.infrastructure.seller_window_adapter._window_is_minimized", return_value=True),
+            patch("agent.infrastructure.seller_window_adapter.ImageGrab.grab") as grab,
+            patch("agent.infrastructure.seller_window_adapter.ensure_camera_region_unoccluded") as activate,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "已最小化"):
+                robot_gui_poc.capture_client_passive(123)
+
+        grab.assert_not_called()
+        activate.assert_not_called()
+
+    def test_agent_capture_holds_cursor_lease_only_during_the_capture(self):
+        controller = RobotController(title="test")
+        frame = Image.new("RGB", (540, 1038), "white")
+        events = []
+
+        class CursorLease:
+            def __enter__(self):
+                events.append("cursor_lease_enter")
+
+            def __exit__(self, *_args):
+                events.append("cursor_lease_exit")
+
+        def capture(_hwnd):
+            events.append("capture")
+            return frame
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.temporarily_park_cursor_outside_camera",
+                return_value=CursorLease(),
+            ) as cursor_lease,
+            patch.object(controller, "_capture_phone", side_effect=capture),
+        ):
+            result = controller.vision_capture()
+
+        self.assertIs(frame, result)
+        cursor_lease.assert_called_once_with(123)
+        self.assertEqual(
+            ["cursor_lease_enter", "capture", "cursor_lease_exit"],
+            events,
+        )
+
+    def test_controller_client_rejects_small_landscape_error_dialog(self):
+        self.assertFalse(controller_client_has_camera(379, 169))
+        self.assertFalse(controller_client_has_camera(540, 400))
+        self.assertTrue(controller_client_has_camera(540, 1038))
+        self.assertTrue(controller_client_has_camera(1440, 810))
+        self.assertTrue(controller_client_has_camera(1440, 885))
+
+    def test_navigation_ratio_rotates_counter_clockwise_landscape_feed(self):
+        landscape = oriented_navigation_ratio(0.685, 0.976, landscape=True)
+        self.assertAlmostEqual(landscape[0], 0.976)
+        self.assertAlmostEqual(landscape[1], 0.315)
+        self.assertEqual(
+            oriented_navigation_ratio(0.685, 0.976, landscape=False),
+            (0.685, 0.976),
+        )
+
+    def test_navigation_tap_forces_single_click_and_returns_exact_pixel(self):
+        controller = RobotController(title="test")
+        frame = Image.new("RGB", (540, 960), "white")
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch("agent.infrastructure.robot_controller.seller_gui.configure_single_click_count") as configure,
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.click_client_point",
+                return_value=self._click_barrier_receipt(),
+            ) as click,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay"),
+            patch(
+                "agent.infrastructure.robot_controller.load_controller_config",
+                return_value={"tap_hold": 0.35},
+            ),
+        ):
+            point = controller._vision_nav_tap(0.685, 0.976, action="back")
+
+        self.assertEqual(point, (370, 937))
+        configure.assert_called_once_with(123)
+        click.assert_called_once_with(
+            123,
+            370,
+            937,
+            countdown=0,
+            hold_seconds=0.35,
+            require_event_barrier=True,
+        )
+        receipt = controller.consume_last_click_receipt()
+        self.assertTrue(receipt["seller_event_barrier_confirmed"])
+        self.assertFalse(receipt["mechanical_contact_ack"])
+        self.assertIsNone(controller.consume_last_click_receipt())
+        profile = controller.hardware_capability_profile()["actions"]["back"]
+        self.assertEqual("gui_event_barrier", profile["transport_ack"])
+        self.assertFalse(profile["mechanical_contact_ack"])
+
+    def test_double_tap_sets_two_then_restores_single_click_count(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"double_tap"},
+        )
+        frame = Image.new("RGB", (540, 960), "white")
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_consume_physical_execution"),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "agent.infrastructure.tap_calibration.corrected_grid_point",
+                return_value=(500.0, 500.0),
+            ),
+            patch("agent.infrastructure.robot_controller.seller_gui.configure_click_count") as configure,
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.configure_single_click_count"
+            ) as restore,
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.click_client_point",
+                return_value=self._click_barrier_receipt(2),
+            ) as click,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear,
+            patch(
+                "agent.infrastructure.robot_controller.load_controller_config",
+                return_value={"tap_hold": 0.35},
+            ),
+        ):
+            point = controller.vision_double_tap_relative(500, 500)
+
+        self.assertEqual(point, (270, 480))
+        configure.assert_called_once_with(123, 2)
+        restore.assert_called_once_with(123)
+        click.assert_called_once_with(
+            123,
+            270,
+            480,
+            countdown=0,
+            hold_seconds=0.35,
+            require_event_barrier=True,
+            click_count=2,
+        )
+        clear.assert_called_once_with(123)
+        receipt = controller.consume_last_click_receipt()
+        self.assertEqual(receipt["click_count"], 2)
+        self.assertEqual(receipt["click_count_restored_to"], 1)
+
+    def test_click_event_barrier_confirms_round_trip_and_restores_cursor(self):
+        class FakeUser32:
+            def __init__(self):
+                self.positions = []
+                self.events = []
+
+            def ClientToScreen(self, _hwnd, point):
+                point._obj.x += 10
+                point._obj.y += 20
+                return 1
+
+            def GetCursorPos(self, point):
+                point._obj.x = 7
+                point._obj.y = 9
+                return 1
+
+            def ShowWindow(self, *_args):
+                return 1
+
+            def SetForegroundWindow(self, *_args):
+                return 1
+
+            def SetCursorPos(self, x, y):
+                self.positions.append((x, y))
+                return 1
+
+            def mouse_event(self, event, *_args):
+                self.events.append(event)
+
+            def GetAsyncKeyState(self, *_args):
+                return 0
+
+        fake = FakeUser32()
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        with (
+            patch("agent.infrastructure.seller_window_adapter.user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("agent.infrastructure.seller_window_adapter._stable_seller_position_baseline", return_value=baseline),
+            patch("agent.infrastructure.seller_window_adapter._capture_seller_position_overlay", return_value=baseline),
+            patch(
+                "agent.infrastructure.seller_window_adapter._wait_for_seller_position_state",
+                side_effect=((240, 0.01), (235, 0.02)),
+            ) as wait_state,
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
+        ):
+            receipt = robot_gui_poc.click_client_point(
+                123,
+                270,
+                937,
+                countdown=0,
+                hold_seconds=0.35,
+                require_event_barrier=True,
+            )
+
+        self.assertEqual(
+            [robot_gui_poc.MOUSEEVENTF_LEFTDOWN, robot_gui_poc.MOUSEEVENTF_LEFTUP],
+            fake.events,
+        )
+        self.assertEqual((7, 9), fake.positions[-1])
+        self.assertIn((283, 957), fake.positions)
+        self.assertIn((280, 957), fake.positions)
+        self.assertEqual(2, wait_state.call_count)
+        self.assertTrue(receipt["seller_event_barrier_confirmed"])
+        self.assertTrue(receipt["round_trip_position_confirmed"])
+        self.assertFalse(receipt["mechanical_contact_ack"])
+
+    def test_click_event_barrier_timeout_restores_cursor_without_second_click(self):
+        class FakeUser32:
+            def __init__(self):
+                self.positions = []
+                self.events = []
+
+            def ClientToScreen(self, _hwnd, point):
+                return 1
+
+            def GetCursorPos(self, point):
+                point._obj.x = 11
+                point._obj.y = 12
+                return 1
+
+            def ShowWindow(self, *_args):
+                return 1
+
+            def SetForegroundWindow(self, *_args):
+                return 1
+
+            def SetCursorPos(self, x, y):
+                self.positions.append((x, y))
+                return 1
+
+            def mouse_event(self, event, *_args):
+                self.events.append(event)
+
+            def GetAsyncKeyState(self, *_args):
+                return 0
+
+        fake = FakeUser32()
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        with (
+            patch("agent.infrastructure.seller_window_adapter.user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("agent.infrastructure.seller_window_adapter._stable_seller_position_baseline", return_value=baseline),
+            patch(
+                "agent.infrastructure.seller_window_adapter._wait_for_seller_position_state",
+                side_effect=RuntimeError("控制端事件栅栏超时"),
+            ),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "事件栅栏超时"):
+                robot_gui_poc.click_client_point(
+                    123,
+                    270,
+                    937,
+                    countdown=0,
+                    hold_seconds=0.35,
+                    require_event_barrier=True,
+                )
+
+        self.assertEqual(
+            [robot_gui_poc.MOUSEEVENTF_LEFTDOWN, robot_gui_poc.MOUSEEVENTF_LEFTUP],
+            fake.events,
+        )
+        self.assertEqual((11, 12), fake.positions[-1])
+
+    def test_click_hold_exception_releases_button_and_restores_cursor(self):
+        class FakeUser32:
+            def __init__(self):
+                self.positions = []
+                self.events = []
+
+            def ClientToScreen(self, _hwnd, point):
+                return 1
+
+            def GetCursorPos(self, point):
+                point._obj.x = 13
+                point._obj.y = 14
+                return 1
+
+            def ShowWindow(self, *_args):
+                return 1
+
+            def SetForegroundWindow(self, *_args):
+                return 1
+
+            def SetCursorPos(self, x, y):
+                self.positions.append((x, y))
+                return 1
+
+            def mouse_event(self, event, *_args):
+                self.events.append(event)
+
+            def GetAsyncKeyState(self, *_args):
+                return 0
+
+        fake = FakeUser32()
+        sleeps = iter((RuntimeError("hold interrupted"), None))
+
+        def sleep_side_effect(_seconds):
+            outcome = next(sleeps)
+            if isinstance(outcome, Exception):
+                raise outcome
+
+        with (
+            patch("agent.infrastructure.seller_window_adapter.user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep", side_effect=sleep_side_effect),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "hold interrupted"):
+                robot_gui_poc.click_client_point(
+                    123,
+                    270,
+                    937,
+                    countdown=0,
+                    hold_seconds=0.35,
+                )
+
+        self.assertEqual(
+            [robot_gui_poc.MOUSEEVENTF_LEFTDOWN, robot_gui_poc.MOUSEEVENTF_LEFTUP],
+            fake.events,
+        )
+        self.assertEqual((13, 14), fake.positions[-1])
+
+    def test_drag_is_fail_closed_until_device_marks_it_verified(self):
+        controller = RobotController(title="test")
+
+        self.assertFalse(controller.hardware_capabilities()["drag"])
+        with self.assertRaisesRegex(Exception, "尚未完成任意两点拖动真机验收"):
+            controller.vision_drag_relative(100, 200, 700, 800)
+
+    def test_unverified_input_and_long_press_fail_before_hardware_access(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "wait_for_change",
+            },
+        )
+
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
+            self.assertFalse(hasattr(controller, "vision_type_text_with_layout"))
+            with self.assertRaisesRegex(Exception, "长按.*真机验收"):
+                controller.vision_long_press_relative(500, 500)
+
+        find_window.assert_not_called()
+
+    def test_verified_long_press_uses_stationary_touch_channel(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"long_press"},
+        )
+        frame = Image.new("RGB", (540, 960), "white")
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_consume_physical_execution"),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "agent.infrastructure.tap_calibration.corrected_grid_point",
+                return_value=(500.0, 500.0),
+            ),
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.long_press_client_point",
+                return_value={
+                    "version": "2026-08-16-seller-gui-contact-barrier-v3",
+                    "channel": "right_button_stationary_touch",
+                    "seller_event_barrier_confirmed": True,
+                    "round_trip_position_confirmed": True,
+                    "hold_started_after_barrier": True,
+                    "requested_hold_seconds": 0.8,
+                    "barrier_offset_pixels": 3,
+                    "changed_pixels": 240,
+                    "return_changed_pixels": 240,
+                    "barrier_elapsed_ms": 35.0,
+                    "post_barrier_settle_seconds": 0.45,
+                },
+            ) as long_press,
+            patch("agent.infrastructure.robot_controller.seller_gui.click_client_point") as click,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay"),
+        ):
+            point = controller.vision_long_press_relative(500, 500, 0.8)
+
+        self.assertEqual((270, 480), point)
+        long_press.assert_called_once_with(
+            123,
+            270,
+            480,
+            hold_seconds=0.8,
+        )
+        click.assert_not_called()
+        receipt = controller.consume_last_long_press_receipt()
+        self.assertTrue(receipt["seller_event_barrier_confirmed"])
+        self.assertIsNone(controller.consume_last_long_press_receipt())
+
+    def test_seller_position_overlay_diff_separates_noise_and_move(self):
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        noise = baseline.copy()
+        noise[0:20, 0:20, :] = 12
+        moved = baseline.copy()
+        moved[0:20, 0:20, :] = 13
+
+        self.assertEqual(
+            0,
+            robot_gui_poc._seller_position_changed_pixels(baseline, noise),
+        )
+        self.assertEqual(
+            400,
+            robot_gui_poc._seller_position_changed_pixels(baseline, moved),
+        )
+
+    def test_seller_position_barrier_waits_for_change_then_return(self):
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        moved = baseline.copy()
+        moved[0:20, 0:20, :] = 20
+
+        with patch(
+            "agent.infrastructure.seller_window_adapter._capture_seller_position_overlay",
+            side_effect=[baseline.copy(), moved, moved, baseline.copy()],
+        ):
+            changed, _ = robot_gui_poc._wait_for_seller_position_state(
+                123,
+                baseline,
+                expect_changed=True,
+            )
+            returned, _ = robot_gui_poc._wait_for_seller_position_state(
+                123,
+                baseline,
+                expect_changed=False,
+            )
+
+        self.assertEqual(400, changed)
+        self.assertEqual(0, returned)
+
+
+
+
+    def test_unicode_text_transport_emits_down_and_up_for_every_character(self):
+        class FakeUser32:
+            def __init__(self):
+                self.events = []
+
+            def SendInput(self, count, events, _size):
+                self.events = [
+                    (events[index].ki.wScan, events[index].ki.dwFlags)
+                    for index in range(count)
+                ]
+                return count
+
+        fake = FakeUser32()
+        with (
+            patch.object(robot_gui_poc, "user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
+        ):
+            robot_gui_poc.type_unicode_text("ab1")
+
+        self.assertEqual(
+            [ord("a"), ord("a"), ord("b"), ord("b"), ord("1"), ord("1")],
+            [item[0] for item in fake.events],
+        )
+        self.assertEqual(
+            [
+                robot_gui_poc.KEYEVENTF_UNICODE,
+                robot_gui_poc.KEYEVENTF_UNICODE | robot_gui_poc.KEYEVENTF_KEYUP,
+            ]
+            * 3,
+            [item[1] for item in fake.events],
+        )
+
+    def test_single_click_configuration_uses_current_unicode_helper(self):
+        with (
+            patch("agent.infrastructure.seller_window_adapter.ensure_window_fully_visible"),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1010)),
+            patch("agent.infrastructure.seller_window_adapter.seller_control_point", return_value=(308, 992)),
+            patch("agent.infrastructure.seller_window_adapter.click_client_control"),
+            patch.object(robot_gui_poc.user32, "keybd_event"),
+            patch("agent.infrastructure.seller_window_adapter.press_virtual_key") as press,
+            patch("agent.infrastructure.seller_window_adapter.type_unicode_text") as type_text,
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
+        ):
+            robot_gui_poc.configure_single_click_count(123)
+
+        type_text.assert_called_once_with("1")
+        self.assertEqual(robot_gui_poc.VK_RETURN, press.call_args_list[-1].args[0])
+
+
+    def test_every_unverified_physical_primitive_fails_before_hardware_access(self):
+        controller = RobotController(title="test", verified_actions=set())
+
+        operations = (
+            ("点击", lambda: controller.vision_tap_relative(500, 500)),
+            ("主页导航", controller.vision_android_home),
+            ("滑动", controller.vision_swipe_up),
+            ("返回", controller.vision_android_back),
+            ("长按", lambda: controller.vision_long_press_relative(500, 500)),
+            ("拖动", lambda: controller.vision_drag_relative(100, 100, 900, 900)),
+        )
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
+            for label, operation in operations:
+                with self.subTest(label=label), self.assertRaisesRegex(
+                    Exception,
+                    "尚未完成|尚未验证",
+                ):
+                    operation()
+
+        find_window.assert_not_called()
+
+    def test_dismiss_capability_cannot_authorize_an_arbitrary_tap(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"dismiss_overlay"},
+        )
+
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
+            with self.assertRaisesRegex(Exception, "点击.*真机验收"):
+                controller.vision_tap_relative(500, 500)
+
+        find_window.assert_not_called()
+
+    def test_dismiss_uses_its_own_verified_physical_entry(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"dismiss_overlay"},
+        )
+
+        with patch.object(
+            controller,
+            "_vision_press_relative",
+            return_value=(270, 480),
+        ) as press:
+            point = controller.vision_dismiss_overlay_relative(500, 500)
+
+        self.assertEqual(point, (270, 480))
+        press.assert_called_once()
+
+    def test_verified_drag_uses_two_calibrated_points_once(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"drag"},
+        )
+        frame = Image.new("RGB", (540, 960), "white")
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "agent.infrastructure.tap_calibration.corrected_grid_point",
+                side_effect=[(100.0, 200.0), (700.0, 800.0)],
+            ),
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear_overlay,
+        ):
+            result = controller.vision_drag_relative(100, 200, 700, 800)
+
+        self.assertEqual(result, ((54, 192), (377, 767)))
+        drag.assert_called_once_with(123, (54, 192), (377, 767))
+        clear_overlay.assert_called_once_with(123)
+
+    def test_verified_swipe_uses_distinct_path_and_records_receipt(self):
+        controller = RobotController(title="test", verified_actions={"swipe"})
+        frame = Image.new("RGB", (540, 960), "white")
+        receipt = {
+            "version": "2026-09-03-seller-gui-swipe-path-v1",
+            "channel": "right_button_swipe_path",
+            "right_button_down_dispatched": True,
+            "right_button_up_dispatched": True,
+            "interpolation_steps_completed": 6,
+            "seller_position_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "touch_down_seconds": 0.35,
+            "movement_seconds": 0.3,
+            "step_count": 6,
+            "client_start": [377, 480],
+            "client_end": [54, 480],
+            "mechanical_contact_ack": False,
+        }
+
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch("agent.infrastructure.tap_calibration.corrected_grid_point",
+                side_effect=[(700.0, 500.0), (100.0, 500.0)]),
+            patch("agent.infrastructure.robot_controller.seller_gui.swipe_client_path",
+                return_value=receipt) as swipe,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear_overlay,
+        ):
+            result = controller.vision_swipe_relative(700, 500, 100, 500, "left")
+
+        self.assertEqual(((377, 480), (54, 480)), result)
+        swipe.assert_called_once_with(123, (377, 480), (54, 480), touch_down_seconds=0.35,
+            movement_seconds=0.3, steps=6)
+        drag.assert_not_called()
+        stored = controller.consume_last_swipe_receipt()
+        self.assertEqual("left", stored["requested_direction"])
+        self.assertFalse(stored["mechanical_contact_ack"])
+        self.assertIsNone(controller.consume_last_swipe_receipt())
+        clear_overlay.assert_called_once_with(123)
+
+    def test_system_navigation_reveal_is_independent_and_default_disabled(self):
+        controller = RobotController(title="test")
+        self.assertFalse(
+            controller.hardware_capabilities()["reveal_system_navigation"]
+        )
+        controller = RobotController(
+            title="test",
+            verified_actions={"swipe", "drag"},
+        )
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+        ):
+            with self.assertRaisesRegex(Exception, "系统边缘唤出导航栏.*真机验收"):
+                controller.vision_reveal_system_navigation()
+        find_window.assert_not_called()
+        drag.assert_not_called()
+
+    def test_verified_system_navigation_reveal_uses_one_local_path(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"reveal_system_navigation"},
+        )
+        frame = Image.new("RGB", (810, 1440), "white")
+        derived = {
+            "action": "reveal_system_navigation",
+            "edge": "bottom",
+            "frame_size": [810, 1440],
+            "dom_path": [[0.504, 0.986], [0.505, 0.700]],
+            "requested_grid": [[118, 500], [350, 500]],
+            "corrected_grid": [[92, 495], [333, 495]],
+        }
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
+                return_value=derived,
+            ) as derive,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear_overlay,
+        ):
+            result = controller.vision_reveal_system_navigation()
+
+        derive.assert_called_once_with((810, 1440), controller.calibration_path)
+        drag.assert_called_once_with(123, (74, 712), (269, 712))
+        clear_overlay.assert_called_once_with(123)
+        self.assertEqual([[74, 712], [269, 712]], result["client_path"])
+        self.assertEqual(derived["dom_path"], result["dom_path"])
+
+    def test_system_navigation_reveal_never_retries_failed_drag(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"reveal_system_navigation"},
+        )
+        frame = Image.new("RGB", (810, 1440), "white")
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
+                return_value={"corrected_grid": [[92, 495], [333, 495]]},
+            ),
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.drag_client_path",
+                side_effect=RuntimeError("drag failed"),
+            ) as drag,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "drag failed"):
+                controller.vision_reveal_system_navigation()
+        drag.assert_called_once()
+
+    def test_system_navigation_reveal_calibration_failure_is_zero_action(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"reveal_system_navigation"},
+        )
+        frame = Image.new("RGB", (810, 1440), "white")
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch(
+                "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
+                side_effect=RuntimeError("invalid calibration"),
+            ),
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid calibration"):
+                controller.vision_reveal_system_navigation()
+        drag.assert_not_called()
+
+    def test_mock_system_navigation_reveal_records_semantic_evidence(self):
+        controller = MockRobotController(
+            verified_actions={"reveal_system_navigation"}
+        )
+        result = controller.vision_reveal_system_navigation()
+
+        self.assertEqual("reveal_system_navigation", result["action"])
+        self.assertEqual("bottom", result["edge"])
+        self.assertEqual(1, len(controller.executions))
+
+TEST_NUMERIC_GRID_LAYOUT = {
+    "type": "numeric_grid",
+    "anchors": {
+        "1": [304, 744],
+        "3": [685, 744],
+        "7": [304, 839],
+        "9": [685, 839],
+        "backspace": [850, 698],
+    },
+}
+
+
+class LowLevelInputTests(unittest.TestCase):
+    def test_input_structure_matches_windows_native_size(self) -> None:
+        expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
+        self.assertEqual(ctypes.sizeof(robot_gui_poc.INPUT), expected_size)
+
+
+
+
+
+
+
+
+class DeviceControllerRegistryTests(unittest.TestCase):
+    def test_default_real_device_advertises_only_actions_with_live_evidence(self) -> None:
+        registry = DeviceControllerRegistry(
+            web_app.DEVICE_REGISTRY_PATH,
+            promotable_actions=PROMOTABLE_ACTIONS,
+            mock=False,
+        )
+        controller = registry.controller(registry.default_device_id)
+
+        self.assertNotIn("input_verified_text", controller.hardware_capabilities())
+        self.assertTrue(controller.hardware_capabilities()["long_press"])
+        self.assertTrue(controller.hardware_capabilities()["drag"])
+
+    def test_two_devices_have_independent_controllers_and_calibrations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {
+                                "device_id": "phone-a",
+                                "enabled": True,
+                                "window_title": "controller-a",
+                                "calibration_path": "calibration-a.json",
+                            },
+                            {
+                                "device_id": "phone-b",
+                                "enabled": True,
+                                "window_title": "controller-b",
+                                "calibration_path": "calibration-b.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = DeviceControllerRegistry(
+                path,
+                promotable_actions=PROMOTABLE_ACTIONS,
+                mock=False,
+            )
+
+            first = registry.controller("phone-a")
+            second = registry.controller("phone-b")
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first.title, "controller-a")
+        self.assertEqual(second.title, "controller-b")
+        self.assertTrue(str(first.calibration_path).endswith("calibration-a.json"))
+        self.assertTrue(str(second.calibration_path).endswith("calibration-b.json"))
+        with self.assertRaisesRegex(DeviceControllerRegistryError, "未登记"):
+            registry.controller("phone-c")
+
+    def test_duplicate_enabled_window_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {"device_id": "phone-a", "enabled": True, "window_title": "same"},
+                            {"device_id": "phone-b", "enabled": True, "window_title": "same"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "同一个机械臂控制窗口"):
+                DeviceControllerRegistry(
+                    path,
+                    promotable_actions=PROMOTABLE_ACTIONS,
+                )
+
+    def test_mock_devices_remain_independent_without_mutating_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {
+                                "device_id": "phone-a",
+                                "enabled": True,
+                                "window_title": "controller-a",
+                                "calibration_path": "a.json",
+                            },
+                            {
+                                "device_id": "phone-b",
+                                "enabled": True,
+                                "window_title": "controller-b",
+                                "calibration_path": "b.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = DeviceControllerRegistry(
+                path,
+                promotable_actions=PROMOTABLE_ACTIONS,
+                mock=True,
+            )
+
+            first = registry.controller("phone-a")
+            second = registry.controller("phone-b")
+            descriptors_before = registry.descriptors()
+
+        self.assertIsInstance(first, _MockRobotController)
+        self.assertIsInstance(second, _MockRobotController)
+        self.assertIsNot(first, second)
+        self.assertEqual(descriptors_before, registry.descriptors())
+
+    def test_invalid_verified_actions_fails_before_controller_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {
+                                "device_id": "phone-a",
+                                "enabled": True,
+                                "verified_actions": ["back", ""],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                DeviceControllerRegistryError,
+                "verified_actions 格式无效",
+            ):
+                DeviceControllerRegistry(
+                    path,
+                    promotable_actions=PROMOTABLE_ACTIONS,
+                )
+
+
+class DeviceCameraCoordinatorTests(unittest.TestCase):
+    def test_task_lease_serves_cached_preview_without_another_capture(self) -> None:
+        coordinator = DeviceCameraCoordinator()
+        preview_calls = []
+
+        def capture_preview(*, quality):
+            preview_calls.append(quality)
+            return b"live-preview"
+
+        first, first_cached = coordinator.capture_preview(
+            capture_preview,
+            quality=72,
+            cache_only=False,
+        )
+        with coordinator.serial_session():
+            cached, cached_during_task = coordinator.capture_preview(
+                capture_preview,
+                quality=72,
+                cache_only=True,
+            )
+            frame = coordinator.capture_agent_frame(
+                lambda: Image.new("RGB", (540, 960), "#203040")
+            )
+
+        self.assertEqual(b"live-preview", first)
+        self.assertFalse(first_cached)
+        self.assertEqual(b"live-preview", cached)
+        self.assertTrue(cached_during_task)
+        self.assertEqual([72], preview_calls)
+        self.assertEqual((540, 960), frame.size)
+
+    def test_concurrent_preview_never_waits_or_captures_behind_task_lease(self) -> None:
+        coordinator = DeviceCameraCoordinator()
+        coordinator.capture_preview(
+            lambda *, quality: b"primed-preview",
+            quality=72,
+            cache_only=False,
+        )
+        lease_started = threading.Event()
+        release_lease = threading.Event()
+
+        def hold_task_lease():
+            with coordinator.serial_session():
+                lease_started.set()
+                release_lease.wait(2.0)
+
+        worker = threading.Thread(target=hold_task_lease)
+        worker.start()
+        self.assertTrue(lease_started.wait(1.0))
+        capture_calls = []
+        started = time.monotonic()
+        try:
+            payload, cached = coordinator.capture_preview(
+                lambda *, quality: capture_calls.append(quality) or b"wrong",
+                quality=72,
+                cache_only=False,
+            )
+        finally:
+            release_lease.set()
+            worker.join(2.0)
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(b"primed-preview", payload)
+        self.assertTrue(cached)
+        self.assertEqual([], capture_calls)
+        self.assertFalse(worker.is_alive())
+
+    def test_cache_only_without_a_frame_fails_closed(self) -> None:
+        coordinator = DeviceCameraCoordinator()
+
+        with self.assertRaisesRegex(CameraPreviewUnavailable, "尚无可复用"):
+            coordinator.capture_preview(
+                lambda *, quality: b"must-not-run",
+                quality=72,
+                cache_only=True,
+            )
+
+    def test_two_device_coordinators_do_not_share_preview_cache(self) -> None:
+        first = DeviceCameraCoordinator()
+        second = DeviceCameraCoordinator()
+        first.capture_preview(
+            lambda *, quality: b"phone-a",
+            quality=72,
+            cache_only=False,
+        )
+
+        with self.assertRaises(CameraPreviewUnavailable):
+            second.capture_preview(
+                lambda *, quality: b"phone-b",
+                quality=72,
+                cache_only=True,
+            )
+
+        cached, is_cached = first.capture_preview(
+            lambda *, quality: b"wrong",
+            quality=72,
+            cache_only=True,
+        )
+        self.assertEqual(b"phone-a", cached)
+        self.assertTrue(is_cached)
+
+
+class DeviceRuntimeResourceRegistryTests(unittest.TestCase):
+    def test_same_device_reuses_resources_and_devices_remain_isolated(self) -> None:
+        registry = DeviceRuntimeResourceRegistry(("phone-a",))
+
+        self.assertIs(
+            registry.coordination_lock("phone-a"),
+            registry.coordination_lock("phone-a"),
+        )
+        self.assertIs(
+            registry.camera_coordinator("phone-a"),
+            registry.camera_coordinator("phone-a"),
+        )
+        self.assertIsNot(
+            registry.coordination_lock("phone-a"),
+            registry.coordination_lock("phone-b"),
+        )
+        self.assertIsNot(
+            registry.camera_coordinator("phone-a"),
+            registry.camera_coordinator("phone-b"),
+        )
+
+    def test_concurrent_first_lookup_returns_one_stable_resource(self) -> None:
+        registry = DeviceRuntimeResourceRegistry()
+        barrier = threading.Barrier(9)
+        results = []
+
+        def resolve() -> None:
+            barrier.wait()
+            results.append(registry.coordination_lock("phone-parallel"))
+
+        workers = [threading.Thread(target=resolve) for _index in range(8)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=2)
+
+        self.assertEqual(8, len(results))
+        self.assertTrue(all(item is results[0] for item in results))
+
+    def test_empty_device_fails_before_resource_creation(self) -> None:
+        registry = DeviceRuntimeResourceRegistry()
+        with self.assertRaisesRegex(DeviceRuntimeResourceError, "device_id 不能为空"):
+            registry.coordination_lock("  ")
+        with self.assertRaisesRegex(DeviceRuntimeResourceError, "device_id 不能为空"):
+            registry.camera_coordinator("")
+
+
+class AdbKeyboardCompositionTests(unittest.TestCase):
+    def test_main_and_capability_adapters_receive_same_device_transport(self) -> None:
+        device_id = web_app.runtime.device_controllers.default_device_id
+        transport = object()
+        controller = MockRobotController(device_id=device_id)
+        main_adapter = object()
+        capability_adapter = object()
+
+        with (
+            patch.object(
+                web_app.runtime,
+                "text_transport_for_device",
+                return_value=transport,
+            ) as transport_for_device,
+            patch.object(
+                web_app.runtime,
+                "controller_for_device",
+                return_value=controller,
+            ),
+            patch.object(
+                web_app.runtime,
+                "app_launcher_for_device",
+                return_value=None,
+            ),
+            patch.object(
+                web_app,
+                "GenericSingleActionAdapter",
+                return_value=main_adapter,
+            ) as adapter_factory,
+        ):
+            built_main = web_app.runtime.universal_agent_orchestrator.adapter_factory(
+                device_id
+            )
+
+        self.assertIs(main_adapter, built_main)
+        self.assertIs(transport, adapter_factory.call_args.kwargs["text_transport"])
+        self.assertNotIn("foreground_identity_provider", adapter_factory.call_args.kwargs)
+        transport_for_device.assert_called_once_with(device_id)
+
+        with (
+            patch.object(
+                web_app.runtime,
+                "text_transport_for_device",
+                return_value=transport,
+            ) as capability_transport_for_device,
+            patch.object(
+                web_app,
+                "GenericSingleActionAdapter",
+                return_value=capability_adapter,
+            ) as capability_adapter_factory,
+        ):
+            orchestrator = web_app.runtime.capability_trial_orchestrator(
+                controller,
+                "long_press",
+            )
+            built_capability = orchestrator.adapter_factory(device_id)
+
+        self.assertIs(capability_adapter, built_capability)
+        self.assertIs(
+            transport,
+            capability_adapter_factory.call_args.kwargs["text_transport"],
+        )
+        self.assertNotIn(
+            "foreground_identity_provider",
+            capability_adapter_factory.call_args.kwargs,
+        )
+        capability_transport_for_device.assert_called_once_with(device_id)
+
+    def test_runtime_lifecycle_has_no_companion_bridge_and_stops_controller(self) -> None:
+        events: list[str] = []
+        runtime = web_app.Runtime.__new__(web_app.Runtime)
+        runtime.controller = SimpleNamespace(
+            request_stop=lambda: events.append("controller:stop")
+        )
+
+        runtime.start()
+        runtime.shutdown()
+
+        self.assertEqual(["controller:stop"], events)
+
+    def test_project_api_exposes_no_raw_companion_text_route(self) -> None:
+        paths = {
+            str(getattr(route, "path", ""))
+            for route in web_app.app.routes
+        }
+        self.assertFalse(any("companion-ime" in path for path in paths))
+        self.assertFalse(any("text-transport" in path for path in paths))
+
+    def test_runtime_has_no_adb_page_observation_authority(self) -> None:
+        root = Path(__file__).resolve().parent
+        sources = "\n".join((root / relative).read_text(encoding="utf-8") for relative in (
+            "web_app.py",
+            "agent/infrastructure/generic_action_adapter.py",
+            "agent/infrastructure/generic_scene_observer.py",
+        ))
+        self.assertFalse((root / "agent" / "domain" / "foreground_app_identity.py").exists())
+        for forbidden in ("foreground_identity_provider", "trusted_foreground_identity",
+            "supports_trusted_foreground_identity", "adb_dumpsys"):
+            self.assertNotIn(forbidden, sources)
+
+
+class ApiEndToEndTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.no_browser_patcher = patch.dict(
+            "os.environ",
+            {"ROBOT_WEB_NO_BROWSER": "1"},
+        )
+        cls.no_browser_patcher.start()
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.original_web_output_dir = web_app.WEB_OUTPUT_DIR
+        web_app.WEB_OUTPUT_DIR = Path(cls.temp_dir.name) / "web_output"
+        web_app.WEB_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        web_app.runtime.controller = MockRobotController()
+        cls.client_context = TestClient(web_app.app)
+        cls.client = cls.client_context.__enter__()
+        cls.headers = {"X-Control-Token": web_app.CONTROL_TOKEN}
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client_context.__exit__(None, None, None)
+        web_app.WEB_OUTPUT_DIR = cls.original_web_output_dir
+        cls.temp_dir.cleanup()
+        cls.no_browser_patcher.stop()
+
+    def setUp(self) -> None:
+        self.device_registry_patcher = patch.object(
+            web_app.runtime,
+            "device_task_registry",
+            DeviceTaskRegistry(),
+        )
+        self.device_registry_patcher.start()
+        web_app.runtime.agent_session_repository.clear()
+        web_app.runtime.device_runtime_resources = DeviceRuntimeResourceRegistry(
+            (web_app.runtime.device_controllers.default_device_id,)
+        )
+
+    def tearDown(self) -> None:
+        self.device_registry_patcher.stop()
+
+
+    def _universal_api_orchestrator(self, *, device_id="phone-01"):
+        from test_universal_agent_orchestrator import CountingQwen, FixtureAdapter
+        from test_single_visual_loop import Observation
+        from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
+        qwen = CountingQwen()
+        adapter = FixtureAdapter(device_id=device_id)
+        orchestrator = UniversalAgentOrchestrator(qwen_observer=qwen,
+            adapter_factory=lambda _: adapter, trusted_observation_factory=Observation,
+            evidence_store_factory=FileSystemAgentEvidenceStore, device_registry=DeviceTaskRegistry())
+        return orchestrator, None, qwen, adapter
+
+    def test_actual_pause_and_budget_state_survive_api_listing(self):
+        from agent.domain.action_capabilities import unverified_promotable_actions
+        for mode in ('paused', 'budget_paused'):
+            with self.subTest(mode=mode):
+                orchestrator, _, _, adapter = self._universal_api_orchestrator()
+                session = orchestrator.start(session_id='integration-' + mode, raw_goal='查看页面',
+                    device_id='phone-01', run_dir=web_app.WEB_OUTPUT_DIR / mode,
+                    max_observations=1 if mode == 'budget_paused' else 200)
+                web_app.runtime.agent_session_repository.add(session)
+                try:
+                    with patch.object(web_app.runtime, 'universal_agent_orchestrator', orchestrator):
+                        if mode == 'paused':
+                            response = self.client.post(
+                                f'/api/agent/generic-supervised/{session.session_id}/pause',
+                                headers=self.headers, json={'device_id': 'phone-01'})
+                            self.assertEqual(200, response.status_code, response.text)
+                        else:
+                            orchestrator.run_autonomous_safe_loop(session)
+                        self.assertEqual(mode, session.status)
+                        status = self.client.get('/api/device').json()
+                        self.assertIn(session.session_id, [x['session_id'] for x in status['active_tasks']])
+                        for device in status['devices']:
+                            self.assertEqual(unverified_promotable_actions(device['verified_actions']),
+                                device['capability_acceptance_actions'])
+                        self.assertEqual(session.session_id, orchestrator.device_registry.active_session('phone-01'))
+                finally:
+                    orchestrator.cancel(session)
+
+    def _fake_capability_manager(self, *, device_id="capability-api-device"):
+        calls = []
+
+        class Session:
+            def __init__(self):
+                self.physical_actions = 0
+                self.status = "awaiting_confirmation"
+
+            def snapshot(self):
+                return {
+                    "session_id": "capability-session-001",
+                    "status": self.status,
+                    "physical_actions": self.physical_actions,
+                    "confirmation_scope": {
+                        "session_id": "capability-session-001",
+                        "task_id": "task-001",
+                        "device_id": device_id,
+                        "revision": 1,
+                        "step_id": "subgoal-001",
+                        "effect_ids": [],
+                        "observation_id": "obs-001",
+                        "fingerprint": "frame-001",
+                    },
+                }
+
+        session = Session()
+        trial = SimpleNamespace(
+            trial_id="trial-api-001",
+            device_id=device_id,
+            candidate_action="drag",
+            session=session,
+        )
+        trial.snapshot = lambda: {
+            "trial_id": trial.trial_id,
+            "device_id": trial.device_id,
+            "candidate_action": trial.candidate_action,
+            "session": session.snapshot(),
+            "report": None,
+            "promotion_scope": None,
+            "promotion": None,
+            "requires_restart": False,
+        }
+
+        class Manager:
+            def __init__(self):
+                self.promoted = False
+
+            def start(self, *, device_id, candidate_action, text):
+                calls.append(("start", device_id, candidate_action, text))
+                return trial
+
+            def get(self, trial_id):
+                calls.append(("get", trial_id))
+                if trial_id != trial.trial_id:
+                    raise web_app.CapabilityAcceptanceError("不存在")
+                return trial
+
+            def confirm(self, trial_id, confirmation):
+                calls.append(("confirm", trial_id, dict(confirmation)))
+                if session.physical_actions:
+                    raise web_app.CapabilityAcceptanceError("动作确认已使用")
+                session.physical_actions = 1
+                session.status = "paused"
+                return {
+                    "physical_actions": 1,
+                    "action_outcome": "executed",
+                }
+
+            def promotion_scope(self, trial_id):
+                calls.append(("promotion_scope", trial_id))
+                return SimpleNamespace(
+                    to_dict=lambda: {
+                        "trial_id": trial.trial_id,
+                        "device_id": trial.device_id,
+                        "action": trial.candidate_action,
+                        "report_sha256": "a" * 64,
+                        "registry_sha256": "b" * 64,
+                    }
+                )
+
+            def promote(self, trial_id, confirmation):
+                calls.append(("promote", trial_id, dict(confirmation)))
+                if self.promoted:
+                    raise web_app.CapabilityAcceptanceError("晋级确认已使用")
+                self.promoted = True
+                return {
+                    "device_id": trial.device_id,
+                    "action": trial.candidate_action,
+                    "requires_restart": True,
+                }
+
+            def cancel(self, trial_id):
+                calls.append(("cancel", trial_id))
+                session.status = "cancelled"
+
+        return Manager(), trial, calls
+
+    def test_home_and_device_are_available(self) -> None:
+        self.assertEqual(self.client.get("/").status_code, 200)
+        with patch.object(
+            web_app.runtime,
+            "app_launcher_for_device",
+            return_value=SimpleNamespace(enabled=False),
+        ):
+            device = self.client.get("/api/device").json()
+        self.assertTrue(device["controller_online"])
+        self.assertTrue(device["camera_online"])
+        self.assertEqual(device["default_device_id"], "device-local-01")
+        self.assertEqual(device["devices"][0]["device_id"], "device-local-01")
+        self.assertNotIn("legacy_free_agent", device)
+        architecture = dict(device["execution_architecture"])
+        universal = dict(architecture["universal_agent"])
+        observer = universal.pop("observer")
+        self.assertEqual(
+            observer["observer_version"],
+            SINGLE_STEP_SCENE_OBSERVER_VERSION,
+        )
+        self.assertEqual(observer["max_online_calls_per_observation"], 1)
+        self.assertEqual(
+            observer["model_role"],
+            "single_step_current_scene_observation",
+        )
+        self.assertEqual(observer["supported_app_scope"], "dynamic")
+        architecture["universal_agent"] = universal
+        self.assertEqual(architecture["active_orchestrator"], "universal_agent")
+        self.assertEqual(architecture["controller"], "universal_action_controller")
+        self.assertTrue(architecture["fixed_app_workflows_retired"])
+        self.assertNotIn("background_compatibility_worker", architecture)
+        self.assertTrue(universal["automatic_loop_enabled"])
+        self.assertEqual(universal["task_budget_default_actions"], 100)
+        self.assertEqual(universal["task_budget_default_observations"], 200)
+        self.assertEqual(universal["supported_app_scope"], "dynamic")
+        self.assertEqual(
+            universal["action_protocol"],
+            "2026-09-06-canonical-whole-task-v10",
+        )
+        self.assertEqual(
+            universal["controller_protocol"],
+            web_app.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
+        )
+        self.assertEqual(
+            universal["protocol_physical_actions"],
+            sorted(web_app.CANONICAL_ACTION_KINDS - {"wait_for_change"}),
+        )
+        self.assertNotIn("launch_app", universal["enabled_physical_actions"])
+        self.assertNotIn("swipe", universal["enabled_physical_actions"])
+        self.assertIn("scroll", universal["enabled_physical_actions"])
+        self.assertIn("swipe_element", universal["enabled_physical_actions"])
+        semantic_authority = universal["typed_effect_authority"]
+        self.assertEqual(
+            semantic_authority["authority_scope"],
+            "qwen_current_action_effect_kind",
+        )
+        self.assertFalse(
+            semantic_authority["retired_remote_risk_diagnostics_enabled"]
+        )
+        self.assertEqual(
+            semantic_authority["canonical_action_protocol"],
+            "2026-09-06-canonical-whole-task-v10",
+        )
+        self.assertEqual(
+            universal["hardware_capability_profile"]["protocol_version"],
+            "2026-08-18-device-capability-profile-v1",
+        )
+        self.assertTrue(
+            universal["hardware_capability_profile"]["actions"]["tap_semantic"]
+            ["fresh_visual_postcondition_required"]
+        )
+
+    def test_device_status_exposes_enabled_trusted_package_launch(self) -> None:
+        default_device_id = web_app.runtime.device_controllers.default_device_id
+        with patch.object(
+            web_app.runtime,
+            "app_launcher_for_device",
+            return_value=SimpleNamespace(enabled=True),
+        ) as launcher_for_device:
+            device = self.client.get("/api/device").json()
+
+        universal = device["execution_architecture"]["universal_agent"]
+        self.assertIn("launch_app", universal["enabled_physical_actions"])
+        self.assertEqual(
+            universal["protocol_physical_actions"],
+            sorted(web_app.CANONICAL_ACTION_KINDS - {"wait_for_change"}),
+        )
+        launcher_for_device.assert_called_once_with(default_device_id)
+
+    def test_device_status_only_exposes_current_task_budget_authority(self) -> None:
+        device = self.client.get("/api/device").json()
+        execution = device["generic_supervised_execution"]
+        for retired in ("max_safe_loop_physical_actions", "max_safe_loop_iterations",
+                        "external_effect_confirmation_count"):
+            self.assertNotIn(retired, execution)
+        self.assertEqual(1, execution["max_physical_actions_per_confirmation"])
+        universal = device["execution_architecture"]["universal_agent"]
+        self.assertEqual(web_app.DEFAULT_DEVICE_ACTION_BUDGET, universal["task_budget_default_actions"])
+        self.assertEqual(web_app.DEFAULT_OBSERVATION_BUDGET, universal["task_budget_default_observations"])
+
+    def test_home_uses_generic_supervised_single_step_endpoints(self) -> None:
+        home = self.client.get("/")
+        script = self.client.get("/assets/app.js")
+        protocol_adapter = self.client.get("/assets/protocol_adapter.js")
+        styles = self.client.get("/assets/styles.css")
+        self.assertEqual(home.status_code, 200)
+        self.assertEqual(script.status_code, 200)
+        self.assertEqual(protocol_adapter.status_code, 200)
+        self.assertEqual(styles.status_code, 200)
+        self.assertIn("你希望手机完成什么", home.text)
+        self.assertIn("动态计划", home.text)
+        self.assertIn("当前画面", home.text)
+        self.assertIn("步骤记录", home.text)
+        self.assertIn('id="pauseButton"', home.text)
+        self.assertIn('id="stopButton"', home.text)
+        self.assertIn('id="riskDialog"', home.text)
+        self.assertIn('id="capabilityAcceptancePanel"', home.text)
+        self.assertIn('id="promotionDialog"', home.text)
+        self.assertIn('id="deviceId"', home.text)
+        self.assertNotIn("微信工作流", home.text)
+        self.assertNotIn("抖音工作流", home.text)
+        self.assertIn('/assets/protocol_adapter.js', home.text)
+        self.assertIn("/api/agent/generic-supervised/start", script.text)
+        self.assertIn("/api/capability-acceptance/start", script.text)
+        self.assertIn("createPromotionGrant", protocol_adapter.text)
+        self.assertTrue("/api/agent/generic-supervised/${view.sessionId}/auto" in script.text)
+        self.assertNotIn('id="confirmSafeLoop"', home.text)
+        self.assertIn("nextSupervisedAgent", script.text)
+        self.assertIn("togglePause", script.text)
+        self.assertNotIn('api("/api/agent/supervised/start"', script.text)
+        self.assertNotIn("wechatView", script.text)
+        self.assertNotIn("douyinView", script.text)
+
+    def test_capability_revision_must_match_loaded_service_code(self) -> None:
+        runtime = web_app.Runtime.__new__(web_app.Runtime)
+        runtime.loaded_code_revision = "loaded-revision"
+
+        with patch.object(web_app, "current_code_revision", return_value="loaded-revision"):
+            self.assertEqual(runtime.capability_code_revision(), "loaded-revision")
+        with (
+            patch.object(web_app, "current_code_revision", return_value="new-revision"),
+            self.assertRaisesRegex(
+                web_app.CapabilityAcceptanceError,
+                "服务启动后代码状态发生变化",
+            ),
+        ):
+            runtime.capability_code_revision()
+
+    def test_generic_supervised_auto_request_is_strict_and_bounded(self) -> None:
+        request = web_app.GenericSupervisedAutoRequest(device_id="phone-01")
+        self.assertFalse(request.confirmed)
+        self.assertIsNone(request.confirmation)
+        self.assertIsNone(request.max_physical_actions)
+        self.assertIsNone(request.max_observations)
+        bounded = web_app.GenericSupervisedAutoRequest(
+            device_id="phone-01",
+            max_physical_actions=20,
+            max_observations=400,
+        )
+        self.assertEqual(bounded.max_physical_actions, 20)
+        self.assertEqual(bounded.max_observations, 400)
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedAutoRequest(
+                device_id="phone-01",
+                max_physical_actions=0,
+            )
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedAutoRequest(
+                device_id="phone-01",
+                max_physical_actions="1",
+            )
+
+    def test_capability_acceptance_requests_are_strict(self) -> None:
+        with self.assertRaises(ValueError):
+            web_app.CapabilityAcceptanceStartRequest(
+                device_id="device-a",
+                action="drag",
+                text="拖动安全控件",
+                unexpected="forbidden",
+            )
+        with self.assertRaises(ValueError):
+            web_app.CapabilityActionConfirmationRequest(confirmed="true")
+        with self.assertRaises(ValueError):
+            web_app.CapabilityPromotionRequest(
+                confirmed=True,
+                trial_id="trial-a",
+                device_id="device-a",
+                action="drag",
+                report_sha256="not-a-sha",
+                registry_sha256="b" * 64,
+            )
+
+    def test_capability_acceptance_api_starts_at_zero_and_binds_action_scope(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        before_executions = list(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app.runtime, "capability_acceptance_manager", manager),
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app,
+                "_supervised_hardware_lock",
+                side_effect=lambda _device_id: nullcontext(),
+            ),
+        ):
+            missing_token = self.client.post(
+                "/api/capability-acceptance/start",
+                json={
+                    "device_id": trial.device_id,
+                    "action": "drag",
+                    "text": "拖动安全控件",
+                },
+            )
+            started = self.client.post(
+                "/api/capability-acceptance/start",
+                headers=self.headers,
+                json={
+                    "device_id": trial.device_id,
+                    "action": "drag",
+                    "text": "拖动安全控件",
+                },
+            )
+
+        self.assertEqual(missing_token.status_code, 403, missing_token.text)
+        self.assertEqual(started.status_code, 200, started.text)
+        payload = started.json()
+        self.assertEqual(payload["physical_actions"], 0)
+        scope = payload["trial"]["action_confirmation_scope"]
+        self.assertEqual(scope["trial_id"], trial.trial_id)
+        self.assertEqual(scope["action"], "drag")
+        self.assertEqual([call[0] for call in calls], ["start"])
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_action_confirmation_is_exact_once(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        scope = {
+            **trial.session.snapshot()["confirmation_scope"],
+            "trial_id": trial.trial_id,
+            "action": trial.candidate_action,
+        }
+        path = f"/api/capability-acceptance/{trial.trial_id}/confirm"
+        before_executions = list(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app.runtime, "capability_acceptance_manager", manager),
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app,
+                "_supervised_hardware_lock",
+                side_effect=lambda _device_id: nullcontext(),
+            ),
+        ):
+            first = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+            replay = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+            extra = self.client.post(
+                path,
+                headers=self.headers,
+                json={
+                    "confirmed": True,
+                    "confirmation": {**scope, "unexpected": "forbidden"},
+                },
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["physical_actions"], 1)
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(extra.status_code, 422, extra.text)
+        self.assertEqual([call[0] for call in calls].count("confirm"), 2)
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_outer_scope_mismatch_is_terminal_without_action(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        scope = {
+            **trial.session.snapshot()["confirmation_scope"],
+            "trial_id": trial.trial_id,
+            "action": "long_press",
+        }
+        path = f"/api/capability-acceptance/{trial.trial_id}/confirm"
+        with patch.object(web_app.runtime, "capability_acceptance_manager", manager):
+            wrong = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+
+        self.assertEqual(wrong.status_code, 409, wrong.text)
+        self.assertEqual(wrong.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(trial.session.physical_actions, 0)
+        self.assertEqual(trial.session.status, "cancelled")
+        self.assertEqual([call[0] for call in calls].count("confirm"), 0)
+        self.assertEqual([call[0] for call in calls].count("cancel"), 1)
+
+    def test_capability_promotion_is_separate_zero_action_and_requires_restart(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        path = f"/api/capability-acceptance/{trial.trial_id}"
+        before_executions = list(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app.runtime, "capability_acceptance_manager", manager),
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                side_effect=AssertionError("promotion must not inspect Qwen"),
+            ),
+        ):
+            preview = self.client.get(
+                f"{path}/promotion-preview",
+                headers=self.headers,
+            )
+            scope = preview.json()["promotion_scope"]
+            refused = self.client.post(
+                f"{path}/promote",
+                headers=self.headers,
+                json={"confirmed": False, **scope},
+            )
+            promoted = self.client.post(
+                f"{path}/promote",
+                headers=self.headers,
+                json={"confirmed": True, **scope},
+            )
+            replay = self.client.post(
+                f"{path}/promote",
+                headers=self.headers,
+                json={"confirmed": True, **scope},
+            )
+
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["physical_actions"], 0)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(promoted.status_code, 200, promoted.text)
+        self.assertEqual(promoted.json()["physical_actions"], 0)
+        self.assertTrue(promoted.json()["promotion"]["requires_restart"])
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual([call[0] for call in calls].count("promote"), 2)
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_evidence_endpoint_is_token_and_trial_bound(self) -> None:
+        manager, trial, _calls = self._fake_capability_manager()
+        run_dir = Path(self.temp_dir.name) / "capability-evidence"
+        run_dir.mkdir(exist_ok=True)
+        frame = run_dir / "before-1.jpg"
+        Image.new("RGB", (8, 8), "white").save(frame, format="JPEG")
+        outside = Path(self.temp_dir.name) / "outside.jpg"
+        Image.new("RGB", (8, 8), "black").save(outside, format="JPEG")
+        trial.run_dir = run_dir
+        trial.report_path = run_dir / "acceptance_report.json"
+        trial.report_path.write_text(
+            json.dumps(
+                {
+                    "before_frame_paths": [str(frame)],
+                    "after_frame_paths": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        path = f"/api/capability-acceptance/{trial.trial_id}/evidence/before/0"
+
+        with patch.object(web_app.runtime, "capability_acceptance_manager", manager):
+            forbidden = self.client.get(path)
+            accepted = self.client.get(path, headers=self.headers)
+            missing = self.client.get(
+                f"/api/capability-acceptance/{trial.trial_id}/evidence/before/1",
+                headers=self.headers,
+            )
+            trial.report_path.write_text(
+                json.dumps(
+                    {
+                        "before_frame_paths": [str(outside)],
+                        "after_frame_paths": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            escaped = self.client.get(path, headers=self.headers)
+
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.headers["content-type"], "image/jpeg")
+        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertEqual(escaped.status_code, 404, escaped.text)
+
+    def test_v3_confirm_request_requires_scope_and_forbids_extra_fields(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-scope",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-scope",
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+        scope = session.snapshot()["confirmation_scope"]
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            missing = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True},
+            )
+        self.assertEqual(missing.status_code, 409, missing.text)
+        self.assertEqual(missing.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.execute_calls, 0)
+
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedStepRequest(
+                confirmed="true",
+                confirmation=scope,
+            )
+
+        for payload in (
+            {
+                "confirmed": True,
+                "confirmation": scope,
+                "unexpected": "forbidden",
+            },
+            {
+                "confirmed": True,
+                "confirmation": {
+                    **scope,
+                    "unexpected": "forbidden",
+                },
+            },
+        ):
+            with self.subTest(payload=payload):
+                with patch.object(web_app, "_require_supervised_device_ready"):
+                    rejected = self.client.post(
+                        path,
+                        headers=self.headers,
+                        json=payload,
+                    )
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+                self.assertEqual(adapter.execute_calls, 0)
+
+    def test_v3_confirm_api_atomically_consumes_one_scope(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-confirm-once",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-confirm-once",
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+        payload = {
+            "confirmed": True,
+            "confirmation": session.snapshot()["confirmation_scope"],
+        }
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            first = self.client.post(path, headers=self.headers, json=payload)
+            replay = self.client.post(path, headers=self.headers, json=payload)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["execution"]["physical_actions"], 1)
+        # Executing one action no longer invokes DeepSeek replan or mutates the
+        # high-level graph; only a later same-frame Qwen finish advances it.
+        self.assertEqual(first.json()["session"]["revision"], 2)
+        self.assertEqual(len(first.json()["execution"]["after_frame_paths"]), 4)
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(replay.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.execute_calls, 1)
+
+    def test_device_disconnect_invalidates_pending_confirmation(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-disconnect-invalidates",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-disconnect-invalidates",
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+        payload = {
+            "confirmed": True,
+            "confirmation": session.snapshot()["confirmation_scope"],
+        }
+
+        def offline(_device_id=None) -> None:
+            raise web_app.HTTPException(status_code=409, detail="控制端或摄像头离线。")
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready", offline),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            disconnected = self.client.post(
+                path, headers=self.headers, json=payload
+            )
+
+        self.assertEqual(409, disconnected.status_code, disconnected.text)
+        self.assertIsNone(session.snapshot()["confirmation_scope"])
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(0, adapter.execute_calls)
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            stale = self.client.post(path, headers=self.headers, json=payload)
+        self.assertEqual(409, stale.status_code, stale.text)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_hardware_lock_rejects_another_process_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            lease_dir = Path(temp)
+            external = InterProcessLease(
+                lease_dir / "physical_hardware_action.lease",
+                owner_id="other-service",
+                metadata={"purpose": "physical_hardware_action"},
+            )
+            self.assertTrue(external.acquire())
+            try:
+                with (
+                    patch.object(web_app, "SHARED_DEVICE_LEASE_DIR", lease_dir),
+                    self.assertRaisesRegex(
+                        web_app.HTTPException, "另一进程已占用"
+                    ),
+                ):
+                    with web_app._supervised_hardware_lock():
+                        self.fail("cross-process lease must block the hardware lock")
+            finally:
+                external.release()
+
+    def test_hardware_locks_allow_different_devices_but_reject_same_device(self) -> None:
+        first_controller = SimpleNamespace(operation_lock=threading.Lock())
+        second_controller = SimpleNamespace(operation_lock=threading.Lock())
+        controllers = {
+            "phone-a": first_controller,
+            "phone-b": second_controller,
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            with (
+                patch.object(web_app, "SHARED_DEVICE_LEASE_DIR", Path(temp)),
+                patch.object(
+                    web_app.runtime,
+                    "controller_for_device",
+                    side_effect=lambda device_id: controllers[device_id],
+                ),
+            ):
+                with web_app._supervised_hardware_lock("phone-a"):
+                    with web_app._supervised_hardware_lock("phone-b"):
+                        self.assertTrue(first_controller.operation_lock.locked())
+                        self.assertTrue(second_controller.operation_lock.locked())
+                    with self.assertRaisesRegex(
+                        web_app.HTTPException,
+                        "占用|正在进行",
+                    ):
+                        with web_app._supervised_hardware_lock("phone-a"):
+                            self.fail("同一设备不能取得第二个硬件锁")
+
+        self.assertFalse(first_controller.operation_lock.locked())
+        self.assertFalse(second_controller.operation_lock.locked())
+
+    def test_v3_confirm_api_rejects_cross_device_scope(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-cross-device",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-cross-device",
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        scope = session.snapshot()["confirmation_scope"]
+        scope["device_id"] = "phone-02"
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            response = self.client.post(
+                f"/api/agent/generic-supervised/{session.session_id}/confirm",
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_generic_scene_preview_is_read_only(self) -> None:
+        scene = UIScene(
+            app_id="calculator",
+            screen_id="app_home",
+            summary="计算器首页",
+            stable=True,
+            confidence=0.96,
+            fingerprint="local-frame",
+        )
+        before_executions = len(web_app.runtime.controller.executions)
+        before_failures = set(
+            web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*")
+        )
+        with (
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                return_value={"configured": True},
+            ),
+            patch.object(
+                web_app.runtime.generic_scene_observer,
+                "observe",
+                return_value=scene,
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-scene",
+                headers=self.headers,
+                json={"goal": {"objective": "在计算器输入7"}},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertFalse(payload["executed"])
+        self.assertFalse(payload["physical_action_requested"])
+        self.assertEqual(payload["scene"]["app_id"], "calculator")
+        self.assertEqual(
+            len(web_app.runtime.controller.executions),
+            before_executions,
+        )
+        self.assertEqual(
+            before_failures,
+            set(web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*")),
+        )
+
+    def test_generic_scene_preview_failure_persists_redacted_raw_response(self) -> None:
+        observer = web_app.runtime.generic_scene_observer
+        raw = (
+            '{"api_key":"preview-secret",'
+            '"image":"data:image/jpeg;base64,QUJD",'
+            '"unexpected":true}'
+        )
+        before_failures = set(
+            web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*")
+        )
+        with (
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                return_value={"configured": True},
+            ),
+            patch.object(observer, "last_raw_response", raw),
+            patch.object(
+                observer,
+                "last_diagnostics",
+                {
+                    "failed_stage": "parsing_targeted_refinement",
+                    "error_type": "schema_validation",
+                },
+            ),
+            patch.object(
+                observer,
+                "observe",
+                side_effect=VisionAgentError("目标精查结果不符合最小增量协议"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-scene",
+                headers=self.headers,
+                json={"goal": {"objective": "只读核对当前输入区域"}},
+            )
+
+        self.assertEqual(422, response.status_code, response.text)
+        new_failures = (
+            set(web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*"))
+            - before_failures
+        )
+        self.assertEqual(1, len(new_failures))
+        artifacts = list(next(iter(new_failures)).glob("*_qwen_failure.json"))
+        self.assertEqual(1, len(artifacts))
+        artifact = json.loads(artifacts[0].read_text(encoding="utf-8"))
+        serialized = json.dumps(artifact, ensure_ascii=False)
+        self.assertNotIn("preview-secret", serialized)
+        self.assertNotIn("data:image", serialized)
+        self.assertIn("[REDACTED_SECRET]", serialized)
+        self.assertIn("[REDACTED_IMAGE_DATA_URL]", serialized)
+
+    def test_generic_scene_preview_diagnostic_failure_preserves_original_422(self) -> None:
+        with (
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                return_value={"configured": True},
+            ),
+            patch.object(
+                web_app.runtime.generic_scene_observer,
+                "observe",
+                side_effect=VisionAgentError("原始只读观察错误"),
+            ),
+            patch.object(
+                web_app,
+                "persist_observer_failure_diagnostic",
+                side_effect=OSError("disk unavailable"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-scene",
+                headers=self.headers,
+                json={"goal": {"objective": "只读核对当前输入区域"}},
+            )
+
+        self.assertEqual(422, response.status_code, response.text)
+        self.assertIn("原始只读观察错误", response.text)
+
+    def test_generic_supervised_api_starts_and_enters_safe_auto_loop(self) -> None:
+        orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
+        before_executions = len(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+            patch.object(
+                orchestrator,
+                "run_autonomous_safe_loop",
+                return_value={
+                    "physical_actions": 0,
+                    "iterations": 0,
+                    "status": "awaiting_confirmation",
+                    "pause_reason": "测试保留待执行安全动作",
+                },
+            ) as auto_loop,
+        ):
+            started = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "查看当前页面的详情", "device_id": "phone-01"},
+            )
+            self.assertEqual(started.status_code, 200, started.text)
+            payload = started.json()
+            session_id = payload["session"]["session_id"]
+            self.assertEqual(payload["physical_actions"], 0)
+            self.assertTrue(payload["automatic_loop_enabled"])
+            self.assertEqual(
+                payload["session"]["status"], "awaiting_confirmation"
+            )
+            self.assertEqual(len(qwen.calls), 1)
+            self.assertEqual(len(qwen.calls), 1)
+            self.assertEqual(adapter.capture_calls, 1)
+            self.assertEqual(adapter.execute_calls, 0)
+            auto_loop.assert_called_once()
+
+            rejected = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/confirm",
+                headers=self.headers,
+                json={"confirmed": False},
+            )
+            self.assertEqual(rejected.status_code, 409, rejected.text)
+            self.assertEqual(rejected.json()["detail"]["physical_actions"], 0)
+
+            cancelled = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["session"]["status"], "cancelled")
+        self.assertEqual(
+            len(web_app.runtime.controller.executions),
+            before_executions,
+        )
+
+    def test_start_auto_loop_failure_returns_persisted_failed_session(self) -> None:
+        from test_universal_agent_orchestrator import CountingQwen
+
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        qwen = CountingQwen(
+            2,
+            error=VisionAgentError("第二步 Qwen 当前截图解析失败"),
+        )
+        orchestrator.qwen_observer = qwen
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "连续查看当前页面", "device_id": "phone-01"},
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        failure = response.json()["detail"]
+        session = failure["session"]
+        self.assertEqual("failed", session["status"])
+        self.assertEqual(
+            "第二步 Qwen 当前截图解析失败",
+            session["failed_reason"],
+        )
+        self.assertFalse(session["automatic_loop_enabled"])
+        self.assertEqual(1, session["physical_actions"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertIsNotNone(failure["report"])
+        self.assertTrue(Path(failure["report"]).is_file())
+        self.assertIsNone(
+            orchestrator.device_registry.active_session(session["device_id"])
+        )
+
+    def test_generic_supervised_evidence_failure_remains_http_409(self) -> None:
+        orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+            patch.object(
+                orchestrator,
+                "start",
+                side_effect=EvidenceStoreError("simulated evidence disk failure"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={
+                    "text": "查看当前页面的详情",
+                    "device_id": "phone-01",
+                    "auto_advance": False,
+                },
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertEqual(0, response.json()["detail"]["physical_actions"])
+        self.assertIn("simulated evidence disk failure", response.text)
+
+    def test_new_generic_session_clears_stop_from_an_earlier_task(self) -> None:
+        orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
+        controller = web_app.runtime.controller
+        original_start = orchestrator.start
+        stop_state_at_task_boundary = []
+
+        def start_after_boundary(**kwargs):
+            stop_state_at_task_boundary.append(controller.stop_event.is_set())
+            return original_start(**kwargs)
+
+        try:
+            stopped = self.client.post(
+                "/api/stop",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+            self.assertEqual(200, stopped.status_code, stopped.text)
+            self.assertTrue(controller.stop_event.is_set())
+
+            with (
+                patch.object(web_app, "_require_supervised_device_ready"),
+                patch.object(
+                    web_app.runtime,
+                    "universal_agent_orchestrator",
+                    orchestrator,
+                ),
+                patch.object(orchestrator, "start", side_effect=start_after_boundary),
+            ):
+                started = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={
+                        "text": "查看当前页面的详情",
+                        "device_id": "phone-01",
+                        "auto_advance": False,
+                    },
+                )
+
+            self.assertEqual(200, started.status_code, started.text)
+            self.assertEqual([False], stop_state_at_task_boundary)
+            self.assertFalse(controller.stop_event.is_set())
+            session_id = started.json()["session"]["session_id"]
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+        finally:
+            controller.stop_event.clear()
+
+    def test_stop_requested_after_new_task_boundary_is_not_cleared(self) -> None:
+        orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
+        controller = web_app.runtime.controller
+        original_start = orchestrator.start
+        controller.stop_event.clear()
+
+        def start_then_request_stop(**kwargs):
+            self.assertFalse(controller.stop_event.is_set())
+            controller.request_stop()
+            return original_start(**kwargs)
+
+        try:
+            with (
+                patch.object(web_app, "_require_supervised_device_ready"),
+                patch.object(
+                    web_app.runtime,
+                    "universal_agent_orchestrator",
+                    orchestrator,
+                ),
+                patch.object(
+                    orchestrator,
+                    "start",
+                    side_effect=start_then_request_stop,
+                ),
+            ):
+                started = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={
+                        "text": "查看当前页面的详情",
+                        "device_id": "phone-01",
+                        "auto_advance": False,
+                    },
+                )
+
+            self.assertEqual(200, started.status_code, started.text)
+            self.assertTrue(controller.stop_event.is_set())
+            session_id = started.json()["session"]["session_id"]
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+        finally:
+            controller.stop_event.clear()
+
+    def test_generic_supervised_api_can_start_in_explicit_single_step_mode(self) -> None:
+        orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
+        before_executions = len(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+            patch.object(
+                orchestrator,
+                "run_autonomous_safe_loop",
+                side_effect=AssertionError("single-step start must not run safe loop"),
+            ) as auto_loop,
+        ):
+            started = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={
+                    "text": "查看当前页面的详情",
+                    "device_id": "phone-01",
+                    "auto_advance": False,
+                },
+            )
+            self.assertEqual(started.status_code, 200, started.text)
+            payload = started.json()
+            session_id = payload["session"]["session_id"]
+            self.assertEqual("generic_supervised_single_step", payload["mode"])
+            self.assertEqual(0, payload["physical_actions"])
+            self.assertFalse(payload["automatic_loop_enabled"])
+            self.assertEqual("awaiting_confirmation", payload["session"]["status"])
+            self.assertEqual(1, len(qwen.calls))
+            self.assertEqual(1, len(qwen.calls))
+            self.assertEqual(1, adapter.capture_calls)
+            self.assertEqual(0, adapter.execute_calls)
+            auto_loop.assert_not_called()
+
+            cancelled = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+
+        self.assertEqual(200, cancelled.status_code, cancelled.text)
+        self.assertEqual("cancelled", cancelled.json()["session"]["status"])
+        self.assertEqual(
+            before_executions,
+            len(web_app.runtime.controller.executions),
+        )
+
+    def test_same_device_second_generic_session_returns_409(self) -> None:
+        orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
+        with tempfile.TemporaryDirectory() as temp:
+            with (
+                patch.object(web_app, "WEB_OUTPUT_DIR", Path(temp)),
+                patch.object(web_app, "_require_supervised_device_ready"),
+                patch.object(
+                    web_app.runtime,
+                    "universal_agent_orchestrator",
+                    orchestrator,
+                ),
+                patch.object(
+                    orchestrator,
+                    "run_autonomous_safe_loop",
+                    return_value={
+                        "physical_actions": 0,
+                        "iterations": 0,
+                        "status": "awaiting_confirmation",
+                        "pause_reason": "测试保留活动会话",
+                    },
+                ),
+            ):
+                first = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={"text": "查看详情", "device_id": "phone-01"},
+                )
+                directories_after_first = sorted(Path(temp).iterdir())
+                second = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={"text": "返回上一页", "device_id": "phone-01"},
+                )
+                directories_after_second = sorted(Path(temp).iterdir())
+                session_id = first.json()["session"]["session_id"]
+                self.client.post(
+                    f"/api/agent/generic-supervised/{session_id}/cancel",
+                    headers=self.headers,
+                    json={"device_id": "phone-01"},
+                )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 409, second.text)
+        self.assertEqual(second.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(directories_after_second, directories_after_first)
+        self.assertEqual(len(directories_after_first), 1)
+        self.assertEqual(len(qwen.calls), 1)
+        self.assertEqual(len(qwen.calls), 1)
+        self.assertEqual(adapter.capture_calls, 1)
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_safe_auto_executes_one_verified_action_without_confirmation(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+            patch.object(
+                orchestrator,
+                "run_autonomous_safe_loop",
+                return_value={
+                    "physical_actions": 0,
+                    "iterations": 0,
+                    "status": "awaiting_confirmation",
+                    "pause_reason": "测试把执行留给 /auto",
+                },
+            ),
+        ):
+            started = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "查看详情", "device_id": "phone-01"},
+            )
+            session_id = started.json()["session"]["session_id"]
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            automatic = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/auto",
+                headers=self.headers,
+                json={
+                    "device_id": "phone-01",
+                    "confirmed": False,
+                    "max_physical_actions": 1,
+                    "max_observations": 2,
+                },
+            )
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+
+        self.assertEqual(automatic.status_code, 200, automatic.text)
+        self.assertEqual(automatic.json()["execution"]["physical_actions"], 1)
+        self.assertEqual(automatic.json()["session"]["physical_actions"], 1)
+        self.assertGreaterEqual(adapter.capture_calls, 1)
+        self.assertEqual(adapter.execute_calls, 1)
+
+    def test_preview_requires_and_uses_exact_registered_device(self) -> None:
+        class PreviewController:
+            def __init__(self, marker: bytes):
+                self.marker = marker
+                self.calls = []
+
+            def capture_preview(self, quality=76):
+                self.calls.append(quality)
+                return b"jpeg-" + self.marker
+
+        phone_a = PreviewController(b"phone-a")
+        phone_b = PreviewController(b"phone-b")
+
+        def controller_for_device(device_id):
+            controllers = {"phone-a": phone_a, "phone-b": phone_b}
+            if device_id not in controllers:
+                raise web_app.UniversalAgentOrchestratorError(
+                    f"device_id 未登记或未启用：{device_id}。"
+                )
+            return controllers[device_id]
+
+        with patch.object(
+            web_app.runtime,
+            "controller_for_device",
+            side_effect=controller_for_device,
+        ):
+            missing = self.client.get("/api/preview.jpg")
+            unknown = self.client.get("/api/preview.jpg?device_id=phone-x")
+            first = self.client.get("/api/preview.jpg?device_id=phone-a")
+            second = self.client.get("/api/preview.jpg?device_id=phone-b")
+
+        self.assertEqual(422, missing.status_code)
+        self.assertEqual(404, unknown.status_code)
+        self.assertEqual(b"jpeg-phone-a", first.content)
+        self.assertEqual(b"jpeg-phone-b", second.content)
+        self.assertEqual([72], phone_a.calls)
+        self.assertEqual([72], phone_b.calls)
+
+    def test_preview_uses_one_cached_frame_while_device_is_coordinated(self) -> None:
+        class PreviewController:
+            def __init__(self):
+                self.calls = []
+
+            def capture_preview(self, quality=76):
+                self.calls.append(quality)
+                return f"jpeg-live-{len(self.calls)}".encode("ascii")
+
+        controller = PreviewController()
+        device_id = "phone-camera-lease"
+        with patch.object(
+            web_app.runtime,
+            "controller_for_device",
+            return_value=controller,
+        ):
+            first = self.client.get(f"/api/preview.jpg?device_id={device_id}")
+            coordination = (
+                web_app.runtime.device_runtime_resources.coordination_lock(
+                    device_id
+                )
+            )
+            self.assertTrue(coordination.acquire(blocking=False))
+            try:
+                cached = [
+                    self.client.get(f"/api/preview.jpg?device_id={device_id}")
+                    for _index in range(3)
+                ]
+            finally:
+                coordination.release()
+
+        self.assertEqual(200, first.status_code)
+        self.assertEqual("live", first.headers["X-Camera-Source"])
+        self.assertEqual([72], controller.calls)
+        self.assertTrue(all(item.content == first.content for item in cached))
+        self.assertTrue(
+            all(item.headers["X-Camera-Source"] == "cache" for item in cached)
+        )
+
+    def test_device_status_identifies_each_active_generic_session_device(self) -> None:
+        def active_session(session_id: str, device_id: str):
+            payload = {
+                "session_id": session_id,
+                "device_id": device_id,
+                "status": "awaiting_confirmation",
+                "step_number": 1,
+                "proposal": {"status": "action"},
+            }
+            return SimpleNamespace(
+                session_id=session_id,
+                device_id=device_id,
+                status="awaiting_confirmation",
+                snapshot=lambda payload=payload: dict(payload),
+            )
+
+        web_app.runtime.agent_session_repository.add(
+            active_session("session-phone-a", "phone-a")
+        )
+        web_app.runtime.agent_session_repository.add(
+            active_session("session-phone-b", "phone-b")
+        )
+
+        active = self.client.get("/api/device").json()[
+            "generic_supervised_execution"
+        ]["active_sessions"]
+
+        self.assertEqual(
+            {
+                (item["session_id"], item["device_id"])
+                for item in active
+            },
+            {
+                ("session-phone-a", "phone-a"),
+                ("session-phone-b", "phone-b"),
+            },
+        )
+
+    def test_device_status_and_doctor_share_observing_session_lease_state(self) -> None:
+        device_id = web_app.runtime.device_controllers.default_device_id
+        payload = {
+            "session_id": "session-observing",
+            "device_id": device_id,
+            "status": "observing",
+            "step_number": 2,
+            "proposal": None,
+        }
+        session = SimpleNamespace(
+            session_id=payload["session_id"],
+            device_id=device_id,
+            status="observing",
+            snapshot=lambda: dict(payload, status=session.status),
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        web_app.runtime.device_task_registry.reserve(device_id, session.session_id)
+
+        with patch.object(
+            web_app.runtime,
+            "serial_camera_session",
+            return_value=nullcontext(),
+        ), patch.object(
+            web_app,
+            "run_runtime_doctor",
+            side_effect=lambda **kwargs: {
+                "device": {"active_session": kwargs["active_session"]}
+            },
+        ):
+            active_device = self.client.get("/api/device").json()
+            active_doctor = self.client.get(f"/api/doctor/{device_id}").json()
+
+            active_sessions = active_device["generic_supervised_execution"][
+                "active_sessions"
+            ]
+            self.assertEqual(active_sessions, active_device["active_tasks"])
+            self.assertEqual("observing", active_sessions[0]["status"])
+            self.assertEqual(
+                session.session_id,
+                active_doctor["device"]["active_session"],
+            )
+
+            session.status = "failed"
+            web_app.runtime.device_task_registry.release(device_id, session.session_id)
+            failed_device = self.client.get("/api/device").json()
+            failed_doctor = self.client.get(f"/api/doctor/{device_id}").json()
+
+        self.assertEqual([], failed_device["active_tasks"])
+        self.assertEqual(
+            [],
+            failed_device["generic_supervised_execution"]["active_sessions"],
+        )
+        self.assertIsNone(failed_doctor["device"]["active_session"])
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

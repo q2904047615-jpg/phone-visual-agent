@@ -34,7 +34,7 @@ class PromptRoleConsistencyTests(unittest.TestCase):
                     self.assertIn('视频、动画或跨帧像素变化本身不是错误', prompt)
                     self.assertIn('SCENE CONTRACT只约束scene字段', prompt)
                     self.assertIn('只允许一个action或finish', prompt)
-                    self.assertIn('横坐标0..1000，纵坐标0..1000', prompt)
+                    self.assertIn('横坐标和纵坐标都为0..1000', prompt)
                     self.assertIn('旧聊天气泡或相同既有内容都不证明本次', prompt)
                     if include_input:
                         self.assertIn('INPUT CONTRACT applies only to input_structure', prompt)

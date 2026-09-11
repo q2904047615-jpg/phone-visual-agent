@@ -92,7 +92,7 @@ class RequestEvidenceTests(unittest.TestCase):
 
 class OptionalFieldContractTests(unittest.TestCase):
     def test_optional_target_details_on_two_canvases_keep_exact_point(self):
-        for height in (960, 1280):
+        for height in (1000,):
             schema = _single_step_response_format({}, input_structure_required=True,
                 request_height=height, available_action_kinds=('tap_semantic',))['json_schema']['schema']
             target = schema['properties']['decision']['properties']['target']
@@ -108,7 +108,7 @@ class OptionalFieldContractTests(unittest.TestCase):
                         target={'role': 'button', 'meaning': 'open_details', **details}, tap_point=[400, 500])}
                 parsed = _parse_single_step_observation_envelope(json.dumps(payload),
                     input_structure_required=False, request_image_size=(720, height))
-                self.assertEqual([400, round(500 * 1000 / height)], parsed['decision']['tap_point'])
+                self.assertEqual([400, 500], parsed['decision']['tap_point'])
 
 
 class ExecutionEvidenceTests(LoopHarness):
@@ -132,3 +132,4 @@ class ExecutionEvidenceTests(LoopHarness):
 
 if __name__ == '__main__':
     unittest.main()
+

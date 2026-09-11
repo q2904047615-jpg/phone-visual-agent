@@ -657,7 +657,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 "role": "input",
                 "meaning": "message_input_field",
                 "label": "",
-                "bounds": [120, 1160, 780, 1230],
+                "bounds": [120, 906, 780, 961],
                 "confidence": 1.0,
                 "states": {"goal_relevant": True, "fully_visible": True},
                 "evidence": ["底部工具栏中央空白长条区域"],
@@ -677,13 +677,13 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         }}}
         envelope = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1280},
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
             "input_structure": input_audit_payload(
-                application_inputs=[{"bounds": [120, 1160, 780, 1230], "text": ""}],
+                application_inputs=[{"bounds": [120, 906, 780, 961], "text": ""}],
             ),
             "decision": {"status": "action", "action": "tap_semantic", "element_id": "e2",
-                "tap_point": [450, 1195]},
+                "tap_point": [450, 934]},
         }
         observer = SingleStepGenericSceneObserver(SequenceProvider([envelope]))
 
@@ -1332,3 +1332,4 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

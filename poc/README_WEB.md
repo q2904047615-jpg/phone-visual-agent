@@ -11,7 +11,7 @@ worker、旧任务队列或旧语义执行接口。
 视觉模型配置：
 
 - `DASHSCOPE_API_KEY`：访问凭据；
-- `VISION_MODEL`：可替换视觉模型，默认 `qwen3.7-plus`；
+- `VISION_MODEL`：可替换视觉模型，默认 `qwen3-vl-plus`；
 - `VISION_MODEL_BASE_URL`：可选服务地址。
 
 正式运行只要求 Qwen 配置；DeepSeek 不再是启动依赖。密钥不写入报告、不输出到终端，也不通过临时
@@ -121,3 +121,4 @@ App 内部操作继续完全使用当前视觉闭环和机械臂。
 
 正式运行不存在 selector、动作后 replan、持久视觉/输入 lineage、decision cache、scene-only decision
 回退或第二完成裁决。不得为目录整齐增加转发包装、兼容开关或第二套权威。
+

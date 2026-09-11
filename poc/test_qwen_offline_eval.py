@@ -67,7 +67,7 @@ class SuccessfulEvalProvider(EvalProvider):
         return json.dumps(
             {
                 "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 960},
+                "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
                 "scene": {
                     "protocol_version": "2026-08-10-ui-scene-v2",
                     "foreground_app_id": "launcher",
@@ -476,3 +476,4 @@ class QwenOfflineReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

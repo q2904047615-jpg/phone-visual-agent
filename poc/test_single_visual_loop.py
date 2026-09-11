@@ -27,7 +27,7 @@ def decision(kind=None, *, meaning='open_details', role='button', text=None, out
     reported_outcome = outcome
     value = {'status':'finish' if kind is None else 'action', 'action':kind,
         'reason':'当前新图与本次执行记录证明结果', 'previous_action_outcome':reported_outcome}
-    if reported_outcome is not None:
+    if kind is not None:
         value['postcondition'] = {'status': {'matched':'confirmed',
             'unmatched':'not_confirmed', 'uncertain':'unknown'}[reported_outcome],
             'fact': '测试夹具动作后状态'}
@@ -169,3 +169,4 @@ class WholeTaskLoopTests(LoopHarness):
 
 if __name__ == '__main__':
     unittest.main()
+

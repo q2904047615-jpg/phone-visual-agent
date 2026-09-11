@@ -84,7 +84,7 @@ class SimpleInputCompletionTests(unittest.TestCase):
     def test_focus_tap_does_not_require_internal_id_or_diagnostic_prose(self):
         payload = saved_response(1)
         payload['decision'].update(action='tap_semantic', element_id=None, text=None,
-            target={'role': 'input', 'meaning': 'application_text_input'}, tap_point=[400,1160])
+            target={'role': 'input', 'meaning': 'application_text_input'}, tap_point=[400,906])
         payload['input_structure']['application_inputs'][0].update(focused=None)
         _, result, resolved, _ = observe(payload, input_graph())
         self.assertEqual('tap_semantic', result.proposal.action.action)

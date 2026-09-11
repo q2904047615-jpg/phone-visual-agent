@@ -94,7 +94,7 @@ class ExplicitInputFocusTests(unittest.TestCase):
         scene, result, resolved, _ = observe(payload, task_context('清空当前输入框'))
         self.assertIsNot(True, scene.elements[0].states.get('focused'))
         self.assertEqual('tap_semantic', result.proposal.action.action)
-        self.assertEqual((.5, .854), resolved.normalized_point)
+        self.assertEqual((.5, .41), resolved.normalized_point)
 
     def test_other_fields_focus_cannot_authorize_current_field_clear(self):
         payload = self.payload(False)

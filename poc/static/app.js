@@ -235,7 +235,7 @@ function taskRunPresentation() {
   return {
     state: "not-started",
     label: "未开始",
-    detail: "还没有提交普通 Agent 任务。输入目标后点击“生成动态计划”。",
+    detail: "还没有提交普通 Agent 任务。输入目标后点击“开始观察并执行”。",
     sessionId: "",
     updatedAt: "",
   };
@@ -1385,3 +1385,4 @@ document.querySelector("#promotionDialog").addEventListener("close", event => {
 });
 
 init();
+

@@ -180,6 +180,14 @@ class DirectCanonicalBindingTests(unittest.TestCase):
         self.assertEqual("aa你好", action.params["expected_input_value"])
         self.assertNotIn("expected_effect", action.params)
 
+    def test_text_action_accepts_redundant_input_description_without_binding_it(self) -> None:
+        raw = payload("input_verified_text", text="aa你好")
+        raw["target"] = {"role": "input", "meaning": "message_input",
+                          "label": "输入框", "evidence": ["当前焦点输入框"]}
+        normalized = normalize_model_step_decision(raw)
+        self.assertIsNone(normalized["target"])
+        self.assertEqual("aa你好", normalized["text"])
+
     def test_adb_keyboard_input_rejects_unfocused_field_even_when_unique_and_visible(self) -> None:
         input_box = element("message-input", role="input", meaning="message_input", label="消息",
             states={"enabled": True, "fully_visible": True, "value": "",

@@ -124,6 +124,14 @@ def normalize_model_step_decision(value: Any) -> dict[str, Any]:
                 target = _normalize_direct_target(target)
                 _validate_model_point(tap_point, f"{action}.tap_point")
             else:
+                if target is not None:
+                    # Some Qwen responses include a plain description of the
+                    # focused input alongside a text action.  It is
+                    # diagnostic only: the binder always consumes the unique
+                    # current-frame input audit and never this description as
+                    # a selector.
+                    _validate_text_target_description(target)
+                    target = None
                 reject_if(target is not None or any(part is not None for part in (
                     source_id, destination_id, direction)) or start is not None or end is not None,
                     CanonicalActionProtocolError("文字动作只消费同帧当前输入事实，不得夹带另一目标或轨迹。"))
@@ -177,6 +185,19 @@ def _validate_system_target_description(value: Any) -> None:
         or (value.get("evidence") is not None and (not isinstance(value["evidence"], list)
             or any(not isinstance(item, str) for item in value["evidence"]))),
         CanonicalActionProtocolError("系统动作附带target只能包含文字说明。"))
+
+
+def _validate_text_target_description(value: Any) -> None:
+    """Accept a redundant input description without letting it select a field."""
+    reject_if(not isinstance(value, Mapping),
+        CanonicalActionProtocolError("文字动作附带target只能是纯描述对象。"))
+    reject_if(set(value) - _DIRECT_TARGET_FIELDS,
+        CanonicalActionProtocolError("文字动作附带target不得包含几何、命令或其他动作字段。"))
+    reject_if(any(part is not None and not isinstance(part, str)
+        for key, part in value.items() if key != "evidence")
+        or (value.get("evidence") is not None and (not isinstance(value["evidence"], list)
+            or any(not isinstance(item, str) for item in value["evidence"]))),
+        CanonicalActionProtocolError("文字动作附带target只能包含文字说明。"))
 
 
 def _validate_model_point(value: Any, label: str) -> None:

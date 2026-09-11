@@ -860,7 +860,16 @@ async function continueBudgetAgent() {
   }
 }
 
-async function startSupervisedAgent() {
+'function apiWithTimeout(path, options = {}, timeoutMs = 35000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return api(path, { ...options, signal: controller.signal }).catch(error => {
+    if (error?.name === "AbortError") throw new Error("启动任务超过35秒仍未完成首轮视觉观察，请检查Qwen服务或网络状态。" );
+    throw error;
+  }).finally(() => clearTimeout(timer));
+}
+
+'async function startSupervisedAgent() {
   const text = document.querySelector("#agentText").value.trim();
   const current = sessionView();
   if (!text) return toast("请先输入希望手机完成的目标。", true);
@@ -1385,4 +1394,5 @@ document.querySelector("#promotionDialog").addEventListener("close", event => {
 });
 
 init();
+
 

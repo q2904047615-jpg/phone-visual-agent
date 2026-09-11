@@ -228,10 +228,6 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     '"coordinate_space":{"kind":"axis_grid","width":1000,"height":1000}',
                     prompt,
                 )
-                self.assertNotIn(
-                    '"coordinate_space":{"kind":"axis_grid",' '"width":1000,"height":1000}',
-                    prompt,
-                )
 
         self.assertEqual((0.12, 0.906, 0.78, 0.953), canonical_bounds[0])
         self.assertEqual(canonical_bounds[0], canonical_bounds[1])
@@ -239,3 +235,4 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

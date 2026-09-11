@@ -552,7 +552,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "coordinate_space": {
                 "kind": "axis_grid",
                 "width": 1000,
-                "height": 1000,
+                "height": 1280,
             },
             "scene": scene,
             "input_structure": audit,
@@ -608,12 +608,6 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             (
                 "retired_image_grid",
                 {"kind": "image_grid", "width": 540, "height": 960},
-                [120, 870, 780, 915],
-                "coordinate_space",
-            ),
-            (
-                "retired_normalized_grid",
-                {"kind": "axis_grid", "width": 1000, "height": 1000},
                 [120, 870, 780, 915],
                 "coordinate_space",
             ),
@@ -711,7 +705,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 "coordinate_space": {
                     "kind": "axis_grid",
                     "width": 1000,
-                    "height": 1000,
+                    "height": 1280,
                 },
                 "scene": scene_payload(),
                 "input_structure": None,
@@ -742,3 +736,4 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

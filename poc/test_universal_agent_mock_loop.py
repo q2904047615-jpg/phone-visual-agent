@@ -112,7 +112,7 @@ def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str)
             "status": "finish", "previous_action_outcome": "matched",
             "evidence_refs": ["scene.summary"],
             "confidence": 0.97,
-            "reason": "合成的新截图已经证明当前目标完成。",
+            "reason": "合成的新截图已经证明当前目标完成。",`n            "postcondition": {"status": "confirmed", "fact": "目标完成"},
         }
     payload = {
         "status": "action",
@@ -432,6 +432,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

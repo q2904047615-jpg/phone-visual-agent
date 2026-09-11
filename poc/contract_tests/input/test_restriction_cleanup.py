@@ -81,6 +81,15 @@ class ClearResultRestrictionTests(unittest.TestCase):
         self.assertEqual([], robot.actions)
 
 
+class InputEffectOrderingPromptTests(unittest.TestCase):
+    def test_explicit_text_effects_keep_input_as_a_separate_step(self):
+        root = Path(__file__).resolve().parents[2] / "agent"
+        prompt = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
+        self.assertIn("需要输入并提交明确文字时，输入必须作为独立动作完成", prompt)
+        self.assertIn("只有实际历史已经记录该input_verified_text", prompt)
+        self.assertIn("不能跳过输入", prompt)
+
+
 class RecentPageRestrictionTests(unittest.TestCase):
     def test_navigation_is_general_but_cleanup_button_remains_scoped(self):
         root = Path(__file__).resolve().parents[2] / "agent"

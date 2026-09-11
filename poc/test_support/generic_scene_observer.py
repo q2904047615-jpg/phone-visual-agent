@@ -32,13 +32,7 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
             "scene": payload,
             "input_structure": None,
         }
-    coordinate_space = payload.get("coordinate_space")
-    normalized_fixture = coordinate_space == {
-        "kind": "normalized_1000",
-        "width": 1000,
-        "height": 1000,
-    }
-    if not (flat_scene or normalized_fixture):
+    if not flat_scene:
         if (
             payload.get("protocol_version")
             == SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
@@ -47,29 +41,6 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
             payload["decision"] = default_model_decision()
         _adapt_direct_point_fixture(payload)
         return payload
-    if normalized_fixture:
-        payload["coordinate_space"] = {
-            "kind": "axis_grid",
-            "width": 1000,
-            "height": request_height,
-        }
-
-    def scale(node, *, anchors: bool = False) -> None:
-        if isinstance(node, list):
-            for item in node:
-                scale(item, anchors=anchors)
-        elif isinstance(node, dict):
-            for key, item in node.items():
-                if key == "bounds" and isinstance(item, list) and len(item) == 4:
-                    item[1] = round(item[1] * request_height / 1000)
-                    item[3] = round(item[3] * request_height / 1000)
-                elif anchors and isinstance(item, list) and len(item) == 2:
-                    item[1] = round(item[1] * request_height / 1000)
-                else:
-                    scale(item, anchors=(key == "qwerty_anchors"))
-
-    scale(payload.get("scene"))
-    scale(payload.get("input_structure"))
     payload.setdefault("decision", default_model_decision())
     _adapt_direct_point_fixture(payload)
     return payload

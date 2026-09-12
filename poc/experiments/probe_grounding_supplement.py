@@ -1,11 +1,13 @@
 """New explicit six-call authorization; old stopped two-call campaign is read-only."""
 import argparse
+import json
 from pathlib import Path
 import sys
 
 POC = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(POC))
 from experiments import probe_grounding_isolation as base
+from test_support.generic_scene_observer import current_axis_grid_payload
 
 PARENT = POC / 'output/grounding_isolation_20260907'
 OUT = PARENT / 'approved_supplement_6'
@@ -29,9 +31,19 @@ def prepare():
         assert old['wire_hashes'][key] == value, 'Previously frozen request changed'
     # Preserve original raw/result files; reparse both saved replies OFFLINE.
     reviewed = {}
+    size = base._image_request_size(base.fixture('failed_send')['frames'][-1])
     for variant in base.VARIANTS:
         raw = base.read(PARENT / f'failed_send_{variant}_raw.json')['raw']
-        point, parsed = base.parse_reply(raw, variant, (720, 1280), True)
+        decoded = json.loads(raw)
+        if variant == 'full':
+            adapted = current_axis_grid_payload(decoded, request_height=size[1])
+            migrated = json.dumps(adapted)
+        else:
+            migrated = json.dumps(decoded)
+            if isinstance(decoded, list) and len(decoded) == 1 and isinstance(decoded[0], dict):
+                decoded[0]['coordinate_space'] = {'kind': 'axis_grid', 'width': 1000, 'height': size[1]}
+                migrated = json.dumps(decoded)
+        point, parsed = base.parse_reply(migrated, variant, size, True)
         frame = [round(point[0]*809/1000), round(point[1]*1439/1000)]
         reviewed[variant] = {'canonical_point': point, 'frame_point': frame,
             'inside_target_region': base.in_region(frame, old['regions']['failed_send']),

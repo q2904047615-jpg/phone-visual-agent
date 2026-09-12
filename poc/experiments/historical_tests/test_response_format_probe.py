@@ -59,8 +59,15 @@ class ResponseFormatProbeTests(unittest.TestCase):
 
     def test_parse_failure_keeps_raw_and_allows_second_but_never_third(self):
         raw = json.dumps([probe.base.grounding_schema(1280)['json_schema']['schema']])
-        valid = json.dumps({'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': 1280},
-            'tap_point': [895, 1125]})
+        provider = probe.base.DashScopeVisionProvider(api_key='offline-dummy', enable_thinking=True, max_attempts=1)
+        _, size, _, case = probe.build(provider, 'schema')
+        frame_width, frame_height = case['frames'][-1].size
+        region = probe.base.REGIONS['successful_send']
+        center_x = (region['bounds'][0] + region['bounds'][2]) / 2
+        center_y = (region['bounds'][1] + region['bounds'][3]) / 2
+        valid = json.dumps({'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': size[1]},
+            'tap_point': [round(center_x * 1000 / (frame_width - 1)),
+                round(center_y * size[1] / (frame_height - 1))]})
         with tempfile.TemporaryDirectory() as directory, patch.object(probe, 'OUT', Path(directory)):
             probe.prepare()
             with patch.object(probe.base.DashScopeVisionProvider, 'configured', True), \

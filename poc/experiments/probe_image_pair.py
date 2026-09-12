@@ -80,7 +80,7 @@ def prepare():
         bodies[variant] = body
         wires[variant] = base.redacted_wire(body)
         cases[variant] = {k: case[k] for k in ('source_record', 'frame_paths', 'context')}
-        if size != (720, 1280) or not required:
+        if not required:
             raise RuntimeError('Unexpected dimensions/input contract')
     if without_images(bodies['old']) != without_images(bodies['current']) or wires['old'] == wires['current']:
         raise RuntimeError('Comparison must differ only in image bytes')

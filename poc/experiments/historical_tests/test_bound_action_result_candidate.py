@@ -119,7 +119,7 @@ class BoundActionResultTests(unittest.TestCase):
     def test_uniform_xy_is_independent_and_preserves_jpeg_dimensions_and_body(self):
         actual = self.prepare(bind_result=False, uniform_xy=True)
         self.assertIn('CURRENT组每张JPEG为720×1280', actual['prompt'])
-        self.assertIn('纵坐标0..1000', actual['prompt'])
+        self.assertIn('纵坐标都为0..1000', actual['prompt'])
         self.assertEqual([1000], actual['response_format']['json_schema']['schema']['properties']
             ['coordinate_space']['properties']['height']['enum'])
         context, _ = json.JSONDecoder().raw_decode(actual['prompt'].split(PREFIX, 1)[1])
@@ -161,6 +161,7 @@ class BoundActionResultTests(unittest.TestCase):
         for kind in ('home', 'back', 'open_recent_apps', 'reveal_system_navigation', None):
             original = decision(kind, status='finish' if kind is None else 'action')
             original['previous_action_outcome'] = 'uncertain'
+            original['postcondition'] = {'status': 'unknown', 'fact': '当前截图无法确认上一步动作结果'}
             candidate = deepcopy(original)
             candidate.pop('previous_action_outcome')
             candidate.update(evaluated_action_id=action_id, action_result='uncertain',

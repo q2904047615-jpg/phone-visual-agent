@@ -53,8 +53,7 @@ class FullResponseProbeTests(unittest.TestCase):
 
     def test_saved_fixture_has_empty_history_and_full_schema(self):
         body, size, include_input, original = probe.build(self.provider)
-        self.assertEqual(size, (720, 1280))
-        self.assertEqual(original, (810, 1440))
+        self.assertEqual(size, original)
         self.assertTrue(include_input)
         self.assertEqual(body['response_format']['type'], 'json_schema')
         self.assertTrue(body['enable_thinking'])

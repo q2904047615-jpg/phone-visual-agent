@@ -71,7 +71,7 @@ def prepare():
         if invariant is not None and candidate != invariant:
             raise RuntimeError('Unexpected non-target request difference')
         invariant = candidate
-        if size != (720, 1280) or not required:
+        if size != base._image_request_size(case['frames'][-1]) or not required:
             raise RuntimeError('Unexpected request shape')
         wires[name] = base.redacted_wire(body)
         save(name + '_wire.json', wires[name])
@@ -105,7 +105,7 @@ def recognize(name):
     if hashes() != pre['fingerprints'] or base.production_hashes() != pre['production_hashes']:
         raise RuntimeError('Frozen source drift')
     provider = base.DashScopeVisionProvider(enable_thinking=True, max_attempts=1)
-    if not provider.configured or provider.model != 'qwen3.7-plus' or provider.base_url != 'https://dashscope.aliyuncs.com/compatible-mode/v1':
+    if not provider.configured or provider.model != 'qwen3-vl-plus' or provider.base_url != 'https://dashscope.aliyuncs.com/compatible-mode/v1':
         raise RuntimeError('Unconfigured or unexpected provider')
     body, size, required, case = build(provider, name)
     if base.model_config(provider) != pre['model_config'] or base.digest(base.redacted_wire(body)) != pre['wire_hashes'][name]:

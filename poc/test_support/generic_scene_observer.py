@@ -21,6 +21,22 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
 
     payload = json.loads(json.dumps(value, ensure_ascii=False))
     flat_scene = payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
+    envelope = isinstance(payload.get("scene"), dict) and isinstance(payload.get("decision"), dict)
+    if envelope:
+        old_height = (payload.get("coordinate_space") or {}).get("height")
+        if isinstance(old_height, (int, float)) and old_height not in (0, 1000):
+            decision = payload.get("decision")
+            point = decision.get("tap_point") if isinstance(decision, dict) else None
+            if isinstance(point, list) and len(point) == 2 and isinstance(point[1], (int, float)):
+                point[1] = round(point[1] * 1000 / old_height)
+            scene = payload.get("scene")
+            for element in scene.get("elements", []) if isinstance(scene, dict) else []:
+                bounds = element.get("bounds") if isinstance(element, dict) else None
+                if isinstance(bounds, list) and len(bounds) == 4:
+                    bounds[1] = round(bounds[1] * 1000 / old_height)
+                    bounds[3] = round(bounds[3] * 1000 / old_height)
+        if "protocol_version" not in payload:
+            payload["protocol_version"] = SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
     if flat_scene:
         payload = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
@@ -39,6 +55,20 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
             and "decision" not in payload
         ):
             payload["decision"] = default_model_decision()
+        if payload.get("protocol_version") == SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION:
+            payload["coordinate_space"] = {
+                "kind": "axis_grid",
+                "width": 1000,
+                "height": 1000,
+            }
+            decision = payload.get("decision")
+            if isinstance(decision, dict) and decision.get("action") and "postcondition" not in decision:
+                decision["postcondition"] = {
+                    "status": "unknown",
+                    "fact": "当前截图无法确认上一步动作结果",
+                }
+        if set(payload) >= {"coordinate_space", "tap_point"} and isinstance(payload.get("coordinate_space"), dict):
+            payload["coordinate_space"] = {"kind": "axis_grid", "width": 1000, "height": request_height}
         _adapt_direct_point_fixture(payload)
         return payload
     payload.setdefault("decision", default_model_decision())

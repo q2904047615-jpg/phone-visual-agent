@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from experiments import probe_uniform_xy as probe
+from test_support.generic_scene_observer import current_axis_grid_payload
 
 
 class UniformXYTests(unittest.TestCase):
@@ -50,10 +51,11 @@ class UniformXYTests(unittest.TestCase):
 
     def test_pure_candidate_parser_preserves_uniform_geometry(self):
         record = probe.read(probe.CURRENT / '3baacd4002744532ad5b3c8280bf577e_model_response.json')
-        reply = json.loads(record['redacted_raw_response'])
+        reply = current_axis_grid_payload(json.loads(record['redacted_raw_response']), request_height=1280)
         baseline = probe.parse_reply(json.dumps(reply), uniform=False, actual_size=(720, 1280), include_input=True)
         self.assertEqual([915, 906], baseline['decision']['tap_point'])
         reply['coordinate_space']['height'] = 1000
+        reply['decision']['postcondition'] = {'status': 'unknown', 'fact': '当前截图无法确认上一步动作结果'}
         reply['decision']['tap_point'] = [850, 870]
         reply['input_structure']['application_inputs'][0]['bounds'] = [130, 850, 830, 900]
         candidate = probe.parse_reply(json.dumps(reply), uniform=True, actual_size=(720, 1280), include_input=True)

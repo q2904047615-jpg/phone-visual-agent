@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 from experiments.history_dialogue_candidate import DialogueCandidateObserver, reframe_as_dialogue
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
+from agent.infrastructure.dashscope_vision_provider import _image_request_size
 import contract_tests.observation.test_action_comparison_context as history_fixtures
 from test_support.generic_scene_observer import (
     SequenceProvider,
@@ -24,7 +25,8 @@ class FactualDialogueCandidateTests(unittest.TestCase):
 
     def observe(self, cls, context, payload=None):
         reply = payload or wire(decision('home'))
-        reply['coordinate_space'] = {'kind': 'normalized_1000', 'width': 1000, 'height': 1000}
+        reply['coordinate_space'] = {'kind': 'axis_grid', 'width': 1000,
+            'height': 1000}
         provider = SequenceProvider([reply])
         observer = cls(provider)
         observer.observe_with_decision(frames=stable_frames(), goal_context=context, device_id='device-1')
@@ -79,7 +81,8 @@ class FactualDialogueCandidateTests(unittest.TestCase):
 
     def test_reused_observer_does_not_keep_previous_task_or_images(self):
         reply = wire(decision('home'))
-        reply['coordinate_space'] = {'kind': 'normalized_1000', 'width': 1000, 'height': 1000}
+        reply['coordinate_space'] = {'kind': 'axis_grid', 'width': 1000,
+            'height': 1000}
         p = SequenceProvider([deepcopy(reply), deepcopy(reply)])
         observer = DialogueCandidateObserver(p)
         observer.observe_with_decision(frames=stable_frames((200, 30, 30)),

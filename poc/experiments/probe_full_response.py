@@ -91,7 +91,7 @@ def recognize():
     if fingerprints() != pre['fingerprints'] or base.production_hashes() != pre['production_hashes']:
         raise RuntimeError('Frozen code or input drift')
     provider = base.DashScopeVisionProvider(enable_thinking=True, max_attempts=1)
-    if not provider.configured or provider.model != 'qwen3.7-plus' or provider.base_url != 'https://dashscope.aliyuncs.com/compatible-mode/v1':
+    if not provider.configured or provider.model != 'qwen3-vl-plus' or provider.base_url != 'https://dashscope.aliyuncs.com/compatible-mode/v1':
         raise RuntimeError('Unexpected endpoint/model or missing credentials')
     body, size, include_input, original = build(provider)
     if base.model_config(provider) != pre['model_config'] or base.digest(base.redacted_wire(body)) != pre['wire_hash']:

@@ -21,7 +21,7 @@ class SpatialTargetsTests(unittest.TestCase):
         for name in probe.ORDER:
             body,size,required,case = probe.build(provider,name)
             bodies.append(probe.neutral(body,name))
-            self.assertEqual(size,(720,1280))
+            self.assertEqual(size, probe.base._image_request_size(case['frames'][-1]))
             self.assertTrue(required)
             self.assertEqual(case['context']['entities']['history'],[])
             self.assertEqual(case['allowed'],['tap_semantic'])

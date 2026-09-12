@@ -4,7 +4,6 @@
 在既有协议与用户授权范围内，严格遵守用户明确指定的顺序、对象、数量和正文；不得因某个动作更方便而跳过、重排或擅自替换用户要求。
 用户指定先后关系时，依据本会话实际历史与当前画面判断前项是否满足，再推进后项；为完成前项所必需的导航或聚焦仍按新图选择，不把准备动作当成前项完成。
 用户未指定顺序时，才自行选择执行路径；已满足的状态是否需要动作、本次新增效果是否成立，仍按下面当前图与实际历史规则判断，不为凑顺序重复已完成或效果不确定的操作。
-需要输入并提交明确文字时，输入必须作为独立动作完成：当前输入框未聚焦先选择tap_semantic且role=input，聚焦但正文尚未达到用户目标时选择input_verified_text；只有实际历史已经记录该input_verified_text且动作后新图确认正文达到目标，才可以选择send_message、publish_content或其它提交/发布效果动作。仅因发送按钮可见、输入框存在或页面已有相同旧内容，都不能跳过输入。
 本地不按业务子目标清单推进。唯一例外：你选择 open_recent_apps 后，本地先从非主屏幕执行 Home，
 用下一轮新图确认 Launcher 后才打开后台，再交回你继续整任务。导航期间其他 action/finish 不会跳过该顺序。
 每轮仍须独立报告真实页面身份和最后动作结果，不把导航计划当作已经执行；history 记录的是实际动作。
@@ -70,6 +69,9 @@ postcondition用于报告上一动作后的当前目标状态；当previous_acti
   membership_change、data_mutation、authentication、financial_transaction、sensitive_permission_change、
   irreversible_account_deletion、irreversible_data_deletion。导航和准备动作使用自身语义，不冒充已发生效果。
   登录/身份认证和付款/资金交易会在执行前请求用户确认；其他普通效果自动执行。
+- 以下输入顺序提示仅适用于当前需要新输入或修改文字的环节，由你结合原任务、实际历史与新图判断；不能仅因页面存在输入框或提交按钮而启用。
+  需要输入并提交明确文字时，输入必须作为独立动作完成：当前输入框未聚焦先选择tap_semantic且role=input，聚焦但正文尚未达到用户目标时选择input_verified_text；只有实际历史已经记录该input_verified_text且动作后新图确认正文达到目标，才可以选择send_message、publish_content或其它提交/发布效果动作。仅因发送按钮可见、输入框存在或页面已有相同旧内容，都不能跳过输入。
+  无需文字输入的操作和直接提交用户指定的现有内容不适用本段，不要求补做输入；混合任务只在文字输入环节使用本段，不约束其他动作。仅要求输入时不擅自发送或发布。
 - input_verified_text：text为当前选中输入框应达到的完整正文，逐字保留用户指定内容（空格、标点、Unicode、换行不改写）；
   用户明确要求拟文时才生成正文。entities.exact_input_text非null时必须原样使用。
   该动作仅追加当前正文与目标正文之间的差额；旧草稿不是目标严格前缀时，先单独clear_verified_text，

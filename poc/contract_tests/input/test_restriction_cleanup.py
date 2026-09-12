@@ -82,12 +82,16 @@ class ClearResultRestrictionTests(unittest.TestCase):
 
 
 class InputEffectOrderingPromptTests(unittest.TestCase):
-    def test_explicit_text_effects_keep_input_as_a_separate_step(self):
+    def test_input_order_guidance_is_scoped_to_text_entry(self):
         root = Path(__file__).resolve().parents[2] / "agent"
         prompt = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
         self.assertIn("需要输入并提交明确文字时，输入必须作为独立动作完成", prompt)
         self.assertIn("只有实际历史已经记录该input_verified_text", prompt)
         self.assertIn("不能跳过输入", prompt)
+        self.assertIn("以下输入顺序提示仅适用于当前需要新输入或修改文字的环节", prompt)
+        self.assertIn("无需文字输入的操作和直接提交用户指定的现有内容不适用本段", prompt)
+        self.assertIn("混合任务只在文字输入环节使用本段，不约束其他动作", prompt)
+        self.assertIn("仅要求输入时不擅自发送或发布", prompt)
 
 
 class RecentPageRestrictionTests(unittest.TestCase):

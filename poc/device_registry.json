@@ -19,6 +19,78 @@
         "tap_semantic",
         "wait_for_change"
       ]
+    },
+    {
+      "device_id": "device-local-02",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 2,
+      "calibration_path": "tap_calibration_02.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-03",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 3,
+      "calibration_path": "tap_calibration_03.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-04",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 4,
+      "calibration_path": "tap_calibration_04.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-05",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 5,
+      "calibration_path": "tap_calibration_05.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-06",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 6,
+      "calibration_path": "tap_calibration_06.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-07",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 7,
+      "calibration_path": "tap_calibration_07.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-08",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 8,
+      "calibration_path": "tap_calibration_08.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-09",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 9,
+      "calibration_path": "tap_calibration_09.json",
+      "verified_actions": []
+    },
+    {
+      "device_id": "device-local-10",
+      "enabled": false,
+      "window_title": "",
+      "machine_position": 10,
+      "calibration_path": "tap_calibration_10.json",
+      "verified_actions": []
     }
   ]
 }

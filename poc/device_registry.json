@@ -6,6 +6,7 @@
       "device_id": "device-local-01",
       "enabled": true,
       "window_title": "",
+      "machine_position": 1,
       "calibration_path": "tap_calibration.json",
       "verified_actions": [
         "back",

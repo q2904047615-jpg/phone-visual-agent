@@ -35,7 +35,10 @@ class DeviceControllerRegistry:
         self._descriptors: dict[str, dict[str, Any]] = {}
         enabled_windows: set[str] = set()
         window_positions: dict[str, set[int | None]] = {}
-        window_locks: dict[str, threading.RLock] = {}
+        # The operation lock is inspected through ``locked()`` by the runtime
+        # status endpoint, so keep it as a plain Lock. Capture remains
+        # re-entrant because nested passive/active frame helpers share it.
+        window_locks: dict[str, threading.Lock] = {}
         window_capture_locks: dict[str, threading.RLock] = {}
         for raw in payload['devices']:
             if not isinstance(raw, dict) or raw.get('enabled') is not True:
@@ -72,7 +75,7 @@ class DeviceControllerRegistry:
                 window_positions[effective_window] = existing_positions
                 enabled_windows.add(effective_window)
             existing_positions.add(machine_position)
-            operation_lock = window_locks.setdefault(effective_window, threading.RLock())
+            operation_lock = window_locks.setdefault(effective_window, threading.Lock())
             capture_lock = window_capture_locks.setdefault(effective_window, threading.RLock())
             calibration_path = Path(calibration_value or "tap_calibration.json")
             if not calibration_path.is_absolute():

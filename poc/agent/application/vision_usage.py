@@ -135,12 +135,13 @@ class VisionSessionUsageLedger:
         cached = _non_negative_int(prompt_details.get('cached_tokens')) if isinstance(prompt_details, Mapping) else 0
         elapsed = max(0.0, float(elapsed_seconds)) if isinstance(elapsed_seconds, (int,
             float)) and (not isinstance(elapsed_seconds, bool)) else None
+        attempts = max(1, int(network_attempts))
         with self._lock:
             event = self._request_event(local_request_id)
             reject_if(event.get('outcome') != 'started', VisionUsageError("Qwen 请求用量被重复结算。"))
             event.update({'outcome': 'succeeded', 'completed_at': self._timestamp(),
                 'provider_request_id': str(provider_request_id or '')[:256],
-                'response_model': str(response_model or '')[:128], 'network_attempts': max(1, int(network_attempts)),
+                'response_model': str(response_model or '')[:128], 'network_attempts': attempts,
                 'prompt_tokens': prompt, 'completion_tokens': completion, 'total_tokens': total,
                 'cached_prompt_tokens': cached, 'finish_reason': str(finish_reason or '')[:120],
                 'elapsed_seconds': round(elapsed, 6) if elapsed is not None else None,
@@ -148,7 +149,7 @@ class VisionSessionUsageLedger:
                 input_rate=QWEN_PLUS_LIST_INPUT_CNY_PER_MILLION, output_rate=QWEN_PLUS_LIST_OUTPUT_CNY_PER_MILLION),
                 'estimated_promotional_cost_cny': _cost_cny(prompt_tokens=prompt, completion_tokens=completion,
                 input_rate=QWEN_PLUS_PROMO_INPUT_CNY_PER_MILLION, output_rate=QWEN_PLUS_PROMO_OUTPUT_CNY_PER_MILLION)})
-            for key, amount in {'successful_requests': 1, 'network_attempts': max(1, int(network_attempts)),
+            for key, amount in {'successful_requests': 1, 'network_attempts': attempts,
                 'prompt_tokens': prompt, 'completion_tokens': completion, 'total_tokens': total}.items():
                 self._totals[key] += amount
             self._add_elapsed(elapsed)
@@ -157,15 +158,16 @@ class VisionSessionUsageLedger:
         elapsed_seconds: float | None=None) -> None:
         elapsed = max(0.0, float(elapsed_seconds)) if isinstance(elapsed_seconds, (int,
             float)) and (not isinstance(elapsed_seconds, bool)) else None
+        attempts = max(0, int(network_attempts))
         with self._lock:
             event = self._request_event(local_request_id)
             if event.get('outcome') != 'started':
                 return
-            event.update({'outcome': 'failed', 'completed_at': self._timestamp(), 'network_attempts': max(0,
-                int(network_attempts)), 'error_type': error.__class__.__name__ if isinstance(error,
+            event.update({'outcome': 'failed', 'completed_at': self._timestamp(),
+                'network_attempts': attempts, 'error_type': error.__class__.__name__ if isinstance(error,
                 BaseException) else 'error', 'error': str(error)[:500], 'elapsed_seconds': round(elapsed,
                 6) if elapsed is not None else None})
-            self._totals['network_attempts'] += max(0, int(network_attempts))
+            self._totals['network_attempts'] += attempts
             self._add_elapsed(elapsed)
 
     def to_dict(self) -> dict[str, Any]:

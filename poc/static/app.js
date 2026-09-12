@@ -613,8 +613,9 @@ function renderMachinePositions() {
   const selected = currentMachinePosition();
   const view = sessionView();
   const controllerOnline = Boolean(currentDeviceDescriptor()?.controller_online ?? state.device?.controller_online);
-  const cameraOnline = Boolean(currentDeviceDescriptor()?.camera_online ?? state.device?.camera_online);
-  const disabled = state.busy || Boolean(view && !view.isTerminal) || !controllerOnline || !cameraOnline;
+  // Position selection targets the seller controller toolbar; camera readiness
+  // is required for task execution and preview, but not for this control.
+  const disabled = state.busy || Boolean(view && !view.isTerminal) || !controllerOnline;
   container.replaceChildren(...Array.from({ length: 10 }, (_, index) => {
     const position = index + 1;
     const button = document.createElement("button");

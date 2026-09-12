@@ -51,6 +51,12 @@ def _non_negative_int(value: Any) -> int:
     return value if isinstance(value, int) and (not isinstance(value, bool)) and (value >= 0) else 0
 
 
+def _elapsed_seconds(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return max(0.0, float(value))
+
+
 @dataclass
 class VisionSessionUsageLedger:
     """Thread-safe, session-scoped Qwen request and token ledger."""
@@ -133,8 +139,7 @@ class VisionSessionUsageLedger:
         total = _non_negative_int(raw.get("total_tokens")) or prompt + completion
         prompt_details = raw.get("prompt_tokens_details")
         cached = _non_negative_int(prompt_details.get('cached_tokens')) if isinstance(prompt_details, Mapping) else 0
-        elapsed = max(0.0, float(elapsed_seconds)) if isinstance(elapsed_seconds, (int,
-            float)) and (not isinstance(elapsed_seconds, bool)) else None
+        elapsed = _elapsed_seconds(elapsed_seconds)
         attempts = max(1, int(network_attempts))
         with self._lock:
             event = self._request_event(local_request_id)
@@ -156,8 +161,7 @@ class VisionSessionUsageLedger:
 
     def record_failure(self, local_request_id: str, *, network_attempts: int, error: BaseException | str,
         elapsed_seconds: float | None=None) -> None:
-        elapsed = max(0.0, float(elapsed_seconds)) if isinstance(elapsed_seconds, (int,
-            float)) and (not isinstance(elapsed_seconds, bool)) else None
+        elapsed = _elapsed_seconds(elapsed_seconds)
         attempts = max(0, int(network_attempts))
         with self._lock:
             event = self._request_event(local_request_id)

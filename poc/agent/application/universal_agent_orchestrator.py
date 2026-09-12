@@ -6,7 +6,6 @@ from agent.domain.confirmation_authority import normalize_action_scope
 
 from collections.abc import Mapping
 from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
 import re
 from typing import Any, Callable

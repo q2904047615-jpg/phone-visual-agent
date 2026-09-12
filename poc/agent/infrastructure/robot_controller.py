@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from agent.domain.validation import NormalizedPoint, reject_if
 import json
-import re
 import threading
 from pathlib import Path
 from typing import Any

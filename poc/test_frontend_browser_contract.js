@@ -491,8 +491,8 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20260912-console-copy-v1"));
-    assert.ok(requests.assets.includes("/assets/styles.css?v=20260912-console-copy-v1"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=20260912-machine-position-v2"));
+    assert.ok(requests.assets.includes("/assets/styles.css?v=20260912-machine-position-v1"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);
     assert.equal(requests.assets.includes("/assets/styles.css"), false);
   } finally {
@@ -1000,4 +1000,5 @@ for (const mode of ["paused", "budget_paused"]) {
     }
   });
 }
+
 

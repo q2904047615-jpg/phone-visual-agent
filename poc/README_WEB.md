@@ -77,6 +77,15 @@ Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册�
   注册表绑定和 transport 回执。直启后必须重新截图，页面、下一动作和 `finish` 仍只由下一次 Qwen 响应
   决定。系统包名不在 Qwen `finish` 后形成第二完成裁决，也不能把 ADB 返回码当作高层任务成功。
 
+### 卖家系统多机位
+
+卖家 `main.exe` 的 1～10 号按钮对应机位配置。`device_registry.json` 中每个设备可选
+`machine_position`（1～10）；任务开始时项目在首次真实观察前选择该机位，然后使用该设备的
+`calibration_path`。机位选择只发生一次，不会在每轮观察或只读预览时移动机械臂。
+
+`machine_position` 必须与卖家 `me_config` 下的机位 JSON、控制端摄像头绑定和该手机的物理安装位置一致；
+未知串口、标定文件或机位编号不要写入正式注册表，先在模拟模式和只读 doctor 中核对。
+
 ## 当前公开能力
 
 - `GET /api/session`：读取本地控制会话元数据；

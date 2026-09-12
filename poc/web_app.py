@@ -319,9 +319,7 @@ class Runtime:
                 exclusive_device_session=lambda device_id: (
                     _agent_device_execution(device_id)
                 ),
-                begin_new_task=lambda device_id: (
-                    self.controller_for_device(device_id).begin_new_task()
-                ),
+                begin_new_task=lambda device_id: self._begin_new_task_for_device(device_id),
             )
         )
         self.capability_acceptance_manager = CapabilityAcceptanceManager(
@@ -337,6 +335,11 @@ class Runtime:
         self.device_runtime_resources = DeviceRuntimeResourceRegistry(
             (self.device_controllers.default_device_id,)
         )
+
+    def _begin_new_task_for_device(self, device_id: str) -> None:
+        controller = self.controller_for_device(device_id)
+        controller.begin_new_task()
+        controller.prepare_machine_position()
 
     def controller_for_device(self, device_id: str) -> RobotController:
         if str(device_id or "").strip() == self.device_controllers.default_device_id:

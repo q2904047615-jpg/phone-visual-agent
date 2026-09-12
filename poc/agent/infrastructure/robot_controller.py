@@ -88,9 +88,15 @@ class RobotController:
     """Safe, single-machine adapter used by the local web task worker."""
 
     def __init__(self, title: str=seller_gui.DEFAULT_WINDOW_TITLE, *, calibration_path: Path | None=None,
-        verified_actions: set[str] | frozenset[str] | None=None, device_id: str) -> None:
+        verified_actions: set[str] | frozenset[str] | None=None, device_id: str,
+        machine_position: int | None=None) -> None:
         self.title = title
         self.device_id = str(device_id or "").strip()
+        reject_if(machine_position is not None and (isinstance(machine_position, bool)
+            or not isinstance(machine_position, int) or not 1 <= machine_position <= 10),
+            ValueError("卖家机位必须是1到10之间的整数。"))
+        self.machine_position = machine_position
+        self._machine_position_ready = machine_position is None
         self._physical_execution_gate = PhysicalExecutionGate(self.device_id)
         self.calibration_path = Path(
             calibration_path) if calibration_path is not None else POC_ROOT / 'tap_calibration.json'
@@ -171,10 +177,19 @@ class RobotController:
             self.stop_event.set()
 
     def begin_new_task(self) -> None:
-        """Acknowledge stop requests that predate this new task boundary."""
+        """Reset task-local stop and seller-position preparation state."""
 
         with self._stop_state_lock:
             self.stop_event.clear()
+        self._machine_position_ready = self.machine_position is None
+
+    def prepare_machine_position(self) -> None:
+        """Select the configured seller position once at task start."""
+        if self.machine_position is None or self._machine_position_ready:
+            return
+        hwnd, _title = seller_gui.find_window(self.title)
+        seller_gui.select_machine_position(hwnd, self.machine_position)
+        self._machine_position_ready = True
 
     def _checkpoint(self) -> None:
         reject_if(self.stop_event.is_set(), RobotWorkflowError("用户已请求停止任务。"))
@@ -428,6 +443,10 @@ class RobotController:
 
 class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""
+
+    def prepare_machine_position(self) -> None:
+        """Mock mode records no seller UI movement."""
+        self._machine_position_ready = True
 
     def __init__(self, *, verified_actions: set[str] | frozenset[str] | None=None,
         device_id: str='mock-default') -> None:

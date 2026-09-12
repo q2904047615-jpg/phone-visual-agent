@@ -47,6 +47,14 @@ class DeviceControllerRegistry:
                 raise DeviceControllerRegistryError(f'设备 {device_id or 'missing'} 的 verified_actions 格式无效。')
             else:
                 verified_actions = {str(item).strip() for item in raw_verified_actions}
+            raw_machine_position = raw.get("machine_position")
+            if raw_machine_position is None:
+                machine_position = None
+            else:
+                reject_if(isinstance(raw_machine_position, bool) or not isinstance(raw_machine_position, int)
+                    or not 1 <= raw_machine_position <= 10,
+                    DeviceControllerRegistryError(f'设备 {device_id or "missing"} 的 machine_position 必须是1到10之间的整数。'))
+                machine_position = raw_machine_position
             reject_if(not device_id or device_id in self._controllers, DeviceControllerRegistryError('设备注册表存在空或重复的 device_id。'))
             effective_window = window_title or "__default_window__"
             reject_if(effective_window in enabled_windows, DeviceControllerRegistryError('两台已启用设备不能绑定同一个机械臂控制窗口。'))
@@ -59,13 +67,14 @@ class DeviceControllerRegistry:
                 controller = MockRobotController(device_id=device_id)
             elif window_title:
                 controller = RobotController(window_title, calibration_path=calibration_path,
-                    verified_actions=verified_actions, device_id=device_id)
+                    verified_actions=verified_actions, device_id=device_id, machine_position=machine_position)
             else:
                 controller = RobotController(calibration_path=calibration_path, verified_actions=verified_actions,
-                    device_id=device_id)
+                    device_id=device_id, machine_position=machine_position)
             self._controllers[device_id] = controller
             self._descriptors[device_id] = {'device_id': device_id, 'window_title': window_title,
-                'calibration_path': str(calibration_path), 'verified_actions': sorted(controller.verified_actions)}
+                'machine_position': machine_position, 'calibration_path': str(calibration_path),
+                'verified_actions': sorted(controller.verified_actions)}
         reject_if(not self._controllers or self.default_device_id not in self._controllers, DeviceControllerRegistryError('设备注册表必须包含已启用的 default_device_id。'))
 
     def controller(self, device_id: str) -> RobotController:

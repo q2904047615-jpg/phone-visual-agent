@@ -14,6 +14,19 @@ from test_support.web_platform import (
 
 
 class PhysicalNavigationSafetyTests(_BasePhysicalNavigationSafetyTests):
+    def test_machine_position_is_selected_once_per_task_before_agent_capture(self):
+        controller = RobotController(title="test", machine_position=2)
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.select_machine_position") as select,
+        ):
+            controller.prepare_machine_position()
+            controller.prepare_machine_position()
+            select.assert_called_once_with(123, 2)
+            controller.begin_new_task()
+            controller.prepare_machine_position()
+            self.assertEqual(2, select.call_count)
+
     def test_live_preview_uses_passive_capture_without_active_capture_path(self):
         controller = RobotController(title="test")
         frame = Image.new("RGB", (540, 1038), "white")

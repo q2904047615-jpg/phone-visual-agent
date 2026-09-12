@@ -76,6 +76,8 @@ SELLER_TOUCH_DOWN_SETTLE_SECONDS = 0.45
 SELLER_SWIPE_TOUCH_DOWN_SECONDS = 0.35
 SELLER_SWIPE_MOVEMENT_SECONDS = 0.30
 SELLER_SWIPE_STEPS = 6
+# The seller UI's first toolbar row contains ten machine-position buttons.
+POSITION_BUTTON_Y_FROM_BOTTOM = 38
 
 
 class POINT(ctypes.Structure):
@@ -592,6 +594,22 @@ def type_unicode_text(text: str) -> None:
     sent = user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
     reject_if(sent != len(events), ctypes.WinError())
     time.sleep(0.08)
+
+
+def select_machine_position(hwnd: int, machine_position: int) -> None:
+    """Select one of the seller control window's documented 1-10 positions."""
+
+    reject_if(isinstance(machine_position, bool) or not isinstance(machine_position, int)
+        or not 1 <= machine_position <= 10, ValueError("卖家机位必须是1到10之间的整数。"))
+    ensure_window_fully_visible(hwnd)
+    _, _, width, height = client_geometry(hwnd)
+    baseline_x = (float(machine_position) - 0.5) * BASELINE_CLIENT_WIDTH / 10.0
+    x = scale_seller_ui_value(baseline_x, width)
+    y = height - scale_seller_vertical_value(POSITION_BUTTON_Y_FROM_BOTTOM, width, height)
+    reject_if(not (0 <= x < width and 0 <= y < height),
+        ValueError(f"机位按钮坐标 ({x}, {y}) 超出窗口客户区 {width}×{height}。"))
+    click_client_control(hwnd, x, y)
+    time.sleep(0.45)
 
 
 def configure_click_count(hwnd: int, click_count: int) -> None:

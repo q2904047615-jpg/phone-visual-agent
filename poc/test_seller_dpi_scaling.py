@@ -99,6 +99,24 @@ class SellerDpiScalingTests(unittest.TestCase):
         self.assertEqual([seller.MOUSEEVENTF_RIGHTDOWN, seller.MOUSEEVENTF_RIGHTUP], fake.mouse_events)
         self.assertEqual((400, 400), fake.cursor)
 
+    def test_machine_position_buttons_use_the_documented_first_toolbar_row(self) -> None:
+        clicks = []
+        with (
+            patch.object(seller, "ensure_window_fully_visible"),
+            patch.object(seller, "client_geometry", return_value=(0, 0, 540, 1010)),
+            patch.object(seller, "click_client_control", side_effect=lambda hwnd, x, y: clicks.append((hwnd, x, y))),
+            patch.object(seller.time, "sleep"),
+        ):
+            seller.select_machine_position(123, 1)
+            seller.select_machine_position(123, 10)
+        self.assertEqual([(123, 27, 972), (123, 513, 972)], clicks)
+
+    def test_machine_position_must_be_one_through_ten(self) -> None:
+        with self.assertRaisesRegex(ValueError, "1到10"):
+            seller.select_machine_position(123, 0)
+        with self.assertRaisesRegex(ValueError, "1到10"):
+            seller.select_machine_position(123, 11)
+
     def test_documented_100_percent_geometry_is_unchanged(self) -> None:
         self.assertEqual(seller.seller_ui_scale(540), 1.0)
         self.assertEqual(seller.seller_camera_height(540, 1010), 960)

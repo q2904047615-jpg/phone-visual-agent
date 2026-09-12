@@ -46,12 +46,14 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                                 "device_id": "phone-a",
                                 "enabled": True,
                                 "window_title": "controller-a",
+                                "machine_position": 1,
                                 "calibration_path": "calibration-a.json",
                             },
                             {
                                 "device_id": "phone-b",
                                 "enabled": True,
                                 "window_title": "controller-b",
+                                "machine_position": 2,
                                 "calibration_path": "calibration-b.json",
                             },
                         ],
@@ -71,6 +73,10 @@ class DeviceControllerRegistryTests(unittest.TestCase):
         self.assertIsNot(first, second)
         self.assertEqual(first.title, "controller-a")
         self.assertEqual(second.title, "controller-b")
+        self.assertEqual(first.machine_position, 1)
+        self.assertEqual(second.machine_position, 2)
+        self.assertEqual(registry.descriptors()[0]["machine_position"], 1)
+        self.assertEqual(registry.descriptors()[1]["machine_position"], 2)
         self.assertTrue(str(first.calibration_path).endswith("calibration-a.json"))
         self.assertTrue(str(second.calibration_path).endswith("calibration-b.json"))
         with self.assertRaisesRegex(DeviceControllerRegistryError, "未登记"):
@@ -138,6 +144,17 @@ class DeviceControllerRegistryTests(unittest.TestCase):
         self.assertIsInstance(second, _MockRobotController)
         self.assertIsNot(first, second)
         self.assertEqual(descriptors_before, registry.descriptors())
+
+    def test_invalid_machine_position_fails_before_controller_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(json.dumps({
+                "version": 1, "default_device_id": "phone-a",
+                "devices": [{"device_id": "phone-a", "enabled": True, "machine_position": 11}],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(DeviceControllerRegistryError, "machine_position"):
+                DeviceControllerRegistry(path, promotable_actions=PROMOTABLE_ACTIONS)
+
 
     def test_invalid_verified_actions_fails_before_controller_construction(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

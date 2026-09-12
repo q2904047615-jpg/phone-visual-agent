@@ -125,4 +125,9 @@ class DeviceControllerRegistry:
             device_id=resolved_device)
 
     def descriptors(self) -> list[dict[str, Any]]:
-        return [dict(self._descriptors[key]) for key in sorted(self._descriptors)]
+        descriptors: list[dict[str, Any]] = []
+        for key in sorted(self._descriptors):
+            descriptor = dict(self._descriptors[key])
+            descriptor["machine_position"] = self._controllers[key].machine_position
+            descriptors.append(descriptor)
+        return descriptors

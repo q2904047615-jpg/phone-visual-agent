@@ -602,6 +602,53 @@ function currentDeviceDescriptor() {
   return devices.find(item => String(item.device_id || "") === state.deviceId) || null;
 }
 
+function currentMachinePosition() {
+  const value = Number(currentDeviceDescriptor()?.machine_position);
+  return Number.isInteger(value) && value >= 1 && value <= 10 ? value : null;
+}
+
+function renderMachinePositions() {
+  const container = document.querySelector("#machinePositionButtons");
+  if (!container) return;
+  const selected = currentMachinePosition();
+  const view = sessionView();
+  const controllerOnline = Boolean(currentDeviceDescriptor()?.controller_online ?? state.device?.controller_online);
+  const cameraOnline = Boolean(currentDeviceDescriptor()?.camera_online ?? state.device?.camera_online);
+  const disabled = state.busy || Boolean(view && !view.isTerminal) || !controllerOnline || !cameraOnline;
+  container.replaceChildren(...Array.from({ length: 10 }, (_, index) => {
+    const position = index + 1;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `machine-position-button${selected === position ? " active" : ""}`;
+    button.textContent = String(position);
+    button.setAttribute("aria-label", `切换到${position}号机位`);
+    button.setAttribute("aria-pressed", selected === position ? "true" : "false");
+    button.disabled = disabled;
+    button.addEventListener("click", () => selectMachinePosition(position));
+    return button;
+  }));
+}
+
+async function selectMachinePosition(position) {
+  if (state.busy) return;
+  state.busy = true;
+  render();
+  try {
+    await api(`/api/device/${encodeURIComponent(state.deviceId)}/machine-position`, {
+      method: "POST",
+      body: JSON.stringify({ machine_position: position }),
+    });
+    state.device = await api("/api/device");
+    toast(`已切换到${position}号机位，正在刷新摄像头画面。`);
+    refreshPreview();
+  } catch (error) {
+    toast(`机位切换失败：${error.message}`, true);
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
 function unverifiedCapabilityActions() {
   return currentDeviceDescriptor()?.capability_acceptance_actions || [];
 }
@@ -729,6 +776,7 @@ function render() {
   document.querySelector("#agentText").disabled = state.busy;
   document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
   document.querySelector("#pauseButton").classList.toggle("active", state.paused);
+  renderMachinePositions();
   renderTaskRunStatus();
   renderStatus();
   renderGoalAndPlan();

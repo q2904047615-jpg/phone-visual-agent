@@ -184,13 +184,20 @@ class RobotController:
             self.stop_event.clear()
         self._machine_position_ready = self.machine_position is None
 
+    def select_machine_position(self, machine_position: int) -> None:
+        """Select a seller position from an explicit console request."""
+        reject_if(isinstance(machine_position, bool) or not isinstance(machine_position, int)
+            or not 1 <= machine_position <= 10, ValueError("卖家机位必须是1到10之间的整数。"))
+        hwnd, _title = seller_gui.find_window(self.title)
+        seller_gui.select_machine_position(hwnd, machine_position)
+        self.machine_position = machine_position
+        self._machine_position_ready = True
+
     def prepare_machine_position(self) -> None:
         """Select the configured seller position once at task start."""
         if self.machine_position is None or self._machine_position_ready:
             return
-        hwnd, _title = seller_gui.find_window(self.title)
-        seller_gui.select_machine_position(hwnd, self.machine_position)
-        self._machine_position_ready = True
+        self.select_machine_position(self.machine_position)
 
     def _checkpoint(self) -> None:
         reject_if(self.stop_event.is_set(), RobotWorkflowError("用户已请求停止任务。"))
@@ -444,6 +451,12 @@ class RobotController:
 
 class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""
+
+    def select_machine_position(self, machine_position: int) -> None:
+        reject_if(isinstance(machine_position, bool) or not isinstance(machine_position, int)
+            or not 1 <= machine_position <= 10, ValueError("卖家机位必须是1到10之间的整数。"))
+        self.machine_position = machine_position
+        self._machine_position_ready = True
 
     def prepare_machine_position(self) -> None:
         """Mock mode records no seller UI movement."""

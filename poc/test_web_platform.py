@@ -48,6 +48,16 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
                 finally:
                     orchestrator.cancel(session)
 
+    def test_machine_position_endpoint_updates_selected_position(self) -> None:
+        response = self.client.post(
+            "/api/device/device-local-01/machine-position",
+            headers=self.headers,
+            json={"machine_position": 7},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["machine_position"], 7)
+        self.assertEqual(response.json()["status"]["controller_online"], True)
+
     def test_home_and_device_are_available(self) -> None:
         self.assertEqual(self.client.get("/").status_code, 200)
         with patch.object(

@@ -178,6 +178,10 @@ class GenericSupervisedDeviceRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
 
 
+class MachinePositionRequest(StrictAgentRequest):
+    machine_position: StrictInt = Field(ge=1, le=10)
+
+
 class BaseActionConfirmationScopeRequest(StrictAgentRequest):
     session_id: StrictStr = Field(min_length=1, max_length=128)
     task_id: StrictStr = Field(min_length=1, max_length=128)
@@ -509,6 +513,38 @@ def apps() -> dict[str, Any]:
         ),
     }}
     return {"apps": APP_CATALOG, "readiness": readiness}
+
+
+@app.post("/api/device/{device_id}/machine-position")
+def select_device_machine_position(
+    device_id: str,
+    body: MachinePositionRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Select one seller-control position from the web console."""
+
+    verify_local_request(request, x_control_token)
+    resolved_device = str(device_id or "").strip()
+    try:
+        controller = runtime.controller_for_device(resolved_device)
+    except DeviceControllerRegistryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if runtime.device_task_registry.active_session(resolved_device):
+        raise HTTPException(status_code=409, detail="该设备正在执行任务，暂不能切换机位。")
+    try:
+        with _supervised_hardware_lock(resolved_device):
+            controller.select_machine_position(body.machine_position)
+            status = controller.device_status()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"卖家控制端机位切换失败：{exc}") from exc
+    return {
+        "device_id": resolved_device,
+        "machine_position": body.machine_position,
+        "status": status,
+    }
 
 
 @app.get("/api/device")

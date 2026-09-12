@@ -79,9 +79,11 @@ Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册�
 
 ### 卖家系统多机位
 
-卖家 `main.exe` 的 1～10 号按钮对应机位配置。`device_registry.json` 中每个设备可选
-`machine_position`（1～10）；任务开始时项目在首次真实观察前选择该机位，然后使用该设备的
-`calibration_path`。机位选择只发生一次，不会在每轮观察或只读预览时移动机械臂。
+卖家 `main.exe` 的 1～10 号按钮对应机位配置。网页顶部提供 1～10 号机位按钮，点击后通过
+`POST /api/device/{device_id}/machine-position` 在硬件锁内切换卖家控制端，并刷新当前摄像头画面；
+任务执行中禁止切换。`device_registry.json` 中每个设备可选 `machine_position`（1～10）；任务开始时项目
+在首次真实观察前选择该机位，然后使用该设备的 `calibration_path`。机位选择只发生一次，不会在每轮
+观察或只读预览时移动机械臂。
 
 `machine_position` 必须与卖家 `me_config` 下的机位 JSON、控制端摄像头绑定和该手机的物理安装位置一致；
 未知串口、标定文件或机位编号不要写入正式注册表，先在模拟模式和只读 doctor 中核对。

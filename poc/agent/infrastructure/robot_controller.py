@@ -89,7 +89,8 @@ class RobotController:
 
     def __init__(self, title: str=seller_gui.DEFAULT_WINDOW_TITLE, *, calibration_path: Path | None=None,
         verified_actions: set[str] | frozenset[str] | None=None, device_id: str,
-        machine_position: int | None=None) -> None:
+        machine_position: int | None=None, operation_lock: threading.Lock | None=None,
+        capture_lock: threading.RLock | None=None) -> None:
         self.title = title
         self.device_id = str(device_id or "").strip()
         reject_if(machine_position is not None and (isinstance(machine_position, bool)
@@ -102,9 +103,9 @@ class RobotController:
             calibration_path) if calibration_path is not None else POC_ROOT / 'tap_calibration.json'
         self.stop_event = threading.Event()
         self._stop_state_lock = threading.Lock()
-        self.operation_lock = threading.Lock()
+        self.operation_lock = operation_lock if operation_lock is not None else threading.Lock()
         # Serialize preview/vision capture to avoid transient truncated Windows bitmaps.
-        self.capture_lock = threading.RLock()
+        self.capture_lock = capture_lock if capture_lock is not None else threading.RLock()
         self._last_click_receipt: dict[str, Any] | None = None
         self._last_long_press_receipt: dict[str, Any] | None = None
         self._last_swipe_receipt: dict[str, Any] | None = None

@@ -82,6 +82,22 @@ class DeviceControllerRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(DeviceControllerRegistryError, "未登记"):
             registry.controller("phone-c")
 
+    def test_same_seller_window_allows_distinct_machine_positions_with_shared_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(json.dumps({
+                "version": 1, "default_device_id": "phone-a",
+                "devices": [
+                    {"device_id": "phone-a", "enabled": True, "window_title": "seller", "machine_position": 1},
+                    {"device_id": "phone-b", "enabled": True, "window_title": "seller", "machine_position": 2},
+                ],
+            }), encoding="utf-8")
+            registry = DeviceControllerRegistry(path, promotable_actions=PROMOTABLE_ACTIONS)
+        first = registry.controller("phone-a")
+        second = registry.controller("phone-b")
+        self.assertIs(first.operation_lock, second.operation_lock)
+        self.assertIs(first.capture_lock, second.capture_lock)
+
     def test_duplicate_enabled_window_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "devices.json"

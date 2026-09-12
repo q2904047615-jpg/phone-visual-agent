@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agent.domain.validation import reject_if
 import json
+import threading
 from collections.abc import Collection
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,9 @@ class DeviceControllerRegistry:
         self._controllers: dict[str, RobotController] = {}
         self._descriptors: dict[str, dict[str, Any]] = {}
         enabled_windows: set[str] = set()
+        window_positions: dict[str, set[int | None]] = {}
+        window_locks: dict[str, threading.RLock] = {}
+        window_capture_locks: dict[str, threading.RLock] = {}
         for raw in payload['devices']:
             if not isinstance(raw, dict) or raw.get('enabled') is not True:
                 continue
@@ -57,8 +61,19 @@ class DeviceControllerRegistry:
                 machine_position = raw_machine_position
             reject_if(not device_id or device_id in self._controllers, DeviceControllerRegistryError('设备注册表存在空或重复的 device_id。'))
             effective_window = window_title or "__default_window__"
-            reject_if(effective_window in enabled_windows, DeviceControllerRegistryError('两台已启用设备不能绑定同一个机械臂控制窗口。'))
-            enabled_windows.add(effective_window)
+            existing_positions = window_positions.get(effective_window)
+            if existing_positions is not None:
+                if machine_position is None or None in existing_positions:
+                    raise DeviceControllerRegistryError('两台已启用设备不能绑定同一个机械臂控制窗口。')
+                reject_if(machine_position in existing_positions,
+                    DeviceControllerRegistryError('同一卖家控制窗口必须为每台设备绑定不同的 machine_position。'))
+            else:
+                existing_positions = set()
+                window_positions[effective_window] = existing_positions
+                enabled_windows.add(effective_window)
+            existing_positions.add(machine_position)
+            operation_lock = window_locks.setdefault(effective_window, threading.RLock())
+            capture_lock = window_capture_locks.setdefault(effective_window, threading.RLock())
             calibration_path = Path(calibration_value or "tap_calibration.json")
             if not calibration_path.is_absolute():
                 calibration_path = self.path.parent / calibration_path
@@ -67,10 +82,12 @@ class DeviceControllerRegistry:
                 controller = MockRobotController(device_id=device_id)
             elif window_title:
                 controller = RobotController(window_title, calibration_path=calibration_path,
-                    verified_actions=verified_actions, device_id=device_id, machine_position=machine_position)
+                    verified_actions=verified_actions, device_id=device_id, machine_position=machine_position,
+                    operation_lock=operation_lock, capture_lock=capture_lock)
             else:
                 controller = RobotController(calibration_path=calibration_path, verified_actions=verified_actions,
-                    device_id=device_id, machine_position=machine_position)
+                    device_id=device_id, machine_position=machine_position, operation_lock=operation_lock,
+                    capture_lock=capture_lock)
             self._controllers[device_id] = controller
             self._descriptors[device_id] = {'device_id': device_id, 'window_title': window_title,
                 'machine_position': machine_position, 'calibration_path': str(calibration_path),

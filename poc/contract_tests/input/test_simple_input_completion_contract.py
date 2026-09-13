@@ -90,6 +90,15 @@ class SimpleInputCompletionTests(unittest.TestCase):
         self.assertEqual('tap_semantic', result.proposal.action.action)
         self.assertEqual((.4, .906), resolved.normalized_point)
 
+    def test_focus_tap_can_create_input_fact_when_audit_is_empty(self):
+        payload = saved_response(1)
+        payload['input_structure']['application_inputs'] = []
+        payload['decision'].update(action='tap_semantic', element_id=None, text=None,
+            target={'role': 'input', 'meaning': 'application_text_input'}, tap_point=[400,906])
+        _, result, resolved, _ = observe(payload, input_graph())
+        self.assertEqual('tap_semantic', result.proposal.action.action)
+        self.assertEqual((.4, .906), resolved.normalized_point)
+
     def test_retired_reference_and_identity_projection_functions_are_absent(self):
         from agent.infrastructure import generic_scene_observer as module
         for name in ('_single_step_input_surface_attestation', '_projected_input_element_id',

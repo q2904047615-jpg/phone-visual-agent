@@ -257,10 +257,10 @@ def bind_same_response_action(payload: Mapping[str, Any], *, context: Any, obser
     params: dict[str, Any] = {}
     if kind in MODEL_STEP_DIRECT_POINT_ACTIONS:
         target = _normalize_direct_target(payload.get("target"))
+        # A focus tap is a direct point action. It may establish the input
+        # fact that a later text action will consume, so it must not require
+        # that fact to already exist in this same observation.
         params.update(_direct_target_params(target))
-        if target["role"] == "input":
-            element = _current_input_target(observation)
-            params.update(_element_params(element))
         params["tap_point"] = _canonical_model_point(payload.get("tap_point"), f"{kind}.tap_point")
         if kind == "long_press":
             params["duration_ms"] = 800

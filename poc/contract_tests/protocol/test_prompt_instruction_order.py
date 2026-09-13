@@ -24,7 +24,9 @@ class PromptInstructionOrderTests(unittest.TestCase):
                     '依据本会话实际历史与当前画面判断前项是否满足，再推进后项',
                     '不能反过来要求所有任务必须有动作',
                     '输入、发送等效果不确定时不得自动重做',
-                    '不生成固定步骤清单', '本地不按业务子目标清单推进'):
+                    '不生成固定步骤清单', '本地不按业务子目标清单推进',
+                    '通用文字效果闭环', '输入动作后必须以新画面确认正文匹配',
+                    '效果动作后再次观察'):
                     self.assertTrue(text in prompt, msg=text)
 
     def test_input_append_requires_complete_expected_text(self):

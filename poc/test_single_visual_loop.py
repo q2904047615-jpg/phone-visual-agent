@@ -68,15 +68,16 @@ class Adapter:
         resolved = ResolvedSemanticAction(node_id=requested_action.node_id, kind=requested_action.action,
             **{k:v for k,v in requested_action.params.items() if k in {'text','text_transport','input_fragment',
                 'input_field_id','prior_input_value','expected_input_value'}})
+        physical_actions = 0 if requested_action.action == 'wait_for_change' else 1
         post_goal = GenericSingleActionAdapter._post_action_goal(goal, authority=action_authority, requested=requested_action,
-            resolved=resolved, physical_actions=1)
+            resolved=resolved, physical_actions=physical_actions)
         self.contexts.append(post_goal.entities)
         self.position += 1
         after, payload = self.rows[self.position]
         return GenericActionExecutionResult(requested_action=requested_action, rebound_action=requested_action,
             resolved_action=resolved,before_scene=planned_scene,after_scene=after,
             planned_scene_fingerprint=planned_scene.fingerprint,confirmation_frame_identity_verified=True,
-            confirmation_frame_delta=0.,physical_actions=1,robot_result=True,evidence=(),
+            confirmation_frame_delta=0.,physical_actions=physical_actions,robot_result=True,evidence=(),
             after_model_decision=payload,after_frames=tuple(self.frames),
             after_frame_paths=tuple(f'after_{self.position}_{i}' for i in range(4)))
 
@@ -127,6 +128,16 @@ class WholeTaskLoopTests(LoopHarness):
         loop.run_autonomous_safe_loop(s)
         self.assertEqual(s.status,'failed')
         self.assertEqual(len(a.calls),1)
+    def test_uncertain_effect_can_wait_for_delayed_visual_confirmation(self):
+        rows=[(scene(0),decision('tap_semantic',meaning='send_message')),
+            (scene(1),decision('wait_for_change',outcome='uncertain')),
+            (scene(2),decision(outcome='matched'))]
+        loop,s,a=self.start(rows,goal='发送一条消息')
+        loop.run_autonomous_safe_loop(s)
+        self.assertEqual(s.status,'succeeded')
+        self.assertEqual(['tap_semantic','wait_for_change'],[x.action for x in a.calls])
+        self.assertEqual(1,s.physical_actions)
+
     def test_unknown_focus_cannot_type(self):
         with self.assertRaisesRegex(Exception,'聚焦'):
             self.start([(scene(0,text='',focused=None),decision('input_verified_text',text='正文'))])

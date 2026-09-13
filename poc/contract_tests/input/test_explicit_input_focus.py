@@ -31,7 +31,7 @@ class ExplicitInputFocusTests(unittest.TestCase):
             available_action_kinds=('tap_semantic', 'clear_verified_text'))
         audit = _input_structure_audit_prompt({'entities': context}, wire_height=1280)
         self.assertNotIn('only facts visible in Image 1', audit)
-        self.assertIn('all supplied images from this observation', audit)
+        self.assertIn('all supplied CURRENT images from this observation', audit)
         self.assertIn('先独立报告scene和input_structure，再选择动作', prompt)
         self.assertNotIn('先按当前目标选择动作或finish，再按对应字段合同报告', prompt)
 

@@ -73,12 +73,12 @@ class ActionComparisonContextTests(unittest.TestCase):
                 self.assertEqual('目标', immediate[0]['canonical_action']['params']['label'])
                 self.assertEqual([], goal.entities['history'])
 
-    def test_only_current_group_and_text_history_one_call(self):
+    def test_direct_observation_without_archive_sends_all_current_frames_one_call(self):
         p, o, current, _, frames, evidence = self.observe(history=[self.history()])
         content = p.messages_seen[0][1]['content']
         images = [x['image_url']['url'] for x in content if x['type'] == 'image_url']
         self.assertEqual(1, p.calls)
-        self.assertEqual([_image_data_url(x) for x in frames[-3:]], images)
+        self.assertEqual([_image_data_url(x) for x in frames], images)
         self.assertEqual(local_frame_fingerprint(frames[-1]), current.fingerprint)
         self.assertEqual(4, len(o.last_diagnostics['frame_sharpness_scores']))
         self.assertNotIn('comparison_reference', evidence)
@@ -88,14 +88,14 @@ class ActionComparisonContextTests(unittest.TestCase):
         self.assertEqual('', next(e.states['value'] for e in current.elements if e.role == 'input'))
         self.assertIsNone(next(e.states.get('focused') for e in current.elements if e.role == 'input'))
 
-    def test_initial_and_later_steps_have_no_old_image_entrypoint(self):
+    def test_text_history_cannot_invent_missing_screenshot_files(self):
         parameters = inspect.signature(SingleStepGenericSceneObserver.observe_with_decision).parameters
         self.assertNotIn('previous_action_frame', parameters)
         self.assertNotIn('previous_action_step', parameters)
         for history in ([], [self.history()], [self.history(step=1), self.history(step=2)]):
             with self.subTest(history=history):
                 p, _, _, _, _, evidence = self.observe(history=history)
-                self.assertEqual(3, sum(x['type'] == 'image_url' for x in p.messages_seen[0][1]['content']))
+                self.assertEqual(4, sum(x['type'] == 'image_url' for x in p.messages_seen[0][1]['content']))
                 self.assertNotIn('comparison_reference', evidence)
 
     def test_action_and_state_finish_remain_model_choices(self):
@@ -110,7 +110,7 @@ class ActionComparisonContextTests(unittest.TestCase):
                 self.assertIn('canonical_action', prompt)
                 self.assertIn('不能当作本次产生了新效果', prompt)
 
-    def test_reused_observer_sends_only_latest_capture(self):
+    def test_reused_observer_does_not_cache_images_between_unscoped_calls(self):
         payloads = [wire(decision('home')), wire(decision('home'))]
         for payload in payloads:
             payload['coordinate_space'] = {'kind': 'axis_grid', 'width': 1000, 'height': 1000}
@@ -123,11 +123,11 @@ class ActionComparisonContextTests(unittest.TestCase):
         self.assertEqual(2, provider.calls)
         content = provider.messages_seen[1][1]['content']
         images = [x['image_url']['url'] for x in content if x['type'] == 'image_url']
-        self.assertEqual([_image_data_url(x) for x in second[-3:]], images)
+        self.assertEqual([_image_data_url(x) for x in second], images)
         self.assertNotIn(_image_data_url(first[-1]), images)
         self.assertIn('open_chat_session', content[0]['text'])
 
-    def test_adapter_never_passes_old_images_across_tasks_or_steps(self):
+    def test_adapter_does_not_keep_previous_action_bitmap_cache(self):
         observer = Mock()
         observer.supports_response_evidence = False
         observer.supports_runtime_action_contract = False

@@ -38,7 +38,7 @@ class PromptRoleConsistencyTests(unittest.TestCase):
                     self.assertIn('旧聊天气泡或相同既有内容都不证明本次', prompt)
                     if include_input:
                         self.assertIn('INPUT CONTRACT applies only to input_structure', prompt)
-                        self.assertIn('all supplied images from this observation', prompt)
+                        self.assertIn('all supplied CURRENT images from this observation', prompt)
                         self.assertIn('Never infer focus from the requested action', prompt)
                     if image_count == 3:
                         self.assertIn('闪烁光标可从任一帧读取', prompt)

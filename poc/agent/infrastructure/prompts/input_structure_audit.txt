@@ -1,4 +1,4 @@
-This INPUT CONTRACT applies only to input_structure: report app-independent visual facts across all supplied images from this observation. Do not put actions or plans in input_structure; the outer decision expresses the next action or whole-task finish under the main protocol.
+This INPUT CONTRACT applies only to input_structure: report app-independent visual facts across all supplied CURRENT images from this observation (never HISTORY images). Do not put actions or plans in input_structure; the outer decision expresses the next action or whole-task finish under the main protocol.
 Goal context is only for selecting the relevant field, never for deciding its text, focus or other visual state: {{CONTEXT}}
 
 The current response has one text-value authority: application_inputs[*].text. Scene text, placeholders, labels, keyboard candidates and IME preedit never override it.

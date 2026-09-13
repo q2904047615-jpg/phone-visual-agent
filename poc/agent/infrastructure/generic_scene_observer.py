@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from agent.domain.validation import NormalizedBounds, reject_if
 import json
+import base64
 from pathlib import Path
 from uuid import uuid4
 from functools import lru_cache
@@ -18,6 +19,7 @@ from typing import Any
 
 from PIL import Image
 from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
+from agent.infrastructure.task_screenshot_history import MANIFEST_NAME, task_screenshots
 from agent.infrastructure.model_failure_diagnostics import redact_model_failure_response
 from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
@@ -45,7 +47,7 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-07-single-step-current-frame-v22"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-14-single-step-task-screenshots-v23"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-06-input-structure-field-preedit-v17"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
@@ -132,6 +134,7 @@ class SingleStepGenericSceneObserver():
         self._last_stage = "idle"
         self.supports_runtime_action_contract = True
         self.supports_response_evidence = True
+        self.supports_task_screenshots = True
         self.last_response_evidence_path: str | None = None
 
     def _set_stage(self, stage: str) -> None:
@@ -173,7 +176,8 @@ class SingleStepGenericSceneObserver():
 
     def observe_with_decision(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
         device_id: str | None=None, available_action_kinds: Iterable[str] | None=None, response_evidence_dir: Path | None=None,
-        response_evidence_prefix: str='observation') -> tuple[UIScene, dict[str, Any]]:
+        response_evidence_prefix: str='observation', current_frame_paths: tuple[str, ...]=()
+        ) -> tuple[UIScene, dict[str, Any]]:
         self.last_raw_response = ""
         model_identity = public_model_identity(self.provider.status())
         self.last_diagnostics = {"vision_model": model_identity,
@@ -186,6 +190,7 @@ class SingleStepGenericSceneObserver():
         selected_frame_index = 0
         stable_tail_start = 0
         input_structure_required = False
+        screenshot_manifest: list[dict[str, Any]] = []
         try:
             reject_if(len(frames) < 4, VisionAgentError("通用页面观察至少需要4帧。"))
             stability = measure_local_stability(frames, allow_leading_outlier=True)
@@ -199,10 +204,10 @@ class SingleStepGenericSceneObserver():
             goal = _goal_view(context)
             runtime_actions = _normalize_runtime_action_kinds(available_action_kinds)
             input_structure_required = goal.input_requested
-            model_frames = tuple(frames[stable_tail_start:]) if input_structure_required else (frame,)
+            model_frames = tuple(frames)
 
             request_image_sizes = {_image_request_size(item) for item in model_frames}
-            reject_if(len(request_image_sizes) != 1, VisionAgentError("同一步发送给Qwen的稳定帧尺寸不一致，不能建立唯一坐标空间。"))
+            reject_if(len(request_image_sizes) != 1, VisionAgentError("同一步发送给Qwen的当前帧尺寸不一致，不能建立唯一坐标空间。"))
             request_image_size = next(iter(request_image_sizes))
             response_format = _single_step_response_format(context,
                 input_structure_required=input_structure_required, request_height=request_image_size[1],
@@ -212,9 +217,30 @@ class SingleStepGenericSceneObserver():
                 image_count=len(model_frames), request_image_size=request_image_size,
                 available_action_kinds=runtime_actions)
             content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-            for (index, item) in enumerate(model_frames, start=1):
-                content.extend(({'type': 'text', 'text': f'IMAGE {index} - CURRENT PHONE SURFACE'},
-                    {'type': 'image_url', 'image_url': {'url': _image_data_url(item.convert('RGB'))}}))
+            reject_if(not current_frame_paths and response_evidence_dir is not None
+                and (Path(response_evidence_dir) / MANIFEST_NAME).exists(),
+                VisionAgentError("已有任务截图记录但缺少本轮截图路径，不能省略历史图片。"))
+            if current_frame_paths:
+                reject_if(response_evidence_dir is None or len(current_frame_paths) != len(model_frames),
+                    VisionAgentError("当前帧缺少完整任务截图路径。"))
+                screenshot_manifest = task_screenshots(Path(response_evidence_dir), device_id=device_id,
+                    task_id=context.get("entities", {}).get("task_id"), current_paths=current_frame_paths)
+                for item in screenshot_manifest:
+                    # Send the saved bytes, without re-encoding historical evidence.
+                    path = Path(item["path"])
+                    with Image.open(path) as saved:
+                        saved.verify()
+                    url = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+                    label = (f'IMAGE {item["image"]} - {item["group"]} PHONE SURFACE '
+                        f'- capture={item["capture"]} - file={path.name}')
+                    content.extend(({'type': 'text', 'text': label},
+                        {'type': 'image_url', 'image_url': {'url': url}}))
+            else:
+                for (index, item) in enumerate(model_frames, start=1):
+                    screenshot_manifest.append({'image': index, 'group': 'CURRENT', 'path': None,
+                        'capture': response_evidence_prefix})
+                    content.extend(({'type': 'text', 'text': f'IMAGE {index} - CURRENT PHONE SURFACE'},
+                        {'type': 'image_url', 'image_url': {'url': _image_data_url(item.convert('RGB'))}}))
             self._set_stage("waiting_single_step_observation")
             scope_factory = getattr(self.provider, "call_scope", None)
             response_id = uuid4().hex
@@ -242,6 +268,7 @@ class SingleStepGenericSceneObserver():
                         and request_evidence_path.is_file() else None,
                     'response_evidence_prefix': redact_model_failure_response(response_evidence_prefix),
                     'observer_protocol': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    'task_screenshots': screenshot_manifest,
                     'goal_context': json.loads(redact_model_failure_response(json.dumps(context, ensure_ascii=False))),
                     'raw_response_length': len(raw), 'redacted_response_truncated': False,
                     'redacted_raw_response': redact_model_failure_response(raw),
@@ -275,6 +302,8 @@ class SingleStepGenericSceneObserver():
                 'vision_model': public_model_identity(self.provider.status()),
                 'strategy': 'single_step_current_scene_observation',
                 'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, 'model_calls': 1,
+                'task_screenshot_count': len(screenshot_manifest),
+                'current_screenshot_count': len(model_frames),
                 'online_stages': ['single_step_observation'],
                 'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
                 'selected_frame_index': selected_frame_index,
@@ -302,6 +331,7 @@ class SingleStepGenericSceneObserver():
                 'online_stages': ['single_step_observation'] if model_calls else [],
                 'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
                 'failed_stage': failed_stage, 'fingerprint': fingerprint, 'error': str(exc),
+                'task_screenshot_count': len(screenshot_manifest),
                 'foreground_identity_source': 'qwen_visual',
                 'error_type': classify_qwen_error(exc, raw_response=self.last_raw_response),
                 'safe_stop_reason': '单次模型输出未建立完整可信观察；没有发起第二次Qwen请求，控制器与机械臂均未执行。',
@@ -314,7 +344,7 @@ class SingleStepGenericSceneObserver():
 
 
 def _json_only_system_message() -> dict[str, str]:
-    return {'role': 'system', 'content': '你是通用手机视觉操作Agent。根据用户整任务、本会话实际执行历史和本轮截图报告画面事实，并按协议选择一个canonical动作或整任务finish。只输出一个语法完整且符合响应schema的JSON对象；禁止Markdown、JSON之外的解释或思考过程、代码围栏、JSON字符串套壳或对象前后的任何文字。'}
+    return {'role': 'system', 'content': '你是通用手机视觉操作Agent。根据用户整任务、本会话实际执行历史和全部任务截图判断进度；只从CURRENT本轮截图报告当前画面事实，并按协议选择一个canonical动作或整任务finish。只输出一个语法完整且符合响应schema的JSON对象；禁止Markdown、JSON之外的解释或思考过程、代码围栏、JSON字符串套壳或对象前后的任何文字。'}
 
 
 LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (

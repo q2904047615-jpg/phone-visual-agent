@@ -86,7 +86,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 image_parts = [
                     part for part in provider.messages_seen[0][1]["content"] if part.get("type") == "image_url"
                 ]
-                self.assertEqual(3, len(image_parts))
+                self.assertEqual(4, len(image_parts))
                 self.assertEqual(
                     _image_data_url(frames[-1].convert("RGB")),
                     image_parts[0]["image_url"]["url"],

@@ -22,6 +22,7 @@ from agent.application.text_transport import TrustedTextTransportPort
 from agent.infrastructure import RobotDeviceExecutor
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
+from agent.infrastructure.task_screenshot_history import save_task_frames
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.action_capabilities import build_device_capability_snapshot
 from agent.infrastructure.observation_images import (
@@ -290,7 +291,7 @@ class GenericSingleActionAdapter:
         try:
             scene, model_decision = self._observe_scene(frames, goal.to_dict(),
                 available_action_kinds=available_action_kinds,
-                response_evidence_dir=evidence_dir, response_evidence_prefix=prefix)
+                response_evidence_dir=evidence_dir, response_evidence_prefix=prefix, current_frame_paths=paths)
             if getattr(self.observer, 'last_response_evidence_path', None):
                 paths += (self.observer.last_response_evidence_path,)
         except RuntimeError as exc:
@@ -303,12 +304,15 @@ class GenericSingleActionAdapter:
 
     def _observe_scene(self, frames: list[Image.Image] | tuple[Image.Image, ...], goal_context: dict[str, Any], *,
         response_evidence_dir: Path | None=None, response_evidence_prefix: str='observation',
+        current_frame_paths: tuple[str, ...]=(),
         available_action_kinds: frozenset[str] | None=None
         ) -> tuple[UIScene, dict[str, Any]]:
         kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
         if getattr(self.observer, 'supports_response_evidence', False):
             kwargs.update(device_id=self.device_id, response_evidence_dir=response_evidence_dir,
                 response_evidence_prefix=response_evidence_prefix)
+        if getattr(self.observer, 'supports_task_screenshots', False) is True:
+            kwargs['current_frame_paths'] = current_frame_paths
         if getattr(self.observer, 'supports_runtime_action_contract', False) is True:
             supported = self.supported_action_kinds()
             scoped = supported if available_action_kinds is None else frozenset(available_action_kinds)
@@ -409,7 +413,7 @@ class GenericSingleActionAdapter:
         try:
             after, model_decision = self._observe_scene(frames, goal.to_dict(),
                 available_action_kinds=available_action_kinds,
-                response_evidence_dir=evidence_dir, response_evidence_prefix=prefix)
+                response_evidence_dir=evidence_dir, response_evidence_prefix=prefix, current_frame_paths=paths)
             if getattr(self.observer, 'last_response_evidence_path', None):
                 all_paths += (self.observer.last_response_evidence_path,)
         except (RuntimeError, OSError) as exc:
@@ -620,14 +624,5 @@ class GenericSingleActionAdapter:
             before_frame_paths=before_paths, orientation_credential=orientation_credential)
 
 
-    @staticmethod
-    def _save_frames(frames: list[Image.Image], evidence_dir: Path | None, prefix: str) -> tuple[str, ...]:
-        if evidence_dir is None:
-            return ()
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-        paths: list[str] = []
-        for (index, frame) in enumerate(frames, start=1):
-            path = evidence_dir / f"{prefix}_{index}.jpg"
-            frame.save(path, format="JPEG", quality=92)
-            paths.append(str(path))
-        return tuple(paths)
+    def _save_frames(self, frames: list[Image.Image], evidence_dir: Path | None, prefix: str) -> tuple[str, ...]:
+        return save_task_frames(frames, evidence_dir, prefix, self.device_id)

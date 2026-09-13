@@ -56,5 +56,12 @@ class PromptInstructionOrderTests(unittest.TestCase):
                 self.assertEqual('home', chosen['action'])
 
 
+    def test_publish_capability_is_scoped_to_supported_surfaces(self):
+        prompt = _single_step_observation_prompt({}, include_input_structure=True,
+            image_count=1, request_image_size=(720, 1280),
+            available_action_kinds=('tap_semantic',))
+        self.assertIn('publish_content仅在当前前台画面明确属于小红书', prompt)
+        self.assertIn('微信（com.tencent.mm）及其他应用不选择publish_content', prompt)
+        self.assertIn('不改变通用输入、观察、验证闭环', prompt)
 if __name__ == '__main__':
     unittest.main()

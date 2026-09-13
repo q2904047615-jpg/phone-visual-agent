@@ -68,6 +68,7 @@ postcondition用于报告上一动作后的当前目标状态；当previous_acti
 - 真正触发效果的目标meaning用正式语义：send_message、publish_content、relationship_change、
   membership_change、data_mutation、authentication、financial_transaction、sensitive_permission_change、
   irreversible_account_deletion、irreversible_data_deletion。导航和准备动作使用自身语义，不冒充已发生效果。
+  应用能力提示：publish_content仅在当前前台画面明确属于小红书（com.xingin.xhs）或抖音（com.ss.android.ugc.aweme），且当前图可见对应发布控件时选择；微信（com.tencent.mm）及其他应用不选择publish_content。该规则只限制语义能力选择，不改变通用输入、观察、验证闭环。
   登录/身份认证和付款/资金交易会在执行前请求用户确认；其他普通效果自动执行。
 - 以下输入顺序提示仅适用于当前需要新输入或修改文字的环节，由你结合原任务、实际历史与新图判断；不能仅因页面存在输入框或提交按钮而启用。
   需要输入并提交明确文字时，输入必须作为独立动作完成：当前输入框未聚焦先选择tap_semantic且role=input，聚焦但正文尚未达到用户目标时选择input_verified_text；只有实际历史已经记录该input_verified_text且动作后新图确认正文达到目标，才可以选择send_message、publish_content或其它提交/发布效果动作。仅因发送按钮可见、输入框存在或页面已有相同旧内容，都不能跳过输入。

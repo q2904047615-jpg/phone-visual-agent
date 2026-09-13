@@ -34,7 +34,7 @@ class RequestEvidenceTests(unittest.TestCase):
                 def post(*args, **kwargs):
                     saved = json.loads(path.read_text(encoding='utf-8'))
                     self.assertEqual(kwargs['json'], saved)
-                    self.assertEqual(thinking, saved['enable_thinking'])
+                    self.assertFalse(saved['enable_thinking'])
                     input_schema = saved['response_format']['json_schema']['schema']['properties']['input_structure']
                     self.assertEqual([INPUT_STRUCTURE_AUDIT_VERSION],
                         input_schema['properties']['protocol_version']['enum'])

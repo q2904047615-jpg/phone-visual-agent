@@ -268,10 +268,16 @@ class DashScopeVisionProvider:
         reject_if(max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
             or max_tokens <= 0), VisionAgentError("千问视觉 max_tokens 必须为正整数或省略。"))
         response_format = _validated_response_format(response_format)
+        request_options = self.model_config.request_options()
+        # DashScope documents Qwen3-VL structured output for non-thinking mode.
+        # Keep thinking enabled for free-form calls, but make strict JSON
+        # requests deterministic so the final message.content carries JSON.
+        if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
+            request_options["enable_thinking"] = False
         request_body = {'model': self.model, 'messages': messages, 'temperature': 0.0,
             **({'max_tokens': max_tokens} if max_tokens is not None else {}),
             **({'response_format': response_format} if response_format is not None else {}),
-            **self.model_config.request_options()}
+            **request_options}
         evidence_path = self._active_request_evidence.get()
         if evidence_path is not None:
             # Preserve the actual JSON body and encoded images, never auth headers.

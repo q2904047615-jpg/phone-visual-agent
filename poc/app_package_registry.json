@@ -5,7 +5,7 @@
       "device_id": "device-local-01",
       "enabled": true,
       "adb_executable": "C:\\Users\\Administrator\\AppData\\Local\\Android\\platform-tools\\adb.exe",
-      "adb_serial": "192.168.0.162:5555",
+      "adb_serial": "192.168.0.162:41165",
       "apps": [
         {
           "launch_ref": "app.wechat",

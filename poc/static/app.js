@@ -919,13 +919,26 @@ function apiWithTimeout(path, options = {}, timeoutMs = 35000) {
 }
 async function startAsyncAndWait(payload) {
   const ticket = await apiWithTimeout("/api/agent/generic-supervised/start-async", {method: "POST", body: JSON.stringify(payload)}, 10000);
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  const startedAt = Date.now();
+  let nextProgressNoticeAt = startedAt + 120000;
+  while (true) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     const status = await api(`/api/agent/generic-supervised/start-async/${encodeURIComponent(ticket.task_id)}`);
     if (status.status === "completed") return status.result;
     if (status.status === "failed") throw new Error(status.error || "任务启动失败。");
+    if (Date.now() >= nextProgressNoticeAt) {
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      if (state.taskAttemptStatus?.state === "running" && !state.stopRequested) {
+        state.taskAttemptStatus = {
+          ...state.taskAttemptStatus,
+          detail: `后台任务仍在执行，已等待 ${elapsedSeconds} 秒；请勿重复提交。`,
+          updatedAt: new Date().toISOString(),
+        };
+        renderTaskRunStatus();
+      }
+      nextProgressNoticeAt += 30000;
+    }
   }
-  throw new Error("任务启动超过120秒仍未完成，请检查Qwen服务或网络状态。");
 }
 
 async function startSupervisedAgent() {

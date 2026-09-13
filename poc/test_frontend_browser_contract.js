@@ -246,6 +246,7 @@ function createServer({
 } = {}) {
   let currentCapabilityTrial = null;
   let capabilityShouldFail = false;
+  const genericStartTasks = new Map();
   return http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     if (url.pathname === "/") {
@@ -288,6 +289,28 @@ function createServer({
       response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/agent/generic-supervised/start-async") {
+      requests.startTokens.push(String(request.headers["x-control-token"] || ""));
+      if (enforceToken && request.headers["x-control-token"] !== runtimeSession.token) {
+        json(response, 403, { detail: "控制令牌无效。" });
+        return;
+      }
+      const body = await readBody(request);
+      requests.start.push(body);
+      const taskId = `browser-start-${genericStartTasks.size + 1}`;
+      if (body.text.includes("start failure")) {
+        genericStartTasks.set(taskId, { status: "failed", error: "规划服务暂时不可用" });
+      } else {
+        const session = body.text.includes("succeeded")
+          ? externalExecutedSession()
+          : body.text.includes("本地确认")
+          ? externalSession()
+          : safeActionSession();
+        genericStartTasks.set(taskId, { status: "completed", result: { session } });
+      }
+      json(response, 200, { task_id: taskId, status: "running" });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/agent/generic-supervised/start") {
       requests.startTokens.push(String(request.headers["x-control-token"] || ""));
       if (enforceToken && request.headers["x-control-token"] !== runtimeSession.token) {
@@ -323,6 +346,14 @@ function createServer({
       capabilityShouldFail = body.text.includes("失败");
       currentCapabilityTrial = capabilityTrial({ failed: capabilityShouldFail });
       json(response, 200, { physical_actions: 0, trial: currentCapabilityTrial });
+      return;
+    }
+    const genericStartMatch = url.pathname.match(/^\/api\/agent\/generic-supervised\/start-async\/([^/]+)$/);
+    if (request.method === "GET" && genericStartMatch) {
+      const taskId = decodeURIComponent(genericStartMatch[1]);
+      const task = genericStartTasks.get(taskId);
+      if (!task) json(response, 404, { detail: "not found" });
+      else json(response, 200, { task_id: taskId, ...task });
       return;
     }
     const restoredMatch = url.pathname.match(/^\/api\/agent\/generic-supervised\/([^/]+)$/);
@@ -443,7 +474,7 @@ test("task budget fields submit configured limits", { timeout: 30000 }, async ()
     await page.locator("#agentActionBudget").fill("123");
     await page.locator("#agentObservationBudget").fill("456");
     await page.locator("#agentText").fill("打开系统设置");
-    const response = page.waitForResponse(response => response.url().endsWith("/start"));
+    const response = page.waitForResponse(response => response.url().includes("/start-async"));
     await page.locator("#startSupervisedAgent").click();
     await response;
     assert.equal(requests.start.at(-1).max_physical_actions, 123);
@@ -491,7 +522,7 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20260912-machine-position-v2"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=20260913-async-start-v1"));
     assert.ok(requests.assets.includes("/assets/styles.css?v=20260912-machine-position-v1"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);
     assert.equal(requests.assets.includes("/assets/styles.css"), false);

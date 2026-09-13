@@ -138,6 +138,16 @@ class WholeTaskLoopTests(LoopHarness):
         self.assertEqual(['tap_semantic','wait_for_change'],[x.action for x in a.calls])
         self.assertEqual(1,s.physical_actions)
 
+    def test_uncertain_effect_can_navigate_without_repeating_effect(self):
+        rows=[(scene(0),decision('tap_semantic',meaning='send_message')),
+            (scene(1),decision('back',outcome='uncertain')),
+            (scene(2),decision(outcome='matched'))]
+        loop,s,a=self.start(rows,goal='发送一条消息')
+        loop.run_autonomous_safe_loop(s)
+        self.assertEqual(s.status,'succeeded')
+        self.assertEqual(['tap_semantic','back'],[x.action for x in a.calls])
+        self.assertEqual(2,s.physical_actions)
+
     def test_unknown_focus_cannot_type(self):
         with self.assertRaisesRegex(Exception,'聚焦'):
             self.start([(scene(0,text='',focused=None),decision('input_verified_text',text='正文'))])

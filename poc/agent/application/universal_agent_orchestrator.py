@@ -236,7 +236,7 @@ class UniversalAgentOrchestrator:
         self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, decision))
         if (executed_effect and decision.previous_action_outcome != "matched"
                 and (decision.proposal.action is None
-                    or decision.proposal.action.action != "wait_for_change")):
+                    or action_effect_kind(decision.proposal.action) != "")):
             self._clear_action(session)
             self._set_status(session, "failed", "本次效果已执行，但新图未确认结果；不自动重复效果。")
             return decision

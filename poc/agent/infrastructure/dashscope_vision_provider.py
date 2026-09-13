@@ -241,14 +241,12 @@ class DashScopeVisionProvider:
                 response_format=response_format)
         except Exception as exc:
             if ledger is not None and local_request_id:
-                if self.last_usage:
-                    ledger.record_success(local_request_id, provider_request_id=self.last_request_id,
-                        response_model=self.last_response_model, network_attempts=self.last_network_attempts,
-                        usage=self.last_usage, finish_reason=self.last_finish_reason,
-                        elapsed_seconds=time.perf_counter() - request_started)
-                else:
-                    ledger.record_failure(local_request_id, network_attempts=self.last_network_attempts, error=exc,
-                        elapsed_seconds=time.perf_counter() - request_started)
+                # A provider response is only successful after message.content
+                # has passed validation. Token usage can exist on malformed
+                # responses, but it must never turn a parse failure into a
+                # successful request in the session ledger.
+                ledger.record_failure(local_request_id, network_attempts=self.last_network_attempts, error=exc,
+                    elapsed_seconds=time.perf_counter() - request_started)
             raise
         if ledger is not None and local_request_id:
             ledger.record_success(local_request_id, provider_request_id=self.last_request_id,
@@ -335,8 +333,44 @@ class DashScopeVisionProvider:
         try:
             choice = payload["choices"][0]
             self.last_finish_reason = str(choice.get("finish_reason") or "")
-            content = choice["message"]["content"]
+            message = choice["message"]
+            content = message["content"]
         except (AttributeError, KeyError, IndexError, TypeError) as exc:
+            self._save_failed_response_evidence(payload, reason="missing_message_content")
             raise VisionAgentError("千问视觉响应缺少 message.content。") from exc
-        reject_if(not isinstance(content, str) or not content.strip(), VisionAgentError("千问视觉返回了空内容。"))
+        if not isinstance(content, str):
+            self._save_failed_response_evidence(payload, reason="non_string_message_content")
+            raise VisionAgentError("千问视觉 message.content 必须是字符串。")
+        if not content.strip():
+            self._save_failed_response_evidence(payload, reason="empty_message_content")
+            raise VisionAgentError("千问视觉返回了空内容（reasoning_content 不能代替最终 JSON）。")
         return content
+
+    def _save_failed_response_evidence(self, payload: Any, *, reason: str) -> None:
+        """Keep the raw response when final content cannot be parsed.
+
+        The observer writes the normal response artifact after a successful
+        provider return. This transport-level artifact covers the opposite
+        case without ever writing request headers or credentials.
+        """
+        request_path = self._active_request_evidence.get()
+        if request_path is None:
+            return
+        if request_path.name.endswith("_model_request.json"):
+            response_path = request_path.with_name(request_path.name.replace(
+                "_model_request.json", "_model_response.json"))
+        else:
+            response_path = request_path.with_name(f"{request_path.stem}_model_response.json")
+        try:
+            atomic_replace_bytes(response_path, json_bytes({
+                "artifact_version": "2026-09-14-transport-response-failure-v1",
+                "reason": reason,
+                "request_evidence_path": str(request_path) if request_path.is_file() else None,
+                "request_id": self.last_request_id,
+                "response_model": self.last_response_model,
+                "finish_reason": self.last_finish_reason,
+                "raw_response": payload,
+            }))
+        except OSError:
+            # Diagnostics must not mask the original protocol failure.
+            return

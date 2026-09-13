@@ -27,6 +27,12 @@ class PromptInstructionOrderTests(unittest.TestCase):
                     '不生成固定步骤清单', '本地不按业务子目标清单推进'):
                     self.assertTrue(text in prompt, msg=text)
 
+    def test_input_append_requires_complete_expected_text(self):
+        prompt = _single_step_observation_prompt({}, include_input_structure=True,
+            image_count=1, request_image_size=(720, 1280),
+            available_action_kinds=('input_verified_text',))
+        self.assertIn('text仍必须填写追加后的完整正文', prompt)
+        self.assertIn('本地会从完整text计算唯一input_fragment', prompt)
     def test_original_goals_and_guidance_reach_actual_request_without_local_planning(self):
         goals = ('先清空卡片，再打开抖音，给十条视频点赞',
             '先打开备忘录，再清空输入框，最后回到主屏幕',

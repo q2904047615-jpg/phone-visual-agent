@@ -74,6 +74,8 @@ postcondition用于报告上一动作后的当前目标状态；当previous_acti
   无需文字输入的操作和直接提交用户指定的现有内容不适用本段，不要求补做输入；混合任务只在文字输入环节使用本段，不约束其他动作。仅要求输入时不擅自发送或发布。
 - input_verified_text：text为当前选中输入框应达到的完整正文，逐字保留用户指定内容（空格、标点、Unicode、换行不改写）；
   用户明确要求拟文时才生成正文。entities.exact_input_text非null时必须原样使用。
+  当当前输入框已有正文且任务要求追加内容时，text仍必须填写追加后的完整正文，必须逐字复制当前input_structure.application_inputs[*].text作为前缀；不得只填写本次新增片段。
+  例如当前正文为“已有内容##”，要追加“旅行”，text必须为“已有内容##旅行”，不能只返回“旅行”。本地会从完整text计算唯一input_fragment。
   该动作仅追加当前正文与目标正文之间的差额；旧草稿不是目标严格前缀时，先单独clear_verified_text，
   取得新图后再输入，不能一次清空并输入。已经达到目标时不重复输入。
 - clear_verified_text：清空当前选中字段，text=null；当前字段正文和预编辑已空时无须空清空。

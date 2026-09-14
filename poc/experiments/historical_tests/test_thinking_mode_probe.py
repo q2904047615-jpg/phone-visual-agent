@@ -52,7 +52,7 @@ class ThinkingModeProbeTests(unittest.TestCase):
         response = Mock()
         response.json.return_value = {'choices': [{'message': {'content': '{}',
             'reasoning_content': 'not an action'}, 'finish_reason': 'stop'}],
-            'model': 'qwen3-vl-plus', 'usage': {'completion_tokens_details': {'reasoning_tokens': 42}}}
+            'model': 'qwen3.7-plus', 'usage': {'completion_tokens_details': {'reasoning_tokens': 42}}}
         bodies = []
         for enabled in (False, True):
             provider = probe.DashScopeVisionProvider(api_key='offline-dummy', enable_thinking=enabled)

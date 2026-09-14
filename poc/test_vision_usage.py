@@ -23,7 +23,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         ledger = VisionSessionUsageLedger(session_id="six-action-topology")
         for index in range(planned_calls):
             local_id = ledger.reserve_request(
-                model="qwen3-vl-plus",
+                model="qwen3.7-plus",
                 stage="single_step_observation",
                 fingerprint=f"frame-{index + 1}",
                 max_completion_tokens=2600,
@@ -31,7 +31,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
             ledger.record_success(
                 local_id,
                 provider_request_id=f"provider-{index + 1}",
-                response_model="qwen3-vl-plus",
+                response_model="qwen3.7-plus",
                 network_attempts=1,
                 usage={
                     "prompt_tokens": 2500,
@@ -60,13 +60,13 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         )
         self.assertNotIn("remaining_model_requests", payload["totals"])
         self.assertNotIn("remaining_tokens", payload["totals"])
-        self.assertEqual("qwen3-vl-plus", payload["model"])
+        self.assertEqual("qwen3.7-plus", payload["model"])
         self.assertFalse(payload["downgrade_allowed"])
 
     def test_request_tokens_cost_and_legacy_cache_counter_remains_zero(self) -> None:
         ledger = VisionSessionUsageLedger(session_id="session-usage")
         local_id = ledger.reserve_request(
-            model="qwen3-vl-plus",
+            model="qwen3.7-plus",
             stage="single_step_observation",
             fingerprint="frame-a",
             max_completion_tokens=2600,
@@ -74,7 +74,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         ledger.record_success(
             local_id,
             provider_request_id="provider-1",
-            response_model="qwen3-vl-plus",
+            response_model="qwen3.7-plus",
             network_attempts=1,
             usage={
                 "prompt_tokens": 1000,
@@ -86,7 +86,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
             elapsed_seconds=1.25,
         )
         payload = ledger.to_dict()
-        self.assertEqual("qwen3-vl-plus", payload["model"])
+        self.assertEqual("qwen3.7-plus", payload["model"])
         self.assertFalse(payload["downgrade_allowed"])
         self.assertEqual(1, payload["totals"]["model_requests"])
         self.assertEqual(1, payload["totals"]["successful_requests"])
@@ -120,7 +120,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         ledger = VisionSessionUsageLedger(session_id="unbounded-observation")
         for index in range(17):
             local_id = ledger.reserve_request(
-                model="qwen3-vl-plus",
+                model="qwen3.7-plus",
                 stage="single_step_observation",
                 fingerprint=f"frame-{index + 1}",
                 max_completion_tokens=5200,
@@ -128,7 +128,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
             ledger.record_success(
                 local_id,
                 provider_request_id=f"provider-{index + 1}",
-                response_model="qwen3-vl-plus",
+                response_model="qwen3.7-plus",
                 network_attempts=1,
                 usage={
                     "prompt_tokens": 2500,
@@ -138,7 +138,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
                 finish_reason="stop",
             )
         next_request = ledger.reserve_request(
-            model="qwen3-vl-plus",
+            model="qwen3.7-plus",
             stage="single_step_observation",
             fingerprint="frame-18",
             max_completion_tokens=5200,
@@ -184,7 +184,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
             "vision_step_contract_violation",
         ):
             ledger.reserve_request(
-                model="qwen3-vl-plus",
+                model="qwen3.7-plus",
                 stage="visual_action_selection",
                 fingerprint="frame-one",
                 max_completion_tokens=100,
@@ -218,7 +218,7 @@ class DashScopeUsageIntegrationTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "id": "dashscope-request-1",
-            "model": "qwen3-vl-plus",
+            "model": "qwen3.7-plus",
             "usage": {
                 "prompt_tokens": 200,
                 "completion_tokens": 20,

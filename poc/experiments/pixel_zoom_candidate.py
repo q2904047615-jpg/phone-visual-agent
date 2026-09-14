@@ -36,7 +36,7 @@ def build_request(image_url, target, *, region):
     data = base64.b64decode(image_url.split(",", 1)[1], validate=True)
     with Image.open(io.BytesIO(data)) as image:
         w, h = image.size
-    return {"model": "qwen3-vl-plus", "temperature": 0.0, "enable_thinking": True,
+    return {"model": "qwen3.7-plus", "temperature": 0.0, "enable_thinking": True,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": image_url}},
             {"type": "text", "text": prompt(target, w, h, region=region)}]}]}

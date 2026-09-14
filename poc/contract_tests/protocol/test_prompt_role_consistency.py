@@ -21,6 +21,16 @@ class PromptRoleConsistencyTests(unittest.TestCase):
         self.assertIn('JSON', message['content'])
         self.assertNotIn('只读页面观察器', message['content'])
 
+    def test_empty_history_does_not_block_current_state_verification(self):
+        prompt = _single_step_observation_prompt(
+            {'objective': '检查当前状态', 'entities': {'history': []}},
+            include_input_structure=False, image_count=1,
+            request_image_size=(720, 1280), available_action_kinds=('wait_for_change',))
+        self.assertIn('CURRENT独立满足该条件即可finish', prompt)
+        self.assertIn('不得仅因history为空改为等待', prompt)
+        self.assertIn('该组事实就是充分条件', prompt)
+        self.assertIn('不得另加历史归因、身份资料或额外稳定等待条件', prompt)
+
     def test_full_prompt_keeps_fact_sections_and_removes_stability_assumption(self):
         for image_count in (1, 3):
             for include_input in (False, True):

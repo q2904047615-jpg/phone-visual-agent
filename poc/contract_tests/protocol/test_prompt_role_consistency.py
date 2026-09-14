@@ -40,6 +40,8 @@ class PromptRoleConsistencyTests(unittest.TestCase):
                     self.assertIn('常见位置只能作弱提示', prompt)
                     self.assertIn('评论行内的回复控件属于该评论，页面底部独立编辑区才是新评论入口', prompt)
                     self.assertIn('UI惯例只帮助解释CURRENT可见事实', prompt)
+                    self.assertIn('最终decision必须与scene、summary和reason一致', prompt)
+                    self.assertIn('目标要求顶层创建时不得在子项回复或嵌套编辑器中输入、发送', prompt)
                     if include_input:
                         self.assertIn('INPUT CONTRACT applies only to input_structure', prompt)
                         self.assertIn('all supplied CURRENT images from this observation', prompt)

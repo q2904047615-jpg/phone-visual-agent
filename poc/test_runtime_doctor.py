@@ -79,7 +79,7 @@ def run(controller, *, active_session=None, qwen=None):
     return run_runtime_doctor(
         device_id="device-a",
         controller=controller,
-        qwen_provider=qwen or FakeProvider(model="qwen3.7-plus"),
+        qwen_provider=qwen or FakeProvider(model="qwen3-vl-plus"),
         active_session=active_session,
         protocols={"action": "2026-08-20-canonical-action-v1"},
         sleep=lambda _seconds: None,
@@ -138,7 +138,7 @@ class RuntimeDoctorTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ready"])
-        self.assertTrue(any("不是 qwen3.7-plus" in item for item in result["blockers"]))
+        self.assertTrue(any("不是 qwen3-vl-plus" in item for item in result["blockers"]))
 
 if __name__ == "__main__":
     unittest.main()

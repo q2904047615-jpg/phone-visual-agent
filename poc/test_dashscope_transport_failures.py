@@ -23,7 +23,7 @@ class DashScopeTransportFailureTests(unittest.TestCase):
         ledger = VisionSessionUsageLedger(session_id="empty-content")
         payload = {
             "id": "request-empty",
-            "model": "qwen3.7-plus",
+            "model": "qwen3-vl-plus",
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
             "choices": [{"finish_reason": "stop", "message": {
                 "reasoning_content": "分析完成，但最终字段为空", "content": ""
@@ -51,7 +51,7 @@ class DashScopeTransportFailureTests(unittest.TestCase):
 
     def test_missing_content_is_failed_without_promoting_reasoning(self):
         provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
-        payload = {"id": "request-missing", "model": "qwen3.7-plus",
+        payload = {"id": "request-missing", "model": "qwen3-vl-plus",
                    "choices": [{"finish_reason": "stop", "message": {
                        "reasoning_content": "仅有推理"
                    }}]}
@@ -69,7 +69,7 @@ class DashScopeTransportFailureTests(unittest.TestCase):
 
     def test_transport_disconnect_retries_request_without_changing_payload(self):
         provider = DashScopeVisionProvider(api_key="test-key", max_attempts=2, retry_base_delay=0)
-        payload = {"id": "request-recovered", "model": "qwen3.7-plus",
+        payload = {"id": "request-recovered", "model": "qwen3-vl-plus",
                    "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}
         messages = [{"role": "user", "content": "observe"}]
         with patch("agent.infrastructure.dashscope_vision_provider.httpx.post",

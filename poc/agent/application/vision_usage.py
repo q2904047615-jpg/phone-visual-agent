@@ -16,8 +16,8 @@ VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v4"
 QWEN_PLUS_MODEL = DEFAULT_VISION_MODEL
 SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
 
-# Beijing non-thinking prices verified 2026-09-15; reports keep list/promo estimates, not invoice claims.
-QWEN_PLUS_PRICING_VERSION = "cn-beijing-qwen3.7-plus-2026-09-15"
+# Beijing non-thinking prices verified 2026-09-09; reports keep list/promo estimates, not invoice claims.
+QWEN_PLUS_PRICING_VERSION = "cn-beijing-qwen3-vl-plus-2026-09-09"
 QWEN_PLUS_PRICING_SOURCE = 'https://help.aliyun.com/zh/model-studio/model-pricing'
 QWEN_PLUS_LIST_INPUT_CNY_PER_MILLION = 2.0
 QWEN_PLUS_LIST_OUTPUT_CNY_PER_MILLION = 8.0

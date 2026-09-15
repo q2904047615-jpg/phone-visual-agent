@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Mapping
 
 
-VISION_MODEL_CONFIG_VERSION = "2026-09-15-vision-model-config-v2"
-DEFAULT_VISION_MODEL = "qwen3.7-plus"
+VISION_MODEL_CONFIG_VERSION = "2026-09-15-vision-model-config-v3"
+DEFAULT_VISION_MODEL = "qwen3-vl-plus"
 DEFAULT_VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_VISION_PROVIDER = "aliyun_model_studio"
 VISION_COORDINATE_SCALE = 1000

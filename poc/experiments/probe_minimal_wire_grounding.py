@@ -54,7 +54,7 @@ def build(target):
     prompt = (f"定位图中{TARGETS[target]}，给出目标内部一个可点击点。"
               "坐标以整张图片左上角为原点，横纵轴均归一化到0..999。"
               "只返回JSON数组[x,y]；目标不可辨认则返回null。")
-    body = {"model": "qwen3.7-plus", "temperature": 0.0, "enable_thinking": True,
+    body = {"model": "qwen3-vl-plus", "temperature": 0.0, "enable_thinking": True,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": url}},
                 {"type": "text", "text": prompt}]}]}

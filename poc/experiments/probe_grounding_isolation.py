@@ -110,7 +110,7 @@ def preflight():
     if (OUT / 'preflight.json').exists() or list(OUT.glob('*_attempt.json')):
         raise RuntimeError('Campaign is already frozen')
     provider = DashScopeVisionProvider(api_key='offline-dummy', enable_thinking=True, max_attempts=1)
-    if provider.model != 'qwen3-vl-plus':
+    if provider.model != 'qwen3.7-plus':
         raise RuntimeError('Unexpected model')
     hashes, fixtures = {}, {}
     for name in CASES:

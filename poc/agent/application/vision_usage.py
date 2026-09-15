@@ -16,8 +16,8 @@ VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v4"
 QWEN_PLUS_MODEL = DEFAULT_VISION_MODEL
 SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
 
-# Beijing non-thinking prices verified 2026-08-24; reports keep list/promo estimates, not invoice claims.
-QWEN_PLUS_PRICING_VERSION = "cn-beijing-qwen3-vl-plus-2026-09-09"
+# Beijing non-thinking prices verified 2026-09-15; reports keep list/promo estimates, not invoice claims.
+QWEN_PLUS_PRICING_VERSION = "cn-beijing-qwen3.7-plus-2026-09-15"
 QWEN_PLUS_PRICING_SOURCE = 'https://help.aliyun.com/zh/model-studio/model-pricing'
 QWEN_PLUS_LIST_INPUT_CNY_PER_MILLION = 2.0
 QWEN_PLUS_LIST_OUTPUT_CNY_PER_MILLION = 8.0
@@ -72,7 +72,7 @@ class VisionSessionUsageLedger:
         self.session_id = str(self.session_id or "").strip()
         self.expected_model = str(self.expected_model or "").strip()
         reject_if(not self.session_id, ValueError("Qwen 用量账本必须绑定 session_id。"))
-        reject_if(self.expected_model != QWEN_PLUS_MODEL, ValueError("正式 Qwen 用量账本只允许 qwen3-vl-plus。"))
+        reject_if(self.expected_model != QWEN_PLUS_MODEL, ValueError(f"正式 Qwen 用量账本只允许 {QWEN_PLUS_MODEL}。"))
 
     @staticmethod
     def _timestamp() -> str:

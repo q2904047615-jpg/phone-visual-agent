@@ -48,7 +48,7 @@ def source_image():
 
 
 def request(url, prompt):
-    return {"model": "qwen3-vl-plus", "temperature": 0.0, "enable_thinking": True,
+    return {"model": "qwen3.7-plus", "temperature": 0.0, "enable_thinking": True,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": url}},
             {"type": "text", "text": prompt}]}]}

@@ -132,9 +132,10 @@ class PointSceneProjectionTests(unittest.TestCase):
         payload['scene']['elements'] = [{'element_id': 'field', 'role': 'input',
             'bounds': [0, 0, 0, 0], 'states': {'value': '冲突文字', 'focused': True}}]
         scene, result, resolved, _ = observe(payload, task_context('清空当前输入框'))
-        bound_id = result.proposal.action.params['element_id']
-        self.assertEqual('旧草稿', scene.get_element(bound_id).states['value'])
-        self.assertIsNot(scene.get_element(bound_id).states.get('focused'), True)
+        self.assertEqual('field', result.proposal.action.params['element_id'])
+        audited_input = scene.get_element('local_audited_input_1')
+        self.assertEqual('旧草稿', audited_input.states['value'])
+        self.assertIsNot(audited_input.states.get('focused'), True)
         self.assertEqual(1, len([item for item in scene.elements if item.role == 'input']))
         self.assertEqual((.61, .37), resolved.normalized_point)
         broken = deepcopy(payload)

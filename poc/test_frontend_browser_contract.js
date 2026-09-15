@@ -471,6 +471,7 @@ test("task budget fields submit configured limits", { timeout: 30000 }, async ()
   try {
     assert.equal(await page.locator("#agentActionBudget").inputValue(), "100");
     assert.equal(await page.locator("#agentObservationBudget").inputValue(), "200");
+    await page.locator("details.advanced-settings > summary").click();
     await page.locator("#agentActionBudget").fill("123");
     await page.locator("#agentObservationBudget").fill("456");
     await page.locator("#agentText").fill("打开系统设置");
@@ -503,6 +504,7 @@ test("budget pause restores progress and resumes via the budget endpoint", { tim
     assert.match(await page.locator("#sceneMeta").innerText(), /100 \/ 100/);
     assert.match(await page.locator("#sceneMeta").innerText(), /150 \/ 200/);
     assert.equal(await page.locator("#reviewAction").count(), 0);
+    await page.locator("details.advanced-settings > summary").click();
     await page.locator("#agentActionBudget").fill("300");
     await page.locator("#agentObservationBudget").fill("600");
     const response = page.waitForResponse(response => response.url().endsWith("/auto"));

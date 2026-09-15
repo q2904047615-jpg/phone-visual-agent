@@ -38,6 +38,8 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
         self.assertIn('整任务预算', prompt)
         self.assertNotIn('gesture_correction', prompt)
         self.assertNotIn('绝不能重复原轨迹', prompt)
+        self.assertIn('落点应明确位于target的可交互区域内部', prompt)
+        self.assertIn('不能原样复用该落点', prompt)
         self.assertIn('顶部标题、页面标题或其它明确身份信息', prompt)
 
 

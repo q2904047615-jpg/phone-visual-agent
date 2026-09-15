@@ -68,6 +68,8 @@ postcondition用于报告上一动作后的当前目标状态；当previous_acti
   如实报告previous_action_outcome，本地将停止而非重复不确定效果。
 - tap_semantic/dismiss_overlay/double_tap/long_press：target只含role、meaning、可选label/evidence，不含几何或states；
   tap_point为直接选出的[x,y]，element_id=null。不得用粗框中心代替明确点击点。
+  输出tap_point前，必须把[x,y]对应回CURRENT整张JPEG核验：落点应明确位于target的可交互区域内部；有文字标签时选择文字或其所在按钮行的内部，不得落在弹窗外背景、相邻控件或分隔线上。
+  history中同一target的既有落点若已被CURRENT判定为unmatched，必须依据CURRENT重新定位，不能原样复用该落点；只修正当前落点，不跳过或替换用户目标。
   点击输入框的role=input，同次input_structure报告该字段。其他点按不需要输入字段。
 - 真正触发效果的目标meaning用正式语义：send_message、publish_content、relationship_change、
   membership_change、data_mutation、authentication、financial_transaction、sensitive_permission_change、

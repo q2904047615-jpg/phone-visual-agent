@@ -47,7 +47,7 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-14-single-step-task-screenshots-v23"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-15-single-step-target-point-v24"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-06-input-structure-field-preedit-v17"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)

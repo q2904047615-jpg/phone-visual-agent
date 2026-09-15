@@ -24,12 +24,14 @@ class ProjectBootstrapContractTests(unittest.TestCase):
         self.assertNotIn("Invoke-WebRequest", launcher)
         self.assertNotIn("/api/device", launcher)
 
-    def test_both_launchers_check_only_current_web_dependencies(self) -> None:
-        for name in ("启动机械臂网页控制台.cmd", "启动网页控制台_模拟模式.cmd"):
-            with self.subTest(launcher=name):
-                launcher = (PROJECT_ROOT / name).read_text(encoding="utf-8")
-                self.assertIn('import fastapi, uvicorn, httpx"', launcher)
-                self.assertNotIn("pypinyin", launcher)
+    def test_only_current_launcher_remains(self) -> None:
+        self.assertEqual(
+            ["启动机械臂网页控制台.cmd"],
+            sorted(path.name for path in PROJECT_ROOT.glob("启动*.cmd")),
+        )
+        launcher = (PROJECT_ROOT / "启动机械臂网页控制台.cmd").read_text(encoding="utf-8")
+        self.assertIn('import fastapi, uvicorn, httpx"', launcher)
+        self.assertNotIn("pypinyin", launcher)
 
     def test_retired_deepseek_configuration_launchers_are_absent(self) -> None:
         for name in ("configure_deepseek_key.ps1", "配置DeepSeek文本理解密钥.ps1", "配置DeepSeek文本理解密钥.cmd"):

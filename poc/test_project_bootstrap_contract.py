@@ -29,6 +29,7 @@ class ProjectBootstrapContractTests(unittest.TestCase):
             ["启动机械臂网页控制台.cmd"],
             sorted(path.name for path in PROJECT_ROOT.glob("启动*.cmd")),
         )
+        self.assertEqual([], list(PROJECT_ROOT.glob(".task-backups/**/启动*.cmd")))
         launcher = (PROJECT_ROOT / "启动机械臂网页控制台.cmd").read_text(encoding="utf-8")
         self.assertIn('import fastapi, uvicorn, httpx"', launcher)
         self.assertNotIn("pypinyin", launcher)

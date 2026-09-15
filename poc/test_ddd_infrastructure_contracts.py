@@ -372,7 +372,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             for target in targets
                         )
                         and isinstance(value, ast.Constant)
-                        and value.value == "qwen3.7-plus"
+                        and value.value == "qwen3-vl-plus"
                     ):
                         model_literal_authorities.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)

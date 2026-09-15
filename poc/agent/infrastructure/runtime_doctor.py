@@ -104,7 +104,7 @@ def run_runtime_doctor(*, device_id: str, controller: Any, qwen_provider: Any,
     if qwen_blocker:
         blockers.append(qwen_blocker)
     if qwen_status.get('configured') and qwen_status.get('model') != DEFAULT_VISION_MODEL:
-        blockers.append(f'正式视觉模型不是 {DEFAULT_VISION_MODEL}：' + str(qwen_status.get('model') or 'unknown'))
+        blockers.append('正式视觉模型不是 qwen3-vl-plus：' + str(qwen_status.get('model') or 'unknown'))
 
     text_transport_status: dict[str, Any] | None = None
     if text_transport is not None:

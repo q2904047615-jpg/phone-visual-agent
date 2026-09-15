@@ -269,7 +269,7 @@ class DashScopeVisionProvider:
             or max_tokens <= 0), VisionAgentError("千问视觉 max_tokens 必须为正整数或省略。"))
         response_format = _validated_response_format(response_format)
         request_options = self.model_config.request_options()
-        # DashScope documents strict structured output for qwen3.7-plus, including visual inputs.
+        # DashScope documents Qwen3-VL structured output for non-thinking mode.
         # Keep thinking enabled for free-form calls, but make strict JSON
         # requests deterministic so the final message.content carries JSON.
         if isinstance(response_format, dict) and response_format.get("type") == "json_schema":

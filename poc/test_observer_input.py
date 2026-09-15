@@ -1,6 +1,6 @@
 from __future__ import annotations
 from PIL import Image
-from agent.infrastructure.generic_scene_observer import SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+from agent.infrastructure.generic_scene_observer import (OBSERVATION_MAX_ATTEMPTS, SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION)
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.domain.vision_model import VisionAgentError
 from agent.domain.visual_evidence import VisualObstruction
@@ -237,7 +237,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         )
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.call_options["max_attempts"], 1)
+        self.assertEqual(provider.call_options["max_attempts"], OBSERVATION_MAX_ATTEMPTS)
         prompt = json.dumps(provider.messages_seen[0], ensure_ascii=False)
         self.assertIn("A blank input is valid", prompt)
         self.assertIn("does not need placeholder, caret", prompt)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 from PIL import Image
-from agent.infrastructure.generic_scene_observer import OBSERVATION_TIMEOUT_SECONDS, SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+from agent.infrastructure.generic_scene_observer import (
+    OBSERVATION_MAX_ATTEMPTS,
+    OBSERVATION_TIMEOUT_SECONDS,
+    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+)
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.infrastructure.dashscope_vision_provider import _image_data_url
 from agent.infrastructure.generic_scene_observer import _single_step_observation_prompt
@@ -89,7 +93,8 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertEqual(4, len(image_parts))
                 self.assertEqual(180.0, OBSERVATION_TIMEOUT_SECONDS)
                 self.assertEqual(OBSERVATION_TIMEOUT_SECONDS, provider.call_options["timeout"])
-                self.assertEqual(1, provider.call_options["max_attempts"])
+                self.assertEqual(2, OBSERVATION_MAX_ATTEMPTS)
+                self.assertEqual(OBSERVATION_MAX_ATTEMPTS, provider.call_options["max_attempts"])
                 self.assertEqual(
                     _image_data_url(frames[-1].convert("RGB")),
                     image_parts[0]["image_url"]["url"],

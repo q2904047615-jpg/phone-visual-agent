@@ -80,7 +80,7 @@ def _positive_env_int(name: str, default: int) -> int:
 # One request per fresh scene remains mandatory. These values only bound the
 # cloud wait and transient retry cost; they never skip the post-action scene.
 OBSERVATION_TIMEOUT_SECONDS = _positive_env_float("VISION_OBSERVATION_TIMEOUT_SECONDS", 180.0)
-OBSERVATION_MAX_ATTEMPTS = _positive_env_int("VISION_OBSERVATION_MAX_ATTEMPTS", 1)
+OBSERVATION_MAX_ATTEMPTS = _positive_env_int("VISION_OBSERVATION_MAX_ATTEMPTS", 2)
 
 _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe',
     'command', 'shell', 'coordinates', 'next_action', 'execution_plan'})

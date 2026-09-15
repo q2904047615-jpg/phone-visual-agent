@@ -1,4 +1,5 @@
 import json
+import httpx
 from pathlib import Path
 import tempfile
 import unittest
@@ -64,6 +65,21 @@ class DashScopeTransportFailureTests(unittest.TestCase):
                         provider._chat([{"role": "user", "content": "observe"}], max_tokens=None)
             saved = json.loads((Path(tmp) / "abc_model_response.json").read_text(encoding="utf-8"))
             self.assertEqual("missing_message_content", saved["reason"])
+
+
+    def test_transport_disconnect_retries_request_without_changing_payload(self):
+        provider = DashScopeVisionProvider(api_key="test-key", max_attempts=2, retry_base_delay=0)
+        payload = {"id": "request-recovered", "model": "qwen3.7-plus",
+                   "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}]}
+        messages = [{"role": "user", "content": "observe"}]
+        with patch("agent.infrastructure.dashscope_vision_provider.httpx.post",
+                   side_effect=[httpx.RemoteProtocolError("server disconnected"), self.response(payload)]) as post:
+            content = provider._chat(messages, max_tokens=None)
+
+        self.assertEqual("{}", content)
+        self.assertEqual(2, post.call_count)
+        self.assertEqual(2, provider.last_network_attempts)
+        self.assertEqual(post.call_args_list[0].kwargs["json"], post.call_args_list[1].kwargs["json"])
 
 
 if __name__ == "__main__":

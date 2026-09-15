@@ -5,6 +5,7 @@ from __future__ import annotations
 from agent.domain.validation import NormalizedBounds, reject_if
 import json
 import base64
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 from functools import lru_cache
@@ -47,7 +48,9 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-15-single-step-target-point-v24"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-15-history-thumbnails-v25"
+HISTORY_THUMBNAIL_MAX_SIZE = (360, 640)
+HISTORY_THUMBNAIL_JPEG_QUALITY = 70
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-06-input-structure-field-preedit-v17"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
@@ -81,6 +84,15 @@ def _positive_env_int(name: str, default: int) -> int:
 # cloud wait and transient retry cost; they never skip the post-action scene.
 OBSERVATION_TIMEOUT_SECONDS = _positive_env_float("VISION_OBSERVATION_TIMEOUT_SECONDS", 180.0)
 OBSERVATION_MAX_ATTEMPTS = _positive_env_int("VISION_OBSERVATION_MAX_ATTEMPTS", 2)
+
+def _history_image_data_url(path: Path) -> str:
+    with Image.open(path) as saved:
+        image = saved.convert("RGB")
+        image.thumbnail(HISTORY_THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=HISTORY_THUMBNAIL_JPEG_QUALITY, optimize=True)
+    return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+
 
 _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe',
     'command', 'shell', 'coordinates', 'next_action', 'execution_plan'})
@@ -164,6 +176,7 @@ class SingleStepGenericSceneObserver():
             'single_step_output_tokens': SINGLE_STEP_OUTPUT_TOKENS,
             'observation_timeout_seconds': OBSERVATION_TIMEOUT_SECONDS,
             'observation_max_attempts': OBSERVATION_MAX_ATTEMPTS,
+            'max_network_attempts_per_observation': OBSERVATION_MAX_ATTEMPTS,
             'last_scene_enum_values': dict(self.last_diagnostics.get('scene_enum_values') or {}),
             'last_input_structure_shape': dict(self.last_diagnostics.get('input_structure_shape') or {})})
         return value
@@ -226,11 +239,11 @@ class SingleStepGenericSceneObserver():
                 screenshot_manifest = task_screenshots(Path(response_evidence_dir), device_id=device_id,
                     task_id=context.get("entities", {}).get("task_id"), current_paths=current_frame_paths)
                 for item in screenshot_manifest:
-                    # Send the saved bytes, without re-encoding historical evidence.
                     path = Path(item["path"])
                     with Image.open(path) as saved:
                         saved.verify()
-                    url = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+                    url = (_history_image_data_url(path) if item["group"] == "HISTORY"
+                        else "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii"))
                     label = (f'IMAGE {item["image"]} - {item["group"]} PHONE SURFACE '
                         f'- capture={item["capture"]} - file={path.name}')
                     content.extend(({'type': 'text', 'text': label},
@@ -305,7 +318,8 @@ class SingleStepGenericSceneObserver():
                 'task_screenshot_count': len(screenshot_manifest),
                 'current_screenshot_count': len(model_frames),
                 'online_stages': ['single_step_observation'],
-                'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
+                'input_structure_in_same_response': input_structure_required,
+                'remote_retry_used': int(getattr(self.provider, 'last_network_attempts', 0) or 0) > 1,
                 'selected_frame_index': selected_frame_index,
                 'stable_tail_start_index': stable_tail_start, 'local_stability': stability.to_dict(), 'temporal_change_is_error': False,
                 'frame_sharpness_scores': [round(value, 3) for value in sharpness_scores],
@@ -329,12 +343,13 @@ class SingleStepGenericSceneObserver():
                 'strategy': 'single_step_current_scene_observation',
                 'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, 'model_calls': model_calls,
                 'online_stages': ['single_step_observation'] if model_calls else [],
-                'input_structure_in_same_response': input_structure_required, 'remote_retry_used': False,
+                'input_structure_in_same_response': input_structure_required,
+                'remote_retry_used': int(getattr(self.provider, 'last_network_attempts', 0) or 0) > 1,
                 'failed_stage': failed_stage, 'fingerprint': fingerprint, 'error': str(exc),
                 'task_screenshot_count': len(screenshot_manifest),
                 'foreground_identity_source': 'qwen_visual',
                 'error_type': classify_qwen_error(exc, raw_response=self.last_raw_response),
-                'safe_stop_reason': '单次模型输出未建立完整可信观察；没有发起第二次Qwen请求，控制器与机械臂均未执行。',
+                'safe_stop_reason': '单次逻辑模型观察未建立完整可信结果；网络重试不会执行动作，控制器与机械臂均未执行。',
                 'raw_response_length': len(self.last_raw_response),
                 'raw_response_excerpt': self.last_raw_response[:1000],
                 'elapsed_seconds': round(time.perf_counter() - started, 3)}

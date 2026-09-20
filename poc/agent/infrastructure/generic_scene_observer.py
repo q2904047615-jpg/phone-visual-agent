@@ -28,7 +28,7 @@ from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
     MODEL_STEP_DIRECT_POINT_ACTIONS,
@@ -99,8 +99,6 @@ _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step'
 
 _INPUT_AUDIT_FIELDS = frozenset({'element_id', 'structure_id', 'bounds', 'fully_visible', 'text', 'preedit_text', 'placeholder',
     'visible_editable_cues', 'caret_line_index', 'focused', 'confidence', 'right_button'})
-
-
 
 
 def _normalize_input_structure_payload(value: Any) -> dict[str, Any]:
@@ -187,172 +185,367 @@ class SingleStepGenericSceneObserver():
             available_action_kinds=available_action_kinds)
         return scene
 
-    def observe_with_decision(self, *, frames: list[Image.Image], goal_context: dict[str, Any] | None=None,
-        device_id: str | None=None, available_action_kinds: Iterable[str] | None=None, response_evidence_dir: Path | None=None,
-        response_evidence_prefix: str='observation', current_frame_paths: tuple[str, ...]=()
-        ) -> tuple[UIScene, dict[str, Any]]:
+    def _prepare_observation(
+        self,
+        frames: list[Image.Image],
+        goal_context: dict[str, Any] | None,
+        available_action_kinds: Iterable[str] | None,
+    ) -> dict[str, Any]:
+        reject_if(len(frames) < 4, VisionAgentError("通用页面观察至少需要4帧。"))
+        stability = measure_local_stability(frames, allow_leading_outlier=True)
+        sharpness_scores = [measure_frame_sharpness(item) for item in frames]
+        stable_tail_start = max(0, len(frames) - min(3, len(frames)))
+        selected_frame_index = max(
+            range(stable_tail_start, len(frames)), key=sharpness_scores.__getitem__
+        )
+        frame = frames[selected_frame_index].convert("RGB")
+        fingerprint = local_frame_fingerprint(frame)
+        context = generic_goal_domain.safe_goal_context(goal_context or {})
+        goal = _goal_view(context)
+        runtime_actions = _normalize_runtime_action_kinds(available_action_kinds)
+        model_frames = tuple(frames)
+        request_image_sizes = {_image_request_size(item) for item in model_frames}
+        reject_if(
+            len(request_image_sizes) != 1,
+            VisionAgentError("同一步发送给Qwen的当前帧尺寸不一致，不能建立唯一坐标空间。"),
+        )
+        request_image_size = next(iter(request_image_sizes))
+        return {
+            "stability": stability,
+            "sharpness_scores": sharpness_scores,
+            "stable_tail_start": stable_tail_start,
+            "selected_frame_index": selected_frame_index,
+            "frame": frame,
+            "fingerprint": fingerprint,
+            "context": context,
+            "runtime_actions": runtime_actions,
+            "input_structure_required": goal.input_requested,
+            "model_frames": model_frames,
+            "request_image_size": request_image_size,
+            "response_format": _single_step_response_format(
+                context,
+                input_structure_required=goal.input_requested,
+                request_height=request_image_size[1],
+                available_action_kinds=runtime_actions,
+            ),
+            "prompt": _single_step_observation_prompt(
+                context,
+                include_input_structure=goal.input_requested,
+                image_count=len(model_frames),
+                request_image_size=request_image_size,
+                available_action_kinds=runtime_actions,
+            ),
+        }
+
+    def _build_observation_content(
+        self,
+        prepared: dict[str, Any],
+        *,
+        device_id: str | None,
+        response_evidence_dir: Path | None,
+        response_evidence_prefix: str,
+        current_frame_paths: tuple[str, ...],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        model_frames = prepared["model_frames"]
+        context = prepared["context"]
+        content: list[dict[str, Any]] = [{"type": "text", "text": prepared["prompt"]}]
+        screenshot_manifest: list[dict[str, Any]] = []
+        reject_if(
+            not current_frame_paths
+            and response_evidence_dir is not None
+            and (Path(response_evidence_dir) / MANIFEST_NAME).exists(),
+            VisionAgentError("已有任务截图记录但缺少本轮截图路径，不能省略历史图片。"),
+        )
+        if current_frame_paths:
+            reject_if(
+                response_evidence_dir is None or len(current_frame_paths) != len(model_frames),
+                VisionAgentError("当前帧缺少完整任务截图路径。"),
+            )
+            screenshot_manifest = task_screenshots(
+                Path(response_evidence_dir),
+                device_id=device_id,
+                task_id=context.get("entities", {}).get("task_id"),
+                current_paths=current_frame_paths,
+            )
+            for item in screenshot_manifest:
+                path = Path(item["path"])
+                with Image.open(path) as saved:
+                    saved.verify()
+                url = (
+                    _history_image_data_url(path)
+                    if item["group"] == "HISTORY"
+                    else "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+                )
+                label = (
+                    f'IMAGE {item["image"]} - {item["group"]} PHONE SURFACE '
+                    f'- capture={item["capture"]} - file={path.name}'
+                )
+                content.extend((
+                    {"type": "text", "text": label},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ))
+            return content, screenshot_manifest
+        for index, item in enumerate(model_frames, start=1):
+            screenshot_manifest.append({
+                "image": index, "group": "CURRENT", "path": None,
+                "capture": response_evidence_prefix,
+            })
+            content.extend((
+                {"type": "text", "text": f"IMAGE {index} - CURRENT PHONE SURFACE"},
+                {"type": "image_url", "image_url": {"url": _image_data_url(item.convert("RGB"))}},
+            ))
+        return content, screenshot_manifest
+
+    def _call_observation(
+        self,
+        content: list[dict[str, Any]],
+        prepared: dict[str, Any],
+        *,
+        response_evidence_dir: Path | None,
+    ) -> tuple[str, str, Path | None, float]:
+        self._set_stage("waiting_single_step_observation")
+        response_id = uuid4().hex
+        request_evidence_path = (
+            Path(response_evidence_dir) / f"{response_id}_model_request.json"
+            if response_evidence_dir is not None else None
+        )
+        scope_factory = getattr(self.provider, "call_scope", None)
+        scope = (
+            scope_factory(
+                stage="single_step_observation",
+                fingerprint=prepared["fingerprint"],
+                request_evidence_path=request_evidence_path,
+            )
+            if callable(scope_factory) else nullcontext()
+        )
+        call_started = time.perf_counter()
+        with scope:
+            raw = self._provider_chat(
+                [_json_only_system_message(), {"role": "user", "content": content}],
+                max_tokens=None,
+                response_format=prepared["response_format"],
+            )
+        return raw, response_id, request_evidence_path, round(time.perf_counter() - call_started, 3)
+
+    def _persist_observation_response(
+        self,
+        raw: str,
+        response_id: str,
+        request_evidence_path: Path | None,
+        prepared: dict[str, Any],
+        screenshot_manifest: list[dict[str, Any]],
+        *,
+        device_id: str | None,
+        response_evidence_dir: Path | None,
+        response_evidence_prefix: str,
+    ) -> None:
+        if response_evidence_dir is None:
+            return
+        evidence_dir = Path(response_evidence_dir)
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = evidence_dir / f"{response_id}_model_response.json"
+        self.last_response_evidence_path = str(atomic_replace_bytes(evidence_path, json_bytes({
+            "artifact_version": "2026-09-04-preparse-model-response-v1",
+            "response_id": response_id,
+            "device_id": device_id,
+            "fingerprint": prepared["fingerprint"],
+            "request_evidence_path": (
+                str(request_evidence_path)
+                if request_evidence_path is not None and request_evidence_path.is_file()
+                else None
+            ),
+            "response_evidence_prefix": redact_model_failure_response(response_evidence_prefix),
+            "observer_protocol": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "task_screenshots": screenshot_manifest,
+            "goal_context": json.loads(
+                redact_model_failure_response(json.dumps(prepared["context"], ensure_ascii=False))
+            ),
+            "raw_response_length": len(raw),
+            "redacted_response_truncated": False,
+            "redacted_raw_response": redact_model_failure_response(raw),
+        })))
+
+    def _parse_observation(
+        self,
+        raw: str,
+        prepared: dict[str, Any],
+    ) -> tuple[UIScene, dict[str, Any], dict[str, Any], str, list[Any]]:
+        self._set_stage("parsing_single_step_observation")
+        envelope = _parse_single_step_observation_envelope(
+            raw,
+            input_structure_required=prepared["input_structure_required"],
+            request_image_size=prepared["request_image_size"],
+        )
+        model_decision = dict(envelope["decision"])
+        scene_payload = dict(envelope["scene"])
+        model_foreground_app_id = str(
+            scene_payload.get("foreground_app_id") or scene_payload.get("app_id") or "unknown"
+        ).strip()
+        obstructions = consensus_top_edge_obstructions(
+            prepared["model_frames"][prepared["stable_tail_start"]:]
+        )
+        referenced_element_ids = _decision_element_ids(model_decision)
+        scene = _parse_scene(
+            json.dumps(scene_payload, ensure_ascii=False, separators=(",", ":")),
+            fingerprint=prepared["fingerprint"],
+            camera_layout_orientation=_camera_layout_orientation(prepared["frame"]),
+            strict_element_ids=referenced_element_ids,
+        )
+        if prepared["input_structure_required"]:
+            input_payload = envelope["input_structure"]
+            assert isinstance(input_payload, dict)
+            scene = _apply_input_structure_audit(
+                scene,
+                json.dumps(input_payload, ensure_ascii=False, separators=(",", ":")),
+                fingerprint=prepared["fingerprint"],
+                goal_context=prepared["context"],
+            )
+        for selected_ref in referenced_element_ids:
+            matches = [item for item in scene.elements if item.element_id == selected_ref]
+            reject_if(
+                len(matches) != 1,
+                VisionAgentError(f"当前Qwen决策引用的元素不唯一或不可执行：{selected_ref}"),
+            )
+        return scene, model_decision, envelope, model_foreground_app_id, obstructions
+
+    def _record_observation_success(
+        self,
+        prepared: dict[str, Any],
+        scene: UIScene,
+        model_decision: dict[str, Any],
+        envelope: dict[str, Any],
+        model_foreground_app_id: str,
+        obstructions: list[Any],
+        screenshot_manifest: list[dict[str, Any]],
+        call_elapsed: float,
+        started: float,
+    ) -> None:
+        self.last_diagnostics = {
+            "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
+            "vision_model": public_model_identity(self.provider.status()),
+            "strategy": "single_step_current_scene_observation",
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "model_calls": 1,
+            "task_screenshot_count": len(screenshot_manifest),
+            "current_screenshot_count": len(prepared["model_frames"]),
+            "online_stages": ["single_step_observation"],
+            "input_structure_in_same_response": prepared["input_structure_required"],
+            "remote_retry_used": int(getattr(self.provider, "last_network_attempts", 0) or 0) > 1,
+            "selected_frame_index": prepared["selected_frame_index"],
+            "stable_tail_start_index": prepared["stable_tail_start"],
+            "local_stability": prepared["stability"].to_dict(),
+            "temporal_change_is_error": False,
+            "frame_sharpness_scores": [round(value, 3) for value in prepared["sharpness_scores"]],
+            "frame_size": list(prepared["frame"].size),
+            "request_image_size": list(prepared["request_image_size"]),
+            "coordinate_normalization": envelope.get("coordinate_normalization"),
+            "fingerprint": prepared["fingerprint"],
+            "element_count": len(scene.elements),
+            "decision_status": model_decision["status"],
+            "foreground_identity_source": "qwen_visual",
+            "model_foreground_app_id": model_foreground_app_id,
+            "available_action_kinds": list(prepared["runtime_actions"]),
+            "local_visual_obstructions": [item.to_dict() for item in obstructions],
+            "model_call_elapsed_seconds": [call_elapsed],
+            "model_call_token_budgets": [None],
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
+
+    def _record_observation_failure(
+        self,
+        exc: Exception,
+        *,
+        model_calls: int,
+        input_structure_required: bool,
+        fingerprint: str,
+        screenshot_manifest: list[dict[str, Any]],
+        started: float,
+    ) -> None:
+        failed_stage = self.status()["last_stage"]
+        self._set_stage("failed")
+        self.last_diagnostics = {
+            "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
+            "vision_model": public_model_identity(self.provider.status()),
+            "strategy": "single_step_current_scene_observation",
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "model_calls": model_calls,
+            "online_stages": ["single_step_observation"] if model_calls else [],
+            "input_structure_in_same_response": input_structure_required,
+            "remote_retry_used": int(getattr(self.provider, "last_network_attempts", 0) or 0) > 1,
+            "failed_stage": failed_stage,
+            "fingerprint": fingerprint,
+            "error": str(exc),
+            "task_screenshot_count": len(screenshot_manifest),
+            "foreground_identity_source": "qwen_visual",
+            "error_type": classify_qwen_error(exc, raw_response=self.last_raw_response),
+            "safe_stop_reason": "单次逻辑模型观察未建立完整可信结果；网络重试不会执行动作，控制器与机械臂均未执行。",
+            "raw_response_length": len(self.last_raw_response),
+            "raw_response_excerpt": self.last_raw_response[:1000],
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
+
+    def observe_with_decision(
+        self,
+        *,
+        frames: list[Image.Image],
+        goal_context: dict[str, Any] | None = None,
+        device_id: str | None = None,
+        available_action_kinds: Iterable[str] | None = None,
+        response_evidence_dir: Path | None = None,
+        response_evidence_prefix: str = "observation",
+        current_frame_paths: tuple[str, ...] = (),
+    ) -> tuple[UIScene, dict[str, Any]]:
         self.last_raw_response = ""
-        model_identity = public_model_identity(self.provider.status())
-        self.last_diagnostics = {"vision_model": model_identity,
-            "foreground_identity_source": "qwen_visual"}
+        self.last_diagnostics = {
+            "vision_model": public_model_identity(self.provider.status()),
+            "foreground_identity_source": "qwen_visual",
+        }
         self._set_stage("checking_stability")
         started = time.perf_counter()
         model_calls = 0
         fingerprint = ""
         self.last_response_evidence_path = None
-        selected_frame_index = 0
-        stable_tail_start = 0
         input_structure_required = False
         screenshot_manifest: list[dict[str, Any]] = []
         try:
-            reject_if(len(frames) < 4, VisionAgentError("通用页面观察至少需要4帧。"))
-            stability = measure_local_stability(frames, allow_leading_outlier=True)
-
-            sharpness_scores = [measure_frame_sharpness(item) for item in frames]
-            stable_tail_start = max(0, len(frames) - min(3, len(frames)))
-            selected_frame_index = max(range(stable_tail_start, len(frames)), key=sharpness_scores.__getitem__)
-            frame = frames[selected_frame_index].convert("RGB")
-            fingerprint = local_frame_fingerprint(frame)
-            context = generic_goal_domain.safe_goal_context(goal_context or {})
-            goal = _goal_view(context)
-            runtime_actions = _normalize_runtime_action_kinds(available_action_kinds)
-            input_structure_required = goal.input_requested
-            model_frames = tuple(frames)
-
-            request_image_sizes = {_image_request_size(item) for item in model_frames}
-            reject_if(len(request_image_sizes) != 1, VisionAgentError("同一步发送给Qwen的当前帧尺寸不一致，不能建立唯一坐标空间。"))
-            request_image_size = next(iter(request_image_sizes))
-            response_format = _single_step_response_format(context,
-                input_structure_required=input_structure_required, request_height=request_image_size[1],
-                available_action_kinds=runtime_actions)
-
-            prompt = _single_step_observation_prompt(context, include_input_structure=input_structure_required,
-                image_count=len(model_frames), request_image_size=request_image_size,
-                available_action_kinds=runtime_actions)
-            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-            reject_if(not current_frame_paths and response_evidence_dir is not None
-                and (Path(response_evidence_dir) / MANIFEST_NAME).exists(),
-                VisionAgentError("已有任务截图记录但缺少本轮截图路径，不能省略历史图片。"))
-            if current_frame_paths:
-                reject_if(response_evidence_dir is None or len(current_frame_paths) != len(model_frames),
-                    VisionAgentError("当前帧缺少完整任务截图路径。"))
-                screenshot_manifest = task_screenshots(Path(response_evidence_dir), device_id=device_id,
-                    task_id=context.get("entities", {}).get("task_id"), current_paths=current_frame_paths)
-                for item in screenshot_manifest:
-                    path = Path(item["path"])
-                    with Image.open(path) as saved:
-                        saved.verify()
-                    url = (_history_image_data_url(path) if item["group"] == "HISTORY"
-                        else "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii"))
-                    label = (f'IMAGE {item["image"]} - {item["group"]} PHONE SURFACE '
-                        f'- capture={item["capture"]} - file={path.name}')
-                    content.extend(({'type': 'text', 'text': label},
-                        {'type': 'image_url', 'image_url': {'url': url}}))
-            else:
-                for (index, item) in enumerate(model_frames, start=1):
-                    screenshot_manifest.append({'image': index, 'group': 'CURRENT', 'path': None,
-                        'capture': response_evidence_prefix})
-                    content.extend(({'type': 'text', 'text': f'IMAGE {index} - CURRENT PHONE SURFACE'},
-                        {'type': 'image_url', 'image_url': {'url': _image_data_url(item.convert('RGB'))}}))
-            self._set_stage("waiting_single_step_observation")
-            scope_factory = getattr(self.provider, "call_scope", None)
-            response_id = uuid4().hex
-            request_evidence_path = (Path(response_evidence_dir) / f"{response_id}_model_request.json"
-                if response_evidence_dir is not None else None)
-            scope = scope_factory(stage='single_step_observation',
-                fingerprint=fingerprint, request_evidence_path=request_evidence_path) if callable(scope_factory) else nullcontext()
-            call_started = time.perf_counter()
+            prepared = self._prepare_observation(frames, goal_context, available_action_kinds)
+            fingerprint = prepared["fingerprint"]
+            input_structure_required = prepared["input_structure_required"]
+            content, screenshot_manifest = self._build_observation_content(
+                prepared,
+                device_id=device_id,
+                response_evidence_dir=response_evidence_dir,
+                response_evidence_prefix=response_evidence_prefix,
+                current_frame_paths=current_frame_paths,
+            )
+            raw, response_id, request_evidence_path, call_elapsed = self._call_observation(
+                content, prepared, response_evidence_dir=response_evidence_dir
+            )
             model_calls = 1
-            with scope:
-                raw = self._provider_chat([_json_only_system_message(), {'role': 'user', 'content': content}],
-                    max_tokens=None, response_format=response_format)
-            call_elapsed = round(time.perf_counter() - call_started, 3)
             self.last_raw_response = raw
-            if response_evidence_dir is not None:
-                # Save before any parse/projection/binding, including successful observations.
-                evidence_dir = Path(response_evidence_dir)
-                evidence_dir.mkdir(parents=True, exist_ok=True)
-                # Keep step provenance in the record, not in an unbounded Windows path.
-                evidence_path = evidence_dir / f"{response_id}_model_response.json"
-                self.last_response_evidence_path = str(atomic_replace_bytes(evidence_path, json_bytes({
-                    'artifact_version': '2026-09-04-preparse-model-response-v1',
-                    'response_id': response_id, 'device_id': device_id, 'fingerprint': fingerprint,
-                    'request_evidence_path': str(request_evidence_path) if request_evidence_path is not None
-                        and request_evidence_path.is_file() else None,
-                    'response_evidence_prefix': redact_model_failure_response(response_evidence_prefix),
-                    'observer_protocol': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    'task_screenshots': screenshot_manifest,
-                    'goal_context': json.loads(redact_model_failure_response(json.dumps(context, ensure_ascii=False))),
-                    'raw_response_length': len(raw), 'redacted_response_truncated': False,
-                    'redacted_raw_response': redact_model_failure_response(raw),
-                })))
-            self._set_stage("parsing_single_step_observation")
-            envelope = _parse_single_step_observation_envelope(raw, input_structure_required=input_structure_required,
-                request_image_size=request_image_size)
-            model_decision = dict(envelope["decision"])
-            scene_payload = dict(envelope["scene"])
-            model_foreground_app_id = str(scene_payload.get("foreground_app_id")
-                or scene_payload.get("app_id") or "unknown").strip()
-            obstructions = consensus_top_edge_obstructions(frames[stable_tail_start:])
-            referenced_element_ids = _decision_element_ids(model_decision)
-            scene = _parse_scene(json.dumps(scene_payload, ensure_ascii=False, separators=(',', ':')),
-                fingerprint=fingerprint, camera_layout_orientation=_camera_layout_orientation(frame),
-                strict_element_ids=referenced_element_ids)
-
-            if input_structure_required:
-                input_payload = envelope["input_structure"]
-                assert isinstance(input_payload, dict)
-                scene = _apply_input_structure_audit(scene, json.dumps(input_payload,
-                    ensure_ascii=False, separators=(',', ':')), fingerprint=fingerprint, goal_context=context)
-
-
-            for selected_ref in referenced_element_ids:
-                matches = [item for item in scene.elements if item.element_id == selected_ref]
-                reject_if(len(matches) != 1,
-                    VisionAgentError(f"当前Qwen决策引用的元素不唯一或不可执行：{selected_ref}"))
-
-            self.last_diagnostics = {'observer_version': SINGLE_STEP_SCENE_OBSERVER_VERSION,
-                'vision_model': public_model_identity(self.provider.status()),
-                'strategy': 'single_step_current_scene_observation',
-                'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, 'model_calls': 1,
-                'task_screenshot_count': len(screenshot_manifest),
-                'current_screenshot_count': len(model_frames),
-                'online_stages': ['single_step_observation'],
-                'input_structure_in_same_response': input_structure_required,
-                'remote_retry_used': int(getattr(self.provider, 'last_network_attempts', 0) or 0) > 1,
-                'selected_frame_index': selected_frame_index,
-                'stable_tail_start_index': stable_tail_start, 'local_stability': stability.to_dict(), 'temporal_change_is_error': False,
-                'frame_sharpness_scores': [round(value, 3) for value in sharpness_scores],
-                'frame_size': list(frame.size), 'request_image_size': list(request_image_size),
-                'coordinate_normalization': envelope.get('coordinate_normalization'), 'fingerprint': fingerprint,
-                'element_count': len(scene.elements), 'decision_status': model_decision['status'],
-                'foreground_identity_source': 'qwen_visual',
-                'model_foreground_app_id': model_foreground_app_id,
-                'available_action_kinds': list(runtime_actions),
-                'local_visual_obstructions': [item.to_dict() for item in obstructions],
-                'model_call_elapsed_seconds': [call_elapsed],
-                'model_call_token_budgets': [None],
-                'elapsed_seconds': round(time.perf_counter() - started, 3)}
+            self._persist_observation_response(
+                raw, response_id, request_evidence_path, prepared, screenshot_manifest,
+                device_id=device_id, response_evidence_dir=response_evidence_dir,
+                response_evidence_prefix=response_evidence_prefix,
+            )
+            scene, model_decision, envelope, model_foreground_app_id, obstructions = self._parse_observation(
+                raw, prepared
+            )
+            self._record_observation_success(
+                prepared, scene, model_decision, envelope, model_foreground_app_id, obstructions,
+                screenshot_manifest, call_elapsed, started,
+            )
             self._set_stage("completed")
             return scene, model_decision
         except Exception as exc:
-            failed_stage = self.status()["last_stage"]
-            self._set_stage("failed")
-            self.last_diagnostics = {'observer_version': SINGLE_STEP_SCENE_OBSERVER_VERSION,
-                'vision_model': public_model_identity(self.provider.status()),
-                'strategy': 'single_step_current_scene_observation',
-                'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, 'model_calls': model_calls,
-                'online_stages': ['single_step_observation'] if model_calls else [],
-                'input_structure_in_same_response': input_structure_required,
-                'remote_retry_used': int(getattr(self.provider, 'last_network_attempts', 0) or 0) > 1,
-                'failed_stage': failed_stage, 'fingerprint': fingerprint, 'error': str(exc),
-                'task_screenshot_count': len(screenshot_manifest),
-                'foreground_identity_source': 'qwen_visual',
-                'error_type': classify_qwen_error(exc, raw_response=self.last_raw_response),
-                'safe_stop_reason': '单次逻辑模型观察未建立完整可信结果；网络重试不会执行动作，控制器与机械臂均未执行。',
-                'raw_response_length': len(self.last_raw_response),
-                'raw_response_excerpt': self.last_raw_response[:1000],
-                'elapsed_seconds': round(time.perf_counter() - started, 3)}
+            self._record_observation_failure(
+                exc,
+                model_calls=model_calls,
+                input_structure_required=input_structure_required,
+                fingerprint=fingerprint,
+                screenshot_manifest=screenshot_manifest,
+                started=started,
+            )
             raise
         finally:
             self._set_stage("idle")
@@ -410,104 +603,9 @@ def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, .
 def _single_step_response_format(context: dict[str, Any], *, input_structure_required: bool,
     request_height: int, available_action_kinds: tuple[str, ...]) -> dict[str, Any]:
     """Constrain impossible pending-transition finishes before Qwen generates them."""
-
-    input_schema: dict[str, Any]
-    if input_structure_required:
-        input_schema = {
-            'type': 'object',
-            'properties': {
-                'protocol_version': {'type': 'string', 'enum': [INPUT_STRUCTURE_AUDIT_VERSION]},
-                'application_inputs': {'type': 'array', 'description': '当前选中输入框的事实，无需元素编号。',
-                    'items': {'type': 'object', 'properties': {
-                        'bounds': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 4, 'maxItems': 4},
-                        'multiline': {'type': ['boolean', 'null']}, 'text': {'type': 'string'}, 'preedit_text': {'type': 'string'}, 'focused': {'type': ['boolean', 'null']}},
-                    'required': ['bounds', 'focused', 'preedit_text'], 'additionalProperties': True}},
-            },
-            'required': ['protocol_version', 'application_inputs'],
-            'additionalProperties': False,
-        }
-    else:
-        input_schema = {'type': 'null'}
-    scene_schema = {
-        'type': 'object',
-        'properties': {
-            'protocol_version': {'type': 'string', 'enum': [UI_SCENE_PROTOCOL_VERSION]},
-            'foreground_app_id': {'type': 'string'},
-            'screen_id': {'type': 'string'},
-            'summary': {'type': 'string'},
-            'system_ui': {'type': 'object', 'additionalProperties': True},
-            'camera_alignment': {'type': 'object', 'additionalProperties': True},
-            'elements': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': True},
-                },
-            'overlays': {'type': 'array', 'items': {'type': 'string'}},
-            'stable': {'type': 'boolean'},
-            'confidence': {'type': 'number'},
-            'fingerprint': {'type': 'string'},
-        },
-        'required': ['protocol_version', 'foreground_app_id', 'screen_id', 'summary', 'system_ui',
-            'camera_alignment', 'elements', 'overlays', 'stable', 'confidence', 'fingerprint'],
-        'additionalProperties': False,
-    }
-    direct_actions = sorted(set(available_action_kinds) & set(MODEL_STEP_DIRECT_POINT_ACTIONS))
-    other_actions = sorted(set(available_action_kinds) - set(MODEL_STEP_DIRECT_POINT_ACTIONS))
-    common_diagnostics = {
-        'confidence': {'type': 'number'},
-        'reason': {'type': 'string'},
-    }
-    decision_properties: dict[str, Any] = {
-        'status': {'type': 'string', 'enum': ['action', 'finish']},
-        'action': {'type': ['string', 'null'], 'enum': [*available_action_kinds, None]},
-    }
-    if direct_actions:
-        decision_properties.update({
-            'target': {
-                'type': 'object',
-                'properties': {
-                    'role': {'type': 'string'},
-                    'meaning': {'type': 'string'},
-                    'label': {'type': 'string'},
-                    'evidence': {'type': 'array', 'items': {'type': 'string'}},
-                },
-                'required': ['role', 'meaning'],
-                'additionalProperties': False,
-                'description': '点按动作的唯一目标身份，不含bounds；其他动作和finish为null。',
-            },
-            'tap_point': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
-        })
-    decision_properties.update({
-        "text": {"type": ["string", "null"]},
-        "app": {"type": ["string", "null"]},
-        "previous_action_outcome": {"type": ["string", "null"], "enum": ["matched", "unmatched", "uncertain", None]},
-        "state_action_consistent": {"type": ["boolean", "null"],
-            "description": "Qwen对当前明确状态与所选动作的一次一致性判断；矛盾时为false。"},
-        "postcondition": {"type": ["object", "null"], "properties": {
-            "status": {"type": "string", "enum": ["confirmed", "not_confirmed", "unknown", "not_applicable"]},
-            "fact": {"type": "string"}}, "required": ["status", "fact"], "additionalProperties": False,
-            "description": "动作后当前目标状态；外部效果必须明确报告，无法判断填unknown。"},
-    })
-    decision_properties.update(common_diagnostics)
-    if other_actions:
-        decision_properties.update({
-            'element_id': {'type': 'string'},
-            'source_element_id': {'type': 'string'},
-            'destination_element_id': {'type': 'string'},
-            'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right'],
-                'description': '仅scroll使用；scroll只能填写direction，其他轨迹字段必须为null。'},
-            'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
-                'description': '仅swipe_element使用；scroll必须为null。'},
-            'end': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
-                'description': '仅swipe_element使用；scroll必须为null。'},
-        })
-    # Cross-field action semantics remain with the single canonical parser.
-    # Do not rely on provider support for conditional JSON Schema composition.
-    for name in ('target', 'tap_point', 'element_id', 'source_element_id',
-            'destination_element_id', 'direction', 'start', 'end'):
-        if name not in decision_properties:
-            decision_properties[name] = {'type': 'null'}
-        else:
-            decision_properties[name]['type'] = [decision_properties[name]['type'], 'null']
-            if 'enum' in decision_properties[name]:
-                decision_properties[name]['enum'].append(None)
+    input_schema = _input_structure_response_schema(input_structure_required)
+    scene_schema = _scene_response_schema()
+    decision_properties = _decision_response_properties(available_action_kinds)
     scene_schema['properties']['elements']['description'] = (
         'tap_semantic/dismiss_overlay/double_tap/long_press时请留空；额外列表只作原始诊断，不参与执行；'
         '其他动作或finish才可报告带bounds的元素。')
@@ -534,10 +632,100 @@ def _single_step_response_format(context: dict[str, Any], *, input_structure_req
         'additionalProperties': False,
     }
     return {'type': 'json_schema', 'json_schema': {
-        'name': 'current_scene_observation',
-        'strict': True,
-        'schema': schema,
+        'name': 'current_scene_observation', 'strict': True, 'schema': schema,
     }}
+
+
+def _input_structure_response_schema(required: bool) -> dict[str, Any]:
+    if not required:
+        return {'type': 'null'}
+    return {
+        'type': 'object',
+        'properties': {
+            'protocol_version': {'type': 'string', 'enum': [INPUT_STRUCTURE_AUDIT_VERSION]},
+            'application_inputs': {
+                'type': 'array', 'description': '当前选中输入框的事实，无需元素编号。',
+                'items': {'type': 'object', 'properties': {
+                    'bounds': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 4, 'maxItems': 4},
+                    'multiline': {'type': ['boolean', 'null']}, 'text': {'type': 'string'},
+                    'preedit_text': {'type': 'string'}, 'focused': {'type': ['boolean', 'null']},
+                }, 'required': ['bounds', 'focused', 'preedit_text'], 'additionalProperties': True},
+            },
+        },
+        'required': ['protocol_version', 'application_inputs'], 'additionalProperties': False,
+    }
+
+
+def _scene_response_schema() -> dict[str, Any]:
+    return {
+        'type': 'object',
+        'properties': {
+            'protocol_version': {'type': 'string', 'enum': [UI_SCENE_PROTOCOL_VERSION]},
+            'foreground_app_id': {'type': 'string'}, 'screen_id': {'type': 'string'},
+            'summary': {'type': 'string'}, 'system_ui': {'type': 'object', 'additionalProperties': True},
+            'camera_alignment': {'type': 'object', 'additionalProperties': True},
+            'elements': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': True}},
+            'overlays': {'type': 'array', 'items': {'type': 'string'}}, 'stable': {'type': 'boolean'},
+            'confidence': {'type': 'number'}, 'fingerprint': {'type': 'string'},
+        },
+        'required': ['protocol_version', 'foreground_app_id', 'screen_id', 'summary', 'system_ui',
+            'camera_alignment', 'elements', 'overlays', 'stable', 'confidence', 'fingerprint'],
+        'additionalProperties': False,
+    }
+
+
+def _decision_response_properties(available_action_kinds: tuple[str, ...]) -> dict[str, Any]:
+    direct_actions = sorted(set(available_action_kinds) & set(MODEL_STEP_DIRECT_POINT_ACTIONS))
+    other_actions = sorted(set(available_action_kinds) - set(MODEL_STEP_DIRECT_POINT_ACTIONS))
+    decision_properties: dict[str, Any] = {
+        'status': {'type': 'string', 'enum': ['action', 'finish']},
+        'action': {'type': ['string', 'null'], 'enum': [*available_action_kinds, None]},
+    }
+    if direct_actions:
+        decision_properties.update({
+            'target': {'type': 'object', 'properties': {
+                'role': {'type': 'string'}, 'meaning': {'type': 'string'},
+                'label': {'type': 'string'}, 'evidence': {'type': 'array', 'items': {'type': 'string'}},
+            }, 'required': ['role', 'meaning'], 'additionalProperties': False,
+                'description': '点按动作的唯一目标身份，不含bounds；其他动作和finish为null。'},
+            'tap_point': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
+        })
+    decision_properties.update({
+        'text': {'type': ['string', 'null']}, 'app': {'type': ['string', 'null']},
+        'previous_action_outcome': {'type': ['string', 'null'], 'enum': ['matched', 'unmatched', 'uncertain', None]},
+        'state_action_consistent': {'type': ['boolean', 'null'],
+            'description': 'Qwen对当前明确状态与所选动作的一次一致性判断；矛盾时为false。'},
+        'postcondition': {'type': ['object', 'null'], 'properties': {
+            'status': {'type': 'string', 'enum': ['confirmed', 'not_confirmed', 'unknown', 'not_applicable']},
+            'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False,
+            'description': '动作后当前目标状态；外部效果必须明确报告，无法判断填unknown。'},
+        'confidence': {'type': 'number'}, 'reason': {'type': 'string'},
+    })
+    if other_actions:
+        decision_properties.update({
+            'element_id': {'type': 'string'}, 'source_element_id': {'type': 'string'},
+            'destination_element_id': {'type': 'string'},
+            'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right'],
+                'description': '仅scroll使用；scroll只能填写direction，其他轨迹字段必须为null。'},
+            'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
+                'description': '仅swipe_element使用；scroll必须为null。'},
+            'end': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
+                'description': '仅swipe_element使用；scroll必须为null。'},
+        })
+    _make_decision_fields_nullable(decision_properties)
+    return decision_properties
+
+
+def _make_decision_fields_nullable(decision_properties: dict[str, Any]) -> None:
+    for name in ('target', 'tap_point', 'element_id', 'source_element_id',
+            'destination_element_id', 'direction', 'start', 'end'):
+        if name not in decision_properties:
+            decision_properties[name] = {'type': 'null'}
+            continue
+        field = decision_properties[name]
+        field['type'] = [field['type'], 'null']
+        if 'enum' in field:
+            field['enum'].append(None)
 
 
 def _decision_element_ids(decision: Mapping[str, Any]) -> tuple[str, ...]:
@@ -561,115 +749,131 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
     reject_if(coordinate_space != expected, UISceneError("单步观察必须声明唯一coordinate_space。"))
     reject_if(request_width <= 0 or request_height <= 0, UISceneError("本轮Qwen请求图片尺寸无效。"))
 
-    def normalized_bounds(value: Any, *, selected: bool=False) -> list[int] | None:
-        valid_shape = bool(isinstance(value, (list, tuple)) and len(value) == 4
-            and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value))
-        if not valid_shape:
-            reject_if(selected, UISceneError("已选目标的bounds格式无效。"))
-            return None
-        left, top, right, bottom = (float(part) for part in value)
-        valid_extent = bool(all(math.isfinite(part) for part in (left, top, right, bottom))
-            and 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000)
-        if not valid_extent:
-            reject_if(selected, UISceneError("已选目标的bounds超出声明的axis_grid。"))
-            return None
-        result = [round(left), round(top), round(right), round(bottom)]
-        if not _valid_1000_bounds(result):
-            reject_if(selected, UISceneError("已选目标的axis_grid换算后bounds退化。"))
-            return None
-        return result
-
-    def normalize_optional_control(value: Any) -> dict[str, Any] | None:
-        if not isinstance(value, dict):
-            return None
-        result = dict(value)
-        bounds = normalized_bounds(result.get('bounds'))
-        if bounds is None:
-            return None
-        result['bounds'] = bounds
-        return result
-
-    def normalized_point(value: Any, *, label: str) -> list[int]:
-        valid_shape = bool(isinstance(value, (list, tuple)) and len(value) == 2
-            and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value))
-        reject_if(not valid_shape, UISceneError(f"{label}格式无效。"))
-        x, y = (float(part) for part in value)
-        reject_if(not (math.isfinite(x) and math.isfinite(y)
-            and 0 <= x <= 1000 and 0 <= y <= 1000),
-            UISceneError(f"{label}超出声明的axis_grid。"))
-        return [round(x), round(y)]
-
     scene = payload.get('scene')
     reject_if(_contains_action_like_wire_key(scene), UISceneError("单步观察scene包含动作或计划字段。"))
     selected_ids = set(_decision_element_ids(decision))
-    if isinstance(scene, dict):
-        raw_elements = scene.get('elements')
-        normalized_elements: list[dict[str, Any]] = []
-        selected_counts: dict[str, int] = {}
-        if isinstance(raw_elements, list):
-            for item in raw_elements:
-                if not isinstance(item, dict):
-                    continue
-                element_id = str(item.get('element_id') or '').strip()
-                selected = element_id in selected_ids
-                if selected:
-                    selected_counts[element_id] = selected_counts.get(element_id, 0) + 1
-                    reject_if(selected_counts[element_id] > 1,
-                        UISceneError(f"已选目标的element_id不唯一：{element_id}"))
-                bounds = normalized_bounds(item.get('bounds'), selected=selected)
-                if bounds is None:
-                    continue
-                normalized = dict(item)
-                normalized['bounds'] = bounds
-                normalized_elements.append(normalized)
-        scene['elements'] = normalized_elements
+    _normalize_wire_scene_elements(scene, selected_ids)
 
     if decision.get('action') in MODEL_STEP_DIRECT_POINT_ACTIONS:
-        decision['tap_point'] = normalized_point(decision.get('tap_point'),
+        decision['tap_point'] = _normalize_wire_point(decision.get('tap_point'),
             label=f"{decision.get('action')}.tap_point")
-    if decision.get('action') == 'scroll':
-        # Qwen sometimes echoes a swipe-like start/end pair while also giving
-        # a valid scroll direction.  The executor's scroll contract is the
-        # direction; discard only those redundant fields, never reinterpret
-        # the action as a different gesture.
-        decision['start'] = None
-        decision['end'] = None
     if decision.get('action') == 'swipe_element':
-        decision['start'] = normalized_point(decision.get('start'), label='swipe_element.start')
-        decision['end'] = normalized_point(decision.get('end'), label='swipe_element.end')
+        decision['start'] = _normalize_wire_point(decision.get('start'), label='swipe_element.start')
+        decision['end'] = _normalize_wire_point(decision.get('end'), label='swipe_element.end')
 
     input_structure = payload.get('input_structure')
     reject_if(_contains_action_like_wire_key(input_structure),
         UISceneError("单步观察input_structure包含动作或计划字段。"))
-    if isinstance(input_structure, dict):
-        raw_inputs = input_structure.get('application_inputs')
-        normalized_inputs: list[dict[str, Any]] = []
-        invalid_inputs = 0
-        if isinstance(raw_inputs, list):
-            for item in raw_inputs:
-                if not isinstance(item, dict):
-                    invalid_inputs += 1
-                    continue
-                bounds = normalized_bounds(item.get('bounds'))
-                if bounds is None:
-                    invalid_inputs += 1
-                    continue
-                normalized = dict(item)
-                normalized['bounds'] = bounds
-                right_button = normalize_optional_control(normalized.get('right_button'))
-                normalized['right_button'] = right_button
-                normalized_inputs.append(normalized)
-        direct_target = decision.get('target') if isinstance(decision.get('target'), Mapping) else {}
-        selected_input = bool(decision.get('status') == 'action' and (
-            decision.get('action') in {'input_verified_text', 'clear_verified_text', 'press_enter'}
-            or direct_target.get('role') == 'input'))
-        reject_if(selected_input and not normalized_inputs and invalid_inputs > 0,
-            UISceneError("已选输入框的bounds无效。"))
-        input_structure['application_inputs'] = normalized_inputs
+    _normalize_wire_input_structure(input_structure, decision)
 
     payload.pop("coordinate_space", None)
     return {'wire_kind': 'axis_grid', 'wire_extent': [1000, 1000], 'request_image_size': [request_width,
         request_height], 'canonical_extent': [1000, 1000], 'applied': True}
+
+
+def _normalize_wire_bounds(value: Any, *, selected: bool = False) -> list[int] | None:
+    valid_shape = bool(
+        isinstance(value, (list, tuple)) and len(value) == 4
+        and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value)
+    )
+    if not valid_shape:
+        reject_if(selected, UISceneError("已选目标的bounds格式无效。"))
+        return None
+    left, top, right, bottom = (float(part) for part in value)
+    valid_extent = bool(
+        all(math.isfinite(part) for part in (left, top, right, bottom))
+        and 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
+    )
+    if not valid_extent:
+        reject_if(selected, UISceneError("已选目标的bounds超出声明的axis_grid。"))
+        return None
+    result = [round(left), round(top), round(right), round(bottom)]
+    reject_if(selected and not _valid_1000_bounds(result), UISceneError("已选目标的axis_grid换算后bounds退化。"))
+    return result
+
+
+def _normalize_wire_point(value: Any, *, label: str) -> list[int]:
+    valid_shape = bool(
+        isinstance(value, (list, tuple)) and len(value) == 2
+        and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value)
+    )
+    reject_if(not valid_shape, UISceneError(f"{label}格式无效。"))
+    x, y = (float(part) for part in value)
+    reject_if(
+        not (math.isfinite(x) and math.isfinite(y) and 0 <= x <= 1000 and 0 <= y <= 1000),
+        UISceneError(f"{label}超出声明的axis_grid。"),
+    )
+    return [round(x), round(y)]
+
+
+def _normalize_optional_wire_control(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    result = dict(value)
+    bounds = _normalize_wire_bounds(result.get('bounds'))
+    if bounds is None:
+        return None
+    result['bounds'] = bounds
+    return result
+
+
+def _normalize_wire_scene_elements(scene: Any, selected_ids: set[str]) -> None:
+    if not isinstance(scene, dict):
+        return
+    raw_elements = scene.get('elements')
+    normalized_elements: list[dict[str, Any]] = []
+    selected_counts: dict[str, int] = {}
+    if isinstance(raw_elements, list):
+        for item in raw_elements:
+            if not isinstance(item, dict):
+                continue
+            element_id = str(item.get('element_id') or '').strip()
+            selected = element_id in selected_ids
+            if selected:
+                selected_counts[element_id] = selected_counts.get(element_id, 0) + 1
+                reject_if(
+                    selected_counts[element_id] > 1,
+                    UISceneError(f"已选目标的element_id不唯一：{element_id}"),
+                )
+            bounds = _normalize_wire_bounds(item.get('bounds'), selected=selected)
+            if bounds is None:
+                continue
+            normalized = dict(item)
+            normalized['bounds'] = bounds
+            normalized_elements.append(normalized)
+    scene['elements'] = normalized_elements
+
+
+def _normalize_wire_input_structure(input_structure: Any, decision: Mapping[str, Any]) -> None:
+    if not isinstance(input_structure, dict):
+        return
+    raw_inputs = input_structure.get('application_inputs')
+    normalized_inputs: list[dict[str, Any]] = []
+    invalid_inputs = 0
+    if isinstance(raw_inputs, list):
+        for item in raw_inputs:
+            if not isinstance(item, dict):
+                invalid_inputs += 1
+                continue
+            bounds = _normalize_wire_bounds(item.get('bounds'))
+            if bounds is None:
+                invalid_inputs += 1
+                continue
+            normalized = dict(item)
+            normalized['bounds'] = bounds
+            normalized['right_button'] = _normalize_optional_wire_control(normalized.get('right_button'))
+            normalized_inputs.append(normalized)
+    direct_target = decision.get('target') if isinstance(decision.get('target'), Mapping) else {}
+    selected_input = bool(
+        decision.get('status') == 'action'
+        and (decision.get('action') in {'input_verified_text', 'clear_verified_text', 'press_enter'}
+             or direct_target.get('role') == 'input')
+    )
+    reject_if(
+        selected_input and not normalized_inputs and invalid_inputs > 0,
+        UISceneError("已选输入框的bounds无效。"),
+    )
+    input_structure['application_inputs'] = normalized_inputs
 
 
 def _parse_single_step_observation_envelope(raw: str, *, input_structure_required: bool, request_image_size: tuple[int,
@@ -724,8 +928,6 @@ def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
     return _render_prompt("compact_scene.txt", CONTEXT=json.dumps(context, ensure_ascii=False, separators=(',', ':')),
         INPUT_RULE=input_rule, WIRE_HEIGHT=str(wire_height),
         SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION, FOREGROUND_IDENTITY_RULE=foreground_identity_rule)
-
-
 
 
 def _input_structure_audit_prompt(context: dict[str, Any], *, wire_height: int=1000) -> str:
@@ -853,14 +1055,6 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
-
-
-
-
-
-
-
-
 def _audited_element(suffix: str, meaning: str, source: Mapping[str, Any], *, states: Mapping[str, Any],
     evidence: str | Iterable[str], role: str='button', label: str | None=None, bounds_key: str='bounds') -> dict[str,
     Any]:
@@ -870,10 +1064,6 @@ def _audited_element(suffix: str, meaning: str, source: Mapping[str, Any], *, st
         '') if label is None else label, 'bounds': [part / 1000.0 for part in source[bounds_key]],
         'confidence': source['confidence'], 'states': state, 'evidence': [evidence] if isinstance(evidence,
         str) else list(evidence)}
-
-
-
-
 
 
 def _audit_strings(value: Any, *, name: str, allow_empty: bool) -> tuple[str, ...]:
@@ -892,10 +1082,6 @@ def _optional_audit_strings(value: Any, *, name: str, allow_empty: bool) -> tupl
         return _audit_strings(value, name=name, allow_empty=allow_empty)
     except UISceneError:
         return ()
-
-
-
-
 
 
 def _collect_audited_input_matches(application_inputs: list[Any]) -> list[dict[str, Any]]:
@@ -966,8 +1152,6 @@ def _append_audited_input_element(elements: list[dict[str, Any]], audited_input:
             states={'goal_relevant': False}, evidence='应用输入结构的相邻独立控件；不具备目标权限'))
 
 
-
-
 def _optional_right_button(value: Any, *, input_bounds: NormalizedBounds) -> dict[str, Any] | None:
     if (not isinstance(value, dict) or _contains_action_like_wire_key(value)
         or (not _valid_1000_bounds(value.get('bounds')))):
@@ -981,8 +1165,6 @@ def _optional_right_button(value: Any, *, input_bounds: NormalizedBounds) -> dic
         input_bounds) < 0.8)):
         return None
     return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence}
-
-
 
 
 def _apply_input_structure_audit(scene: UIScene, raw: str, *, fingerprint: str,
@@ -1013,26 +1195,6 @@ def _diagnostic_confidence(value: Any) -> float:
     return confidence if 0.0 <= confidence <= 1.0 else 0.0
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _bounds_inside(inner: NormalizedBounds, outer: NormalizedBounds, *,
     tolerance: float) -> bool:
     return inner[0] >= outer[0] - tolerance and inner[1] >= outer[1] - tolerance and (inner[2] <= outer[2] +
@@ -1043,7 +1205,6 @@ def _vertical_overlap_ratio(first: NormalizedBounds, second: NormalizedBounds) -
     overlap = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
     smaller = min(first[3] - first[1], second[3] - second[1])
     return overlap / smaller if smaller > 0 else 0.0
-
 
 
 def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
@@ -1058,4 +1219,3 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
         item["states"].pop("independent_geometry_verified", None)
         item["states"].pop("geometry_audit_source", None)
         item["states"].pop("focus_only_input_surface", None)
-

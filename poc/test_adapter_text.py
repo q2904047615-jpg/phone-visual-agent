@@ -71,10 +71,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         )
         observer = FakeSceneObserver([after])
         robot = FakeRobot()
-        anchors = {
-            key: list(value)
-            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
-        }
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
             observer=observer,
@@ -146,13 +142,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
             )
 
         planned = typed_scene("planned", "first\n")
-        fresh_missing = replace(planned, fingerprint="fresh", elements=())
-        planned_audited = typed_scene("planned-audited", "first\n")
-        fresh_audited = typed_scene(
-            "fresh-audited",
-            "first\n",
-            bounds=(0.14, 0.52, 0.71, 0.60),
-        )
         after = typed_scene("after", "first\nsecond")
         observer = FakeSceneObserver([after])
         robot = FakeRobot()
@@ -434,9 +423,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
                 fingerprint=fingerprint,
             )
 
-        planned = input_scene(
-            "planned", "planned-input", "target_text_input", "", ""
-        )
         fresh = input_scene(
             "before", "planned-input", "target_text_input", "", ""
         )
@@ -529,7 +515,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
                 camera_alignment=aligned_camera_facts(),
             )
 
-        planned = input_scene("planned", "current_foreground", "通用动作真机验收页", "")
         fresh = input_scene("before", "current_foreground", "通用动作真机验收页", "")
         after = input_scene("after", "unknown", "unknown", "agent")
         robot = FakeRobot()
@@ -777,7 +762,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
             )
 
         planned = input_scene("planned", (0.14, 0.53, 0.69, 0.58))
-        fresh = input_scene("fresh", (0.24, 0.623, 0.80, 0.68))
         target_text = "longinput2026abcdefghijklmnopqrstuvwxyz"
         first_segment = target_text
         after = input_scene(
@@ -787,10 +771,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         )
         observer = FakeSceneObserver([after])
         robot = FakeRobot()
-        snapped_anchors = {
-            key: list(value)
-            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
-        }
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(
                 [sharp_frame] * 4 + [blurred_frame] * 4 + [sharp_frame] * 4
@@ -862,20 +842,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
             confidence=1.0,
             fingerprint="planned",
             camera_alignment=aligned_camera_facts(),
-        )
-        fresh = replace(
-            planned,
-            elements=(
-                replace(
-                    planned.elements[0],
-                    bounds=(0.24, 0.623, 0.80, 0.68),
-                    states={
-                        **planned_states,
-                        "keyboard_input_mode": "chinese_pinyin",
-                    },
-                ),
-            ),
-            fingerprint="fresh",
         )
         after = replace(
             planned,

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "device_id": "device-local-01",
+      "enabled": true,
+      "adb_executable": "adb.exe",
+      "adb_serial": "replace-with-local-serial",
+      "apps": [
+        {
+          "launch_ref": "app.example",
+          "aliases": ["example"],
+          "package": "com.example.app"
+        }
+      ]
+    }
+  ]
+}

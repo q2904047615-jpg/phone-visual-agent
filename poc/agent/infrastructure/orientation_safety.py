@@ -147,8 +147,6 @@ class OrientationCredential:
         return item
 
 
-
-
 def _mint_single_step_scene_credential(*, device_id: str, scene_fingerprint: str,
     frame: Image.Image) -> OrientationCredential:
     """Mint a one-shot credential only from the fresh local frame binding.

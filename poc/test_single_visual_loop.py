@@ -6,7 +6,7 @@ import unittest
 from PIL import Image
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.domain.text_transport import TextTransportProfile
 from agent.domain.ui_scene import UIScene, UIElement
 from agent.domain.universal_action_controller import ResolvedSemanticAction

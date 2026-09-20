@@ -1,7 +1,6 @@
 """Whole-task runtime lifecycle and single-authority error contracts. Offline only."""
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
 import unittest
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver

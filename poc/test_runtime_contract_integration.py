@@ -173,11 +173,14 @@ class RuntimeContractIntegrationTests(LoopHarness):
         self.assertEqual([], adapter.calls)
 
     def test_acceptance_choices_share_actual_physical_capability_mapping(self):
-        from agent.domain.action_capabilities import (PROMOTABLE_ACTIONS,
-            unverified_promotable_actions, build_device_capability_snapshot)
+        from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
+        from agent.domain.action_capabilities import (
+            unverified_promotable_actions,
+            build_device_capability_snapshot,
+        )
         for verified in [[], ['swipe'], ['swipe', 'home', 'back'], ['tap_semantic']]:
             with self.subTest(verified=verified):
                 snapshot = build_device_capability_snapshot(device_id='device-1',
                     supported_actions=verified)
-                self.assertEqual(sorted(action for action in PROMOTABLE_ACTIONS
+                self.assertEqual(sorted(action for action in PROMOTABLE_ACTION_KINDS
                     if not snapshot.actions[action]['enabled']), unverified_promotable_actions(verified))

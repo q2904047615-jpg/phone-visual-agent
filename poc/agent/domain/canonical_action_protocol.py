@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .canonical_action_kinds import CANONICAL_ACTION_KINDS
+from .action_catalog import CANONICAL_ACTION_KINDS
 from .semantic_action import SemanticAction
 from .text_transport import TextTransportProfile
 from .ui_scene import UIElement
@@ -29,7 +29,6 @@ _ACTION_INJECTION_FIELDS = frozenset({"actions", "plan", "plans", "step", "steps
 _DIRECT_TARGET_FIELDS = frozenset({"element_id", "role", "meaning", "label", "evidence"})
 
 
-
 class CanonicalActionProtocolError(ValueError):
     pass
 
@@ -45,134 +44,178 @@ def _contains_action_injection(value: Any) -> bool:
 
 def normalize_model_step_decision(value: Any) -> dict[str, Any]:
     """Normalize the one action-or-finish union shared by scene and action binding."""
+    metadata = _normalize_decision_metadata(value)
+    fields = _decision_fields(value, metadata["action"])
+    fields["target"] = _validate_decision_shape(metadata["status"], metadata["action"], fields)
+    normalized_reason = metadata["reason"].strip() or (
+        "" if metadata["status"] == "finish" else "当前截图选择一个推进目标的动作"
+    )
+    return {
+        "status": metadata["status"],
+        "action": metadata["action"],
+        **fields,
+        "confidence": metadata["confidence"],
+        "reason": normalized_reason,
+        "text": metadata["text"],
+        "app": metadata["app"],
+        "previous_action_outcome": metadata["outcome"],
+        "state_action_consistent": metadata["state_action_consistent"],
+        "postcondition": metadata["postcondition"],
+    }
 
+
+def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
     reject_if(not isinstance(value, Mapping), CanonicalActionProtocolError("同响应decision必须是对象。"))
     extras = {key: part for key, part in value.items() if key not in MODEL_STEP_DECISION_FIELDS}
-    reject_if(_contains_action_injection(extras),
-        CanonicalActionProtocolError("同响应decision包含多动作、计划或裸坐标字段。"))
+    reject_if(
+        _contains_action_injection(extras),
+        CanonicalActionProtocolError("同响应decision包含多动作、计划或裸坐标字段。"),
+    )
     status = value.get("status")
-    reject_if(status not in {"action", "finish"},
-        CanonicalActionProtocolError("同响应decision只允许action或finish。"))
+    reject_if(status not in {"action", "finish"}, CanonicalActionProtocolError("同响应decision只允许action或finish。"))
     confidence = value.get("confidence", 1.0)
-    if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-        or not 0.0 <= float(confidence) <= 1.0):
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0.0 <= float(confidence) <= 1.0:
         confidence = 1.0
     reason = value.get("reason", "")
-    if not isinstance(reason, str):
-        reason = ""
     action = value.get("action")
     text = value.get("text")
     app = value.get("app")
     outcome = value.get("previous_action_outcome")
     state_action_consistent = value.get("state_action_consistent")
-    reject_if(state_action_consistent is False,
-        CanonicalActionProtocolError("Qwen明确报告当前状态与所选动作矛盾。"))
-    reject_if(state_action_consistent is not None and not isinstance(state_action_consistent, bool),
-        CanonicalActionProtocolError("state_action_consistent必须是boolean或null。"))
-    postcondition = value.get("postcondition")
+    reject_if(state_action_consistent is False, CanonicalActionProtocolError("Qwen明确报告当前状态与所选动作矛盾。"))
+    reject_if(
+        state_action_consistent is not None and not isinstance(state_action_consistent, bool),
+        CanonicalActionProtocolError("state_action_consistent必须是boolean或null。"),
+    )
+    postcondition = _normalize_postcondition(value.get("postcondition"), action, outcome)
+    reject_if(
+        outcome not in {None, "matched", "unmatched", "uncertain"},
+        CanonicalActionProtocolError("动作后判断必须为matched/unmatched/uncertain或null。"),
+    )
+    reject_if(
+        (action == "input_verified_text") != (isinstance(text, str) and bool(text)),
+        CanonicalActionProtocolError("输入动作必须提供逐字目标正文；其他动作不携带正文。"),
+    )
+    reject_if(action != "input_verified_text" and text is not None, CanonicalActionProtocolError("非输入动作不得携带正文。"))
+    reject_if(
+        action == "launch_app" and (not isinstance(app, str) or not app.strip()),
+        CanonicalActionProtocolError("launch_app必须提供本地注册的App语义名称。"),
+    )
+    reject_if(action != "launch_app" and app is not None, CanonicalActionProtocolError("非启动动作不得携带App参数。"))
+    return {
+        "status": status, "confidence": float(confidence), "reason": reason if isinstance(reason, str) else "",
+        "action": action, "text": text, "app": app, "outcome": outcome,
+        "state_action_consistent": state_action_consistent, "postcondition": postcondition,
+    }
+
+
+def _normalize_postcondition(value: Any, action: Any, outcome: Any) -> Mapping[str, Any] | None:
+    postcondition = value
     if outcome is not None and not isinstance(postcondition, Mapping):
-        # Navigation/observation actions have no external effect state to
-        # report.  Treat an omitted postcondition as not_applicable instead of
-        # rejecting an already executed Home/back/recent-apps step.  Effectful
-        # actions still require an explicit postcondition.
-        if action in {"home", "back", "open_recent_apps", "reveal_system_navigation",
-            "scroll", "wait_for_change", "launch_app"}:
+        if action in {"home", "back", "open_recent_apps", "reveal_system_navigation", "scroll", "wait_for_change", "launch_app"}:
             postcondition = {"status": "not_applicable", "fact": ""}
         else:
             raise CanonicalActionProtocolError("动作后必须提供postcondition。")
-    if postcondition is not None:
-        reject_if(not isinstance(postcondition, Mapping), CanonicalActionProtocolError("postcondition必须是对象或null。"))
-        post_status = postcondition.get("status")
-        reject_if(post_status not in {"confirmed", "not_confirmed", "unknown", "not_applicable"},
-            CanonicalActionProtocolError("postcondition.status无效。"))
-        reject_if(not isinstance(postcondition.get("fact", ""), str),
-            CanonicalActionProtocolError("postcondition.fact必须是字符串。"))
-    reject_if(outcome not in {None, "matched", "unmatched", "uncertain"},
-        CanonicalActionProtocolError("动作后判断必须为matched/unmatched/uncertain或null。"))
-    reject_if((action == "input_verified_text") != (isinstance(text, str) and bool(text)),
-        CanonicalActionProtocolError("输入动作必须提供逐字目标正文；其他动作不携带正文。"))
-    reject_if(action != "input_verified_text" and text is not None, CanonicalActionProtocolError("非输入动作不得携带正文。"))
-    reject_if(action == "launch_app" and (not isinstance(app, str) or not app.strip()),
-        CanonicalActionProtocolError("launch_app必须提供本地注册的App语义名称。"))
-    reject_if(action != "launch_app" and app is not None, CanonicalActionProtocolError("非启动动作不得携带App参数。"))
-    # Text actions consume the current input fact, not a model guess of an
-    # internal projection ID. Extra IDs are raw diagnostics only.
-    element_id = None if action in {"input_verified_text", "clear_verified_text", "press_enter"} else value.get("element_id")
-    source_id = value.get("source_element_id")
-    destination_id = value.get("destination_element_id")
-    direction = value.get("direction")
-    target = value.get("target")
-    tap_point = value.get("tap_point")
-    start = value.get("start")
-    end = value.get("end")
-    for name, part in {"action": action, "element_id": element_id, "source_element_id": source_id,
-        "destination_element_id": destination_id, "direction": direction}.items():
-        reject_if(part is not None and (not isinstance(part, str) or not part.strip()),
-            CanonicalActionProtocolError(f"同响应decision.{name}必须是非空字符串或null。"))
+    if postcondition is None:
+        return None
+    reject_if(not isinstance(postcondition, Mapping), CanonicalActionProtocolError("postcondition必须是对象或null。"))
+    reject_if(
+        postcondition.get("status") not in {"confirmed", "not_confirmed", "unknown", "not_applicable"},
+        CanonicalActionProtocolError("postcondition.status无效。"),
+    )
+    reject_if(not isinstance(postcondition.get("fact", ""), str), CanonicalActionProtocolError("postcondition.fact必须是字符串。"))
+    return postcondition
+
+
+def _decision_fields(value: Mapping[str, Any], action: Any) -> dict[str, Any]:
+    return {
+        "element_id": None if action in {"input_verified_text", "clear_verified_text", "press_enter"} else value.get("element_id"),
+        "source_element_id": value.get("source_element_id"),
+        "destination_element_id": value.get("destination_element_id"),
+        "direction": value.get("direction"),
+        "target": value.get("target"),
+        "tap_point": value.get("tap_point"),
+        "start": value.get("start"),
+        "end": value.get("end"),
+    }
+
+
+def _validate_decision_shape(status: str, action: Any, fields: dict[str, Any]) -> Any:
+    for name in ("action", "element_id", "source_element_id", "destination_element_id", "direction"):
+        part = action if name == "action" else fields[name]
+        reject_if(
+            part is not None and (not isinstance(part, str) or not part.strip()),
+            CanonicalActionProtocolError(f"同响应decision.{name}必须是非空字符串或null。"),
+        )
+    target = fields["target"]
     if status == "finish":
-        reject_if(any(part is not None for part in (action, element_id, source_id, destination_id, direction, target))
-            or tap_point is not None or start is not None or end is not None,
-            CanonicalActionProtocolError("finish必须陈述当前截图完成事实且不得夹带动作。"))
-    else:
-        reject_if(action not in CANONICAL_ACTION_KINDS,
-            CanonicalActionProtocolError("action必须是canonical动作。"))
-        if action in MODEL_STEP_SINGLE_ELEMENT_ACTIONS:
-            if action in MODEL_STEP_DIRECT_POINT_ACTIONS:
-                reject_if(element_id is not None or any(part is not None for part in (
-                    source_id, destination_id, direction)) or start is not None or end is not None,
-                    CanonicalActionProtocolError("点按动作必须且只能使用decision.target绑定同帧唯一目标。"))
-                target = _normalize_direct_target(target)
-                _validate_model_point(tap_point, f"{action}.tap_point")
-            else:
-                if target is not None and action == "input_verified_text":
-                    # Some Qwen responses include a plain description of the
-                    # focused input alongside a text action.  It is
-                    # diagnostic only: the binder always consumes the unique
-                    # current-frame input audit and never this description as
-                    # a selector.
-                    _validate_text_target_description(target)
-                    target = None
-                reject_if(target is not None or any(part is not None for part in (
-                    source_id, destination_id, direction)) or start is not None or end is not None,
-                    CanonicalActionProtocolError("文字动作只消费同帧当前输入事实，不得夹带另一目标或轨迹。"))
-                reject_if(tap_point is not None,
-                    CanonicalActionProtocolError(f"{action}不得携带tap_point。"))
-        elif action == "drag":
-            reject_if(target is not None or element_id is not None or direction is not None or source_id is None
-                or destination_id is None
-                or source_id == destination_id or tap_point is not None or start is not None or end is not None,
-                CanonicalActionProtocolError("drag必须且只能引用不同起点和终点。"))
-        elif action == "scroll":
-            reject_if(target is not None or source_id is not None or destination_id is not None
-                or direction not in {"up", "down", "left", "right"}
-                or tap_point is not None or start is not None or end is not None,
-                CanonicalActionProtocolError("scroll必须声明唯一方向且不得携带自由轨迹。"))
-        elif action == "swipe_element":
-            reject_if(target is not None or element_id is None or source_id is not None or destination_id is not None
-                or direction is not None or tap_point is not None or start is None or end is None,
-                CanonicalActionProtocolError("swipe_element必须绑定一个元素以及起点和终点。"))
-            _validate_model_point(start, "swipe_element.start")
-            _validate_model_point(end, "swipe_element.end")
-            reject_if(tuple(start) == tuple(end),
-                CanonicalActionProtocolError("swipe_element起点和终点不能相同。"))
+        reject_if(
+            action is not None
+            or any(fields[name] is not None for name in ("element_id", "source_element_id", "destination_element_id", "direction", "target"))
+            or fields["tap_point"] is not None or fields["start"] is not None or fields["end"] is not None,
+            CanonicalActionProtocolError("finish必须陈述当前截图完成事实且不得夹带动作。"),
+        )
+        return target
+    reject_if(action not in CANONICAL_ACTION_KINDS, CanonicalActionProtocolError("action必须是canonical动作。"))
+    if action in MODEL_STEP_SINGLE_ELEMENT_ACTIONS:
+        if action in MODEL_STEP_DIRECT_POINT_ACTIONS:
+            reject_if(
+                fields["element_id"] is not None
+                or any(fields[name] is not None for name in ("source_element_id", "destination_element_id", "direction"))
+                or fields["start"] is not None or fields["end"] is not None,
+                CanonicalActionProtocolError("点按动作必须且只能使用decision.target绑定同帧唯一目标。"),
+            )
+            target = _normalize_direct_target(target)
+            _validate_model_point(fields["tap_point"], f"{action}.tap_point")
         else:
-            if target is not None:
-                # System actions have no model-selected surface target. Only
-                # prose is redundant; execution payloads must never be hidden.
-                _validate_system_target_description(target)
+            if target is not None and action == "input_verified_text":
+                _validate_text_target_description(target)
                 target = None
-            reject_if(any(part is not None for part in (element_id, source_id, destination_id, direction, target))
-                or tap_point is not None or start is not None or end is not None,
-                CanonicalActionProtocolError("系统动作不得携带元素或方向字段。"))
-    normalized_reason = reason.strip() or ("" if status == "finish"
-        else "当前截图选择一个推进目标的动作")
-    return {"status": status, "action": action, "element_id": element_id,
-        "source_element_id": source_id, "destination_element_id": destination_id, "direction": direction,
-        "target": target, "tap_point": list(tap_point) if tap_point is not None else None,
-        "start": list(start) if start is not None else None, "end": list(end) if end is not None else None,
-        "confidence": float(confidence), "reason": normalized_reason, "text": text, "app": app,
-        "previous_action_outcome": outcome, "state_action_consistent": state_action_consistent,
-        "postcondition": postcondition}
+            reject_if(
+                target is not None
+                or any(fields[name] is not None for name in ("source_element_id", "destination_element_id", "direction"))
+                or fields["start"] is not None or fields["end"] is not None,
+                CanonicalActionProtocolError("文字动作只消费同帧当前输入事实，不得夹带另一目标或轨迹。"),
+            )
+            reject_if(fields["tap_point"] is not None, CanonicalActionProtocolError(f"{action}不得携带tap_point。"))
+    elif action == "drag":
+        reject_if(
+            target is not None or fields["element_id"] is not None or fields["direction"] is not None
+            or fields["source_element_id"] is None or fields["destination_element_id"] is None
+            or fields["source_element_id"] == fields["destination_element_id"]
+            or fields["tap_point"] is not None or fields["start"] is not None or fields["end"] is not None,
+            CanonicalActionProtocolError("drag必须且只能引用不同起点和终点。"),
+        )
+    elif action == "scroll":
+        reject_if(
+            target is not None or fields["source_element_id"] is not None or fields["destination_element_id"] is not None
+            or fields["direction"] not in {"up", "down", "left", "right"}
+            or fields["tap_point"] is not None or fields["start"] is not None or fields["end"] is not None,
+            CanonicalActionProtocolError("scroll必须声明唯一方向且不得携带自由轨迹。"),
+        )
+    elif action == "swipe_element":
+        reject_if(
+            target is not None or fields["element_id"] is None
+            or fields["source_element_id"] is not None or fields["destination_element_id"] is not None
+            or fields["direction"] is not None or fields["tap_point"] is not None
+            or fields["start"] is None or fields["end"] is None,
+            CanonicalActionProtocolError("swipe_element必须绑定一个元素以及起点和终点。"),
+        )
+        _validate_model_point(fields["start"], "swipe_element.start")
+        _validate_model_point(fields["end"], "swipe_element.end")
+        reject_if(tuple(fields["start"]) == tuple(fields["end"]), CanonicalActionProtocolError("swipe_element起点和终点不能相同。"))
+    else:
+        if target is not None:
+            _validate_system_target_description(target)
+            target = None
+            fields["target"] = None
+        reject_if(
+            any(fields[name] is not None for name in ("element_id", "source_element_id", "destination_element_id", "direction", "target"))
+            or fields["tap_point"] is not None or fields["start"] is not None or fields["end"] is not None,
+            CanonicalActionProtocolError("系统动作不得携带元素或方向字段。"),
+        )
+    fields["target"] = target
+    return target
 
 
 def _validate_system_target_description(value: Any) -> None:

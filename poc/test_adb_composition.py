@@ -43,7 +43,7 @@ class AdbKeyboardCompositionTests(unittest.TestCase):
             with (
                 patch.object(web_app.runtime, "adb_keyboard_runtime", registry),
                 patch.object(web_app.runtime, "_app_launchers", {}),
-                patch.object(web_app, "APP_PACKAGE_REGISTRY_PATH", app_registry),
+                patch.object(web_app.runtime, "app_package_registry_path", app_registry),
                 patch.object(web_app.runtime, "controller_for_device", side_effect=controllers.__getitem__),
                 patch.object(web_app.runtime.vision_provider, "status", return_value={"configured": True}),
             ):
@@ -109,9 +109,8 @@ class AdbKeyboardCompositionTests(unittest.TestCase):
                 "app_launcher_for_device",
                 return_value=None,
             ),
-            patch.object(
-                web_app,
-                "GenericSingleActionAdapter",
+            patch(
+                "agent.bootstrap.runtime.GenericSingleActionAdapter",
                 return_value=main_adapter,
             ) as adapter_factory,
         ):
@@ -130,9 +129,8 @@ class AdbKeyboardCompositionTests(unittest.TestCase):
                 "text_transport_for_device",
                 return_value=transport,
             ) as capability_transport_for_device,
-            patch.object(
-                web_app,
-                "GenericSingleActionAdapter",
+            patch(
+                "agent.bootstrap.runtime.GenericSingleActionAdapter",
                 return_value=capability_adapter,
             ) as capability_adapter_factory,
         ):

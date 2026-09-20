@@ -245,6 +245,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "re",
             "typing",
             "validation",
+            "action_catalog",
         }
         unexpected: list[str] = []
         tree = ast.parse(domain_path.read_text(encoding="utf-8"))
@@ -281,8 +282,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         import agent.domain.canonical_action_protocol as canonical_protocol
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
-        from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
-        from agent.domain.device_execution import EXECUTABLE_ACTION_KINDS
+        from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 
         expected = {
             "back",
@@ -307,7 +307,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             CANONICAL_ACTION_KINDS,
             canonical_protocol.CANONICAL_ACTION_KINDS,
         )
-        self.assertIs(CANONICAL_ACTION_KINDS, EXECUTABLE_ACTION_KINDS)
         self.assertEqual(
             CANONICAL_ACTION_KINDS,
             qwen_visual_decision.QWEN_PROTOCOL_ACTIONS,
@@ -678,7 +677,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_vision_model_contract_has_one_layered_identity(self) -> None:
         import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.infrastructure.dashscope_vision_provider as vision_agent
-        import agent.infrastructure.qwen_runtime_errors as qwen_runtime_errors
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.vision_model import (
             VisionAgentError,

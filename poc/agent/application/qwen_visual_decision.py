@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable
 
 from PIL import Image
 
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
     GenericStepProposal,

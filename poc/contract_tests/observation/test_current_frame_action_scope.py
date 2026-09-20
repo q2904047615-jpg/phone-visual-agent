@@ -1,5 +1,4 @@
 """Fresh observations and one immutable device action scope; offline only."""
-from dataclasses import replace
 from unittest.mock import patch
 import unittest
 from test_single_visual_loop import LoopHarness, scene, decision

@@ -29,6 +29,12 @@ class AdbKeyboardConfigError(RuntimeError):
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def _executable_name(value: Path | str) -> str:
+    """Normalize both native paths and Windows paths on a non-Windows host."""
+
+    return str(value).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+
+
 class AdbKeyboardTextTransport:
     """Execute only the fixed ADB Keyboard command family for one fixed serial."""
 
@@ -36,7 +42,7 @@ class AdbKeyboardTextTransport:
         clock: Callable[[], float]=time.time, nonce_factory: Callable[[], str] | None=None) -> None:
         profile.validate()
         executable = Path(adb_executable)
-        if executable.name.casefold() not in {"adb", "adb.exe"}:
+        if _executable_name(executable) not in {"adb", "adb.exe"}:
             raise AdbKeyboardConfigError("adb_executable 必须指向 adb 或 adb.exe。")
         self._profile = profile
         self._adb_executable = executable

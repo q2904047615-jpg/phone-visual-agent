@@ -148,7 +148,7 @@ class EvidenceIOFailureTests(LoopHarness):
         adapter = loop_fixtures.FixtureAdapter()
         adapter.execute_error=failure
         loop,session,adapter=self.start([],adapter=adapter)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory():
             with self.assertRaises(GenericActionAdapterError):
                 loop.confirm_one(session, session.confirmation_authority.scope())
             saved = json.loads((session.run_dir / 'session.json').read_text(encoding='utf-8'))

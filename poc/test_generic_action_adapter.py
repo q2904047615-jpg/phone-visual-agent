@@ -225,12 +225,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertEqual((), result.controller_transition_evidence)
 
     def test_confirmed_home_executes_exactly_once_and_reobserves(self):
-        planned = scene(
-            "planned",
-            screen_id="settings_home",
-            element_id="settings-title",
-            app_id="settings",
-        )
         fresh = scene(
             "before",
             screen_id="settings_home",
@@ -272,7 +266,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         )
 
     def test_home_records_single_click_transport_receipt(self):
-        planned = scene("planned", screen_id="settings_home", app_id="settings")
         fresh = scene("before", screen_id="settings_home", app_id="settings")
         after = scene("after", screen_id="android_home", app_id="launcher")
         observer = FakeSceneObserver([fresh, after])
@@ -299,7 +292,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertIsNone(robot.consume_last_click_receipt())
 
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
-        planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
         fresh = scene("before", bounds=(0.11, 0.21, 0.31, 0.41))
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver([fresh, after])
@@ -332,23 +324,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertEqual(observer.calls, 2)
 
     def test_changed_non_authoritative_state_does_not_reselect_or_veto(self):
-        planned = UIScene(
-            app_id="unknown",
-            screen_id="android_home",
-            summary="主屏幕",
-            elements=(
-                UIElement(
-                    element_id="e1",
-                    role="icon",
-                    meaning="app_icon",
-                    label="设置",
-                    bounds=(0.2, 0.3, 0.4, 0.5),
-                    confidence=0.96,
-                    states={"enabled": True},
-                ),
-            ),
-            fingerprint="planned",
-        )
         fresh = UIScene(
             app_id="unknown",
             screen_id="android_home",
@@ -425,22 +400,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         planned = drag_scene(
             "planned",
             (0.12, 0.46, 0.58, 0.51),
-            destination_bounds,
-        )
-        fresh = drag_scene(
-            "fresh",
-            (0.12, 0.225, 0.45, 0.265),
-            destination_bounds,
-        )
-        audited_source = (0.18, 0.20, 0.32, 0.30)
-        planned_audited = drag_scene(
-            "planned",
-            audited_source,
-            destination_bounds,
-        )
-        fresh_audited = drag_scene(
-            "fresh",
-            audited_source,
             destination_bounds,
         )
         after = drag_scene(
@@ -528,18 +487,7 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
             )
 
         planned = long_press_scene("planned", (0.09, 0.53, 0.91, 0.76))
-        fresh = long_press_scene(
-            "fresh",
-            (0.09, 0.47, 0.91, 0.69),
-            meaning="interaction_zone",
-        )
         audited_bounds = (0.10, 0.48, 0.90, 0.70)
-        planned_audited = long_press_scene("planned", audited_bounds)
-        fresh_audited = long_press_scene(
-            "fresh",
-            audited_bounds,
-            meaning="interaction_zone",
-        )
         after = long_press_scene(
             "after",
             audited_bounds,
@@ -685,7 +633,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
             )
 
         planned = make_scene("planned", "drag_source_object", "drop_target_zone")
-        fresh = make_scene("fresh", "draggable_source_block", "drag_target_region")
         after = make_scene("after", "draggable_source_block", "drag_target_region")
         moved_source = replace(
             after.elements[0],
@@ -763,7 +710,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertEqual(len(robot.actions), 1)
 
     def test_ordinary_unchanged_screen_is_a_valid_fresh_receipt(self):
-        planned = scene("same")
         fresh = scene("same")
         unchanged = scene("same", element_id="after")
         observer = FakeSceneObserver([fresh, unchanged, unchanged])
@@ -822,7 +768,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertEqual(off_phone.tobytes(), frames[-1].tobytes())
 
     def test_confirmed_dismiss_uses_dedicated_physical_entry(self):
-        planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
         fresh = scene("before", bounds=(0.11, 0.21, 0.31, 0.41))
         after = scene("after", screen_id="app_home", element_id="after")
         robot = FakeRobot()

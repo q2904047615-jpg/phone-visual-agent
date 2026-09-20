@@ -46,6 +46,15 @@ class _FakeCursorUser32:
 
 
 class SellerDpiScalingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._windows_patch = patch.object(seller, "IS_WINDOWS", True)
+        cls._windows_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._windows_patch.stop()
+
     def test_swipe_path_has_distinct_timing_and_honest_receipt(self) -> None:
         fake = _FakeCursorUser32((400, 400))
         sleeps: list[float] = []

@@ -24,7 +24,7 @@ from agent.infrastructure.trusted_observation_frames import (
     build_trusted_observation, validate_trusted_observation_against_frames,
 )
 from test_canonical_action_protocol import ime_profile
-from contract_tests.input.test_simple_input_completion_contract import saved_response, input_graph
+from contract_tests.input.test_simple_input_completion_contract import saved_response
 from test_universal_agent_orchestrator import _clear_graph
 
 
@@ -67,7 +67,6 @@ class ProbeProvider(DashScopeVisionProvider):
 
 def cases():
     clear = _clear_graph()
-    typing = input_graph()
     focus = replace(clear, raw_user_goal='让当前消息编辑栏获得输入焦点，但不输入文字',
         goal=replace(clear.goal, objective='让当前消息编辑栏获得输入焦点'),
         subgoals=(replace(clear.subgoals[0], objective='让当前消息编辑栏获得输入焦点',

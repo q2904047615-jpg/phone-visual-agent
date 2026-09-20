@@ -228,7 +228,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_camera_coordination_has_one_infrastructure_implementation(self) -> None:
         root = Path(__file__).resolve().parent
-        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        web_source = (root / "agent" / "bootstrap" / "runtime.py").read_text(encoding="utf-8")
         infrastructure_source = (
             root / "agent" / "infrastructure" / "camera_coordinator.py"
         ).read_text(encoding="utf-8")
@@ -241,7 +241,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_device_controller_registry_has_one_infrastructure_implementation(self) -> None:
         root = Path(__file__).resolve().parent
-        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        web_source = (root / "agent" / "bootstrap" / "runtime.py").read_text(encoding="utf-8")
         infrastructure_path = (
             root
             / "agent"
@@ -253,7 +253,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("class DeviceControllerRegistry", web_source)
         self.assertIn("class DeviceControllerRegistry", infrastructure_source)
         self.assertIn(
-            "promotable_actions=PROMOTABLE_ACTIONS",
+            "promotable_actions=PROMOTABLE_ACTION_KINDS",
             web_source,
         )
         self.assertNotIn("capability_acceptance", infrastructure_source)
@@ -275,7 +275,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_per_device_runtime_resources_are_not_owned_by_web(self) -> None:
         root = Path(__file__).resolve().parent
-        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        web_source = (root / "agent" / "bootstrap" / "runtime.py").read_text(encoding="utf-8")
         infrastructure_source = (
             root
             / "agent"
@@ -378,7 +378,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
         self.assertEqual([], legacy_patches)
         self.assertEqual(
-            ["agent\\domain\\vision_model.py"],
+            [str(Path("agent") / "domain" / "vision_model.py")],
             model_literal_authorities,
         )
 
@@ -512,7 +512,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         import agent.infrastructure.capability_acceptance as acceptance
         from agent.domain.action_capabilities import (
             CALIBRATION_BOUND_ACTIONS,
-            PROMOTABLE_ACTIONS,
+            PROMOTABLE_ACTION_KINDS,
         )
 
         root = Path(__file__).resolve().parent
@@ -521,7 +521,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
         self.assertFalse((root / "capability_acceptance.py").exists())
         self.assertTrue(infrastructure_path.is_file())
-        self.assertIs(PROMOTABLE_ACTIONS, acceptance.PROMOTABLE_ACTIONS)
+        self.assertIs(PROMOTABLE_ACTION_KINDS, acceptance.PROMOTABLE_ACTION_KINDS)
         self.assertIs(
             CALIBRATION_BOUND_ACTIONS,
             acceptance.CALIBRATION_BOUND_ACTIONS,
@@ -647,7 +647,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_visual_evidence_and_image_measurement_are_layered_once(self) -> None:
         import agent.infrastructure.observation_images as observation_images
-        import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.visual_evidence import (
             LocalFrameStability,
@@ -808,7 +807,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("FileSystemAgentEvidenceStore", orchestrator_source)
         self.assertNotIn("evidence_store_factory or", orchestrator_source)
 
-        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        web_source = (root / "agent" / "bootstrap" / "runtime.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(
             web_source.count(
                 "evidence_store_factory=FileSystemAgentEvidenceStore"

@@ -17,7 +17,7 @@ from typing import Any
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.text_input_utils import normalize_user_text
 from agent.domain.ui_scene import UIElement, UIScene, UISceneError
-from agent.domain.validation import NormalizedPoint, bounds_overlap, dataclass_wire, reject_if
+from agent.domain.validation import NormalizedBounds, NormalizedPoint, bounds_overlap, dataclass_wire, reject_if
 
 
 UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-09-06-universal-adb-text-v28"
@@ -79,10 +79,6 @@ class UniversalActionController:
                 **values,
             )
 
-        if action.action == "tap_semantic":
-            element = self._resolve_direct_point_target(action, scene)
-            return self._point_action(action, element, scene.fingerprint)
-
         if action.action == "press_enter":
             element = self._resolve_target(action, scene, required_role="input")
             reject_if(element.states.get("input_multiline") is not True
@@ -104,18 +100,41 @@ class UniversalActionController:
         if action.action == "clear_verified_text":
             return self._resolve_verified_clear(action, scene, resolved)
 
-        if action.action == "double_tap":
-            element = self._resolve_direct_point_target(action, scene)
-            point_action = self._point_action(
-                action,
-                element,
-                scene.fingerprint,
-            )
-            self._validate_gesture_point(point_action.normalized_point, label="双击落点")
-            return point_action
+        if action.action == "reveal_system_navigation":
+            reject_if(action.params, UniversalActionError("系统导航栏唤出动作不能携带参数。"))
+            self._require_hidden_immersive_navigation(scene)
+            return resolved("reveal_system_navigation")
 
-        if action.action == "long_press":
-            element = self._resolve_direct_point_target(action, scene)
+        if action.action == "launch_app":
+            return self._resolve_launch_app(action, resolved)
+
+        if action.action == "scroll":
+            return self._resolve_scroll(action, scene, resolved)
+
+        if action.action == "swipe_element":
+            return self._resolve_element_swipe(action, scene, resolved)
+
+        if action.action in {"tap_semantic", "dismiss_overlay", "double_tap", "long_press"}:
+            return self._resolve_point_gesture(action, scene)
+
+        if action.action == "drag":
+            return self._resolve_drag(action, scene, resolved)
+
+        if action.action in {"back", "home", "open_recent_apps", "wait_for_change"}:
+            return resolved()
+
+        raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
+
+    def _resolve_point_gesture(
+        self,
+        action: SemanticAction,
+        scene: UIScene,
+    ) -> ResolvedSemanticAction:
+        element = self._resolve_direct_point_target(action, scene)
+        point_action = self._point_action(action, element, scene.fingerprint)
+        if action.action == "double_tap":
+            self._validate_gesture_point(point_action.normalized_point, label="双击落点")
+        elif action.action == "long_press":
             duration_ms = action.params.get("duration_ms", 800)
             reject_if(
                 isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)),
@@ -125,115 +144,125 @@ class UniversalActionController:
                 not 500 <= float(duration_ms) <= 2000,
                 UniversalActionError("长按 duration_ms 必须在500～2000之间。"),
             )
-            point_action = self._point_action(
-                action,
-                element,
-                scene.fingerprint,
-            )
             self._validate_gesture_point(point_action.normalized_point, label="长按落点")
             return replace(point_action, hold_seconds=float(duration_ms) / 1000.0)
+        return point_action
 
-        if action.action == "drag":
-            source = self._resolve_target(action, scene, prefix="source_")
-            destination = self._resolve_target(action, scene, prefix="destination_")
-            reject_if(
-                source.element_id == destination.element_id,
-                UniversalActionError("拖动起点和终点不能是同一元素。"),
-            )
-            self._validate_executable_element(source)
-            self._validate_executable_element(destination)
-            self._validate_gesture_point(source.center, label="拖动起点")
-            self._validate_gesture_point(destination.center, label="拖动终点")
-            distance = math.dist(source.center, destination.center)
-            reject_if(
-                not math.isfinite(distance) or distance <= 0,
-                UniversalActionError("拖动轨迹必须是有限非零距离。"),
-            )
-            return resolved(
-                "drag",
-                normalized_point=source.center,
-                normalized_end_point=destination.center,
-                target_element_id=source.element_id,
-                destination_element_id=destination.element_id,
-                hold_seconds=DRAG_DURATION_SECONDS,
-                path_distance=distance,
-            )
+    def _resolve_drag(
+        self,
+        action: SemanticAction,
+        scene: UIScene,
+        resolved: Any,
+    ) -> ResolvedSemanticAction:
+        source = self._resolve_target(action, scene, prefix="source_")
+        destination = self._resolve_target(action, scene, prefix="destination_")
+        reject_if(
+            source.element_id == destination.element_id,
+            UniversalActionError("拖动起点和终点不能是同一元素。"),
+        )
+        self._validate_executable_element(source)
+        self._validate_executable_element(destination)
+        self._validate_gesture_point(source.center, label="拖动起点")
+        self._validate_gesture_point(destination.center, label="拖动终点")
+        distance = math.dist(source.center, destination.center)
+        reject_if(
+            not math.isfinite(distance) or distance <= 0,
+            UniversalActionError("拖动轨迹必须是有限非零距离。"),
+        )
+        return resolved(
+            "drag",
+            normalized_point=source.center,
+            normalized_end_point=destination.center,
+            target_element_id=source.element_id,
+            destination_element_id=destination.element_id,
+            hold_seconds=DRAG_DURATION_SECONDS,
+            path_distance=distance,
+        )
 
-        if action.action == "reveal_system_navigation":
-            reject_if(action.params, UniversalActionError("系统导航栏唤出动作不能携带参数。"))
-            self._require_hidden_immersive_navigation(scene)
-            return resolved("reveal_system_navigation")
+    @staticmethod
+    def _resolve_launch_app(action: SemanticAction, resolved: Any) -> ResolvedSemanticAction:
+        allowed = {
+            "target_surface_id",
+            "target_app_id",
+            "target_app_name",
+            "launch_ref",
+            "expected_app_id",
+        }
+        reject_if(set(action.params) != allowed, UniversalActionError("App 直启动作包含协议外字段。"))
+        launch_ref = str(action.params.get("launch_ref") or "").strip()
+        expected_app_id = str(action.params.get("expected_app_id") or "").strip()
+        target_app_id = str(action.params.get("target_app_id") or "").strip()
+        target_app_name = str(action.params.get("target_app_name") or "").strip()
+        reject_if(
+            not launch_ref or not expected_app_id or not target_app_id or not target_app_name,
+            UniversalActionError("App 直启没有绑定受信任引用、目标包和 typed App 视觉身份。"),
+        )
+        reject_if(
+            not str(action.params.get("target_surface_id") or "").strip(),
+            UniversalActionError("App 直启缺少 target_surface_id。"),
+        )
+        return resolved(
+            "launch_app",
+            launch_ref=launch_ref,
+            expected_package_id=expected_app_id,
+            target_app_id=target_app_id,
+            target_app_name=target_app_name,
+        )
 
-        if action.action == "launch_app":
-            allowed = {
-                "target_surface_id",
-                "target_app_id",
-                "target_app_name",
-                "launch_ref",
-                "expected_app_id",
-            }
-            reject_if(set(action.params) != allowed, UniversalActionError("App 直启动作包含协议外字段。"))
-            launch_ref = str(action.params.get("launch_ref") or "").strip()
-            expected_app_id = str(action.params.get("expected_app_id") or "").strip()
-            target_app_id = str(action.params.get("target_app_id") or "").strip()
-            target_app_name = str(action.params.get("target_app_name") or "").strip()
-            reject_if(
-                not launch_ref or not expected_app_id or not target_app_id or not target_app_name,
-                UniversalActionError("App 直启没有绑定受信任引用、目标包和 typed App 视觉身份。"),
-            )
-            reject_if(
-                not str(action.params.get("target_surface_id") or "").strip(),
-                UniversalActionError("App 直启缺少 target_surface_id。"),
-            )
-            return resolved(
-                "launch_app",
-                launch_ref=launch_ref,
-                expected_package_id=expected_app_id,
-                target_app_id=target_app_id,
-                target_app_name=target_app_name,
-            )
-
-        if action.action == "scroll":
-            direction = str(action.params.get("direction") or "").strip().lower()
-            reject_if(
-                direction not in {"up", "down", "left", "right"},
-                UniversalActionError(f"不支持的滑动方向：{direction}"),
-            )
-            element_id = str(action.params.get("element_id") or "").strip()
-            if element_id:
-                element = self._resolve_target(action, scene)
-                self._validate_executable_element(element)
-                start, end = self._targeted_scroll_path(element, direction)
-                return resolved(
-                    "scroll",
-                    normalized_point=start,
-                    normalized_end_point=end,
-                    direction=direction,
-                    hold_seconds=DRAG_DURATION_SECONDS,
-                    path_distance=math.dist(start, end),
-                    target_element_id=element.element_id,
-                )
+    def _resolve_scroll(
+        self,
+        action: SemanticAction,
+        scene: UIScene,
+        resolved: Any,
+    ) -> ResolvedSemanticAction:
+        direction = str(action.params.get("direction") or "").strip().lower()
+        reject_if(
+            direction not in {"up", "down", "left", "right"},
+            UniversalActionError(f"不支持的滑动方向：{direction}"),
+        )
+        element_id = str(action.params.get("element_id") or "").strip()
+        if not element_id:
             return resolved("scroll", direction=direction)
+        element = self._resolve_target(action, scene)
+        self._validate_executable_element(element)
+        start, end = self._targeted_scroll_path(element, direction)
+        return resolved(
+            "scroll",
+            normalized_point=start,
+            normalized_end_point=end,
+            direction=direction,
+            hold_seconds=DRAG_DURATION_SECONDS,
+            path_distance=math.dist(start, end),
+            target_element_id=element.element_id,
+        )
 
-        if action.action == "swipe_element":
-            element = self._resolve_target(action, scene)
-            self._validate_executable_element(element)
-            start = self._gesture_param_point(action.params.get("start"), "元素滑动起点")
-            end = self._gesture_param_point(action.params.get("end"), "元素滑动终点")
-            self._validate_element_swipe_start(element, start)
-            self._validate_gesture_point(end, label="元素滑动终点")
-            distance = math.dist(start, end)
-            reject_if(not math.isfinite(distance) or distance <= 0,
-                UniversalActionError("元素滑动轨迹必须是有限非零距离。"))
-            direction = self._gesture_direction(start, end)
-            return resolved("swipe_element", normalized_point=start, normalized_end_point=end,
-                direction=direction, hold_seconds=DRAG_DURATION_SECONDS, path_distance=distance,
-                target_element_id=element.element_id)
-
-        if action.action in {"back", "home", "open_recent_apps", "wait_for_change"}:
-            return resolved()
-
-        raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
+    def _resolve_element_swipe(
+        self,
+        action: SemanticAction,
+        scene: UIScene,
+        resolved: Any,
+    ) -> ResolvedSemanticAction:
+        element = self._resolve_target(action, scene)
+        self._validate_executable_element(element)
+        start = self._gesture_param_point(action.params.get("start"), "元素滑动起点")
+        end = self._gesture_param_point(action.params.get("end"), "元素滑动终点")
+        self._validate_element_swipe_start(element, start)
+        self._validate_gesture_point(end, label="元素滑动终点")
+        distance = math.dist(start, end)
+        reject_if(
+            not math.isfinite(distance) or distance <= 0,
+            UniversalActionError("元素滑动轨迹必须是有限非零距离。"),
+        )
+        direction = self._gesture_direction(start, end)
+        return resolved(
+            "swipe_element",
+            normalized_point=start,
+            normalized_end_point=end,
+            direction=direction,
+            hold_seconds=DRAG_DURATION_SECONDS,
+            path_distance=distance,
+            target_element_id=element.element_id,
+        )
 
     def _resolve_verified_input(self, action: SemanticAction, scene: UIScene, resolved: Any) -> ResolvedSemanticAction:
         try:
@@ -405,7 +434,6 @@ class UniversalActionController:
             len(candidates) != 1 or candidates[0].element_id != target.element_id,
             UniversalActionError(error),
         )
-
 
 
     @staticmethod

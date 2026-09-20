@@ -5,10 +5,12 @@ import json
 import threading
 from collections.abc import Collection
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent.infrastructure.robot_controller import MockRobotController, RobotController
 from agent.domain.action_capabilities import physical_capability_for_action
+
+if TYPE_CHECKING:
+    from agent.infrastructure.robot_controller import RobotController
 
 
 class DeviceControllerRegistryError(RuntimeError):
@@ -30,10 +32,14 @@ class DeviceControllerRegistry:
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise DeviceControllerRegistryError(f'设备注册表无法读取：{exc}') from exc
         reject_if(payload.get('version') != 1 or not isinstance(payload.get('devices'), list), DeviceControllerRegistryError('设备注册表版本或 devices 格式无效。'))
+        # Keep the registry/configuration boundary importable without loading
+        # the Windows seller-window adapter.  Real or mock controllers are
+        # resolved only after the JSON contract has been validated.
+        from agent.infrastructure.robot_controller import MockRobotController, RobotController
+
         self.default_device_id = str(payload.get('default_device_id') or '').strip()
         self._controllers: dict[str, RobotController] = {}
         self._descriptors: dict[str, dict[str, Any]] = {}
-        enabled_windows: set[str] = set()
         window_positions: dict[str, set[int | None]] = {}
         # The operation lock is inspected through ``locked()`` by the runtime
         # status endpoint, so keep it as a plain Lock. Capture remains
@@ -73,7 +79,6 @@ class DeviceControllerRegistry:
             else:
                 existing_positions = set()
                 window_positions[effective_window] = existing_positions
-                enabled_windows.add(effective_window)
             existing_positions.add(machine_position)
             operation_lock = window_locks.setdefault(effective_window, threading.Lock())
             capture_lock = window_capture_locks.setdefault(effective_window, threading.RLock())
@@ -103,8 +108,24 @@ class DeviceControllerRegistry:
         reject_if(controller is None, DeviceControllerRegistryError(f'device_id 未登记或未启用：{resolved or 'missing'}。'))
         return controller
 
+    def request_stop_all(self) -> tuple[str, ...]:
+        """Request a stop on every enabled device controller.
+
+        Stop is intentionally broadcast to the registry rather than only to the
+        default device.  A service-level stop/shutdown must be safe even when a
+        task is currently running on another enabled device.
+        """
+
+        stopped: list[str] = []
+        for device_id, controller in self._controllers.items():
+            controller.request_stop()
+            stopped.append(device_id)
+        return tuple(sorted(stopped))
+
     def provisional_controller(self, device_id: str, candidate_action: str) -> RobotController:
         """Create an unregistered controller for one evidence-bound trial."""
+
+        from agent.infrastructure.robot_controller import MockRobotController, RobotController
 
         resolved_device = str(device_id or "").strip()
         action = str(candidate_action or "").strip()

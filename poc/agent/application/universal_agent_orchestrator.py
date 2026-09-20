@@ -22,7 +22,7 @@ from agent.domain import (
     DeviceTaskRegistryPort,
     EffectConfirmationAuthority,
 )
-from agent.domain.canonical_action_kinds import (
+from agent.domain.action_catalog import (
     CANONICAL_ACTION_KINDS,
 )
 from agent.domain.execution_budget import (

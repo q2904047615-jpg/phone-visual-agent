@@ -2,13 +2,60 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
+import time
 from uuid import uuid4
 from PIL import Image
 from agent.domain.vision_model import VisionAgentError
 from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
 
 MANIFEST_NAME = "task_screenshots.json"
+
+
+def cleanup_evidence_runs(root: Path, *, retention_seconds: float | None = None,
+    max_bytes: int | None = None) -> dict[str, int]:
+    """Remove only old completed evidence directories and enforce a disk budget.
+
+    The model payload is never truncated. Cleanup happens between runs and skips
+    directories carrying the ``.active`` marker so a live task keeps its full
+    screenshot history.
+    """
+
+    base = Path(root)
+    if not base.exists():
+        return {"removed_runs": 0, "removed_bytes": 0}
+    retention = float(retention_seconds if retention_seconds is not None else
+        os.environ.get("ROBOT_EVIDENCE_RETENTION_SECONDS", 7 * 24 * 3600))
+    budget = int(max_bytes if max_bytes is not None else
+        os.environ.get("ROBOT_EVIDENCE_MAX_BYTES", 5 * 1024 * 1024 * 1024))
+    now = time.time()
+    candidates = []
+    for path in base.iterdir():
+        # Only directories created by the current evidence lifecycle are
+        # eligible.  Unknown output folders and historical evidence are never
+        # deleted by a generic startup cleanup.
+        if (not path.is_dir() or not (path / ".evidence-run").exists()
+                or (path / ".active").exists()):
+            continue
+        try:
+            size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append((mtime, path, size))
+    removed_runs = removed_bytes = 0
+    for mtime, path, size in sorted(candidates):
+        if now - mtime < retention and sum(item[2] for item in candidates) - removed_bytes <= budget:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue
+        removed_runs += 1
+        removed_bytes += size
+    return {"removed_runs": removed_runs, "removed_bytes": removed_bytes}
 
 
 def _manifest(directory: Path, device_id: str | None) -> dict:
@@ -25,6 +72,13 @@ def save_task_frames(frames: list[Image.Image], directory: Path | None,
     if directory is None:
         return ()
     directory.mkdir(parents=True, exist_ok=True)
+    quota = int(os.environ.get("ROBOT_EVIDENCE_MAX_RUN_BYTES", 1024 * 1024 * 1024))
+    existing_bytes = sum(item.stat().st_size for item in directory.rglob("*") if item.is_file())
+    estimated_bytes = sum(max(1024, frame.width * frame.height // 2) for frame in frames)
+    if existing_bytes + estimated_bytes > quota:
+        raise VisionAgentError(
+            f"任务证据目录超过配额（{quota} bytes）；截图历史保持完整，未截断模型输入。"
+        )
     manifest = _manifest(directory, device_id)
     # Re-observing the same step must not overwrite any earlier capture.
     capture_id = uuid4().hex

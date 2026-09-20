@@ -13,6 +13,8 @@ OUTPUT = ROOT / 'poc/output/project_cleanup_inventory_current'
 
 def classify(name: str) -> tuple[str, str]:
     path = Path(name)
+    if name.startswith('.task-backups/'):
+        return 'history_snapshot', '历史工作树快照；保留用于回滚核对，不作为当前源码解析'
     if name.startswith('android/companion-ime/'):
         return 'remove', '用户已明确退役的Companion Android工程；保留恢复压缩包，不留运行入口'
     if name.startswith(('.agents/', '.codex/')) or path.name in {
@@ -52,7 +54,7 @@ def main() -> None:
         present = path.is_file()
         row = {'path': name, 'category': category, 'reason': reason,
             'status': 'present' if present else 'missing_from_worktree'}
-        if present and path.suffix == '.py' and category not in {'protect'}:
+        if present and path.suffix == '.py' and category not in {'protect', 'history_snapshot'}:
             tree = ast.parse(path.read_text(encoding='utf-8-sig'))
             row['imports'] = sorted(set(
                 node.module or '' for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)))

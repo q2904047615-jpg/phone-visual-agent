@@ -66,6 +66,20 @@ class DashScopeTransportFailureTests(unittest.TestCase):
             saved = json.loads((Path(tmp) / "abc_model_response.json").read_text(encoding="utf-8"))
             self.assertEqual("missing_message_content", saved["reason"])
 
+    def test_non_object_json_response_is_failed_with_raw_evidence(self):
+        provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "abc_model_request.json"
+            with patch("agent.infrastructure.dashscope_vision_provider.httpx.post",
+                       return_value=self.response([])):
+                with self.assertRaisesRegex(VisionAgentError, "顶层必须是 JSON 对象"):
+                    with provider.call_scope(stage="single_step_observation",
+                                            request_evidence_path=request_path):
+                        provider._chat([{"role": "user", "content": "observe"}], max_tokens=None)
+            saved = json.loads((Path(tmp) / "abc_model_response.json").read_text(encoding="utf-8"))
+            self.assertEqual("non_object_response", saved["reason"])
+            self.assertEqual([], saved["raw_response"])
+
 
     def test_transport_disconnect_retries_request_without_changing_payload(self):
         provider = DashScopeVisionProvider(api_key="test-key", max_attempts=2, retry_base_delay=0)

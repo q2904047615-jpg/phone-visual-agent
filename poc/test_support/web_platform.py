@@ -1,26 +1,15 @@
 from __future__ import annotations
-from contextlib import nullcontext
-import json
 import tempfile
-import time
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-import httpx
 from fastapi.testclient import TestClient
-from PIL import Image
 import web_app
 from agent.infrastructure import (
     DeviceRuntimeResourceRegistry,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
-)
-from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
-from agent.domain.canonical_action_protocol import GenericStepProposal
-from agent.infrastructure.generic_scene_observer import (
-    SINGLE_STEP_SCENE_OBSERVER_VERSION,
 )
 from agent.infrastructure.robot_controller import (
     MockRobotController as _MockRobotController,
@@ -62,9 +51,6 @@ web_app.RobotController = RobotController
 
 
 web_app.MockRobotController = MockRobotController
-
-
-from agent.domain.vision_model import VisionAgentError
 
 
 class _BasePhysicalNavigationSafetyTests(unittest.TestCase):
@@ -240,4 +226,3 @@ class _BaseApiEndToEndTests(unittest.TestCase):
                 session.status = "cancelled"
 
         return Manager(), trial, calls
-

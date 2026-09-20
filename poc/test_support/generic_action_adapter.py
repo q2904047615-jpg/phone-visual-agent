@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import patch
 from dataclasses import replace
 from PIL import Image, ImageDraw
 from agent.domain.confirmation_authority import ConfirmationAuthority
@@ -25,7 +24,6 @@ from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import (
     SingleStepGenericSceneObserver,
 )
-from agent.infrastructure.observation_images import local_frame_fingerprint
 from agent.infrastructure.orientation_safety import (
     OrientationSafetyError,
     _claim_audit_seal,
@@ -37,10 +35,6 @@ from agent.domain.ui_scene import (
     UIElement,
     UIScene,
 )
-from agent.domain.universal_action_controller import (
-    UniversalActionController,
-)
-from agent.domain.vision_model import VisionAgentError
 
 
 TEST_QWERTY_GEOMETRY = {
@@ -397,29 +391,6 @@ def textured_phone_frame() -> Image.Image:
     return frame
 
 
-def ocr_text_payload(
-    text: str,
-    *,
-    left: int,
-    top: int,
-    width: int = 180,
-    height: int = 30,
-) -> dict:
-    word = {
-        "text": text,
-        "left": left,
-        "top": top,
-        "width": width,
-        "height": height,
-    }
-    return {
-        "lines": [
-            {
-                **word,
-                "words": [dict(word)],
-            }
-        ]
-    }
 
 
 class SecondPostCaptureFailureAdapter(GenericSingleActionAdapter):
@@ -470,28 +441,6 @@ def navigation_goal(*, execution_class="navigate"):
     )
 
 
-def exact_tap_goal(label="两个字段分别输入"):
-    return GenericIntentDraft(
-        understood=True,
-        app_id="current_surface",
-        app_name="当前界面",
-        objective="点击当前画面中的目标控件",
-        entities={
-            "target_ui_label": label,
-            "active_subgoal_visual_context": {
-                "step_id": "exact_tap_semantic",
-                "objective": "点击当前画面中的目标控件",
-                "constraints": [],
-                "completion_conditions": ["动作后出现新的稳定画面"],
-                "execution_class": "navigate",
-                "goal_entities": {
-                    "target_surface": "current_surface",
-                    "target_ui_label": label,
-                },
-            },
-        },
-        success_criteria={"action_completed": "动作后出现新的稳定画面"},
-    )
 
 
 def aligned_camera_facts() -> CameraAlignmentFacts:
@@ -748,4 +697,3 @@ class _BaseGenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([], robot.actions)
         self.assertIsNone(robot._armed)
         self.assertEqual([None], provider.max_tokens_seen)
-

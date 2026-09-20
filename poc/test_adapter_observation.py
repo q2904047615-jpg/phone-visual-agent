@@ -295,12 +295,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
             confidence=0.95,
             evidence=("中央App内容被隐私遮罩，当前完整画布保持稳定",),
         )
-        planned = scene(
-            "planned-hidden-content",
-            screen_id="unknown",
-            app_id="unknown",
-            camera_alignment=hidden_content_alignment,
-        )
         fresh = scene(
             "fresh-hidden-content",
             screen_id="unknown",
@@ -341,7 +335,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertEqual(2, observer.calls)
 
     def test_invalid_home_click_receipt_stops_before_fresh_screenshot_observation(self):
-        planned = scene("planned", screen_id="settings_home", app_id="settings")
         fresh = scene("before", screen_id="settings_home", app_id="settings")
         observer = FakeSceneObserver([fresh])
         robot = ClickReceiptRobot(valid=False)
@@ -607,7 +600,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
 
     def test_matching_frame_identity_reuses_original_geometry(self):
         planned = scene("planned", bounds=(0.12, 0.46, 0.58, 0.51))
-        fresh = scene("fresh", bounds=(0.12, 0.225, 0.45, 0.265))
         observer = FakeSceneObserver(
             [scene("after", screen_id="app_home", element_id="after")]
         )
@@ -731,7 +723,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertIsNone(result.confirmation_frame_delta)
 
     def test_observer_exception_stops_without_retry_or_action(self):
-        planned = scene("planned")
         fresh = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver(
@@ -876,7 +867,6 @@ class GenericActionAdapterTests(_BaseGenericActionAdapterTests):
         self.assertEqual(len(frames), 4)
 
     def test_post_action_format_failure_does_not_resample_model(self):
-        planned = scene("planned")
         fresh = scene("before")
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver(

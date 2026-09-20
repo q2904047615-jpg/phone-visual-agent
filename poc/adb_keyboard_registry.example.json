@@ -6,15 +6,12 @@
         "protocol_version": "2026-09-02-adb-keyboard-v1",
         "profile_id": "adb-keyboard-local-01",
         "device_id": "device-local-01",
-        "adb_serial": "REPLACE_WITH_ADB_SERIAL",
+        "adb_serial": "replace-with-local-serial",
         "enabled": true,
-        "capabilities": [
-          "append_text",
-          "clear_text"
-        ],
+        "capabilities": ["append_text", "clear_text"],
         "command_timeout_seconds": 10.0
       },
-      "adb_executable": "C:\\path\\to\\platform-tools\\adb.exe"
+      "adb_executable": "adb.exe"
     }
   ]
 }

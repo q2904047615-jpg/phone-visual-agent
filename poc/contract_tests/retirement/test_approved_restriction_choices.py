@@ -67,7 +67,8 @@ class UncappedTextTests(unittest.TestCase):
     def test_natural_web_request_has_no_literal_capacity_limit(self):
         from pydantic import StrictInt
         from agent.domain.execution_budget import DEFAULT_DEVICE_ACTION_BUDGET, DEFAULT_OBSERVATION_BUDGET
-        source = (Path(__file__).resolve().parents[2] / "web_app.py").read_text(encoding="utf-8")
+        source_path = Path(__file__).resolve().parents[2] / "agent" / "interfaces" / "http_models.py"
+        source = source_path.read_text(encoding="utf-8")
         names = {"StrictAgentRequest", "GenericSupervisedStartRequest"}
         nodes = [node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name in names]
         namespace = dict(BaseModel=BaseModel, ConfigDict=ConfigDict, Field=Field,

@@ -292,6 +292,9 @@ class DashScopeVisionProvider:
                     self.api_key}', 'Content-Type': 'application/json'}, json=request_body, timeout=effective_timeout)
                 response.raise_for_status()
                 payload = response.json()
+                if not isinstance(payload, dict):
+                    self._save_failed_response_evidence(payload, reason="non_object_response")
+                    raise VisionAgentError("千问视觉响应顶层必须是 JSON 对象。")
                 break
             except httpx.HTTPStatusError as exc:
                 last_error = exc

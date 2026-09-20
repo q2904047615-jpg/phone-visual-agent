@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-from PIL import Image
 from agent.application.universal_agent_orchestrator import _model_history
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.domain.qwen_task_context import execution_history_entry

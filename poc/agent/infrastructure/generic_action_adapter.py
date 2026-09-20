@@ -25,6 +25,7 @@ from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneOb
 from agent.infrastructure.task_screenshot_history import save_task_frames
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.action_capabilities import build_device_capability_snapshot
+from agent.domain.action_catalog import PHYSICAL_ACTION_KINDS
 from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
@@ -49,7 +50,6 @@ from agent.domain.universal_action_controller import (
 
 
 QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"
-
 
 
 def _persist_qwen_failure_diagnostic(*, evidence_dir: Path | None, prefix: str, raw_response: str, error: Exception,
@@ -140,9 +140,7 @@ class GenericActionExecutionResult:
 class GenericSingleActionAdapter:
     """The only generic bridge from a verified scene to one robot action."""
 
-    PHYSICAL_KINDS = frozenset({'tap_semantic', 'dismiss_overlay', 'double_tap', 'scroll', 'swipe_element', 'reveal_system_navigation',
-        'back', 'home', 'open_recent_apps', 'input_verified_text', 'press_enter', 'clear_verified_text', 'long_press',
-        'drag'})
+    PHYSICAL_KINDS = PHYSICAL_ACTION_KINDS
     DEVICE_ACTION_KINDS = PHYSICAL_KINDS | {'launch_app'}
 
     @staticmethod
@@ -472,19 +470,26 @@ class GenericSingleActionAdapter:
             clear()
             raise GenericActionAdapterError(f'动作前单步画面方向凭据校验失败：{exc}', evidence=paths) from exc
 
-    def execute(self, *, requested_action: SemanticAction, planned_scene: UIScene, goal: GenericIntentDraft,
-        confirmed: bool, evidence_dir: Path | None=None, planned_frames: tuple[Image.Image,
-        ...] | list[Image.Image]=(), action_authority: ConfirmationAuthority | None=None,
-        available_action_kinds: frozenset[str] | None=None,
-        post_action_available_action_kinds: frozenset[str] | None=None
-        ) -> GenericActionExecutionResult:
+    def _prepare_execution(
+        self,
+        requested_action: SemanticAction,
+        planned_scene: UIScene,
+        *,
+        confirmed: bool,
+        evidence_dir: Path | None,
+        planned_frames: tuple[Image.Image, ...] | list[Image.Image],
+    ) -> tuple[str, list[Image.Image], tuple[str, ...], UIScene, SemanticAction,
+               ResolvedSemanticAction, OrientationCredential | None, Callable[[], Any] | None]:
         reject_if(confirmed is not True, GenericActionAdapterError("必须明确确认当前这一个语义动作。"))
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
-        reject_if(not planned_frames, GenericActionAdapterError(
-            "执行动作必须携带产生该 Qwen 动作的当前截图帧。"))
-        before_frames, before_paths = self._capture_confirmation_frames(evidence_dir=evidence_dir, prefix=f'{
-            evidence_prefix}_before')
+        reject_if(
+            not planned_frames,
+            GenericActionAdapterError("执行动作必须携带产生该 Qwen 动作的当前截图帧。"),
+        )
+        before_frames, before_paths = self._capture_confirmation_frames(
+            evidence_dir=evidence_dir, prefix=f"{evidence_prefix}_before"
+        )
         try:
             self._validate_confirmation_frame_dimensions(planned_frames, before_frames)
         except GenericActionAdapterError as exc:
@@ -492,51 +497,72 @@ class GenericSingleActionAdapter:
         before = planned_scene
         # Qwen's action is immutable after selection.  Local code may validate
         # device/scope/geometry, but it may not rewrite its semantic fields.
-        rebound = requested_action
         try:
-            resolved = self.controller.resolve_one(rebound, before, confirmed=True)
+            resolved = self.controller.resolve_one(requested_action, before, confirmed=True)
         except UniversalActionError as exc:
             raise GenericActionAdapterError(f'确认前控制器拒绝动作：{exc}', evidence=before_paths) from exc
-
         reject_if(
             resolved.kind not in self.DEVICE_ACTION_KINDS and resolved.kind != 'wait_for_change',
             GenericActionAdapterError(f'当前通用硬件适配器尚未开放：{resolved.kind}', evidence=before_paths),
         )
-
         orientation_credential, clear_authorization = self._arm_physical_execution(resolved, before,
             before_frames, before_paths)
+        return (evidence_prefix, before_frames, before_paths, before, requested_action,
+            resolved, orientation_credential, clear_authorization)
 
-        physical_actions = 0
-        robot_result: Any = None
-        hardware_receipt: dict[str, Any] | None = None
-        execution_metadata: dict[str, Any] = {}
+    @staticmethod
+    def _executor_point(point: NormalizedPoint | None) -> tuple[int, int] | None:
+        if point is None:
+            return None
+        return (
+            max(0, min(1000, round(point[0] * 1000))),
+            max(0, min(1000, round(point[1] * 1000))),
+        )
 
-        def executor_point(point: NormalizedPoint | None) -> tuple[int, int] | None:
-            if point is None:
-                return None
-            return (max(0, min(1000, round(point[0] * 1000))), max(0, min(1000, round(point[1] * 1000))))
-
-        text_scope = None
+    def _mint_text_scope(
+        self,
+        resolved: ResolvedSemanticAction,
+        requested_action: SemanticAction,
+        before: UIScene,
+        action_authority: ConfirmationAuthority | None,
+        before_paths: tuple[str, ...],
+    ) -> Any:
+        if resolved.text_transport != 'adb_keyboard':
+            return None
+        transport = self.text_transport
+        reject_if(
+            transport is None or action_authority is None,
+            GenericActionAdapterError(
+                "ADB Keyboard 动作缺少 transport 或已消费的一次性 authority。",
+                evidence=before_paths,
+            ),
+        )
+        assert transport is not None and action_authority is not None
+        reject_if(
+            action_authority.device_id != self.device_id
+            or action_authority.fingerprint != before.fingerprint
+            or action_authority.decision_node_id != requested_action.node_id
+            or action_authority.action_digest != canonical_digest(requested_action.to_dict()),
+            GenericActionAdapterError(
+                "ADB Keyboard 动作 authority 与当前设备、画面或 canonical 动作不一致。",
+                evidence=before_paths,
+            ),
+        )
+        prior = resolved.prior_input_value
+        fragment = resolved.input_fragment if resolved.kind != 'clear_verified_text' else ''
+        expected = resolved.expected_input_value
+        reject_if(
+            not isinstance(prior, str)
+            or not isinstance(fragment, str)
+            or not isinstance(expected, str)
+            or not resolved.input_field_id,
+            GenericActionAdapterError(
+                "ADB Keyboard 动作缺少精确 typed 文字事务。", evidence=before_paths
+            ),
+        )
         if resolved.text_transport == 'adb_keyboard':
-            transport = self.text_transport
-            reject_if(transport is None or action_authority is None,
-                GenericActionAdapterError("ADB Keyboard 动作缺少 transport 或已消费的一次性 authority。",
-                evidence=before_paths))
-            assert transport is not None and action_authority is not None
-            reject_if(action_authority.device_id != self.device_id
-                or action_authority.fingerprint != before.fingerprint
-                or action_authority.decision_node_id != requested_action.node_id
-                or action_authority.action_digest != canonical_digest(requested_action.to_dict()),
-                GenericActionAdapterError("ADB Keyboard 动作 authority 与当前设备、画面或 canonical 动作不一致。",
-                evidence=before_paths))
-            prior = resolved.prior_input_value
-            fragment = resolved.input_fragment if resolved.kind != 'clear_verified_text' else ''
-            expected = resolved.expected_input_value
-            reject_if(not isinstance(prior, str) or not isinstance(fragment, str)
-                or not isinstance(expected, str) or not resolved.input_field_id,
-                GenericActionAdapterError("ADB Keyboard 动作缺少精确 typed 文字事务。", evidence=before_paths))
             try:
-                text_scope = transport.mint_action_scope(session_id=action_authority.session_id,
+                return transport.mint_action_scope(session_id=action_authority.session_id,
                     task_id=action_authority.task_id, revision=action_authority.revision,
                     action_id=action_authority.decision_node_id, input_field_id=resolved.input_field_id,
                     observation_fingerprint=before.fingerprint, prior_text_digest=text_digest(prior),
@@ -544,19 +570,35 @@ class GenericSingleActionAdapter:
             except (RuntimeError, ValueError) as exc:
                 raise GenericActionAdapterError(f"ADB Keyboard 单动作 scope 签发失败：{exc}",
                     evidence=before_paths) from exc
+        return None
 
-        execution_request = DeviceActionRequest(kind=resolved.kind, point=executor_point(resolved.normalized_point),
-            end_point=executor_point(resolved.normalized_end_point), direction=resolved.direction,
-            hold_seconds=resolved.hold_seconds, input_fragment=resolved.input_fragment,
-            text_transport=resolved.text_transport, text_scope=text_scope,
-            wait_seconds=max(0.5,
-            self.post_action_settle) if resolved.kind == 'wait_for_change' else None, launch_ref=resolved.launch_ref)
+    def _execute_device_action(
+        self,
+        resolved: ResolvedSemanticAction,
+        text_scope: Any,
+        clear_authorization: Callable[[], Any] | None,
+        before_paths: tuple[str, ...],
+    ) -> tuple[int, Any, dict[str, Any] | None, dict[str, Any]]:
+        execution_request = DeviceActionRequest(
+            kind=resolved.kind,
+            point=self._executor_point(resolved.normalized_point),
+            end_point=self._executor_point(resolved.normalized_end_point),
+            direction=resolved.direction,
+            hold_seconds=resolved.hold_seconds,
+            input_fragment=resolved.input_fragment,
+            text_transport=resolved.text_transport,
+            text_scope=text_scope,
+            wait_seconds=max(0.5, self.post_action_settle) if resolved.kind == 'wait_for_change' else None,
+            launch_ref=resolved.launch_ref,
+        )
         try:
             execution_result = self.device_executor.execute(execution_request)
-            physical_actions = execution_result.physical_actions
-            robot_result = execution_result.transport_result
-            hardware_receipt = execution_result.hardware_receipt
-            execution_metadata = dict(execution_result.metadata)
+            return (
+                execution_result.physical_actions,
+                execution_result.transport_result,
+                execution_result.hardware_receipt,
+                dict(execution_result.metadata),
+            )
         except DeviceExecutionError as exc:
             raise GenericActionAdapterError(f'设备执行器拒绝动作：{exc}', physical_actions=exc.physical_actions,
                 evidence=before_paths, execution_metadata=getattr(exc, 'metadata', {})) from exc
@@ -564,12 +606,28 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(f'共享物理执行门在控制端原语前拒绝动作：{exc}', physical_actions=0,
                 evidence=before_paths) from exc
         except Exception as exc:
-            raise GenericActionAdapterError(f'设备单步动作调用失败：{exc}', physical_actions=physical_actions,
+            raise GenericActionAdapterError(f'设备单步动作调用失败：{exc}', physical_actions=0,
                 evidence=before_paths) from exc
         finally:
             if callable(clear_authorization):
                 clear_authorization()
 
+    def _observe_after_execution(
+        self,
+        goal: GenericIntentDraft,
+        requested_action: SemanticAction,
+        resolved: ResolvedSemanticAction,
+        action_authority: ConfirmationAuthority | None,
+        physical_actions: int,
+        execution_metadata: dict[str, Any],
+        before: UIScene,
+        before_frames: list[Image.Image],
+        before_paths: tuple[str, ...],
+        evidence_dir: Path | None,
+        evidence_prefix: str,
+        available_action_kinds: frozenset[str] | None,
+        post_action_available_action_kinds: frozenset[str] | None,
+    ) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], dict[str, Any]]:
         try:
             (
                 after,
@@ -580,35 +638,94 @@ class GenericSingleActionAdapter:
                 controller_transition_evidence,
                 after_model_decision,
             ) = self._observe_stable_post_action_scene(
-                self._post_action_goal(goal, authority=action_authority, requested=requested_action, resolved=resolved,
-                    physical_actions=physical_actions, execution_metadata=execution_metadata),
+                self._post_action_goal(
+                    goal, authority=action_authority, requested=requested_action, resolved=resolved,
+                    physical_actions=physical_actions, execution_metadata=execution_metadata,
+                ),
                 before=before,
                 before_frames=tuple(before_frames),
                 resolved=resolved,
                 evidence_dir=evidence_dir,
                 evidence_prefix=evidence_prefix,
-                available_action_kinds=(post_action_available_action_kinds
-                    if post_action_available_action_kinds is not None else available_action_kinds),
+                available_action_kinds=(
+                    post_action_available_action_kinds
+                    if post_action_available_action_kinds is not None
+                    else available_action_kinds
+                ),
             )
         except Exception as exc:
             # The device has already executed. Every ordinary post-action failure must
             # carry its receipt count, including filesystem and unexpected parser errors.
             evidence = before_paths + tuple(getattr(exc, "evidence", ()))
-            raise GenericActionAdapterError(f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
+            raise GenericActionAdapterError(
+                f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
                 observation_errors=tuple(getattr(exc, 'observation_errors', ())), verification_errors=tuple(getattr(exc,
                 'verification_errors', ())), execution_metadata=execution_metadata) from exc
-        if (action_authority is not None and action_authority.effect_ids
+        return (
+            after, after_frames, after_frame_paths, all_after_paths,
+            observation_errors, controller_transition_evidence, after_model_decision,
+        )
+
+    @staticmethod
+    def _verify_effect_finish(
+        action_authority: ConfirmationAuthority | None,
+        after_model_decision: dict[str, Any],
+        before_frames: list[Image.Image],
+        after_frames: tuple[Image.Image, ...],
+        before_paths: tuple[str, ...],
+        all_after_paths: tuple[str, ...],
+        physical_actions: int,
+        execution_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not (action_authority is not None and action_authority.effect_ids
             and str(after_model_decision.get('status') or '').strip() == 'finish'):
-            transition = measure_material_visual_transition(before_frames, after_frames)
-            execution_metadata = {**execution_metadata, 'effect_visual_transition': transition}
-            reject_if(not transition['material'], GenericActionAdapterError(
+            return execution_metadata
+        transition = measure_material_visual_transition(before_frames, after_frames)
+        execution_metadata = {**execution_metadata, 'effect_visual_transition': transition}
+        reject_if(
+            not transition['material'],
+            GenericActionAdapterError(
                 '外部效果动作后的真实帧没有可归因的新变化；动作前已有画面不能作为本次 finish 证据，'
                 '本次已执行1次且不会自动重复。',
                 physical_actions=physical_actions,
                 evidence=before_paths + all_after_paths,
                 verification_errors=('外部效果缺少动作前后真实帧变化',),
                 execution_metadata=execution_metadata,
-            ))
+            ),
+        )
+        return execution_metadata
+
+    def execute(self, *, requested_action: SemanticAction, planned_scene: UIScene, goal: GenericIntentDraft,
+        confirmed: bool, evidence_dir: Path | None=None, planned_frames: tuple[Image.Image,
+        ...] | list[Image.Image]=(), action_authority: ConfirmationAuthority | None=None,
+        available_action_kinds: frozenset[str] | None=None,
+        post_action_available_action_kinds: frozenset[str] | None=None
+        ) -> GenericActionExecutionResult:
+        (
+            evidence_prefix, before_frames, before_paths, before, rebound, resolved,
+            orientation_credential, clear_authorization,
+        ) = self._prepare_execution(
+            requested_action, planned_scene, confirmed=confirmed, evidence_dir=evidence_dir,
+            planned_frames=planned_frames,
+        )
+        text_scope = self._mint_text_scope(
+            resolved, requested_action, before, action_authority, before_paths
+        )
+        physical_actions, robot_result, hardware_receipt, execution_metadata = self._execute_device_action(
+            resolved, text_scope, clear_authorization, before_paths
+        )
+        (
+            after, after_frames, after_frame_paths, all_after_paths,
+            observation_errors, controller_transition_evidence, after_model_decision,
+        ) = self._observe_after_execution(
+            goal, requested_action, resolved, action_authority, physical_actions, execution_metadata,
+            before, before_frames, before_paths, evidence_dir, evidence_prefix,
+            available_action_kinds, post_action_available_action_kinds,
+        )
+        execution_metadata = self._verify_effect_finish(
+            action_authority, after_model_decision, before_frames, after_frames,
+            before_paths, all_after_paths, physical_actions, execution_metadata,
+        )
         return GenericActionExecutionResult(requested_action=requested_action, rebound_action=rebound,
             resolved_action=resolved, before_scene=before, after_scene=after,
             planned_scene_fingerprint=planned_scene.fingerprint,

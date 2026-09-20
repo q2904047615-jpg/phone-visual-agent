@@ -264,7 +264,24 @@ def _vertical_polygon_slice(polygon: Sequence[tuple[float, float]], x: float) ->
 
 def reveal_system_navigation_path(frame_size: tuple[int, int], path: Path=CALIBRATION_PATH) -> dict[str, object]:
     """Derive one calibrated bottom-edge inward gesture without model coordinates."""
+    payload, validation = _load_navigation_calibration(path)
+    stored_width, stored_height, current_width, current_height = _navigation_frame_sizes(payload, frame_size)
+    frame_to_dom, dom_to_frame, target_to_command = _navigation_transforms(payload)
+    collection_hull = _validated_hull(payload.get("coverage"), label="采集标定")
+    validation_hull = _validated_hull(validation.get("coverage"), label="独立验证")
+    _validate_navigation_samples(payload, frame_to_dom, stored_width, stored_height, collection_hull)
+    top, bottom = _navigation_dom_bounds(frame_to_dom, collection_hull, validation_hull)
+    requested_grid, dom_path = _navigation_dom_path(
+        top, bottom, dom_to_frame, frame_to_dom, collection_hull, validation_hull
+    )
+    corrected_grid = _correct_navigation_grid(target_to_command, requested_grid)
+    return _navigation_result(
+        payload, validation, current_width, current_height, stored_width, stored_height,
+        dom_path, requested_grid, corrected_grid,
+    )
 
+
+def _load_navigation_calibration(path: Path) -> tuple[dict[str, object], dict[str, object]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError) as exc:
@@ -272,40 +289,65 @@ def reveal_system_navigation_path(frame_size: tuple[int, int], path: Path=CALIBR
     reject_if(not isinstance(payload, dict), TapCalibrationError("触控标定不是JSON对象。"))
     reject_if(
         int(payload.get('version', 0)) < CALIBRATION_VERSION or payload.get('enabled') is not True
-        or payload.get('accepted_fit') is not True or (payload.get('validated') is not True),
+        or payload.get('accepted_fit') is not True or payload.get('validated') is not True,
         TapCalibrationError("系统导航唤出要求已启用且独立验证通过的v2标定。"),
     )
     validation = payload.get("validation")
     reject_if(
-        not isinstance(validation, dict) or validation.get('passed') is not True or validation.get('coverage_passed')
-        is not True,
+        not isinstance(validation, dict) or validation.get('passed') is not True
+        or validation.get('coverage_passed') is not True,
         TapCalibrationError("系统导航唤出缺少独立九点验证证据。"),
     )
+    return payload, validation
 
+
+def _navigation_frame_sizes(
+    payload: dict[str, object], frame_size: tuple[int, int]
+) -> tuple[float, float, float, float]:
     stored_size = payload.get("frame_size")
-    reject_if(not isinstance(stored_size, list) or len(stored_size) != 2, TapCalibrationError("触控标定缺少有效相机尺寸。"))
+    reject_if(
+        not isinstance(stored_size, list) or len(stored_size) != 2,
+        TapCalibrationError("触控标定缺少有效相机尺寸。"),
+    )
     try:
         stored_width, stored_height = (float(value) for value in stored_size)
         current_width, current_height = (float(value) for value in frame_size)
     except (TypeError, ValueError) as exc:
         raise TapCalibrationError("触控标定相机尺寸非法。") from exc
-    reject_if(min(stored_width, stored_height, current_width, current_height) <= 1, TapCalibrationError("触控标定相机尺寸无效。"))
+    reject_if(
+        min(stored_width, stored_height, current_width, current_height) <= 1,
+        TapCalibrationError("触控标定相机尺寸无效。"),
+    )
     width_scale = current_width / stored_width
     height_scale = current_height / stored_height
     scale_delta = abs(width_scale - height_scale) / max(width_scale, height_scale)
-    reject_if(scale_delta > 0.02, TapCalibrationError("当前相机画面相对验证标定发生非等比漂移，保持0动作。"))
+    reject_if(
+        scale_delta > 0.02,
+        TapCalibrationError("当前相机画面相对验证标定发生非等比漂移，保持0动作。"),
+    )
+    return stored_width, stored_height, current_width, current_height
 
+
+def _navigation_transforms(payload: dict[str, object]) -> tuple[Affine2D, Affine2D, Affine2D]:
     try:
         frame_to_dom = Affine2D.from_json(payload["frame_to_dom"])
         dom_to_frame = frame_to_dom.inverse()
         target_to_command = Affine2D.from_json(payload["target_to_command"])
     except (KeyError, TypeError, ValueError, TapCalibrationError) as exc:
         raise TapCalibrationError("系统导航唤出缺少可信坐标变换。") from exc
-    collection_hull = _validated_hull(payload.get("coverage"), label="采集标定")
-    validation_hull = _validated_hull(validation.get("coverage"), label="独立验证")
+    return frame_to_dom, dom_to_frame, target_to_command
 
+
+def _validate_navigation_samples(
+    payload: dict[str, object], frame_to_dom: Affine2D,
+    stored_width: float, stored_height: float,
+    collection_hull: list[tuple[float, float]],
+) -> None:
     samples = payload.get("samples")
-    reject_if(not isinstance(samples, list) or len(samples) < 6, TapCalibrationError("frame_to_dom缺少足够的原始标定样本。"))
+    reject_if(
+        not isinstance(samples, list) or len(samples) < 6,
+        TapCalibrationError("frame_to_dom缺少足够的原始标定样本。"),
+    )
     sample_points: list[tuple[float, float]] = []
     projection_errors: list[float] = []
     try:
@@ -314,31 +356,55 @@ def reveal_system_navigation_path(frame_size: tuple[int, int], path: Path=CALIBR
                 raise TypeError
             desired = sample["desired_frame"]
             target = sample["target_dom"]
-            frame_point = (float(desired[0]) / (stored_width - 1), float(desired[1]) / (stored_height - 1))
+            frame_point = (
+                float(desired[0]) / (stored_width - 1),
+                float(desired[1]) / (stored_height - 1),
+            )
             dom_point = (float(target[0]), float(target[1]))
-            if any((not math.isfinite(value) for value in (*frame_point, *dom_point))):
+            if any(not math.isfinite(value) for value in (*frame_point, *dom_point)):
                 raise ValueError
             sample_points.append(frame_point)
             projection_errors.append(math.dist(frame_to_dom.apply(*frame_point), dom_point))
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise TapCalibrationError("frame_to_dom原始样本损坏。") from exc
-    reject_if(max(projection_errors) > SYSTEM_NAVIGATION_MAX_FRAME_TO_DOM_ERROR, TapCalibrationError("frame_to_dom与原始标定样本漂移，保持0动作。"))
-    rebuilt_coverage = build_coverage(sample_points)
-    rebuilt_hull = _validated_hull(rebuilt_coverage, label="重建标定")
     reject_if(
-        any((not _point_in_convex_hull(point, rebuilt_hull) for point in collection_hull))
-        or any((not _point_in_convex_hull(point, collection_hull) for point in rebuilt_hull)),
+        max(projection_errors) > SYSTEM_NAVIGATION_MAX_FRAME_TO_DOM_ERROR,
+        TapCalibrationError("frame_to_dom与原始标定样本漂移，保持0动作。"),
+    )
+    rebuilt_hull = _validated_hull(build_coverage(sample_points), label="重建标定")
+    reject_if(
+        any(not _point_in_convex_hull(point, rebuilt_hull) for point in collection_hull)
+        or any(not _point_in_convex_hull(point, collection_hull) for point in rebuilt_hull),
         TapCalibrationError("保存的覆盖凸包与原始样本不一致，保持0动作。"),
     )
 
-    collection_dom_hull = [frame_to_dom.apply(*point) for point in collection_hull]
-    validation_dom_hull = [frame_to_dom.apply(*point) for point in validation_hull]
-    collection_slice = _vertical_polygon_slice(collection_dom_hull, SYSTEM_NAVIGATION_DOM_CENTER_X)
-    validation_slice = _vertical_polygon_slice(validation_dom_hull, SYSTEM_NAVIGATION_DOM_CENTER_X)
+
+def _navigation_dom_bounds(
+    frame_to_dom: Affine2D,
+    collection_hull: list[tuple[float, float]],
+    validation_hull: list[tuple[float, float]],
+) -> tuple[float, float]:
+    collection_slice = _vertical_polygon_slice(
+        [frame_to_dom.apply(*point) for point in collection_hull],
+        SYSTEM_NAVIGATION_DOM_CENTER_X,
+    )
+    validation_slice = _vertical_polygon_slice(
+        [frame_to_dom.apply(*point) for point in validation_hull],
+        SYSTEM_NAVIGATION_DOM_CENTER_X,
+    )
     top = max(collection_slice[0], validation_slice[0])
     bottom = min(collection_slice[1], validation_slice[1])
-    reject_if(bottom < SYSTEM_NAVIGATION_MIN_BOTTOM_Y, TapCalibrationError("验证凸包没有覆盖DOM底边中点，保持0动作。"))
+    reject_if(
+        bottom < SYSTEM_NAVIGATION_MIN_BOTTOM_Y,
+        TapCalibrationError("验证凸包没有覆盖DOM底边中点，保持0动作。"),
+    )
+    return top, bottom
 
+
+def _navigation_dom_path(
+    top: float, bottom: float, dom_to_frame: Affine2D, frame_to_dom: Affine2D,
+    collection_hull: list[tuple[float, float]], validation_hull: list[tuple[float, float]],
+) -> tuple[list[tuple[int, int]], list[tuple[float, float]]]:
     requested_grid: list[tuple[int, int]] | None = None
     dom_path: list[tuple[float, float]] | None = None
     for inset_index in range(0, 21):
@@ -346,32 +412,68 @@ def reveal_system_navigation_path(frame_size: tuple[int, int], path: Path=CALIBR
         end_y = start_y - SYSTEM_NAVIGATION_DOM_INWARD_DISTANCE
         if end_y <= top:
             break
-        candidate_dom = [(SYSTEM_NAVIGATION_DOM_CENTER_X, start_y), (SYSTEM_NAVIGATION_DOM_CENTER_X, end_y)]
-        candidate_grid = [tuple((int(round(value * 1000)) for value in dom_to_frame.apply(*point))) for point
-            in candidate_dom]
+        candidate_dom = [
+            (SYSTEM_NAVIGATION_DOM_CENTER_X, start_y),
+            (SYSTEM_NAVIGATION_DOM_CENTER_X, end_y),
+        ]
+        candidate_grid = [
+            tuple(int(round(value * 1000)) for value in dom_to_frame.apply(*point))
+            for point in candidate_dom
+        ]
         normalized = [(point[0] / 1000.0, point[1] / 1000.0) for point in candidate_grid]
-        if (all((0 <= value <= 1000 for point in candidate_grid for value in point))
-            and all((_point_in_convex_hull(point, collection_hull) and _point_in_convex_hull(point,
-            validation_hull) for point in normalized))):
+        if (
+            all(0 <= value <= 1000 for point in candidate_grid for value in point)
+            and all(
+                _point_in_convex_hull(point, collection_hull)
+                and _point_in_convex_hull(point, validation_hull)
+                for point in normalized
+            )
+        ):
             requested_grid = candidate_grid
             dom_path = [frame_to_dom.apply(*point) for point in normalized]
             break
-    reject_if(requested_grid is None or dom_path is None, TapCalibrationError("无法在采集与验证凸包内形成系统边缘轨迹，保持0动作。"))
     reject_if(
-        dom_path[0][1] < SYSTEM_NAVIGATION_MIN_BOTTOM_Y or dom_path[0][1] - dom_path[1][1] < 0.2
-        or any((abs(point[0] - SYSTEM_NAVIGATION_DOM_CENTER_X) > 0.02 for point in dom_path)),
+        requested_grid is None or dom_path is None,
+        TapCalibrationError("无法在采集与验证凸包内形成系统边缘轨迹，保持0动作。"),
+    )
+    reject_if(
+        dom_path[0][1] < SYSTEM_NAVIGATION_MIN_BOTTOM_Y
+        or dom_path[0][1] - dom_path[1][1] < 0.2
+        or any(abs(point[0] - SYSTEM_NAVIGATION_DOM_CENTER_X) > 0.02 for point in dom_path),
         TapCalibrationError("本地推导的系统边缘轨迹语义不可信，保持0动作。"),
     )
+    return requested_grid, dom_path
 
-    corrected_grid: list[tuple[int, int]] = []
+
+def _correct_navigation_grid(
+    target_to_command: Affine2D, requested_grid: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    corrected_grid = []
     for point in requested_grid:
         corrected = target_to_command.apply(point[0] / 1000.0, point[1] / 1000.0)
-        reject_if(any((not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in corrected)), TapCalibrationError("系统边缘轨迹纠偏结果越界，保持0动作。"))
+        reject_if(
+            any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in corrected),
+            TapCalibrationError("系统边缘轨迹纠偏结果越界，保持0动作。"),
+        )
         corrected_grid.append((int(round(corrected[0] * 1000)), int(round(corrected[1] * 1000))))
+    return corrected_grid
 
-    return {'action': 'reveal_system_navigation', 'edge': 'bottom', 'frame_size': [int(current_width),
-        int(current_height)], 'stored_frame_size': [int(stored_width), int(stored_height)], 'dom_path': [[float(x),
-        float(y)] for x, y in dom_path], 'requested_grid': [list(point) for point in requested_grid],
-        'corrected_grid': [list(point) for point in corrected_grid], 'collection_coverage': payload['coverage'],
-        'validation_coverage': validation['coverage'], 'calibration_version': int(payload['version']),
-        'calibration_created_at': payload.get('created_at'), 'calibration_validated_at': payload.get('validated_at')}
+
+def _navigation_result(
+    payload: dict[str, object], validation: dict[str, object],
+    current_width: float, current_height: float, stored_width: float, stored_height: float,
+    dom_path: list[tuple[float, float]], requested_grid: list[tuple[int, int]],
+    corrected_grid: list[tuple[int, int]],
+) -> dict[str, object]:
+    return {
+        'action': 'reveal_system_navigation', 'edge': 'bottom',
+        'frame_size': [int(current_width), int(current_height)],
+        'stored_frame_size': [int(stored_width), int(stored_height)],
+        'dom_path': [[float(x), float(y)] for x, y in dom_path],
+        'requested_grid': [list(point) for point in requested_grid],
+        'corrected_grid': [list(point) for point in corrected_grid],
+        'collection_coverage': payload['coverage'], 'validation_coverage': validation['coverage'],
+        'calibration_version': int(payload['version']),
+        'calibration_created_at': payload.get('created_at'),
+        'calibration_validated_at': payload.get('validated_at'),
+    }

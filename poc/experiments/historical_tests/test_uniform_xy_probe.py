@@ -1,5 +1,4 @@
 """Isolated request/coordinate checks; no model or device calls."""
-from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile

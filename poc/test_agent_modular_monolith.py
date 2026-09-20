@@ -167,11 +167,16 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 self.assertNotIn(forbidden, source)
 
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
-        source = (Path(__file__).resolve().parent / "web_app.py").read_text(
+        root = Path(__file__).resolve().parent
+        source = (root / "web_app.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("UniversalAgentSessionApplicationService", source)
-        self.assertIn("InMemoryAgentSessionRepository", source)
+        runtime_source = (root / "agent" / "bootstrap" / "runtime.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("StartUniversalAgentSessionCommand", source)
+        self.assertIn("UniversalAgentSessionApplicationService", runtime_source)
+        self.assertIn("InMemoryAgentSessionRepository", runtime_source)
         self.assertNotIn("generic_supervised_sessions", source)
         self.assertNotIn("generic_supervised_session_lock", source)
         self.assertNotIn("_require_generic_session_device", source)

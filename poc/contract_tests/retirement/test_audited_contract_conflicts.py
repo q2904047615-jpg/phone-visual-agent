@@ -1,5 +1,4 @@
 """Cross-action regressions after retiring fixed-subgoal authority."""
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import unittest

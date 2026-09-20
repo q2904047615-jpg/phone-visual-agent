@@ -3,7 +3,6 @@
   "enabled": true,
   "accepted_fit": true,
   "validated": true,
-  "created_at": "2026-08-14T10:40:50.069165+00:00",
   "frame_size": [
     810,
     1440
@@ -291,7 +290,6 @@
       ]
     }
   ],
-  "collection_dir": "C:\\Users\\Administrator\\Documents\\Claude\\Projects\\手机自动点击器\\poc\\output\\xy_calibration\\collect_20260814_180746",
   "validation": {
     "rms_error_css_px": 4.2034,
     "max_error_css_px": 7.1686,
@@ -337,7 +335,5 @@
       ],
       "sufficient": true
     }
-  },
-  "validation_dir": "C:\\Users\\Administrator\\Documents\\Claude\\Projects\\手机自动点击器\\poc\\output\\xy_calibration\\validate_20260814_184059",
-  "validated_at": "2026-08-14T10:44:17.099463+00:00"
+  }
 }

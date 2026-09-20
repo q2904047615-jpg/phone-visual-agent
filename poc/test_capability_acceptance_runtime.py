@@ -25,7 +25,7 @@ from agent.infrastructure.capability_acceptance_runtime import (
     CapabilityAcceptanceManager,
 )
 from agent.application.action_adapter import GenericActionAdapterError
-from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
+from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
 class ProvisionalControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -72,7 +72,7 @@ class ProvisionalControllerTests(unittest.TestCase):
         )
         self.registry = DeviceControllerRegistry(
             self.registry_path,
-            promotable_actions=PROMOTABLE_ACTIONS,
+            promotable_actions=PROMOTABLE_ACTION_KINDS,
             mock=False,
         )
 

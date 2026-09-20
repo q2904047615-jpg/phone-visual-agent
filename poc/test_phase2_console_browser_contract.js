@@ -106,7 +106,7 @@ function activeActionSession() {
 async function launchOfflinePage(session, options = {}) {
   const launchOptions = { headless: true };
   if (process.env.BROWSER_EXECUTABLE) launchOptions.executablePath = process.env.BROWSER_EXECUTABLE;
-  else launchOptions.channel = "msedge";
+  else if (process.platform === "win32") launchOptions.channel = "msedge";
   const browser = await chromium.launch(launchOptions);
   const page = await browser.newPage({ viewport: options.viewport || { width: 1280, height: 900 } });
   await page.addInitScript(value => {

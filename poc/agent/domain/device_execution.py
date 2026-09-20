@@ -5,16 +5,11 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from .canonical_action_kinds import CANONICAL_ACTION_KINDS
+from .action_catalog import CANONICAL_ACTION_KINDS
 from .text_transport import EMPTY_TEXT_DIGEST, TextTransportActionScope, text_digest
 
 
 DEVICE_EXECUTOR_PROTOCOL = "2026-08-25-device-executor-v1"
-
-# The canonical catalog is the only action-kind authority. The executor owns
-# only transport dispatch and must not maintain a second action whitelist.
-EXECUTABLE_ACTION_KINDS = CANONICAL_ACTION_KINDS
-
 
 class DeviceExecutionError(RuntimeError):
     def __init__(self, message: str, *, physical_actions: int=0,
@@ -59,7 +54,7 @@ class DeviceActionRequest(DataclassWire):
     wait_seconds: float | None = None
 
     def validate(self) -> None:
-        reject_if(self.kind not in EXECUTABLE_ACTION_KINDS, DeviceExecutionError(f"设备执行器不支持动作：{self.kind}"))
+        reject_if(self.kind not in CANONICAL_ACTION_KINDS, DeviceExecutionError(f"设备执行器不支持动作：{self.kind}"))
         point_kinds = {'tap_semantic', 'dismiss_overlay', 'double_tap', 'long_press', 'drag'}
         if self.kind in point_kinds:
             self._validate_point(self.point, "动作落点")

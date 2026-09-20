@@ -1,16 +1,10 @@
 from __future__ import annotations
-from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
 from PIL import Image, ImageDraw
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
-from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
-from agent.domain.canonical_action_protocol import (
-    GenericStepProposal,
-    bind_same_response_action,
-)
 from agent.infrastructure.orientation_safety import _claim_audit_seal
 from agent.domain.ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from agent.application.universal_agent_orchestrator import (
@@ -278,7 +272,8 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             device_id="mock-device",
             frame_interval=0,
             post_action_settle=0,
-            post_action_timeout=0.02,
+            # These tests verify loop behavior, not wall-clock capture speed.
+            post_action_timeout=1.0,
         )
         qwen = CountingQwen()
         orchestrator = UniversalAgentOrchestrator(
@@ -433,8 +428,6 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
 
 
 

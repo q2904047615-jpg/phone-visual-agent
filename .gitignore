@@ -26,6 +26,7 @@ poc/output/
 poc/data/
 poc/*.promotion.lease
 poc/adb_keyboard_registry.json
+poc/app_package_registry.json
 *.db
 *.sqlite
 *.sqlite3

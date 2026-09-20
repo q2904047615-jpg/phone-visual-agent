@@ -37,6 +37,15 @@ class FakeWindows:
 
 
 class ScreenChangeRetirementTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._windows_patch = patch.object(seller, "IS_WINDOWS", True)
+        cls._windows_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._windows_patch.stop()
+
     def test_real_observer_binder_controller_accept_dynamic_and_static_frames(self):
         frame = textured_phone_frame().resize((240, 480))
         inverted = ImageOps.invert(frame)

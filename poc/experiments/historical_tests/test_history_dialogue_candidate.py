@@ -5,7 +5,6 @@ import unittest
 from unittest.mock import Mock, patch
 from experiments.history_dialogue_candidate import DialogueCandidateObserver, reframe_as_dialogue
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
-from agent.infrastructure.dashscope_vision_provider import _image_request_size
 import contract_tests.observation.test_action_comparison_context as history_fixtures
 from test_support.generic_scene_observer import (
     SequenceProvider,

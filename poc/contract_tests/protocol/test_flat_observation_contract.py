@@ -3,16 +3,16 @@ import json
 import unittest
 from pathlib import Path
 from agent.application.qwen_visual_decision import QWEN_VISUAL_DECISION_PROTOCOL_VERSION
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError, MODEL_STEP_DECISION_FIELDS, MODEL_STEP_DIRECT_POINT_ACTIONS,
     normalize_model_step_decision,
 )
-from agent.domain.vision_model import VisionAgentError
 from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, _parse_single_step_observation_envelope,
     _single_step_observation_prompt, _single_step_response_format,
 )
+from agent.domain.vision_model import VisionAgentError
 
 
 def decision(**values):
@@ -79,6 +79,26 @@ class FlatObservationContractTests(unittest.TestCase):
         self.assertEqual('finish', result['status'])
         self.assertIsNone(result['target'])
         self.assertIsNone(result['tap_point'])
+
+    def test_scroll_rejects_legacy_free_trajectory_fields(self):
+        with self.assertRaises(CanonicalActionProtocolError):
+            normalize_model_step_decision(decision(
+                action='scroll', direction='up', start=[500, 800], end=[500, 400]))
+
+    def test_observation_parser_does_not_repair_legacy_scroll_trajectory(self):
+        payload = {
+            'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': 1000},
+            'scene': {'elements': [], 'summary': '可滚动页面'},
+            'input_structure': None,
+            'decision': decision(action='scroll', direction='up', start=[500, 800], end=[500, 400]),
+        }
+        with self.assertRaisesRegex(VisionAgentError, '自由轨迹'):
+            _parse_single_step_observation_envelope(
+                json.dumps(payload, ensure_ascii=False),
+                input_structure_required=False,
+                request_image_size=(720, 1280),
+            )
 
     def test_finish_with_nonnull_action_or_target_is_rejected(self):
         for extra in ({'action': 'home'}, {'target': TARGET}, {'tap_point': [500, 500]}):

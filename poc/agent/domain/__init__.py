@@ -4,7 +4,6 @@ from .canonical_selection import CANONICAL_SELECTION_RECEIPT_VERSION, CanonicalS
 from .confirmation_authority import ConfirmationAuthority, EffectConfirmationAuthority
 from .device_execution import (
     DEVICE_EXECUTOR_PROTOCOL,
-    EXECUTABLE_ACTION_KINDS,
     DeviceActionRequest,
     DeviceExecutionError,
     DeviceExecutionResult,
@@ -24,7 +23,7 @@ from .session import (
 from .session_evidence import AgentEvidenceStoreFactory, AgentEvidenceStorePort, EvidenceStoreError
 
 __all__ = ['ACTIVE_SESSION_STATUSES', 'CANONICAL_SELECTION_RECEIPT_VERSION', 'DEVICE_EXECUTOR_PROTOCOL',
-    'EXECUTABLE_ACTION_KINDS', 'AgentSession', 'AgentSessionConflictError', 'AgentSessionDeviceMismatchError',
+    'AgentSession', 'AgentSessionConflictError', 'AgentSessionDeviceMismatchError',
     'AgentSessionNotFoundError', 'AgentSessionRepository',
     'AgentEvidenceStoreFactory', 'AgentEvidenceStorePort', 'CanonicalSelectionReceipt', 'ConfirmationAuthority',
     'DeviceActionRequest', 'DeviceExecutionError', 'DeviceExecutionResult', 'DeviceExecutor', 'DeviceTaskRegistryError',

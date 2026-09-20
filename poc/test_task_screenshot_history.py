@@ -1,6 +1,8 @@
 """Offline all-image transport checks; no cloud requests or phone actions."""
 import base64
 import json
+import os
+import time
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,13 +16,35 @@ from agent.domain.universal_action_controller import ResolvedSemanticAction
 from agent.domain.vision_model import VisionAgentError
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
 from agent.infrastructure.generic_scene_observer import HISTORY_THUMBNAIL_MAX_SIZE, SingleStepGenericSceneObserver
-from agent.infrastructure.task_screenshot_history import save_task_frames
+from agent.infrastructure.task_screenshot_history import cleanup_evidence_runs, save_task_frames
 from agent.infrastructure.observation_images import local_frame_fingerprint
 from contract_tests.observation.test_point_scene_projection import wire, decision
 from test_support.generic_scene_observer import SequenceProvider, stable_frames, input_audit_payload, audited_application_input
 
 
 class TaskScreenshotHistoryTests(unittest.TestCase):
+    def test_cleanup_only_removes_owned_old_completed_runs(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owned = root / "generic_supervised_old"
+            owned.mkdir()
+            (owned / ".evidence-run").touch()
+            (owned / "old.bin").write_bytes(b"old")
+            active = root / "generic_supervised_active"
+            active.mkdir()
+            (active / ".evidence-run").touch()
+            (active / ".active").touch()
+            unknown = root / "historical_archive"
+            unknown.mkdir()
+            (unknown / "old.bin").write_bytes(b"keep")
+            old = time.time() - 100
+            for path in (owned, active, unknown):
+                os.utime(path, (old, old))
+            result = cleanup_evidence_runs(root, retention_seconds=1, max_bytes=1)
+            self.assertEqual(1, result["removed_runs"])
+            self.assertFalse(owned.exists())
+            self.assertTrue(active.exists())
+            self.assertTrue(unknown.exists())
     def context(self, task='task-1'):
         return {'objective': '完成十个不同对象的操作', 'entities': {'task_id': task, 'history': []}}
 

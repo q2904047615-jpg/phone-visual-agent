@@ -47,8 +47,6 @@ const decisionStatusNames = {
 };
 
 const semanticActionNames = {
-  ensure_app: "打开目标 App",
-  observe: "重新观察页面",
   tap_semantic: "点击语义控件",
   dismiss_overlay: "关闭当前弹层",
   scroll: "滚动当前页面",
@@ -61,25 +59,39 @@ const semanticActionNames = {
   drag: "拖动目标控件",
   input_verified_text: "输入并核对文字",
   wait_for_change: "等待页面变化",
-  record_verified_result: "记录已验证结果",
   finish: "完成本次任务",
 };
 
-async function api(path, options = {}) {
+async function api(path, options = {}, timeoutMs = 0) {
   const headers = { ...(options.headers || {}) };
   if (state.token) headers["X-Control-Token"] = state.token;
   if (options.body) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, { ...options, headers });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = data.detail;
-    const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
-    const error = new Error(message || `请求失败（${response.status}）`);
-    error.detail = detail;
-    error.status = response.status;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = data.detail;
+      const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
+      const error = new Error(message || `请求失败（${response.status}）`);
+      error.detail = detail;
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("启动任务超过10秒仍未完成首轮视觉观察，请检查Qwen服务或网络状态。" );
+    }
     throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return data;
 }
 
 function escapeHtml(value) {
@@ -909,16 +921,8 @@ async function continueBudgetAgent() {
   }
 }
 
-function apiWithTimeout(path, options = {}, timeoutMs = 35000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  return api(path, { ...options, signal: controller.signal }).catch(error => {
-    if (error?.name === "AbortError") throw new Error("启动任务超过35秒仍未完成首轮视觉观察，请检查Qwen服务或网络状态。" );
-    throw error;
-  }).finally(() => clearTimeout(timer));
-}
 async function startAsyncAndWait(payload) {
-  const ticket = await apiWithTimeout("/api/agent/generic-supervised/start-async", {method: "POST", body: JSON.stringify(payload)}, 10000);
+  const ticket = await api("/api/agent/generic-supervised/start-async", {method: "POST", body: JSON.stringify(payload)}, 10000);
   const startedAt = Date.now();
   let nextProgressNoticeAt = startedAt + 120000;
   while (true) {
@@ -1463,6 +1467,3 @@ document.querySelector("#promotionDialog").addEventListener("close", event => {
 });
 
 init();
-
-
-

@@ -24,7 +24,6 @@ class ExplicitInputFocusTests(unittest.TestCase):
         from agent.infrastructure.generic_scene_observer import (
             _input_structure_audit_prompt, _single_step_observation_prompt,
         )
-        graph = task_context('清空当前输入框')
         context = {'history': [], 'exact_input_text': None}
         prompt = _single_step_observation_prompt({'entities': context},
             include_input_structure=True, image_count=3, request_image_size=(720, 1280),

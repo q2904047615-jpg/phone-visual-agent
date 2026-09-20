@@ -52,7 +52,7 @@ def build_trusted_observation(*, frames: list[Image.Image], device_id: str, scen
 def validate_trusted_observation_against_frames(observation: TrustedObservation, frames: list[Image.Image], *,
     allow_leading_outlier: bool=False) -> None:
     reject_if(len(frames) < 4, VisionAgentError("新鲜度校验至少需要4帧。"))
-    stability = measure_local_stability(frames, allow_leading_outlier=allow_leading_outlier)
+    measure_local_stability(frames, allow_leading_outlier=allow_leading_outlier)
     sharpness = [measure_frame_sharpness(frame) for frame in frames]
     eligible_start = max(0, len(frames) - min(3, len(frames))) if allow_leading_outlier else 0
     selected = max(range(eligible_start, len(frames)), key=sharpness.__getitem__)

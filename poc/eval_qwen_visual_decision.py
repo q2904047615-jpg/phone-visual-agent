@@ -90,7 +90,7 @@ def _materialize_case(raw_case: Any, *, index: int) -> dict[str, Any]:
     if (not isinstance(statuses, list) or not statuses
         or any(item not in {"action", "finish"} for item in statuses)):
         raise ValueError(f"离线用例 {case_id or index} 的 accepted_statuses 无效。")
-    context = QwenTaskContext.from_dict(dict(case["task_context"]))
+    QwenTaskContext.from_dict(dict(case["task_context"]))
     return case
 
 

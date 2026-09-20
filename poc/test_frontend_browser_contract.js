@@ -5,7 +5,15 @@ const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
 const { execFileSync } = require("node:child_process");
-const runtimeWire = JSON.parse(execFileSync(path.join(__dirname, ".venv", "Scripts", "python.exe"),
+const pythonCandidates = [
+  process.env.PYTHON_BIN,
+  path.join(__dirname, ".venv", "Scripts", "python.exe"),
+  path.join(__dirname, ".venv", "bin", "python"),
+  process.platform === "win32" ? "python" : "python3",
+].filter(Boolean);
+const python = pythonCandidates.find(candidate => !path.isAbsolute(candidate) || fs.existsSync(candidate));
+if (!python) throw new Error("No Python interpreter found; set PYTHON_BIN for browser contract tests.");
+const runtimeWire = JSON.parse(execFileSync(python,
   ["-B", "-X", "utf8", path.join(__dirname, "fixtures", "runtime_contract_fixture.py")], {encoding: "utf8"}));
 
 const staticRoot = path.join(__dirname, "static");
@@ -456,12 +464,18 @@ async function launchFixturePage(server, { deviceId = "phone-01" } = {}) {
   const address = server.address();
   const launchOptions = { headless: true };
   if (process.env.BROWSER_EXECUTABLE) launchOptions.executablePath = process.env.BROWSER_EXECUTABLE;
-  else launchOptions.channel = "msedge";
-  const browser = await chromium.launch(launchOptions);
-  const page = await browser.newPage();
-  await page.addInitScript(value => localStorage.setItem("visual-agent-device-id", value), deviceId);
-  await page.goto(`http://127.0.0.1:${address.port}/`);
-  return { browser, page };
+  else if (process.platform === "win32") launchOptions.channel = "msedge";
+  try {
+    const browser = await chromium.launch(launchOptions);
+    const page = await browser.newPage();
+    await page.addInitScript(value => localStorage.setItem("visual-agent-device-id", value), deviceId);
+    await page.goto(`http://127.0.0.1:${address.port}/`);
+    return { browser, page };
+  } catch (error) {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    throw error;
+  }
 }
 
 test("task budget fields submit configured limits", { timeout: 30000 }, async () => {
@@ -1033,5 +1047,3 @@ for (const mode of ["paused", "budget_paused"]) {
     }
   });
 }
-
-

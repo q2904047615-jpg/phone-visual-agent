@@ -29,9 +29,9 @@ from agent.infrastructure.tap_calibration import (
 )
 from agent.domain.action_capabilities import (
     CALIBRATION_BOUND_ACTIONS,
-    PROMOTABLE_ACTIONS,
     physical_capability_for_action,
 )
+from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
 
 
 ACCEPTANCE_REPORT_VERSION = 3
@@ -246,7 +246,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     task_id = _required_text(report.get("task_id"), field="task_id", max_length=128)
     device_id = _required_text(report.get('device_id'), field='device_id', max_length=128)
     action = _required_text(report.get('candidate_action'), field='candidate_action', max_length=64)
-    reject_if(action not in PROMOTABLE_ACTIONS, CapabilityAcceptanceError(f"动作类型不能进入真机验收：{action}。"))
+    reject_if(action not in PROMOTABLE_ACTION_KINDS, CapabilityAcceptanceError(f"动作类型不能进入真机验收：{action}。"))
     calibration_evidence = _calibration_evidence(report.get('calibration_evidence'), action=action)
     code_revision = _required_text(report.get('code_revision'), field='code_revision', max_length=128)
     reject_if(code_revision.endswith('+dirty'), CapabilityAcceptanceError("验收报告来自未提交代码，不能晋级。"))

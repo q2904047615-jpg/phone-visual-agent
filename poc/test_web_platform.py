@@ -58,6 +58,33 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertEqual(response.json()["machine_position"], 7)
         self.assertEqual(response.json()["status"]["controller_online"], True)
 
+    def test_read_only_session_routes_require_control_token(self) -> None:
+        missing_task = self.client.get("/api/agent/generic-supervised/start-async/missing")
+        self.assertEqual(403, missing_task.status_code)
+        missing_session = self.client.get("/api/agent/generic-supervised/missing")
+        self.assertEqual(403, missing_session.status_code)
+
+    def test_async_start_metadata_is_bounded_and_hides_internal_timestamp(self) -> None:
+        with patch.object(web_app._GENERIC_START_TASKS, "submit") as submit:
+            response = self.client.post(
+                "/api/agent/generic-supervised/start-async",
+                headers=self.headers,
+                json={
+                    "text": "查看当前页面",
+                    "device_id": "device-local-01",
+                    "auto_advance": False,
+                },
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        submit.assert_called_once()
+        task_id = response.json()["task_id"]
+        detail = self.client.get(
+            f"/api/agent/generic-supervised/start-async/{task_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(200, detail.status_code, detail.text)
+        self.assertNotIn("created_monotonic", detail.json())
+
     def test_home_and_device_are_available(self) -> None:
         self.assertEqual(self.client.get("/").status_code, 200)
         with patch.object(
@@ -117,6 +144,9 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertFalse(
             semantic_authority["retired_remote_risk_diagnostics_enabled"]
         )
+        self.assertEqual("mock", universal["execution_mode"])
+        self.assertFalse(universal["hardware_execution_enabled"])
+        self.assertFalse(universal["physical_execution"])
         self.assertEqual(
             semantic_authority["canonical_action_protocol"],
             "2026-09-06-canonical-whole-task-v10",
@@ -194,11 +224,12 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
     def test_capability_revision_must_match_loaded_service_code(self) -> None:
         runtime = web_app.Runtime.__new__(web_app.Runtime)
         runtime.loaded_code_revision = "loaded-revision"
+        runtime.code_revision_provider = lambda: "loaded-revision"
 
-        with patch.object(web_app, "current_code_revision", return_value="loaded-revision"):
+        with patch.object(runtime, "code_revision_provider", return_value="loaded-revision"):
             self.assertEqual(runtime.capability_code_revision(), "loaded-revision")
         with (
-            patch.object(web_app, "current_code_revision", return_value="new-revision"),
+            patch.object(runtime, "code_revision_provider", return_value="new-revision"),
             self.assertRaisesRegex(
                 web_app.CapabilityAcceptanceError,
                 "服务启动后代码状态发生变化",
@@ -824,7 +855,6 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
                 payload["session"]["status"], "awaiting_confirmation"
             )
             self.assertEqual(len(qwen.calls), 1)
-            self.assertEqual(len(qwen.calls), 1)
             self.assertEqual(adapter.capture_calls, 1)
             self.assertEqual(adapter.execute_calls, 0)
             auto_loop.assert_called_once()
@@ -1047,7 +1077,6 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             self.assertFalse(payload["automatic_loop_enabled"])
             self.assertEqual("awaiting_confirmation", payload["session"]["status"])
             self.assertEqual(1, len(qwen.calls))
-            self.assertEqual(1, len(qwen.calls))
             self.assertEqual(1, adapter.capture_calls)
             self.assertEqual(0, adapter.execute_calls)
             auto_loop.assert_not_called()
@@ -1111,7 +1140,6 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertEqual(second.json()["detail"]["physical_actions"], 0)
         self.assertEqual(directories_after_second, directories_after_first)
         self.assertEqual(len(directories_after_first), 1)
-        self.assertEqual(len(qwen.calls), 1)
         self.assertEqual(len(qwen.calls), 1)
         self.assertEqual(adapter.capture_calls, 1)
         self.assertEqual(adapter.execute_calls, 0)

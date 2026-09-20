@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agent.domain.validation import NormalizedPoint, reject_if
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 import json
 import threading
 from pathlib import Path
@@ -12,7 +13,6 @@ from PIL import Image, ImageDraw
 
 from agent.infrastructure import seller_window_adapter as seller_gui
 from agent.infrastructure.orientation_safety import OrientationCredential, PhysicalExecutionGate
-
 
 
 POC_ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +47,6 @@ DEFAULT_CONTROLLER_CONFIG: dict[str, Any] = {'tap_hold': 0.35, 'android_home_x_r
     'swipe_touch_down_seconds': 0.35, 'swipe_movement_seconds': 0.30, 'swipe_steps': 6}
 
 
-
 class RobotWorkflowError(RuntimeError):
     """A user-facing workflow failure that must stop further physical actions."""
 
@@ -75,12 +74,6 @@ def load_controller_config() -> dict[str, Any]:
         raise WorkflowNotReady(f"控制器配置损坏：{exc}") from exc
     reject_if(not isinstance(raw, dict), WorkflowNotReady("控制器配置必须是 JSON 对象。"))
     return _deep_merge(DEFAULT_CONTROLLER_CONFIG, raw)
-
-
-
-
-
-
 
 
 class RobotController:
@@ -111,8 +104,7 @@ class RobotController:
         default_actions = {'tap_semantic', 'dismiss_overlay', 'swipe', 'back', 'home', 'open_recent_apps',
             'wait_for_change'}
         self.verified_actions = frozenset(default_actions if verified_actions is None else verified_actions)
-        allowed_actions = default_actions | {'double_tap', 'long_press', 'drag',
-            'reveal_system_navigation'}
+        allowed_actions = set(CANONICAL_ACTION_KINDS) | {'swipe'}
         unexpected = self.verified_actions - allowed_actions
         reject_if(unexpected, ValueError('设备已验证动作包含未知值：' + ', '.join(sorted(unexpected))))
 
@@ -220,7 +212,8 @@ class RobotController:
             camera_error = str(exc)
         return {'controller_online': online, 'camera_online': camera_online, 'window_title': title,
             'client_size': [width, height], 'stop_requested': self.stop_event.is_set(),
-            'busy': self.operation_lock.locked(), 'error': error, 'camera_error': camera_error}
+            'busy': self.operation_lock.locked(), 'error': error, 'camera_error': camera_error,
+            'execution_mode': 'hardware', 'physical_execution': True}
 
     def _capture_phone(self, hwnd: int) -> Image.Image:
         with self.capture_lock:
@@ -445,9 +438,6 @@ class RobotController:
         self._vision_swipe("right")
 
 
-
-
-
 class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""
 
@@ -472,7 +462,8 @@ class MockRobotController(RobotController):
     def device_status(self) -> dict[str, Any]:
         return {'controller_online': True, 'camera_online': True, 'window_title': 'MOCK 智联新途机械臂控制端',
             'client_size': [540, 1038], 'stop_requested': self.stop_event.is_set(),
-            'busy': self.operation_lock.locked(), 'error': None}
+            'busy': self.operation_lock.locked(), 'error': None,
+            'execution_mode': 'mock', 'physical_execution': False}
 
     def capture_preview(self, quality: int=72) -> bytes:
         from io import BytesIO

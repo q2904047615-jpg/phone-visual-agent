@@ -5,6 +5,7 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 
 from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutionResult
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.application.text_transport import TrustedTextTransportPort
 from agent.infrastructure.orientation_safety import OrientationSafetyError
 
@@ -24,7 +25,6 @@ class RobotDeviceExecutor:
         'reveal_system_navigation': ('vision_reveal_system_navigation', lambda request: ()),
         'drag': ('vision_drag_relative', lambda request: (*request.point, *request.end_point)),
     }
-
     def __init__(self, robot: Any, *, app_launcher: Any=None,
         text_transport: TrustedTextTransportPort | None=None,
         sleep: Callable[[float], None]=time.sleep) -> None:
@@ -42,6 +42,11 @@ class RobotDeviceExecutor:
             'wait_for_change': self._wait,
             'launch_app': self._launch_app,
         }
+        reject_if(
+            set(self._CLICK_TRANSPORTS) | set(self._SIMPLE_TRANSPORTS) | set(self._handlers)
+            != CANONICAL_ACTION_KINDS,
+            DeviceExecutionError("设备执行器动作映射未覆盖统一 canonical action 目录。"),
+        )
 
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         request.validate()

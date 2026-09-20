@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .validation import ValidatedDataclassWire, canonical_digest, reject_if
+from .action_catalog import CANONICAL_ACTION_KINDS, PROMOTABLE_ACTION_KINDS
 import json
 import re
 from dataclasses import dataclass
@@ -10,30 +11,30 @@ from typing import Any, Iterable, Mapping
 CAPABILITY_PROTOCOL = "2026-08-19-action-capability-v1"
 CAPABILITY_GAP_PROTOCOL = "2026-08-19-capability-gap-v1"
 
-PROMOTABLE_ACTIONS = frozenset({'tap_semantic', 'dismiss_overlay', 'scroll', 'swipe_element', 'back', 'home', 'reveal_system_navigation',
-    'double_tap', 'long_press', 'drag'})
-
 CALIBRATION_BOUND_ACTIONS = frozenset({'double_tap', 'long_press', 'drag', 'reveal_system_navigation'})
 
-KNOWN_ACTION_CAPABILITIES = frozenset({'tap_semantic', 'dismiss_overlay', 'scroll', 'swipe_element', 'reveal_system_navigation', 'back',
-    'home', 'open_recent_apps', 'wait_for_change', 'input_verified_text', 'clear_verified_text', 'long_press', 'drag',
-    'double_tap', 'press_enter', 'launch_app', 'pinch', 'hardware_key'})
+KNOWN_ACTION_CAPABILITIES = CANONICAL_ACTION_KINDS | frozenset({'pinch', 'hardware_key'})
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _PHYSICAL_CAPABILITY_ALIASES = {'swipe': frozenset({'scroll', 'swipe_element'})}
+_ACTION_TO_PHYSICAL_CAPABILITY = {
+    action: capability
+    for capability, actions in _PHYSICAL_CAPABILITY_ALIASES.items()
+    for action in actions
+}
 
 
 def physical_capability_for_action(action: str) -> str:
     """Map canonical gesture semantics to the sole device-level swipe transport."""
 
     resolved = str(action or '').strip()
-    return 'swipe' if resolved in {'scroll', 'swipe_element'} else resolved
+    return _ACTION_TO_PHYSICAL_CAPABILITY.get(resolved, resolved)
 
 
 def unverified_promotable_actions(verified_actions: Iterable[str]) -> list[str]:
     """Public acceptance choices use the same physical mapping as execution."""
     verified = set(verified_actions)
-    return sorted(action for action in PROMOTABLE_ACTIONS
+    return sorted(action for action in PROMOTABLE_ACTION_KINDS
         if physical_capability_for_action(action) not in verified)
 
 

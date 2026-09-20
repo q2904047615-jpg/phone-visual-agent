@@ -4,9 +4,8 @@ import json
 import os
 import re
 import secrets
-import subprocess
+import shutil
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 import webbrowser
@@ -18,14 +17,13 @@ from typing import Any, Iterator, Literal
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from agent.application import (
     AgentDeviceRuntimeError,
     AgentSessionCommandError,
     StartUniversalAgentSessionCommand,
-    UniversalAgentSessionApplicationService,
 )
+from agent.application.async_task_registry import AsyncTaskRegistry
 from agent.domain import (
     AgentSession,
     AgentSessionConflictError,
@@ -35,63 +33,55 @@ from agent.domain import (
     EvidenceStoreError,
 )
 from agent.infrastructure import (
-    DeviceControllerRegistry as InfrastructureDeviceControllerRegistry,
     DeviceControllerRegistryError,
     DeviceRuntimeResourceError,
-    DeviceRuntimeResourceRegistry,
-    DeviceTaskRegistry,
-    FileSystemAgentEvidenceStore,
-    InMemoryAgentSessionRepository,
     InterProcessLease,
     SHARED_DEVICE_LEASE_DIR,
 )
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
 )
-from agent.infrastructure.capability_acceptance_runtime import (
-    CapabilityAcceptanceManager,
-)
-from agent.domain.action_capabilities import PROMOTABLE_ACTIONS, physical_capability_for_action, unverified_promotable_actions
-from agent.infrastructure.generic_action_adapter import (
-    GenericSingleActionAdapter,
-    persist_observer_failure_diagnostic,
-)
-from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
+from agent.domain.action_capabilities import physical_capability_for_action, unverified_promotable_actions
+from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
+from agent.infrastructure.generic_action_adapter import persist_observer_failure_diagnostic
 from agent.application.action_adapter import GenericActionAdapterError
-from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
-from agent.infrastructure.trusted_observation_frames import (
-    build_trusted_observation,
-    validate_trusted_observation_against_frames,
-)
-from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.application.universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
-    UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
 )
 from agent.domain.universal_action_controller import (
     UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
-    UniversalActionController,
     UniversalActionError,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.session import TERMINAL_SESSION_STATUSES
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from agent.domain.recent_navigation import RECENT_NAVIGATION_PROTOCOL
 from agent.infrastructure.runtime_doctor import run_runtime_doctor
-from agent.infrastructure.adb_keyboard_transport import (
-    AdbKeyboardRuntimeRegistry,
-)
-
 from agent.infrastructure.robot_controller import (
     MockRobotController,
-    RobotController,
     WEB_OUTPUT_DIR,
 )
-from agent.infrastructure.dashscope_vision_provider import (
-    DashScopeVisionProvider,
-)
 from agent.domain.vision_model import VisionAgentError
+from agent.domain.execution_budget import (
+    DEFAULT_DEVICE_ACTION_BUDGET,
+    DEFAULT_OBSERVATION_BUDGET,
+)
+from agent.interfaces.http_models import (
+    CapabilityAcceptanceStartRequest,
+    CapabilityActionConfirmationRequest,
+    CapabilityCancelRequest,
+    CapabilityEffectApprovalRequest,
+    CapabilityPromotionRequest,
+    GenericEffectApprovalRequest,
+    GenericSceneRequest,
+    GenericSupervisedAutoRequest,
+    GenericSupervisedDeviceRequest,
+    GenericSupervisedStartRequest,
+    GenericSupervisedStepRequest,
+    MachinePositionRequest,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -109,35 +99,6 @@ ADB_KEYBOARD_REGISTRY_PATH = Path(os.environ.get(
     "ROBOT_ADB_KEYBOARD_REGISTRY",
     Path(__file__).with_name("adb_keyboard_registry.json"),
 ))
-def current_code_revision() -> str:
-    """Return a reproducible revision; dirty worktrees are never promotable."""
-
-    repository = ROOT.parent
-    try:
-        revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repository,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        ).stdout.strip()
-        dirty = bool(
-            subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=repository,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=3,
-            ).stdout.strip()
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CapabilityAcceptanceError(f"无法读取当前 Git 提交：{exc}") from exc
-    if not revision:
-        raise CapabilityAcceptanceError("当前 Git 提交为空。")
-    return revision + ("+dirty" if dirty else "")
-
 APP_CATALOG = [
     {
         "id": "universal-agent",
@@ -149,307 +110,37 @@ APP_CATALOG = [
         "note": "唯一默认入口；按当前画面逐步观察、执行和验证",
     },
 ]
-class GenericSceneRequest(BaseModel):
-    goal: dict[str, Any] = Field(default_factory=dict)
+from agent.bootstrap.runtime import (
+    Runtime,
+    RuntimeUnavailable,
+    current_code_revision as _current_code_revision,
+)
 
 
-class StrictAgentRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-from agent.domain.execution_budget import DEFAULT_DEVICE_ACTION_BUDGET, DEFAULT_OBSERVATION_BUDGET
-
-
-class GenericSupervisedStartRequest(StrictAgentRequest):
-    text: StrictStr = Field(min_length=1)
-    exact_input_text: StrictStr | None = Field(
-        default=None,
-        min_length=1,
+try:
+    runtime: Runtime | RuntimeUnavailable = Runtime(
+        device_registry_path=DEVICE_REGISTRY_PATH,
+        app_package_registry_path=APP_PACKAGE_REGISTRY_PATH,
+        adb_keyboard_registry_path=ADB_KEYBOARD_REGISTRY_PATH,
+        output_dir=WEB_OUTPUT_DIR,
+        ensure_device_ready=lambda device_id: _require_agent_device_ready(device_id),
+        exclusive_device_session=lambda device_id: _agent_device_execution(device_id),
+        code_revision_provider=lambda: _current_code_revision(ROOT.parent),
     )
-    exact_action_kind: StrictStr | None = Field(default=None, max_length=32)
-    exact_target_label: StrictStr = Field(default="")
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    auto_advance: StrictBool = True
-    max_physical_actions: StrictInt = Field(default=DEFAULT_DEVICE_ACTION_BUDGET, ge=1)
-    max_observations: StrictInt = Field(default=DEFAULT_OBSERVATION_BUDGET, ge=1)
+except Exception as exc:
+    runtime = RuntimeUnavailable(exc)
 
 
-class GenericSupervisedDeviceRequest(StrictAgentRequest):
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-
-
-class MachinePositionRequest(StrictAgentRequest):
-    machine_position: StrictInt = Field(ge=1, le=10)
-
-
-class BaseActionConfirmationScopeRequest(StrictAgentRequest):
-    session_id: StrictStr = Field(min_length=1, max_length=128)
-    task_id: StrictStr = Field(min_length=1, max_length=128)
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    revision: StrictInt = Field(ge=1)
-    step_id: StrictStr = Field(min_length=1, max_length=128)
-    effect_ids: list[StrictStr] = Field(default_factory=list)
-    observation_id: StrictStr = Field(min_length=1, max_length=128)
-    fingerprint: StrictStr = Field(min_length=1, max_length=256)
-
-
-class GenericConfirmationScopeRequest(BaseActionConfirmationScopeRequest):
-    decision_node_id: StrictStr = Field(min_length=1, max_length=128)
-    action_digest: StrictStr = Field(min_length=64, max_length=64)
-
-
-class GenericEffectConfirmationScopeRequest(StrictAgentRequest):
-    session_id: StrictStr = Field(min_length=1, max_length=128)
-    task_id: StrictStr = Field(min_length=1, max_length=128)
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    revision: StrictInt = Field(ge=1)
-    step_id: StrictStr = Field(min_length=1, max_length=128)
-    effect_ids: list[StrictStr] = Field(min_length=1)
-    intent_digest: StrictStr = Field(min_length=64, max_length=64)
-
-
-class GenericEffectApprovalRequest(StrictAgentRequest):
-    confirmed: StrictBool = False
-    confirmation: GenericEffectConfirmationScopeRequest | None = None
-
-
-class GenericSupervisedStepRequest(StrictAgentRequest):
-    confirmed: StrictBool = False
-    confirmation: GenericConfirmationScopeRequest | None = None
-
-
-class GenericSupervisedAutoRequest(StrictAgentRequest):
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    confirmed: StrictBool = False
-    confirmation: GenericConfirmationScopeRequest | None = None
-    max_physical_actions: StrictInt | None = Field(default=None, ge=1)
-    max_observations: StrictInt | None = Field(default=None, ge=1)
-
-
-class CapabilityAcceptanceStartRequest(StrictAgentRequest):
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    action: StrictStr = Field(min_length=1, max_length=64)
-    text: StrictStr = Field(min_length=1)
-
-
-class CapabilityActionConfirmationScopeRequest(GenericConfirmationScopeRequest):
-    """Trial action confirmation carries the complete canonical action scope.
-
-    Capability metadata extends, rather than replaces, the normal session
-    scope.  The page receives this exact object from ``trial.json``.
-    """
-    trial_id: StrictStr = Field(min_length=1, max_length=128)
-    action: StrictStr = Field(min_length=1, max_length=64)
-
-
-class CapabilityEffectConfirmationScopeRequest(GenericEffectConfirmationScopeRequest):
-    trial_id: StrictStr = Field(min_length=1, max_length=128)
-    action: StrictStr = Field(min_length=1, max_length=64)
-
-
-class CapabilityActionConfirmationRequest(StrictAgentRequest):
-    confirmed: StrictBool = False
-    confirmation: CapabilityActionConfirmationScopeRequest | None = None
-
-
-class CapabilityEffectApprovalRequest(StrictAgentRequest):
-    confirmed: StrictBool = False
-    confirmation: CapabilityEffectConfirmationScopeRequest | None = None
-
-
-class CapabilityPromotionRequest(StrictAgentRequest):
-    confirmed: StrictBool = False
-    trial_id: StrictStr = Field(min_length=1, max_length=128)
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    action: StrictStr = Field(min_length=1, max_length=64)
-    report_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
-    registry_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-class CapabilityCancelRequest(StrictAgentRequest):
-    device_id: StrictStr = Field(min_length=1, max_length=128)
-    action: StrictStr = Field(min_length=1, max_length=64)
-
-
-class Runtime:
-    def __init__(self) -> None:
-        self.loaded_code_revision = current_code_revision()
-        self.device_controllers = InfrastructureDeviceControllerRegistry(
-            DEVICE_REGISTRY_PATH,
-            promotable_actions=PROMOTABLE_ACTIONS,
-            mock=os.environ.get("ROBOT_WEB_MOCK") == "1",
-        )
-        self.controller: RobotController = self.device_controllers.controller(
-            self.device_controllers.default_device_id
-        )
-        self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
-        self.vision_provider = DashScopeVisionProvider(enable_thinking=True)
-        self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(ADB_KEYBOARD_REGISTRY_PATH)
-        self.generic_scene_observer = SingleStepGenericSceneObserver(
-            self.vision_provider,
-        )
-        self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
-            self.vision_provider,
-            trusted_observation_frame_validator=(
-                validate_trusted_observation_against_frames
-            ),
-        )
-        self.device_task_registry = DeviceTaskRegistry(
-            lease_directory=SHARED_DEVICE_LEASE_DIR
-        )
-        self.universal_agent_orchestrator = UniversalAgentOrchestrator(
-            qwen_observer=self.qwen_visual_decision_observer,
-            adapter_factory=lambda device_id: GenericSingleActionAdapter(
-                capture=lambda: self.capture_agent_frame(device_id),
-                observer=self.generic_scene_observer,
-                robot=self.controller_for_device(device_id),
-                app_launcher=self.app_launcher_for_device(device_id),
-                controller=UniversalActionController(),
-                device_id=device_id,
-                text_transport=self.text_transport_for_device(device_id),
-            ),
-            trusted_observation_factory=build_trusted_observation,
-            evidence_store_factory=FileSystemAgentEvidenceStore,
-            device_registry=self.device_task_registry,
-        )
-        self.agent_session_repository = InMemoryAgentSessionRepository()
-        self.universal_agent_session_service = (
-            UniversalAgentSessionApplicationService(
-                orchestrator_provider=lambda: self.universal_agent_orchestrator,
-                sessions=self.agent_session_repository,
-                ensure_device_ready=lambda device_id: (
-                    _require_agent_device_ready(device_id)
-                ),
-                exclusive_device_session=lambda device_id: (
-                    _agent_device_execution(device_id)
-                ),
-                begin_new_task=lambda device_id: self._begin_new_task_for_device(device_id),
-            )
-        )
-        self.capability_acceptance_manager = CapabilityAcceptanceManager(
-            provisional_controller_factory=(
-                self.device_controllers.provisional_controller
-            ),
-            orchestrator_factory=self.capability_trial_orchestrator,
-            device_registry=self.device_task_registry,
-            output_dir=WEB_OUTPUT_DIR,
-            registry_path=DEVICE_REGISTRY_PATH,
-            code_revision_provider=self.capability_code_revision,
-        )
-        self.device_runtime_resources = DeviceRuntimeResourceRegistry(
-            (self.device_controllers.default_device_id,)
-        )
-
-    def _begin_new_task_for_device(self, device_id: str) -> None:
-        controller = self.controller_for_device(device_id)
-        controller.begin_new_task()
-        controller.prepare_machine_position()
-
-    def controller_for_device(self, device_id: str) -> RobotController:
-        if str(device_id or "").strip() == self.device_controllers.default_device_id:
-            return self.controller
-        if isinstance(self.controller, MockRobotController):
-            # Test and explicit mock mode accepts logical device IDs while the
-            # production registry remains strict.
-            return self.controller
-        return self.device_controllers.controller(device_id)
-
-    def app_launcher_for_device(self, device_id: str) -> AdbPackageLauncher | None:
-        if device_id not in self._app_launchers:
-            self._app_launchers[device_id] = AdbPackageLauncher(APP_PACKAGE_REGISTRY_PATH, device_id)
-        return self._app_launchers[device_id]
-
-    def text_transport_for_device(self, device_id: str):
-        return self.adb_keyboard_runtime.transport_for_device(device_id)
-
-    def capability_code_revision(self) -> str:
-        current = current_code_revision()
-        if current != self.loaded_code_revision:
-            raise CapabilityAcceptanceError(
-                "服务启动后代码状态发生变化，必须安全重启后才能进行真机验收。"
-            )
-        return self.loaded_code_revision
-
-    def capability_trial_orchestrator(
-        self,
-        provisional_controller: RobotController,
-        candidate_action: str,
-    ) -> UniversalAgentOrchestrator:
-        """Build one isolated primitive-certification orchestrator."""
-
-        return UniversalAgentOrchestrator(
-            required_action_kind=candidate_action,
-            qwen_observer=self.qwen_visual_decision_observer,
-            adapter_factory=lambda device_id: GenericSingleActionAdapter(
-                capture=lambda: self.capture_agent_frame(
-                    device_id,
-                    controller=provisional_controller,
-                ),
-                observer=self.generic_scene_observer,
-                robot=provisional_controller,
-                controller=UniversalActionController(),
-                device_id=device_id,
-                text_transport=self.text_transport_for_device(device_id),
-            ),
-            trusted_observation_factory=build_trusted_observation,
-            evidence_store_factory=FileSystemAgentEvidenceStore,
-            device_registry=self.device_task_registry,
-        )
-
-    def capture_agent_frame(
-        self,
-        device_id: str,
-        *,
-        controller: RobotController | None = None,
-    ) -> Any:
-        resolved_controller = controller or self.controller_for_device(device_id)
-        return self.device_runtime_resources.camera_coordinator(
-            device_id
-        ).capture_agent_frame(resolved_controller.vision_capture)
-
-    def capture_preview(
-        self,
-        device_id: str,
-        *,
-        quality: int = 72,
-    ) -> tuple[bytes, bool]:
-        controller = self.controller_for_device(device_id)
-        cache_only = self.device_runtime_resources.coordination_lock(
-            device_id
-        ).locked()
-        return self.device_runtime_resources.camera_coordinator(
-            device_id
-        ).capture_preview(
-            controller.capture_preview,
-            quality=quality,
-            cache_only=cache_only,
-        )
-
-    @contextmanager
-    def serial_camera_session(self, device_id: str) -> Iterator[None]:
-        with self.device_runtime_resources.camera_coordinator(
-            device_id
-        ).serial_session():
-            yield
-
-    def start(self) -> None:
-        return None
-
-    def shutdown(self) -> None:
-        self.controller.request_stop()
-
-
-
-runtime = Runtime()
-_GENERIC_START_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent-start")
-_GENERIC_START_TASKS: dict[str, dict[str, Any]] = {}
-_GENERIC_START_TASKS_LOCK = threading.RLock()
+_GENERIC_START_TASKS = AsyncTaskRegistry(
+    ttl_seconds=float(os.environ.get("ROBOT_START_TASK_TTL_SECONDS", "3600")),
+    max_tasks=int(os.environ.get("ROBOT_START_TASK_MAX", "256")),
+)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
-    print(f"机械臂网页控制台：http://127.0.0.1:8765/")
+    print("机械臂网页控制台：http://127.0.0.1:8765/")
     print("控制令牌已生成，仅通过本机受保护的页面初始化接口使用。")
     if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
         threading.Timer(
@@ -457,6 +148,7 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
         ).start()
     yield
     runtime.shutdown()
+    _GENERIC_START_TASKS.shutdown()
 
 
 app = FastAPI(
@@ -482,7 +174,6 @@ def verify_local_request(request: Request, token: str | None) -> None:
             raise HTTPException(status_code=403, detail="只允许本机网页请求。")
 
 
-
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -490,15 +181,22 @@ def index() -> FileResponse:
 
 @app.get("/api/session")
 def session() -> dict[str, Any]:
+    ready = not isinstance(runtime, RuntimeUnavailable)
     return {
         "token": CONTROL_TOKEN,
-        "mock": isinstance(runtime.controller, MockRobotController),
+        "mock": bool(ready and isinstance(runtime.controller, MockRobotController)),
+        "ready": ready,
+        "startup_error": runtime.startup_error if not ready else None,
         "version": app.version,
     }
 
 
 @app.get("/api/apps")
 def apps() -> dict[str, Any]:
+    if isinstance(runtime, RuntimeUnavailable):
+        return {"apps": APP_CATALOG, "readiness": {
+            "runtime": {"ready": False, "error": runtime.startup_error}
+        }}
     readiness = {"vision_agent": {
         "ready": bool(runtime.vision_provider.status().get("configured")),
         "mode": runtime.vision_provider.status().get("model", "unknown"),
@@ -547,16 +245,16 @@ def select_device_machine_position(
     }
 
 
-@app.get("/api/device")
-def device() -> dict[str, Any]:
-    status = dict(runtime.controller.device_status())
-    status.pop("readiness", None)
-    capability_provider = getattr(runtime.controller, "hardware_capabilities", None)
+def _device_capability_snapshot(
+    active_runtime: Runtime,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, set[str]]:
+    default_device_id = active_runtime.device_controllers.default_device_id
+    capability_provider = getattr(active_runtime.controller, "hardware_capabilities", None)
     hardware_capabilities = (
         capability_provider() if callable(capability_provider) else {}
     )
     capability_profile_provider = getattr(
-        runtime.controller,
+        active_runtime.controller,
         "hardware_capability_profile",
         None,
     )
@@ -565,15 +263,24 @@ def device() -> dict[str, Any]:
         if callable(capability_profile_provider)
         else None
     )
-    default_text_transport = runtime.text_transport_for_device(runtime.device_controllers.default_device_id)
-    text_transport_status = (default_text_transport.status()
-        if default_text_transport is not None and callable(getattr(default_text_transport, "status", None)) else None)
+    default_text_transport = active_runtime.text_transport_for_device(default_device_id)
+    text_transport_status = (
+        default_text_transport.status()
+        if default_text_transport is not None
+        and callable(getattr(default_text_transport, "status", None))
+        else None
+    )
     if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
         hardware_capability_profile = dict(hardware_capability_profile)
-        copied_actions = {str(name): dict(spec) for name, spec in
-            dict(hardware_capability_profile.get("actions") or {}).items() if isinstance(spec, dict)}
-        for action_name, operation in (("input_verified_text", "append_text"),
-            ("clear_verified_text", "clear_text")):
+        copied_actions = {
+            str(name): dict(spec)
+            for name, spec in dict(hardware_capability_profile.get("actions") or {}).items()
+            if isinstance(spec, dict)
+        }
+        for action_name, operation in (
+            ("input_verified_text", "append_text"),
+            ("clear_verified_text", "clear_text"),
+        ):
             if action_name in copied_actions:
                 copied_actions[action_name]["text_transport"] = "adb_keyboard"
                 copied_actions[action_name]["operation"] = operation
@@ -590,26 +297,53 @@ def device() -> dict[str, Any]:
         for action, spec in profile_actions.items()
         if isinstance(action, str) and isinstance(spec, dict)
     }
-    default_device_id = runtime.device_controllers.default_device_id
     device_capabilities = effective_hardware_capabilities or hardware_capabilities
-    enabled_physical_actions = {action for action in CANONICAL_ACTION_KINDS
-        if action != "wait_for_change" and bool(device_capabilities.get(
-            physical_capability_for_action(action), False))}
-    default_app_launcher = runtime.app_launcher_for_device(default_device_id)
+    enabled_physical_actions = {
+        action
+        for action in CANONICAL_ACTION_KINDS
+        if action != "wait_for_change"
+        and bool(device_capabilities.get(physical_capability_for_action(action), False))
+    }
+    default_app_launcher = active_runtime.app_launcher_for_device(default_device_id)
     if bool(getattr(default_app_launcher, "enabled", False)):
         enabled_physical_actions.add("launch_app")
-    status["default_device_id"] = default_device_id
+    return (
+        default_device_id,
+        hardware_capabilities,
+        hardware_capability_profile,
+        text_transport_status,
+        enabled_physical_actions,
+    )
+
+
+def _public_device_statuses(active_runtime: Runtime) -> list[dict[str, Any]]:
     devices = []
-    for descriptor in runtime.device_controllers.descriptors():
+    for descriptor in active_runtime.device_controllers.descriptors():
         public_status = dict(
-            runtime.controller_for_device(descriptor["device_id"]).device_status()
+            active_runtime.controller_for_device(descriptor["device_id"]).device_status()
         )
         public_status.pop("readiness", None)
-        devices.append({**descriptor, **public_status,
-            "capability_acceptance_actions": unverified_promotable_actions(descriptor.get("verified_actions", []))})
-    status["devices"] = devices
-    status["vision_agent"] = runtime.vision_provider.status()
-    status["execution_architecture"] = {
+        devices.append(
+            {
+                **descriptor,
+                **public_status,
+                "capability_acceptance_actions": unverified_promotable_actions(
+                    descriptor.get("verified_actions", [])
+                ),
+            }
+        )
+    return devices
+
+
+def _execution_architecture_status(
+    active_runtime: Runtime,
+    *,
+    hardware_capabilities: dict[str, Any],
+    hardware_capability_profile: dict[str, Any] | None,
+    text_transport_status: dict[str, Any] | None,
+    enabled_physical_actions: set[str],
+) -> dict[str, Any]:
+    return {
         "model_role": "whole_task_visual_agent",
         "controller": "universal_action_controller",
         "fixed_app_workflows_retired": True,
@@ -622,32 +356,37 @@ def device() -> dict[str, Any]:
             "controller_protocol": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
             "goal_preview_enabled": False,
             "scene_preview_enabled": True,
-            "hardware_execution_enabled": True,
+            "hardware_execution_enabled": active_runtime.hardware_mode,
+            "execution_mode": (
+                "mock"
+                if active_runtime.mock_mode or isinstance(active_runtime.controller, MockRobotController)
+                else ("hardware" if active_runtime.hardware_mode else "offline")
+            ),
+            "physical_execution": active_runtime.hardware_mode,
             "automatic_loop_enabled": True,
             "task_budget_default_actions": DEFAULT_DEVICE_ACTION_BUDGET,
             "task_budget_default_observations": DEFAULT_OBSERVATION_BUDGET,
             "supervised_single_step_enabled": False,
             "enabled_physical_actions": sorted(enabled_physical_actions),
-            "protocol_physical_actions": sorted(
-                CANONICAL_ACTION_KINDS - {"wait_for_change"}
-            ),
+            "protocol_physical_actions": sorted(CANONICAL_ACTION_KINDS - {"wait_for_change"}),
             "hardware_capabilities": hardware_capabilities,
             "hardware_capability_profile": hardware_capability_profile,
             "text_transport": text_transport_status,
             "supported_app_scope": "dynamic",
             "typed_effect_authority": {
-                "semantic_ir_protocol": None,
                 "authority_protocol": "2026-09-02-typed-effect-kind-v1",
                 "effect_policy_protocol": "2026-09-02-auth-payment-only-v1",
                 "authority_scope": "qwen_current_action_effect_kind",
                 "retired_remote_risk_diagnostics_enabled": False,
                 "canonical_action_protocol": CANONICAL_ACTION_PROTOCOL,
             },
-            "observer": runtime.generic_scene_observer.status(),
+            "observer": active_runtime.generic_scene_observer.status(),
         },
     }
-    generic_sessions = runtime.universal_agent_session_service.active_snapshots()
-    active_sessions = [
+
+
+def _active_session_status(active_runtime: Runtime) -> list[dict[str, Any]]:
+    return [
         {
             "session_id": item["session_id"],
             "device_id": item["device_id"],
@@ -655,8 +394,36 @@ def device() -> dict[str, Any]:
             "step_number": item["step_number"],
             "proposal": item["proposal"],
         }
-        for item in generic_sessions
+        for item in active_runtime.universal_agent_session_service.active_snapshots()
     ]
+
+
+@app.get("/api/device")
+def device() -> dict[str, Any]:
+    if isinstance(runtime, RuntimeUnavailable):
+        raise HTTPException(status_code=503, detail={
+            "code": "runtime_not_ready", "error": runtime.startup_error,
+        })
+    status = dict(runtime.controller.device_status())
+    status.pop("readiness", None)
+    (
+        default_device_id,
+        hardware_capabilities,
+        hardware_capability_profile,
+        text_transport_status,
+        enabled_physical_actions,
+    ) = _device_capability_snapshot(runtime)
+    status["default_device_id"] = default_device_id
+    status["devices"] = _public_device_statuses(runtime)
+    status["vision_agent"] = runtime.vision_provider.status()
+    status["execution_architecture"] = _execution_architecture_status(
+        runtime,
+        hardware_capabilities=hardware_capabilities,
+        hardware_capability_profile=hardware_capability_profile,
+        text_transport_status=text_transport_status,
+        enabled_physical_actions=enabled_physical_actions,
+    )
+    active_sessions = _active_session_status(runtime)
     status["active_tasks"] = [dict(item) for item in active_sessions]
     status["generic_supervised_execution"] = {
         "enabled": True,
@@ -703,15 +470,12 @@ def runtime_doctor(device_id: str) -> dict[str, Any]:
                     "scene": UI_SCENE_PROTOCOL_VERSION,
                     "action": CANONICAL_ACTION_PROTOCOL,
                     "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
-                    "semantic_ir": None,
                     "risk": "2026-09-02-auth-payment-only-v1",
                 },
             )
     finally:
         if acquired:
             coordination_lock.release()
-
-
 
 
 def _require_supervised_device_ready(device_id: str | None = None) -> None:
@@ -763,8 +527,6 @@ def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
         controller.operation_lock.release()
         coordination_lock.release()
         process_lease.release()
-
-
 
 
 def _require_agent_device_ready(device_id: str) -> None:
@@ -868,7 +630,11 @@ def observe_generic_scene(
 
 def _write_generic_supervised_report(session: AgentSession) -> str:
     """Return the atomic report already maintained by the orchestrator."""
-
+    if session.status in TERMINAL_SESSION_STATUSES:
+        try:
+            (session.run_dir / ".active").unlink(missing_ok=True)
+        except OSError:
+            pass
     return str(session.run_dir / "report.json")
 
 
@@ -967,8 +733,7 @@ def _require_capability_trial_binding(
         raise CapabilityAcceptanceError("真机验收确认范围与当前会话不匹配。")
 
 
-CAPABILITY_ACCEPTANCE_ERRORS = (
-    CapabilityAcceptanceError,
+COMMON_OPERATION_ERRORS = (
     DeviceControllerRegistryError,
     DeviceRuntimeResourceError,
     DeviceTaskRegistryError,
@@ -978,6 +743,19 @@ CAPABILITY_ACCEPTANCE_ERRORS = (
     UniversalAgentOrchestratorError,
     VisionAgentError,
 )
+
+CAPABILITY_ACCEPTANCE_ERRORS = (CapabilityAcceptanceError, *COMMON_OPERATION_ERRORS)
+
+GENERIC_SESSION_ERRORS = (
+    AgentSessionCommandError,
+    AgentSessionConflictError,
+    *COMMON_OPERATION_ERRORS,
+)
+
+
+def _confirmation_payload(body: Any) -> dict[str, Any] | None:
+    confirmation = getattr(body, "confirmation", None)
+    return confirmation.model_dump() if confirmation is not None else None
 
 
 @app.post("/api/capability-acceptance/start")
@@ -989,7 +767,7 @@ def start_capability_acceptance(
     """Plan and observe one unverified generic action with zero execution."""
 
     verify_local_request(request, x_control_token)
-    if body.action not in PROMOTABLE_ACTIONS:
+    if body.action not in PROMOTABLE_ACTION_KINDS:
         exc = CapabilityAcceptanceError(
             f"动作 {body.action} 不能进入真机能力验收。"
         )
@@ -1284,34 +1062,35 @@ def cancel_capability_acceptance(
         ) from exc
 
 
-def _run_generic_start_task(task_id: str, body: GenericSupervisedStartRequest, request: Request, token: str | None) -> None:
-    try:
-        result = start_generic_supervised_session(body, request, token)
-        with _GENERIC_START_TASKS_LOCK:
-            _GENERIC_START_TASKS[task_id] = {"status": "completed", "result": result}
-    except Exception as exc:
-        with _GENERIC_START_TASKS_LOCK:
-            _GENERIC_START_TASKS[task_id] = {"status": "failed", "error": str(exc)}
-
-
 @app.post("/api/agent/generic-supervised/start-async")
 def start_generic_supervised_async(body: GenericSupervisedStartRequest, request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
     task_id = uuid.uuid4().hex
-    with _GENERIC_START_TASKS_LOCK:
-        _GENERIC_START_TASKS[task_id] = {"status": "running"}
-    _GENERIC_START_EXECUTOR.submit(_run_generic_start_task, task_id, body, request, x_control_token)
+    try:
+        _GENERIC_START_TASKS.reserve(task_id)
+        _GENERIC_START_TASKS.submit(
+            task_id,
+            lambda: start_generic_supervised_session(body, request, x_control_token),
+        )
+    except OverflowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="异步启动执行器当前不可用。") from exc
     return {"task_id": task_id, "status": "running"}
 
 
 @app.get("/api/agent/generic-supervised/start-async/{task_id}")
-def get_generic_supervised_start_task(task_id: str) -> dict[str, Any]:
-    with _GENERIC_START_TASKS_LOCK:
-        task = _GENERIC_START_TASKS.get(task_id)
+def get_generic_supervised_start_task(
+    task_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    task = _GENERIC_START_TASKS.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="启动任务不存在或已过期。")
-    return {"task_id": task_id, **task}
+    return {"task_id": task_id, **{key: value for key, value in task.items() if key != "created_monotonic"}}
 
 
 @app.post("/api/agent/generic-supervised/start")
@@ -1320,7 +1099,11 @@ def start_generic_supervised_session(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Plan once, then autonomously advance only safe read/navigation actions."""
+    """Start one canonical whole-task visual session.
+
+    Automatic mode advances the same Qwen action/finish loop; it does not build
+    a local plan or restrict execution to a read-only action subset.
+    """
 
     verify_local_request(request, x_control_token)
     session_id = uuid.uuid4().hex
@@ -1329,6 +1112,9 @@ def start_generic_supervised_session(
         + datetime.now().strftime("%Y%m%d_%H%M%S_")
         + session_id[:8]
     )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / ".evidence-run").touch()
+    (run_dir / ".active").touch()
     session = None
     try:
         started = runtime.universal_agent_session_service.start(
@@ -1362,24 +1148,23 @@ def start_generic_supervised_session(
             "report": report,
         }
     except AgentDeviceRuntimeError as exc:
+        try:
+            if session is None:
+                shutil.rmtree(run_dir, ignore_errors=True)
+            else:
+                (run_dir / ".active").unlink(missing_ok=True)
+        except OSError:
+            pass
         _raise_agent_device_runtime_error(exc)
-    except (
-        AgentSessionCommandError,
-        AgentSessionConflictError,
-        DeviceControllerRegistryError,
-        DeviceRuntimeResourceError,
-        DeviceTaskRegistryError,
-        GenericActionAdapterError,
-        UniversalActionError,
-        EvidenceStoreError,
-        UniversalAgentOrchestratorError,
-            VisionAgentError,
-    ) as exc:
+    except GENERIC_SESSION_ERRORS as exc:
         if session is None:
             try:
                 session = runtime.universal_agent_session_service.require(session_id)
             except AgentSessionNotFoundError:
-                pass
+                try:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                except OSError:
+                    pass
         failure = _generic_supervised_failure(session, exc)
         failure["evidence"] = [
             str(path) for path in sorted(run_dir.glob("*.jpg"))
@@ -1388,7 +1173,12 @@ def start_generic_supervised_session(
 
 
 @app.get("/api/agent/generic-supervised/{session_id}")
-def get_generic_supervised_session(session_id: str) -> dict[str, Any]:
+def get_generic_supervised_session(
+    session_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
     session = _require_generic_supervised_session(session_id)
     return {
         "mode": "generic_supervised_single_step",
@@ -1414,9 +1204,7 @@ def approve_generic_supervised_effect(
             session,
             confirmed=body.confirmed,
             confirmation=(
-                body.confirmation.model_dump()
-                if body.confirmation is not None
-                else None
+                _confirmation_payload(body)
             ),
         )
         result = approved.operation
@@ -1438,17 +1226,7 @@ def approve_generic_supervised_effect(
         _raise_agent_device_runtime_error(exc)
     except AgentSessionDeviceMismatchError as exc:
         _raise_agent_session_device_mismatch(exc)
-    except (
-        AgentSessionCommandError,
-        DeviceControllerRegistryError,
-        DeviceRuntimeResourceError,
-        DeviceTaskRegistryError,
-        GenericActionAdapterError,
-        UniversalActionError,
-        EvidenceStoreError,
-        UniversalAgentOrchestratorError,
-            VisionAgentError,
-    ) as exc:
+    except GENERIC_SESSION_ERRORS as exc:
         request_actions = max(0, session.physical_actions - before_actions)
         raise HTTPException(
             status_code=409,
@@ -1477,9 +1255,7 @@ def confirm_generic_supervised_session(
             session,
             confirmed=body.confirmed,
             confirmation=(
-                body.confirmation.model_dump()
-                if body.confirmation is not None
-                else None
+                _confirmation_payload(body)
             ),
         )
         result = confirmed.operation
@@ -1493,17 +1269,7 @@ def confirm_generic_supervised_session(
         }
     except AgentDeviceRuntimeError as exc:
         _raise_agent_device_runtime_error(exc)
-    except (
-        AgentSessionCommandError,
-        DeviceControllerRegistryError,
-        DeviceRuntimeResourceError,
-        DeviceTaskRegistryError,
-        GenericActionAdapterError,
-        UniversalActionError,
-        EvidenceStoreError,
-        UniversalAgentOrchestratorError,
-            VisionAgentError,
-    ) as exc:
+    except GENERIC_SESSION_ERRORS as exc:
         request_actions = max(0, session.physical_actions - before_actions)
         raise HTTPException(
             status_code=409,
@@ -1546,17 +1312,7 @@ def plan_next_generic_supervised_step(
         _raise_agent_device_runtime_error(exc)
     except AgentSessionDeviceMismatchError as exc:
         _raise_agent_session_device_mismatch(exc)
-    except (
-        AgentSessionCommandError,
-        DeviceControllerRegistryError,
-        DeviceRuntimeResourceError,
-        DeviceTaskRegistryError,
-        GenericActionAdapterError,
-        UniversalActionError,
-        EvidenceStoreError,
-        UniversalAgentOrchestratorError,
-            VisionAgentError,
-    ) as exc:
+    except GENERIC_SESSION_ERRORS as exc:
         raise HTTPException(
             status_code=409,
             detail=_generic_supervised_failure(
@@ -1587,9 +1343,7 @@ def run_generic_supervised_safe_loop(
             requested_device_id=body.device_id,
             confirmed=body.confirmed,
             confirmation=(
-                body.confirmation.model_dump()
-                if body.confirmation is not None
-                else None
+                _confirmation_payload(body)
             ),
             max_physical_actions=body.max_physical_actions,
             max_observations=body.max_observations,
@@ -1607,17 +1361,7 @@ def run_generic_supervised_safe_loop(
         _raise_agent_device_runtime_error(exc)
     except AgentSessionDeviceMismatchError as exc:
         _raise_agent_session_device_mismatch(exc)
-    except (
-        AgentSessionCommandError,
-        DeviceControllerRegistryError,
-        DeviceRuntimeResourceError,
-        DeviceTaskRegistryError,
-        GenericActionAdapterError,
-        UniversalActionError,
-        EvidenceStoreError,
-        UniversalAgentOrchestratorError,
-            VisionAgentError,
-    ) as exc:
+    except GENERIC_SESSION_ERRORS as exc:
         raise HTTPException(
             status_code=409,
             detail=_generic_supervised_failure(
@@ -1686,12 +1430,16 @@ def stop_all(
     x_control_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
+    stopped_devices = runtime.device_controllers.request_stop_all()
+    # Tests and embedding callers may replace the default controller after the
+    # registry was built; keep that explicit runtime handle covered as well.
     runtime.controller.request_stop()
     capability_stop_requested = (
         runtime.capability_acceptance_manager.request_stop_all()
     )
     return {
         "stop_requested": True,
+        "stopped_device_ids": list(stopped_devices),
         "queued_cancelled": [],
         "capability_stop_requested": capability_stop_requested,
         "note": "正在执行的任务会在当前最小动作结束后停止。",

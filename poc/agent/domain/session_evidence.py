@@ -20,7 +20,6 @@ class AgentEvidenceStorePort(Protocol):
     def write_session(self, session: Any) -> Path: ...
 
 
-
     def write_trusted_observation( self, step_number: int, observation: Any,
     ) -> Path: ...
 

@@ -1,6 +1,5 @@
 """Raw-response/observer/binder/controller composition. No model or device I/O."""
 from copy import deepcopy
-from dataclasses import replace
 import json
 from pathlib import Path
 import unittest
@@ -54,7 +53,6 @@ def wire(choice=None, audit=None):
 def observe(payload, graph=None, *, allowed=None):
     graph = graph or task_context()
     goal_context = {'objective': graph.raw_goal, 'entities': {'history': list(graph.history), 'exact_input_text': graph.exact_input_text}}
-    height = payload['coordinate_space']['height']
     frames = [frame.resize((720, 1280), Image.Resampling.NEAREST)
         for frame in patterned_frames()]
     provider = RawSceneProvider([deepcopy(payload)])  # Does not repair/upgrade model fields.

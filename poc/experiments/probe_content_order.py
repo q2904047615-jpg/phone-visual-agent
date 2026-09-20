@@ -1,7 +1,6 @@
 """Approved isolated A/B: move task text after unchanged current image blocks."""
 import argparse
 import base64
-from copy import deepcopy
 import hashlib
 import io
 import json

@@ -6,7 +6,7 @@ from agent.infrastructure import DeviceControllerRegistryError
 from agent.infrastructure import DeviceRuntimeResourceError
 from agent.infrastructure import DeviceRuntimeResourceRegistry
 from PIL import Image
-from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
+from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
 from pathlib import Path
 from agent.infrastructure.robot_controller import MockRobotController as _MockRobotController
 import json
@@ -23,7 +23,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
     def test_default_real_device_advertises_only_actions_with_live_evidence(self) -> None:
         registry = DeviceControllerRegistry(
             web_app.DEVICE_REGISTRY_PATH,
-            promotable_actions=PROMOTABLE_ACTIONS,
+            promotable_actions=PROMOTABLE_ACTION_KINDS,
             mock=False,
         )
         controller = registry.controller(registry.default_device_id)
@@ -63,7 +63,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
             )
             registry = DeviceControllerRegistry(
                 path,
-                promotable_actions=PROMOTABLE_ACTIONS,
+                promotable_actions=PROMOTABLE_ACTION_KINDS,
                 mock=False,
             )
 
@@ -92,7 +92,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                     {"device_id": "phone-b", "enabled": True, "window_title": "seller", "machine_position": 2},
                 ],
             }), encoding="utf-8")
-            registry = DeviceControllerRegistry(path, promotable_actions=PROMOTABLE_ACTIONS)
+            registry = DeviceControllerRegistry(path, promotable_actions=PROMOTABLE_ACTION_KINDS)
         first = registry.controller("phone-a")
         second = registry.controller("phone-b")
         self.assertIs(first.operation_lock, second.operation_lock)
@@ -117,7 +117,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "同一个机械臂控制窗口"):
                 DeviceControllerRegistry(
                     path,
-                    promotable_actions=PROMOTABLE_ACTIONS,
+                    promotable_actions=PROMOTABLE_ACTION_KINDS,
                 )
 
     def test_mock_devices_remain_independent_without_mutating_descriptors(self) -> None:
@@ -148,7 +148,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
             )
             registry = DeviceControllerRegistry(
                 path,
-                promotable_actions=PROMOTABLE_ACTIONS,
+                promotable_actions=PROMOTABLE_ACTION_KINDS,
                 mock=True,
             )
 
@@ -169,7 +169,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                 "devices": [{"device_id": "phone-a", "enabled": True, "machine_position": 11}],
             }), encoding="utf-8")
             with self.assertRaisesRegex(DeviceControllerRegistryError, "machine_position"):
-                DeviceControllerRegistry(path, promotable_actions=PROMOTABLE_ACTIONS)
+                DeviceControllerRegistry(path, promotable_actions=PROMOTABLE_ACTION_KINDS)
 
 
     def test_invalid_verified_actions_fails_before_controller_construction(self) -> None:
@@ -197,7 +197,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
             ):
                 DeviceControllerRegistry(
                     path,
-                    promotable_actions=PROMOTABLE_ACTIONS,
+                    promotable_actions=PROMOTABLE_ACTION_KINDS,
                 )
 
 

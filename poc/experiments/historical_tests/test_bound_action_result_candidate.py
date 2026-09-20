@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 from experiments.bound_action_result_candidate import prepare, project_result_for_evaluation, PREFIX
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
 from agent.infrastructure.generic_scene_observer import _single_step_observation_prompt, _single_step_response_format
 
 

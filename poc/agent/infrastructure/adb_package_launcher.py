@@ -17,6 +17,12 @@ _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 
 
+def _executable_name(value: str | Path) -> str:
+    """Normalize native and Windows-style paths for cross-platform config loading."""
+
+    return str(value).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+
+
 class AdbPackageLauncherError(RuntimeError):
     def __init__(self, message: str, *, attempted: bool=False) -> None:
         super().__init__(message)
@@ -91,7 +97,7 @@ class AdbPackageLauncher:
             packages.add(package.casefold())
             by_alias.update((alias, target) for alias in normalized)
         executable_path = Path(executable)
-        reject_if(executable_path.name.casefold() not in {'adb', 'adb.exe'},
+        reject_if(_executable_name(executable_path) not in {'adb', 'adb.exe'},
             AdbPackageLauncherError("adb_executable 必须指向 adb 或 adb.exe。"))
         resolved = str(executable_path) if executable_path.is_file() else shutil.which(executable)
         executable_command = str(resolved or executable)

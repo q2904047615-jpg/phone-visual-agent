@@ -1,6 +1,6 @@
 """Check dead-name removal without mistaking dynamic transports for dead code."""
 import unittest
-from agent.domain import canonical_action_kinds
+from agent.domain import action_catalog
 from agent.domain.device_execution import DeviceActionRequest
 from agent.infrastructure import generic_scene_observer
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
@@ -11,7 +11,7 @@ from agent.infrastructure.robot_controller import RobotController
 class UnusedRuntimeResidueTests(unittest.TestCase):
     def test_unreferenced_names_stay_retired(self):
         for owner, names in (
-            (canonical_action_kinds, ('expected_idempotent_system_surface_kind', '_IDEMPOTENT_SYSTEM_SURFACES')),
+            (action_catalog, ('expected_idempotent_system_surface_kind', '_IDEMPOTENT_SYSTEM_SURFACES')),
             (GenericSingleActionAdapter, ('GEOMETRY_BOUND_KINDS', 'INDEPENDENT_GEOMETRY_AUDIT_KINDS')),
             (generic_scene_observer, ('_QWERTY_ANCHOR_KEYS',)),
             (RobotController, ('_sleep',)),

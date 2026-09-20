@@ -14,6 +14,18 @@ from test_support.web_platform import (
 
 
 class PhysicalNavigationSafetyTests(_BasePhysicalNavigationSafetyTests):
+    @classmethod
+    def setUpClass(cls):
+        # These tests replace every Win32 call with deterministic fakes.  Mark
+        # the adapter as a Windows hardware seam so the production fail-closed
+        # guard does not hide the behavior under test.
+        cls._windows_patch = patch.object(robot_gui_poc, "IS_WINDOWS", True)
+        cls._windows_patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._windows_patch.stop()
+
     def test_machine_position_is_selected_once_per_task_before_agent_capture(self):
         controller = RobotController(title="test", machine_position=2)
         with (
@@ -683,6 +695,7 @@ class PhysicalNavigationSafetyTests(_BasePhysicalNavigationSafetyTests):
 
 
 class LowLevelInputTests(unittest.TestCase):
+    @unittest.skipUnless(robot_gui_poc.IS_WINDOWS, "Windows ABI assertion is not applicable off Windows")
     def test_input_structure_matches_windows_native_size(self) -> None:
         expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
         self.assertEqual(ctypes.sizeof(robot_gui_poc.INPUT), expected_size)

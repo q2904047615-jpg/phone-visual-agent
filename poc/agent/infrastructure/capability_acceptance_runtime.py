@@ -23,7 +23,8 @@ from agent.infrastructure.capability_acceptance import (
     validate_acceptance_report,
 )
 from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
-from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
+from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS
+from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
 
 
 def _payload(value: Any) -> dict[str, Any]:
@@ -152,7 +153,7 @@ class CapabilityAcceptanceManager:
                 revision = str(stored.get("code_revision") or "").strip()
                 if (not re.fullmatch('[A-Za-z0-9_-]{1,128}', trial_id)
                     or resolved_dir.name != f'capability_acceptance_{trial_id}' or (not device_id) or (action not
-                    in PROMOTABLE_ACTIONS) or (not text_value) or (not revision)):
+                    in PROMOTABLE_ACTION_KINDS) or (not text_value) or (not revision)):
                     continue
                 promotion = stored.get('promotion')
                 if not isinstance(promotion, Mapping):
@@ -184,7 +185,7 @@ class CapabilityAcceptanceManager:
         candidate = str(action or "").strip()
         goal = " ".join(str(text or "").split())
         reject_if(not resolved_device or len(resolved_device) > 128, CapabilityAcceptanceError("验收 device_id 格式无效。"))
-        reject_if(candidate not in PROMOTABLE_ACTIONS, CapabilityAcceptanceError(f'动作 {candidate or 'missing'} 不能进入真机能力验收。'))
+        reject_if(candidate not in PROMOTABLE_ACTION_KINDS, CapabilityAcceptanceError(f'动作 {candidate or 'missing'} 不能进入真机能力验收。'))
         reject_if(not goal or len(goal) > 500, CapabilityAcceptanceError("验收目标长度必须在 1～500 个字符之间。"))
         return resolved_device, candidate, goal
 

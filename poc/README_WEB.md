@@ -33,7 +33,7 @@ npm test
 ### ADB Keyboard 文字 transport
 
 `ROBOT_ADB_KEYBOARD_REGISTRY` 可指向本机 ADB Keyboard JSON 注册表；未设置时读取
-`adb_keyboard_registry.json`。每个启用设备只能登记一个固定 profile、一个固定 ADB 可执行文件和
+`adb_keyboard_registry.json`（仓库默认不提供，缺失时文字 transport 不可用）。每个启用设备只能登记一个固定 profile、一个固定 ADB 可执行文件和
 一个固定 serial。最小结构为：
 
 ```json
@@ -67,7 +67,8 @@ Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册�
 可选 App 包名直启配置：
 
 - `ROBOT_APP_PACKAGE_REGISTRY`：指向本机可信的 JSON 注册表；未设置时读取
-  `app_package_registry.json`；
+  `app_package_registry.json`（仓库默认不提供，缺失时 `launch_app` 不可用）；
+- 可从 [`app_package_registry.example.json`](app_package_registry.example.json) 复制并按本机设备填写；不要提交真实 serial、IP 或用户目录。
 - 注册表按 `device_id` 绑定固定 `adb_executable`、`adb_serial`、App alias、opaque
   `launch_ref` 与 Android package；只有 `enabled=true`、ADB 文件存在、serial 非空且当前
   App 唯一匹配时才开放 `launch_app`；
@@ -76,6 +77,13 @@ Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册�
 - 仓库默认注册表保持关闭。启用前应由设备维护者核对 ADB serial 和包名；可信 `launch_app` 只验证
   注册表绑定和 transport 回执。直启后必须重新截图，页面、下一动作和 `finish` 仍只由下一次 Qwen 响应
   决定。系统包名不在 Qwen `finish` 后形成第二完成裁决，也不能把 ADB 返回码当作高层任务成功。
+
+### 证据生命周期
+
+每个任务仍保存完整截图历史，模型请求不会因为配额而静默截断。服务启动时会删除超过保留期的非活动
+证据目录；可用 `ROBOT_EVIDENCE_RETENTION_SECONDS`、`ROBOT_EVIDENCE_MAX_BYTES` 和
+`ROBOT_EVIDENCE_MAX_RUN_BYTES` 调整总目录与单任务配额。达到配额时任务报告明确的存储错误并停止写入，
+不会伪称模型已经收到完整历史。
 
 ### 卖家系统多机位
 
@@ -132,4 +140,3 @@ App 内部操作继续完全使用当前视觉闭环和机械臂。
 
 正式运行不存在 selector、动作后 replan、持久视觉/输入 lineage、decision cache、scene-only decision
 回退或第二完成裁决。不得为目录整齐增加转发包装、兼容开关或第二套权威。
-

@@ -19,6 +19,9 @@ const state = {
   capabilityEvidenceUrls: [],
   taskAttemptStatus: null,
   lastTaskOutcome: null,
+  luckyBagProfile: null,
+  luckyBagMonitorId: "",
+  luckyBagMonitorTimer: null,
 };
 
 const taskOutcomeStoragePrefix = "visual-agent-task-outcome:";
@@ -945,6 +948,110 @@ async function startAsyncAndWait(payload) {
   }
 }
 
+async function useLuckyBagPreset() {
+  try {
+    const feature = await api("/api/features/lucky-bag");
+    state.luckyBagProfile = feature.profile || null;
+    document.querySelector("#agentText").value = String(feature.goal || "");
+    const notice = document.querySelector("#luckyBagFeatureNotice");
+    if (notice && feature.notice) notice.textContent = feature.notice;
+    toast("已填充福袋监控目标；确认直播间已打开后可启动长期监控。");
+  } catch (error) {
+    toast("加载福袋功能失败：" + error.message, true);
+  }
+}
+
+function renderLuckyBagMonitorStatus(monitor) {
+  const element = document.querySelector("#luckyBagMonitorStatus");
+  if (!element || !monitor) return;
+  const labels = {
+    starting: "启动中",
+    running: "运行中",
+    paused: "已暂停",
+    waiting_confirmation: "等待确认",
+    succeeded: "疑似中奖，已记录通知",
+    expired: "已到时限",
+    failed: "失败",
+    blocked: "已阻止",
+    cancelled: "已停止",
+    recovery_required: "等待恢复",
+  };
+  element.textContent = labels[monitor.status] || monitor.status || "未知状态";
+  const resume = document.querySelector("#resumeLuckyBagMonitor");
+  if (resume) resume.hidden = monitor.status !== "recovery_required";
+}
+
+async function restoreLuckyBagMonitor() {
+  try {
+    const response = await api("/api/features/lucky-bag/monitors");
+    const items = Array.isArray(response.monitors) ? response.monitors : [];
+    const active = items.find(item => [
+      "starting", "running", "paused", "waiting_confirmation", "recovery_required",
+    ].includes(item.monitor?.status));
+    if (!active) return;
+    state.luckyBagMonitorId = String(active.monitor?.monitor_id || "");
+    state.luckyBagProfile = active.profile || null;
+    renderLuckyBagMonitorStatus(active.monitor);
+    clearInterval(state.luckyBagMonitorTimer);
+    state.luckyBagMonitorTimer = setInterval(pollLuckyBagMonitor, 5000);
+  } catch (_error) {
+    // The ordinary Agent page remains usable when the optional feature is unavailable.
+  }
+}
+
+async function resumeLuckyBagMonitor() {
+  if (!state.luckyBagMonitorId || !state.luckyBagProfile) return;
+  try {
+    const response = await api(
+      "/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId) + "/resume",
+      {
+        method: "POST",
+        body: JSON.stringify({ device_id: state.luckyBagProfile.device_id }),
+      },
+    );
+    renderLuckyBagMonitorStatus(response.monitor);
+    clearInterval(state.luckyBagMonitorTimer);
+    state.luckyBagMonitorTimer = setInterval(pollLuckyBagMonitor, 5000);
+    toast("监控已恢复，将重新观察当前 Android 画面。");
+  } catch (error) {
+    toast("恢复福袋监控失败：" + error.message, true);
+  }
+}
+
+async function pollLuckyBagMonitor() {
+  if (!state.luckyBagMonitorId) return;
+  try {
+    const response = await api("/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId));
+    renderLuckyBagMonitorStatus(response.monitor);
+    if (["succeeded", "expired", "failed", "blocked", "cancelled"].includes(response.monitor?.status)) {
+      clearInterval(state.luckyBagMonitorTimer);
+      state.luckyBagMonitorTimer = null;
+    }
+  } catch (error) {
+    renderLuckyBagMonitorStatus({ status: "状态读取失败：" + error.message });
+  }
+}
+
+async function startLuckyBagMonitor() {
+  try {
+    if (!state.luckyBagProfile) {
+      const feature = await api("/api/features/lucky-bag");
+      state.luckyBagProfile = feature.profile || null;
+      document.querySelector("#agentText").value = String(feature.goal || "");
+    }
+    const response = await api("/api/features/lucky-bag/start", {
+      method: "POST",
+      body: JSON.stringify(state.luckyBagProfile || {}),
+    });
+    state.luckyBagMonitorId = String(response.monitor?.monitor_id || "");
+    renderLuckyBagMonitorStatus(response.monitor);
+    clearInterval(state.luckyBagMonitorTimer);
+    state.luckyBagMonitorTimer = setInterval(pollLuckyBagMonitor, 5000);
+    toast("长期监控已启动；请保持用户手动打开的直播间。");
+  } catch (error) {
+    toast("启动福袋监控失败：" + error.message, true);
+  }
+}
 async function startSupervisedAgent() {
   const text = document.querySelector("#agentText").value.trim();
   const current = sessionView();
@@ -1409,6 +1516,7 @@ async function init() {
     mode.classList.toggle("live-mode", !session.mock);
     await refreshDevice();
     await restoreActiveSession();
+    await restoreLuckyBagMonitor();
     if (!state.supervisedSession) await restoreCapabilityTrial();
     render();
     refreshPreview();
@@ -1420,6 +1528,9 @@ async function init() {
 }
 
 document.querySelector("#startSupervisedAgent").addEventListener("click", startSupervisedAgent);
+document.querySelector("#useLuckyBagPreset")?.addEventListener("click", useLuckyBagPreset);
+document.querySelector("#startLuckyBagMonitor")?.addEventListener("click", startLuckyBagMonitor);
+document.querySelector("#resumeLuckyBagMonitor")?.addEventListener("click", resumeLuckyBagMonitor);
 document.querySelector("#startCapabilityTrial").addEventListener("click", startCapabilityTrial);
 document.querySelector("#pauseButton").addEventListener("click", togglePause);
 document.querySelector("#stopButton").addEventListener("click", stopTasks);

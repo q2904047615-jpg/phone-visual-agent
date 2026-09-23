@@ -82,6 +82,10 @@ from agent.interfaces.http_models import (
     GenericSupervisedStepRequest,
     MachinePositionRequest,
 )
+from features.lucky_bag import LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
+from features.lucky_bag.http import LuckyBagDeviceRequest, LuckyBagStartRequest
+from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink
+from features.notifications import JsonlNotificationOutbox
 
 
 ROOT = Path(__file__).resolve().parent
@@ -131,6 +135,86 @@ except Exception as exc:
     runtime = RuntimeUnavailable(exc)
 
 
+class _LuckyBagGateway:
+    """Adapter from the additive monitor to the existing session service."""
+
+    def start(self, *, goal: str, device_id: str, run_dir: Path) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session_id = uuid.uuid4().hex
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / ".evidence-run").touch()
+        (run_dir / ".active").touch()
+        started = runtime.universal_agent_session_service.start(
+            StartUniversalAgentSessionCommand(
+                session_id=session_id,
+                raw_goal=goal,
+                exact_input_text=None,
+                exact_action_kind=None,
+                exact_target_label="",
+                device_id=device_id,
+                run_dir=run_dir,
+                auto_advance=False,
+                max_physical_actions=20,
+                max_observations=40,
+            )
+        )
+        return {"session": started.session.snapshot()}
+
+    def get(self, session_id: str) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        return {"session": runtime.universal_agent_session_service.require(session_id).snapshot()}
+
+    def auto(self, session_id: str, *, max_physical_actions: int, max_observations: int) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session = runtime.universal_agent_session_service.require(session_id)
+        result = runtime.universal_agent_session_service.run_automatic(
+            session,
+            requested_device_id=session.device_id,
+            confirmed=False,
+            confirmation=None,
+            max_physical_actions=max_physical_actions,
+            max_observations=max_observations,
+        )
+        return {"session": result.session.snapshot()}
+
+    def pause(self, session_id: str) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session = runtime.universal_agent_session_service.require(session_id)
+        result = runtime.universal_agent_session_service.pause(
+            session_id,
+            requested_device_id=session.device_id,
+        )
+        return {"session": result.session.snapshot()}
+
+    def cancel(self, session_id: str) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session = runtime.universal_agent_session_service.require(session_id)
+        result = runtime.universal_agent_session_service.cancel(
+            session_id,
+            requested_device_id=session.device_id,
+        )
+        return {"session": result.session.snapshot()}
+
+
+_LUCKY_BAG_OUTPUT_DIR = WEB_OUTPUT_DIR / "lucky_bag"
+_LUCKY_BAG_OUTBOX = JsonlNotificationOutbox(
+    _LUCKY_BAG_OUTPUT_DIR / "lucky_bag_notifications.jsonl"
+)
+_LUCKY_BAG_NOTIFICATIONS = DurableNotificationRouter(
+    outbox=_LUCKY_BAG_OUTBOX,
+    remote=configured_gmail_sink(),
+)
+_LUCKY_BAG_MONITOR = LuckyBagMonitor(
+    gateway=_LuckyBagGateway(),
+    output_root=_LUCKY_BAG_OUTPUT_DIR,
+    notification_sink=_LUCKY_BAG_NOTIFICATIONS,
+)
+
 _GENERIC_START_TASKS = AsyncTaskRegistry(
     ttl_seconds=float(os.environ.get("ROBOT_START_TASK_TTL_SECONDS", "3600")),
     max_tasks=int(os.environ.get("ROBOT_START_TASK_MAX", "256")),
@@ -148,6 +232,7 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
         ).start()
     yield
     runtime.shutdown()
+    _LUCKY_BAG_MONITOR.shutdown()
     _GENERIC_START_TASKS.shutdown()
 
 
@@ -397,6 +482,171 @@ def _active_session_status(active_runtime: Runtime) -> list[dict[str, Any]]:
         for item in active_runtime.universal_agent_session_service.active_snapshots()
     ]
 
+
+@app.get("/api/features/lucky-bag")
+def lucky_bag_feature(
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Return the additive lucky-bag goal preset for the existing Agent entry."""
+
+    verify_local_request(request, x_control_token)
+    profile = LuckyBagProfile(
+        device_id="device-local-01",
+        recipient=os.environ.get(
+            "LUCKY_BAG_NOTIFICATION_RECIPIENT",
+            "q2904047615@gmail.com",
+        ),
+    )
+    return {
+        "feature_id": "lucky_bag",
+        "stage": "goal_preset",
+        "profile": {
+            "device_id": profile.device_id,
+            "recipient": profile.recipient,
+            "duration_seconds": profile.duration_seconds,
+            "app_alias": profile.app_alias,
+            "subject": profile.subject,
+            "body": profile.body,
+        },
+        "goal": build_lucky_bag_goal(profile),
+        "notice": "此入口可填充通用Agent目标并启动分段长期监控；邮件先写入本地通知队列，Gmail发送仍需后续配置。",
+    }
+
+
+def _lucky_bag_profile_payload(profile: LuckyBagProfile) -> dict[str, Any]:
+    return {
+        "device_id": profile.device_id,
+        "recipient": profile.recipient,
+        "duration_seconds": profile.duration_seconds,
+        "app_alias": profile.app_alias,
+        "subject": profile.subject,
+        "body": profile.body,
+    }
+
+
+def _lucky_bag_record_or_404(monitor_id: str):
+    record = _LUCKY_BAG_MONITOR.get(monitor_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="福袋监控不存在。")
+    return record
+
+
+@app.post("/api/features/lucky-bag/start")
+def start_lucky_bag_monitor(
+    body: LuckyBagStartRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    profile = LuckyBagProfile(
+        device_id=body.device_id,
+        recipient=body.recipient,
+        duration_seconds=body.duration_seconds,
+    )
+    goal = build_lucky_bag_goal(profile)
+    try:
+        record = _LUCKY_BAG_MONITOR.start(profile=profile, goal=goal)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "feature_id": "lucky_bag",
+        "stage": "monitoring",
+        "monitor": record.snapshot(),
+        "profile": _lucky_bag_profile_payload(profile),
+        "goal": goal,
+        "notice": "监控已排队启动；用户仍需手动打开直播间，通知暂写入本地队列。",
+    }
+
+
+@app.get("/api/features/lucky-bag/monitors")
+def list_lucky_bag_monitors(
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    records = _LUCKY_BAG_MONITOR.list()
+    return {
+        "feature_id": "lucky_bag",
+        "monitors": [
+            {
+                "monitor": record.snapshot(),
+                "profile": _lucky_bag_profile_payload(record.profile),
+            }
+            for record in records
+        ],
+    }
+
+
+@app.get("/api/features/lucky-bag/{monitor_id}")
+def get_lucky_bag_monitor(
+    monitor_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    record = _lucky_bag_record_or_404(monitor_id)
+    return {
+        "feature_id": "lucky_bag",
+        "stage": "monitoring",
+        "monitor": record.snapshot(),
+        "profile": _lucky_bag_profile_payload(record.profile),
+        "goal": record.goal,
+    }
+
+
+@app.post("/api/features/lucky-bag/{monitor_id}/pause")
+def pause_lucky_bag_monitor(
+    monitor_id: str,
+    body: LuckyBagDeviceRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    record = _lucky_bag_record_or_404(monitor_id)
+    if body.device_id != record.profile.device_id:
+        raise HTTPException(status_code=409, detail="请求device_id与福袋监控设备不一致。")
+    try:
+        updated = _LUCKY_BAG_MONITOR.pause(monitor_id)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"feature_id": "lucky_bag", "monitor": updated.snapshot()}
+
+
+@app.post("/api/features/lucky-bag/{monitor_id}/resume")
+def resume_lucky_bag_monitor(
+    monitor_id: str,
+    body: LuckyBagDeviceRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    record = _lucky_bag_record_or_404(monitor_id)
+    if body.device_id != record.profile.device_id:
+        raise HTTPException(status_code=409, detail="请求device_id与福袋监控设备不一致。")
+    try:
+        updated = _LUCKY_BAG_MONITOR.resume(monitor_id)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"feature_id": "lucky_bag", "monitor": updated.snapshot()}
+
+
+@app.post("/api/features/lucky-bag/{monitor_id}/cancel")
+def cancel_lucky_bag_monitor(
+    monitor_id: str,
+    body: LuckyBagDeviceRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    record = _lucky_bag_record_or_404(monitor_id)
+    if body.device_id != record.profile.device_id:
+        raise HTTPException(status_code=409, detail="请求device_id与福袋监控设备不一致。")
+    try:
+        updated = _LUCKY_BAG_MONITOR.cancel(monitor_id)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"feature_id": "lucky_bag", "monitor": updated.snapshot()}
 
 @app.get("/api/device")
 def device() -> dict[str, Any]:

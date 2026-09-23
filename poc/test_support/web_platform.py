@@ -93,6 +93,8 @@ class _BaseApiEndToEndTests(unittest.TestCase):
         cls.no_browser_patcher.start()
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.original_web_output_dir = web_app.WEB_OUTPUT_DIR
+        cls.original_hardware_mode = web_app.runtime.hardware_mode
+        web_app.runtime.hardware_mode = False
         web_app.WEB_OUTPUT_DIR = Path(cls.temp_dir.name) / "web_output"
         web_app.WEB_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         web_app.runtime.controller = MockRobotController()
@@ -103,6 +105,7 @@ class _BaseApiEndToEndTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.client_context.__exit__(None, None, None)
         web_app.WEB_OUTPUT_DIR = cls.original_web_output_dir
+        web_app.runtime.hardware_mode = cls.original_hardware_mode
         cls.temp_dir.cleanup()
         cls.no_browser_patcher.stop()
     def setUp(self) -> None:

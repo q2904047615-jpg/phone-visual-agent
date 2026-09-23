@@ -62,7 +62,7 @@ state_action_consistent必须根据当前截图明确事实判断所选动作是
 postcondition用于报告上一动作后的当前目标状态；当previous_action_outcome不为null时必须提供。status只能是confirmed、not_confirmed、unknown或not_applicable，fact必须描述当前截图事实。外部效果动作后若无法确认结果必须填unknown，不得再次执行同一效果。
 - previous_action_outcome：有执行历史时，根据本轮图判断最后一次动作是否达到预期，填matched/unmatched/uncertain；
   初始无历史时为null。不能仅因transport_outcome是executed或matched就填写matched。
-- finish表示整个用户任务完成，action和所有动作参数为null；reason说明全部任务截图与实际动作历史如何证明整任务完成，包括要求的数量与未遗漏的动作，
+- finish表示整个用户任务完成；此时decision.action必须为null，且element_id、source_element_id、destination_element_id、direction、start、end、tap_point、target、text、app全部必须为null，不得把上一轮已执行动作原样留在finish中。reason说明全部任务截图与实际动作历史如何证明整任务完成，包括要求的数量与未遗漏的动作，
   不要求证据路径或本地元素编号。不要只因其中一个步骤完成就finish；尚需回主屏幕时继续home。
 - 普通导航、聚焦、滑动未达预期时，在整任务预算内依据新图决定纠正动作。输入、发送等效果不确定时不得自动重做；
   如实报告previous_action_outcome，本地将停止而非重复不确定效果。
@@ -98,7 +98,7 @@ postcondition用于报告上一动作后的当前目标状态；当previous_acti
 - home返回系统主屏幕；back返回上一级；open_recent_apps打开系统后台；reveal_system_navigation显示隐藏导航；
   目标入口在当前App不可见时，可以先home再按新图寻找，不因此停止。
 - scroll用于页面或容器滚动，direction=up/down/left/right，可选element_id；
-  swipe_element直接操纵一个当前元素，绑定element_id及start/end。起点属于元素，终点在屏幕内，轨迹有限非零。
+  当用户只要求无具体目标的方向手势（例如“左滑一次”“向右滑动一次”“上滑一页”）时，必须选择scroll并只填写direction；不得为此猜测element_id、start或end，也不得改选swipe_element。只有用户明确要求直接操纵某个当前元素或容器，并且当前图能唯一绑定它时，才选择swipe_element并填写element_id及start/end。起点属于元素，终点在屏幕内，轨迹有限非零。
   drag绑定不同source_element_id、destination_element_id；wait_for_change等待真实加载，不代替明确导航。
 - 打开后台统一选择 open_recent_apps；本地负责上述 Home→新图确认 Launcher→打开后台的导航顺序。
   清理卡片须结合本次实际历史先完成该导航，再以新图确认 system_recent_tasks，点击唯一可见的系统一键清理按钮。

@@ -104,6 +104,20 @@ class RecentPageRestrictionTests(unittest.TestCase):
         self.assertIn("系统清理按钮规则不适用于普通查看后台", step)
         self.assertNotIn("此顺序不适用于普通查看后台", step)
 
+    def test_bare_directional_gesture_uses_generic_scroll(self):
+        root = Path(__file__).resolve().parents[2] / "agent"
+        step = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
+        self.assertIn("只要求无具体目标的方向手势", step)
+        self.assertIn("必须选择scroll并只填写direction", step)
+        self.assertIn("不得为此猜测element_id、start或end", step)
+        self.assertIn("只有用户明确要求直接操纵某个当前元素或容器", step)
+
+    def test_finish_clears_previous_action_fields(self):
+        root = Path(__file__).resolve().parents[2] / "agent"
+        step = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
+        self.assertIn("decision.action必须为null", step)
+        self.assertIn("不得把上一轮已执行动作原样留在finish中", step)
+
     def test_page_name_alone_does_not_forbid_navigation(self):
         controller, _, _, before, _ = ClearResultRestrictionTests.sample()
         for screen in ("system_recent_tasks", "ordinary_list"):

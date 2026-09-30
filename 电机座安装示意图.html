@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>电机座与电机安装示意</title>
+  <style>
+    body { margin: 0; padding: 28px; background: #f4f7fb; color: #1e293b; font-family: system-ui, "Microsoft YaHei", sans-serif; line-height: 1.6; }
+    main { max-width: 1080px; margin: auto; padding: 30px; background: #fff; border-radius: 18px; box-shadow: 0 12px 35px #1e293b18; }
+    h1 { margin: 0 0 6px; font-size: 30px; }
+    .note { color: #64748b; }
+    .panel { margin: 24px 0; overflow: hidden; border: 1px solid #dbe3ee; border-radius: 14px; }
+    .panel-title { padding: 12px 18px; background: #eaf2ff; font-weight: 700; }
+    .diagram { padding: 22px; overflow: auto; }
+    .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    button { display: flex; gap: 14px; padding: 18px; text-align: left; background: #fff; border: 2px solid #dbe3ee; border-radius: 14px; cursor: pointer; font: inherit; }
+    button:hover, button.selected { border-color: #2563eb; background: #eff6ff; }
+    .letter { width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center; color: #fff; background: #2563eb; border-radius: 50%; font-weight: 800; }
+    button strong { display: block; font-size: 18px; }
+    button span:last-child { color: #475569; }
+    #answer { min-height: 30px; margin-top: 18px; color: #1d4ed8; font-weight: 700; }
+    @media (max-width: 700px) { body { padding: 10px; } main { padding: 18px; } h1 { font-size: 24px; } .choices { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>电机座 + 电机安装方向</h1>
+    <p class="note">俯视示意图，不按实际比例。方向确认前先不要把螺丝拧紧。</p>
+
+    <section class="panel">
+      <div class="panel-title">正确朝向：电机在外，电机轴沿外框长边方向</div>
+      <div class="diagram">
+        <svg viewBox="0 0 900 430" width="100%" role="img" aria-label="铝型材外框、电机座和电机安装方向示意图">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/>
+            </marker>
+          </defs>
+          <rect x="230" y="80" width="590" height="270" rx="8" fill="none" stroke="#8a98a8" stroke-width="26"/>
+          <text x="525" y="215" text-anchor="middle" font-size="25" fill="#334155">2020 铝型材外框</text>
+          <text x="525" y="250" text-anchor="middle" font-size="18" fill="#64748b">手机以后平放在框下方</text>
+
+          <path d="M235 105 L285 105 L285 180 L235 180 Z" fill="#f59e0b" stroke="#92400e" stroke-width="4"/>
+          <text x="310" y="153" font-size="20" fill="#92400e">B 面贴内侧</text>
+          <ellipse cx="250" cy="125" rx="8" ry="16" fill="#fff" stroke="#92400e" stroke-width="3"/>
+          <ellipse cx="250" cy="162" rx="8" ry="16" fill="#fff" stroke="#92400e" stroke-width="3"/>
+          <text x="75" y="235" font-size="18" fill="#92400e">两个椭圆长孔</text>
+          <line x1="190" y1="220" x2="242" y2="171" stroke="#92400e" stroke-width="3" marker-end="url(#arrow)"/>
+
+          <rect x="62" y="93" width="145" height="105" rx="12" fill="#475569" stroke="#0f172a" stroke-width="4"/>
+          <circle cx="134" cy="145" r="31" fill="#64748b" stroke="#cbd5e1" stroke-width="4"/>
+          <text x="134" y="85" text-anchor="middle" font-size="20" fill="#334155">NEMA17 电机在框外</text>
+          <line x1="207" y1="145" x2="405" y2="145" stroke="#2563eb" stroke-width="10"/>
+          <line x1="405" y1="145" x2="600" y2="145" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+          <text x="475" y="126" font-size="20" fill="#2563eb">电机轴 / 皮带方向</text>
+          <text x="475" y="100" font-size="17" fill="#2563eb">沿外框长边指向另一端</text>
+
+          <line x1="230" y1="388" x2="820" y2="388" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+          <text x="525" y="420" text-anchor="middle" font-size="20" fill="#2563eb">Y 方向（长边方向）</text>
+        </svg>
+      </div>
+    </section>
+
+    <h2>现在只做一个尺寸测试</h2>
+    <p>把手里的 <strong>M5×6 无头紧定螺丝</strong>当作量规，尝试从电机座的椭圆长孔穿过去。不要拧，只看能否顺畅穿过。</p>
+
+    <div class="choices">
+      <button type="button" data-answer="M5 能穿过：后续买 M5×10 带头螺丝，现有 M5 弹性 T 螺母可以继续用。">
+        <span class="letter">A</span><span><strong>M5 能穿过</strong>后续采用 M5 螺丝方案。</span>
+      </button>
+      <button type="button" data-answer="M5 穿不过：长孔大概率是 M4，需要改用 M4 螺丝和 M4 弹性 T 螺母。">
+        <span class="letter">B</span><span><strong>M5 穿不过</strong>后续采用 M4 螺丝方案。</span>
+      </button>
+    </div>
+    <p id="answer">点击 A 或 B 后，把结果告诉我。</p>
+  </main>
+  <script>
+    document.querySelectorAll('button').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('button').forEach((item) => item.classList.remove('selected'));
+        button.classList.add('selected');
+        document.getElementById('answer').textContent = button.dataset.answer;
+      });
+    });
+  </script>
+</body>
+</html>

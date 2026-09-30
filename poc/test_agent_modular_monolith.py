@@ -102,6 +102,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         orchestrator_path = (
             root / "agent" / "application" / "universal_agent_orchestrator.py"
         )
+        components_path = (
+            root / "agent" / "application" / "orchestration_components.py"
+        )
         tree = ast.parse(orchestrator_path.read_text(encoding="utf-8"))
         orchestrator = next(
             node
@@ -109,6 +112,19 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             if isinstance(node, ast.ClassDef)
             and node.name == "UniversalAgentOrchestrator"
         )
+
+        components_tree = ast.parse(components_path.read_text(encoding="utf-8"))
+        component_methods = [
+            method
+            for component in components_tree.body
+            if isinstance(component, ast.ClassDef)
+            and component.name in {
+                "ObservationDecisionCoordinator",
+                "ConfirmationExecutionCoordinator",
+            }
+            for method in component.body
+            if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
 
         owners: dict[str, list[str]] = {
             "_decide": [],
@@ -132,9 +148,24 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 if name in owners:
                     owners[name].append(method.name)
 
+        component_owners: dict[str, list[str]] = {"_decide": []}
+        for method in component_methods:
+            for node in ast.walk(method):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else ""
+                )
+                if name in component_owners:
+                    component_owners[name].append(method.name)
+
         self.assertEqual(
-            ["_observe_and_decide", "_confirm_one_locked"],
-            owners["_decide"],
+            ["observe_and_decide", "confirm_one_locked"],
+            component_owners["_decide"],
         )
         self.assertEqual(
             ["_stage_decision"],
@@ -214,6 +245,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parent
         expected = {
             "agent_api_cli.py",
+            "start_verified.py",  # Verified local API launch tool, not a domain entry.
             "capture_click_burst.py",
             "eval_qwen_visual_decision.py",
             "eval_task_sequences.py",
@@ -257,6 +289,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
         expected = {
             "agent_api_cli.py",
+            "start_verified.py",  # Verified local API launch tool, not a domain entry.
             "capture_click_burst.py",
             "eval_qwen_visual_decision.py",
             "eval_task_sequences.py",

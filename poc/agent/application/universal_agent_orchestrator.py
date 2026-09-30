@@ -52,6 +52,18 @@ def _is_zero_action_stale_frame_fault(exc: GenericActionAdapterError) -> bool:
     return exc.physical_actions == 0 and str(exc).startswith(_STALE_FRAME_FAILURE_PREFIXES)
 
 
+def _is_zero_action_reobservation_fault(exc: GenericActionAdapterError) -> bool:
+    """Return whether the failed attempt can be retried with a fresh observation.
+
+    A zero-action model/observation failure has not consumed the one-shot action
+    authority.  Keep it resumable so a transient provider response or stale
+    frame cannot turn an otherwise valid task into a terminal failure.  Device
+    execution errors remain terminal when there is no observation evidence.
+    """
+
+    return _is_zero_action_stale_frame_fault(exc) or bool(exc.observation_errors)
+
+
 def _action_digest(action: Any) -> str:
     reject_if(action is None, UniversalAgentOrchestratorError("动作摘要缺少语义动作。"))
     payload = action.to_dict() if callable(getattr(action, 'to_dict', None)) else action
@@ -77,6 +89,7 @@ class ObservationBridge:
         return GenericIntentDraft(understood=True, app_id="current_surface", app_name="当前设备",
             objective=session.raw_goal, entities={
                 "task_id": session.session_id, "history": _model_history(session),
+                "conversation": [dict(item) for item in session.conversation],
                 "exact_input_text": session.exact_input_text,
                 "required_action_kind": session.exact_action_kind,
                 "exact_target_label": session.exact_target_label,
@@ -101,6 +114,10 @@ class UniversalAgentOrchestrator:
         self.trusted_observation_factory = trusted_observation_factory
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry
+        self._observation_coordinator = ObservationDecisionCoordinator()
+        self._confirmation_coordinator = ConfirmationExecutionCoordinator()
+        self._execution_coordinator = AutonomousExecutionCoordinator()
+        self._lifecycle_coordinator = SessionLifecycleCoordinator()
 
     def _vision_usage_scope(self, ledger: VisionSessionUsageLedger | None):
         provider = getattr(self.qwen_observer, 'provider', None)
@@ -134,6 +151,90 @@ class UniversalAgentOrchestrator:
         session.confirmation_authority = None
 
     @staticmethod
+    def _record_qwen_reply(session: UniversalAgentSessionState, model_decision: Mapping[str, Any]) -> dict[str, Any]:
+        """Keep the same-response natural reply separate from canonical action fields."""
+        decision = dict(model_decision)
+        reply = str(decision.pop("_qwen_reply", "") or "").strip()
+        if reply:
+            session.qwen_reply = reply
+            session.conversation.append({"role": "assistant", "content": reply})
+        return decision
+
+    def _record_uncertain_execution(self, session: UniversalAgentSessionState, *, authority: ConfirmationAuthority,
+        decision: Any, physical_actions: int, error: Exception) -> None:
+        """Persist a dispatched action whose post-action result is unavailable.
+
+        The consumed authority is deliberately not recreated.  Recording the
+        dispatch before asking for a fresh observation gives Qwen the factual
+        history while preventing the local loop from replaying a potentially
+        effective action (send, submit, delete, etc.).
+        """
+
+        action = decision.proposal.action
+        error_text = str(error).strip() or type(error).__name__
+        metadata = dict(getattr(error, 'execution_metadata', {}) or {})
+        metadata.update({'uncertain_effect': True, 'failure_stage': 'post_action_observation',
+            'error': error_text})
+        executed_revision = session.step_number
+        session.step_number += 1
+        execution = {
+            'requested_action': action.to_dict(),
+            'resolved_action': action.to_dict(),
+            'physical_actions': int(physical_actions),
+            'action_outcome': 'uncertain',
+            'execution_metadata': metadata,
+            'verification_errors': list(getattr(error, 'verification_errors', ()) or ()),
+            'after_scene': {'summary': f'动作已派发，但动作后观察失败：{error_text}'},
+            'evidence': list(getattr(error, 'evidence', ()) or ()),
+            'after_frame_paths': [],
+        }
+        session.history.append({
+            'step_number': executed_revision,
+            'task_revision': authority.revision,
+            'step_id': authority.step_id,
+            'effect_ids': list(authority.effect_ids),
+            'confirmation_receipt': {'authoritative': True, 'consumed': True, 'scope': authority.scope()},
+            'qwen_decision': UniversalAgentSessionState._serialize(decision),
+            'execution': execution,
+            'before_observation_id': getattr(session.trusted_observation, 'observation_id', None),
+            'before_fingerprint': getattr(session.trusted_observation, 'fingerprint', None),
+            'after_observation_id': None,
+            'after_fingerprint': None,
+            'visual_outcome': 'uncertain',
+        })
+        self._remember(session, getattr(error, 'evidence', ()))
+        session.last_post_action_transition = {
+            'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+            'transition_kind': 'uncertain_action_reobservation',
+            'execution_outcome': 'uncertain',
+            'visual_outcome': 'uncertain',
+            'physical_actions': session.physical_actions,
+            'error': error_text,
+        }
+
+    def _mark_last_execution_uncertain(self, session: UniversalAgentSessionState, error: Exception) -> None:
+        """Downgrade a dispatched result when its local Qwen binding fails."""
+
+        if not session.history:
+            return
+        entry = session.history[-1]
+        execution = dict(entry.get('execution') or {})
+        metadata = dict(execution.get('execution_metadata') or {})
+        error_text = str(error).strip() or type(error).__name__
+        metadata.update({'uncertain_effect': True, 'failure_stage': 'post_action_decision_binding',
+            'error': error_text})
+        execution.update({'action_outcome': 'uncertain', 'execution_metadata': metadata,
+            'after_scene': {'summary': f'动作已派发，但动作后决策绑定失败：{error_text}'}})
+        entry['execution'] = execution
+        entry['visual_outcome'] = 'uncertain'
+        session.last_post_action_transition = {
+            'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+            'transition_kind': 'uncertain_action_reobservation',
+            'execution_outcome': 'uncertain', 'visual_outcome': 'uncertain',
+            'physical_actions': session.physical_actions, 'error': error_text,
+        }
+
+    @staticmethod
     def _available_action_kinds(session: UniversalAgentSessionState) -> frozenset[str]:
         provider = getattr(session.adapter, 'supported_action_kinds', None)
         actions = CANONICAL_ACTION_KINDS if not callable(provider) else frozenset(str(item or '').strip()
@@ -150,18 +251,10 @@ class UniversalAgentOrchestrator:
         return frozenset(actions)
 
     def _write_snapshot(self, session: UniversalAgentSessionState) -> None:
-        if session.vision_usage is not None:
-            self._remember(session, session.evidence_store.write_json('qwen_usage.json',
-                session.vision_usage.to_dict()))
-        self._remember(session, session.evidence_store.write_session(session))
-        self._remember(session, session.evidence_store.write_report({'mode': 'qwen_same_response_single_loop',
-            'policy_version': CANONICAL_SELECTION_RECEIPT_VERSION, 'session': session.snapshot()}))
+        return self._lifecycle_coordinator.write_snapshot(self, session)
 
     def _best_effort_snapshot(self, session: UniversalAgentSessionState) -> None:
-        try:
-            self._write_snapshot(session)
-        except Exception:
-            pass
+        return self._lifecycle_coordinator.best_effort_snapshot(self, session)
 
     def _build_observation(self, session: UniversalAgentSessionState, *, scene: Any, frames: list[Any] | tuple[Any,
         ...], observation_id: str | None=None) -> Any:
@@ -234,11 +327,30 @@ class UniversalAgentOrchestrator:
         self._validate_decision_binding(session, session.trusted_observation, decision)
         session.qwen_decision = decision
         self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, decision))
-        if (executed_effect and decision.previous_action_outcome != "matched"
-                and (decision.proposal.action is None
-                    or action_effect_kind(decision.proposal.action) != "")):
+        uncertain_history = bool(session.history and (
+            str(session.history[-1].get('execution', {}).get('action_outcome') or '') == 'uncertain'
+            or str(session.history[-1].get('visual_outcome') or '') == 'uncertain'
+        ))
+        previous_effect = ""
+        if uncertain_history:
+            effect_ids = session.history[-1].get('effect_ids') or []
+            if isinstance(effect_ids, (list, tuple)) and effect_ids:
+                previous_effect = str(effect_ids[0] or '').strip()
+        current_effect = action_effect_kind(decision.proposal.action)
+        if (uncertain_history and previous_effect and current_effect == previous_effect
+                and decision.previous_action_outcome != "matched"):
             self._clear_action(session)
-            self._set_status(session, "failed", "本次效果已执行，但新图未确认结果；不自动重复效果。")
+            session.auto_pause_reason = (
+                "上一次外部效果的结果仍不确定，Qwen再次选择相同效果；已暂停，避免重复发送或提交。"
+            )
+            self._set_status(session, "paused", session.auto_pause_reason)
+            return decision
+        if ((executed_effect or uncertain_history) and decision.previous_action_outcome != "matched"
+                and (decision.proposal.action is None
+                    or current_effect != "")):
+            self._clear_action(session)
+            self._set_status(session, "needs_reobservation",
+                "本次效果已执行，但新图未确认结果；保留不确定效果并重新观察，不自动重复效果。")
             return decision
         if decision.proposal.status == "finish":
             self._clear_action(session)
@@ -269,23 +381,7 @@ class UniversalAgentOrchestrator:
         return True
 
     def _observe_and_decide(self, session: UniversalAgentSessionState) -> Any:
-        self._clear_action(session)
-        if not self._reserve_observation(session):
-            return None
-        session.goal_draft = self.bridge.goal_draft(session)
-        self._set_status(session, "observing")
-        available = self._prepare_observation_actions(session)
-        scene, frames, paths, model_decision = session.adapter.capture_scene(session.goal_draft,
-            evidence_dir=session.run_dir, prefix=f"before_step_{session.step_number}_frame",
-            available_action_kinds=available)
-        reject_if(not isinstance(model_decision, Mapping),
-            UniversalAgentOrchestratorError("Qwen当前观察缺少同响应action/finish。"))
-        self._remember(session, paths)
-        observation = self._build_observation(session, scene=scene, frames=frames)
-        decision = self._decide(session, frames=frames, observation=observation, model_decision=model_decision)
-        self._stage_decision(session, decision=decision)
-        self._write_snapshot(session)
-        return decision
+        return self._observation_coordinator.observe_and_decide(self, session)
 
     def _current_confirmation_scope(self, session: UniversalAgentSessionState) -> dict[str, Any]:
         observation, decision = session.trusted_observation, session.qwen_decision
@@ -357,85 +453,7 @@ class UniversalAgentOrchestrator:
         return cls._normalize_scope(value, required=required, digest_key='intent_digest', label='效果确认scope')
 
     def _confirm_one_locked(self, session: UniversalAgentSessionState, confirmation: Mapping[str, Any]) -> Any:
-        authority = self._consume_confirmation(session, confirmation)
-        observation, decision = session.trusted_observation, session.qwen_decision
-        assert observation is not None and decision is not None
-        if not self._reserve_observation(session,
-            will_execute=decision.proposal.action.action != 'wait_for_change'):
-            return None
-        self._set_status(session, 'executing_one_action')
-        before_actions = session.physical_actions
-        session.goal_draft = self.bridge.goal_draft(session)
-        try:
-            result = session.adapter.execute(requested_action=decision.proposal.action,
-                planned_scene=observation.scene, goal=session.goal_draft, confirmed=True,
-                evidence_dir=session.run_dir, planned_frames=session.trusted_frames,
-                action_authority=authority,
-                available_action_kinds=session.observation_action_kinds,
-                post_action_available_action_kinds=session.observation_action_kinds)
-        except GenericActionAdapterError as exc:
-            session.physical_actions += max(0, int(exc.physical_actions))
-            self._remember(session, exc.evidence)
-            self._set_status(session,
-                'needs_reobservation' if _is_zero_action_stale_frame_fault(exc) else 'failed', str(exc))
-            self._best_effort_snapshot(session)
-            raise
-
-        self._remember(session, result.evidence, result.after_frame_paths)
-        physical = int(result.physical_actions)
-        wait = result.resolved_action.kind == 'wait_for_change'
-        reject_if(physical != 1 and not (wait and physical == 0),
-            UniversalAgentOrchestratorError(f'一次动作返回了无效物理动作数：{physical}。'))
-        session.physical_actions += physical
-        reject_if(_action_digest(result.requested_action) != authority.action_digest
-            or result.requested_action.node_id != authority.decision_node_id
-            or result.rebound_action.node_id != authority.decision_node_id
-            or result.resolved_action.node_id != authority.decision_node_id
-            or result.resolved_action.kind != result.rebound_action.action,
-            UniversalAgentOrchestratorError('执行结果没有绑定已消费的canonical动作。'))
-        outcome = str(result.action_outcome or '')
-        errors = tuple(str(item) for item in result.verification_errors if str(item).strip())
-        reject_if(outcome != 'executed' or errors,
-            UniversalAgentOrchestratorError('执行器没有确认本次物理动作及必要硬校验。'))
-        after_frames = tuple(result.after_frames)
-        after_paths = tuple(str(item).strip() for item in result.after_frame_paths)
-        reject_if(len(after_frames) < 4 or len(after_paths) != len(after_frames) or any(not item for item in after_paths),
-            UniversalAgentOrchestratorError('动作后缺少完整四帧新观察。'))
-
-        session.step_number += 1
-        new_observation = self._build_observation(session, scene=result.after_scene, frames=after_frames,
-            observation_id=f'obs_{uuid.uuid4().hex}')
-        session.history.append({'step_number': session.step_number - 1, 'task_revision': authority.revision,
-            'step_id': authority.step_id, 'effect_ids': list(authority.effect_ids),
-            'confirmation_receipt': {'authoritative': True, 'consumed': True, 'scope': authority.scope()},
-            'qwen_decision': UniversalAgentSessionState._serialize(decision), 'execution': result.to_dict(),
-            'before_observation_id': observation.observation_id, 'before_fingerprint': observation.fingerprint,
-            'after_observation_id': new_observation.observation_id,
-            'after_fingerprint': new_observation.fingerprint})
-        reject_if(not isinstance(result.after_model_decision, Mapping),
-            UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
-        session.recent_navigation.record_execution(result.resolved_action.kind)
-        next_decision = self._decide(session, frames=after_frames, observation=new_observation,
-            model_decision=result.after_model_decision)
-        session.history[-1]["visual_outcome"] = next_decision.previous_action_outcome
-        self._remember(session, session.evidence_store.write_verification(session.step_number - 1,
-            {'execution_outcome': outcome, 'visual_outcome': next_decision.previous_action_outcome,
-            'verification_errors': list(errors), 'after_observation_id': new_observation.observation_id,
-            'after_fingerprint': new_observation.fingerprint}))
-        self._stage_decision(session, decision=next_decision,
-            executed_effect=bool(physical == 1 and authority.effect_ids))
-        transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
-            'transition_kind': 'new_screenshot_decision', 'execution_outcome': outcome,
-            'visual_outcome': next_decision.previous_action_outcome,
-            'physical_actions_before': before_actions, 'physical_actions': session.physical_actions,
-            'next_decision_status': next_decision.proposal.status,
-            'after_observation_id': new_observation.observation_id,
-            'after_fingerprint': new_observation.fingerprint}
-        session.last_post_action_transition = transition
-        self._remember(session, session.evidence_store.write_post_action_transition(session.step_number - 1,
-            transition))
-        self._write_snapshot(session)
-        return result
+        return self._confirmation_coordinator.confirm_one_locked(self, session, confirmation)
 
     def confirm_one(self, session: UniversalAgentSessionState, confirmation: Mapping[str, Any]) -> Any:
         reject_if(self.device_registry.active_session(session.device_id) != session.session_id,
@@ -454,8 +472,18 @@ class UniversalAgentOrchestrator:
             self._release_if_terminal(session)
 
     def _handle_operation_failure(self, session: UniversalAgentSessionState, error: Exception) -> None:
-        # Only the classified zero-action stale frame fault retains a resumable lease.
-        if isinstance(error, GenericActionAdapterError) and _is_zero_action_stale_frame_fault(error):
+        # Never overwrite a terminal result (or a user pause/cancel) with a
+        # secondary exception raised while unwinding the operation.
+        if session.status in self.device_registry.TERMINAL_STATUSES:
+            return
+        if session.pause_requested.is_set():
+            self._apply_pause_request(session)
+            return
+        # Re-observation is a resumable state.  The caller may have already
+        # recorded evidence and consumed the action authority; do not clear it
+        # into a terminal failure here.
+        if session.status in {'needs_reobservation', 'paused', 'budget_paused'}:
+            self._best_effort_snapshot(session)
             return
         self._clear_action(session)
         self._set_status(session, 'failed', str(error).strip() or type(error).__name__)
@@ -531,146 +559,37 @@ class UniversalAgentOrchestrator:
         finally:
             self._release_if_terminal(session)
 
-    def run_autonomous_safe_loop(self, session: UniversalAgentSessionState, *, max_physical_actions: int | None=None,
-        max_observations: int | None=None) -> dict[str, Any]:
-        # Bad caller configuration is not a task failure and must not consume its scope.
-        TaskExecutionBudget(
-            max_physical_actions=session.execution_budget.max_physical_actions if max_physical_actions is None else max_physical_actions,
-            max_observations=session.execution_budget.max_observations if max_observations is None else max_observations)
-        reject_if(self.device_registry.active_session(session.device_id) != session.session_id,
-            UniversalAgentOrchestratorError('当前会话不再拥有设备。'))
-        start_actions = session.physical_actions
-        iterations = 0
-        session.automatic_loop_enabled = True
-        session.auto_pause_reason = ''
-        try:
-            with self._vision_usage_scope(session.vision_usage), self.device_registry.device_lock(session.device_id):
-                session.execution_budget.configure(max_physical_actions=max_physical_actions,
-                    max_observations=max_observations)
-                if session.status in {'budget_paused', 'paused'}:
-                    session.pause_requested.clear()
-                    self._set_status(session, 'needs_reobservation')
-                while session.status != 'budget_paused':
-                    if self._apply_pause_request(session):
-                        break
-                    if session.status in self.device_registry.TERMINAL_STATUSES:
-                        break
-                    if session.status == 'awaiting_effect_confirmation':
-                        session.auto_pause_reason = '登录或付款目标等待用户确认。'
-                        break
-                    if session.status == 'needs_reobservation':
-                        self._observe_and_decide(session)
-                    elif session.status == 'awaiting_confirmation':
-                        authority = session.confirmation_authority
-                        reject_if(authority is None or authority.consumed,
-                            UniversalAgentOrchestratorError('待执行动作缺少一次性scope。'))
-                        try:
-                            self._confirm_one_locked(session, authority.scope())
-                        except GenericActionAdapterError as exc:
-                            # No device action occurred and the adapter already classified
-                            # the old screenshot as stale.  Discard that action and let the
-                            # next iteration obtain one new screenshot/Qwen decision.
-                            if exc.physical_actions != 0 or session.status != 'needs_reobservation':
-                                raise
-                            self._clear_action(session)
-                    else:
-                        session.auto_pause_reason = f'当前状态不能自动推进：{session.status}。'
-                        break
-                    iterations += 1
-                self._apply_pause_request(session)
-                session.automatic_loop_enabled = False
-                self._write_snapshot(session)
-        except Exception as exc:
-            session.automatic_loop_enabled = False
-            self._clear_action(session)
-            self._set_status(session, 'failed', str(exc).strip() or type(exc).__name__)
-            self._best_effort_snapshot(session)
-            raise
-        finally:
-            session.automatic_loop_enabled = False
-            self._release_if_terminal(session)
-        return {'physical_actions': session.physical_actions - start_actions, 'iterations': iterations,
-            'status': session.status, 'pause_reason': session.auto_pause_reason}
+    def run_autonomous_safe_loop(self, session: UniversalAgentSessionState, *, max_physical_actions: int | None=None, max_observations: int | None=None) -> dict[str, Any]:
+        return self._execution_coordinator.run(self, session, max_physical_actions=max_physical_actions, max_observations=max_observations)
 
     def start(self, *, session_id: str, raw_goal: str, exact_input_text: str | None=None,
         exact_action_kind: str | None=None, exact_target_label: str='', device_id: str,
-        run_dir: Path, max_physical_actions: int=DEFAULT_DEVICE_ACTION_BUDGET,
+        run_dir: Path, visual_reference_paths: tuple[Path, ...] = (),
+        conversation: tuple[dict[str, str], ...] = (),
+        max_physical_actions: int=DEFAULT_DEVICE_ACTION_BUDGET,
         max_observations: int=DEFAULT_OBSERVATION_BUDGET) -> UniversalAgentSessionState:
-        budget = TaskExecutionBudget(max_physical_actions=max_physical_actions, max_observations=max_observations)
-        resolved_session = str(session_id or '').strip()
-        resolved_device = str(device_id or '').strip()
-        self.device_registry.reserve(resolved_device, resolved_session)
-        try:
-            ledger = VisionSessionUsageLedger(session_id=resolved_session)
-            with self.device_registry.device_lock(resolved_device), self._vision_usage_scope(ledger):
-                adapter = self.adapter_factory(resolved_device)
-                store = self.evidence_store_factory(Path(run_dir))
-                session = UniversalAgentSessionState(session_id=resolved_session,
-                    raw_goal=str(raw_goal or ''), device_id=resolved_device, run_dir=Path(run_dir),
-                    adapter=adapter, evidence_store=store, vision_usage=ledger, execution_budget=budget,
-                    local_exact_input_authority=exact_input_text is not None, exact_input_text=exact_input_text,
-                    exact_action_kind=exact_action_kind or self.required_action_kind, exact_target_label=exact_target_label)
-                reject_if(not session.session_id or not session.raw_goal or not session.device_id,
-                    UniversalAgentOrchestratorError('启动Agent需要session_id、目标和device_id。'))
-                reject_if(exact_input_text is not None and exact_action_kind is not None,
-                    UniversalAgentOrchestratorError('exact_input_text与exact_action_kind不能同时使用。'))
-                try:
-                    self._observe_and_decide(session)
-                    self._write_snapshot(session)
-                except Exception as exc:
-                    self._set_status(session, 'failed', str(exc))
-                    self._best_effort_snapshot(session)
-                    raise
-        except Exception:
-            self.device_registry.release(resolved_device, resolved_session)
-            raise
-        self._release_if_terminal(session)
-        return session
+        return self._lifecycle_coordinator.start(self, session_id=session_id, raw_goal=raw_goal,
+            exact_input_text=exact_input_text, exact_action_kind=exact_action_kind,
+            exact_target_label=exact_target_label, device_id=device_id, run_dir=run_dir,
+            visual_reference_paths=visual_reference_paths, conversation=conversation,
+            max_physical_actions=max_physical_actions, max_observations=max_observations)
 
     def _terminate(self, session: UniversalAgentSessionState, *, status: str, message: str) -> None:
-        try:
-            with self.device_registry.device_lock(session.device_id):
-                self._clear_action(session)
-                if session.effect_confirmation_authority is not None:
-                    session.effect_confirmation_authority.consumed = True
-                    session.effect_confirmation_authority.invalid_reason = status
-                self._set_status(session, status, message)
-                self._write_snapshot(session)
-        finally:
-            self.device_registry.release(session.device_id, session.session_id)
+        return self._lifecycle_coordinator.terminate(self, session, status=status, message=message)
 
     def _apply_pause_request(self, session: UniversalAgentSessionState) -> bool:
-        if not session.pause_requested.is_set() or session.status in self.device_registry.TERMINAL_STATUSES:
-            return False
-        self._clear_action(session)
-        if session.effect_confirmation_authority is not None:
-            session.effect_confirmation_authority.consumed = True
-            session.effect_confirmation_authority.invalid_reason = 'paused'
-            session.effect_confirmation_authority = None
-        session.auto_pause_reason = '用户已暂停；恢复时重新观察。'
-        self._set_status(session, 'paused')
-        self._write_snapshot(session)
-        return True
+        return self._lifecycle_coordinator.apply_pause_request(self, session)
 
     def pause(self, session: UniversalAgentSessionState) -> None:
-        if session.status in self.device_registry.TERMINAL_STATUSES:
-            return
-        session.pause_requested.set()
-        # Signal without waiting behind the lock held by an in-flight action/loop.
-        # That operation applies the pause only after recording its real result.
-        if session.automatic_loop_enabled or session.status in {'observing', 'executing_one_action'}:
-            return
-        with self.device_registry.device_lock(session.device_id):
-            self._apply_pause_request(session)
+        return self._lifecycle_coordinator.pause(self, session)
 
     def cancel(self, session: UniversalAgentSessionState) -> None:
-        self._terminate(session, status='cancelled', message='用户已取消任务。')
+        return self._lifecycle_coordinator.cancel(self, session)
 
     def invalidate_confirmation(self, session: UniversalAgentSessionState, *, reason: str) -> None:
-        if self.device_registry.active_session(session.device_id) != session.session_id:
-            return
-        with self.device_registry.device_lock(session.device_id):
-            self._clear_action(session)
-            self._set_status(session, 'needs_reobservation',
-                f'设备状态变化，旧动作已失效：{str(reason or "unknown")}。')
-            self._write_snapshot(session)
+        return self._lifecycle_coordinator.invalidate_confirmation(self, session, reason=reason)
+
+from agent.application.orchestration_components import (
+    ObservationDecisionCoordinator, ConfirmationExecutionCoordinator,
+    AutonomousExecutionCoordinator, SessionLifecycleCoordinator,
+)

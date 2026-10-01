@@ -137,6 +137,29 @@ class GenericActionExecutionResult:
         return value
 
 
+@dataclass(frozen=True)
+class _ExecutionPreparation:
+    evidence_prefix: str
+    before_frames: tuple[Image.Image, ...]
+    before_paths: tuple[str, ...]
+    before_scene: UIScene
+    rebound_action: SemanticAction
+    resolved_action: ResolvedSemanticAction
+    orientation_credential: OrientationCredential | None
+    clear_authorization: Callable[[], Any] | None
+
+
+@dataclass(frozen=True)
+class _PostActionObservation:
+    after_scene: UIScene
+    after_frames: tuple[Image.Image, ...]
+    after_frame_paths: tuple[str, ...]
+    all_after_paths: tuple[str, ...]
+    observation_errors: tuple[str, ...]
+    controller_transition_evidence: tuple[str, ...]
+    after_model_decision: Mapping[str, Any]
+
+
 class GenericSingleActionAdapter:
     """The only generic bridge from a verified scene to one robot action."""
 
@@ -478,8 +501,7 @@ class GenericSingleActionAdapter:
         confirmed: bool,
         evidence_dir: Path | None,
         planned_frames: tuple[Image.Image, ...] | list[Image.Image],
-    ) -> tuple[str, list[Image.Image], tuple[str, ...], UIScene, SemanticAction,
-               ResolvedSemanticAction, OrientationCredential | None, Callable[[], Any] | None]:
+    ) -> _ExecutionPreparation:
         reject_if(confirmed is not True, GenericActionAdapterError("必须明确确认当前这一个语义动作。"))
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
@@ -507,8 +529,16 @@ class GenericSingleActionAdapter:
         )
         orientation_credential, clear_authorization = self._arm_physical_execution(resolved, before,
             before_frames, before_paths)
-        return (evidence_prefix, before_frames, before_paths, before, requested_action,
-            resolved, orientation_credential, clear_authorization)
+        return _ExecutionPreparation(
+            evidence_prefix=evidence_prefix,
+            before_frames=tuple(before_frames),
+            before_paths=before_paths,
+            before_scene=before,
+            rebound_action=requested_action,
+            resolved_action=resolved,
+            orientation_credential=orientation_credential,
+            clear_authorization=clear_authorization,
+        )
 
     @staticmethod
     def _executor_point(point: NormalizedPoint | None) -> tuple[int, int] | None:
@@ -627,7 +657,7 @@ class GenericSingleActionAdapter:
         evidence_prefix: str,
         available_action_kinds: frozenset[str] | None,
         post_action_available_action_kinds: frozenset[str] | None,
-    ) -> tuple[UIScene, tuple[Image.Image, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], dict[str, Any]]:
+    ) -> _PostActionObservation:
         try:
             (
                 after,
@@ -661,9 +691,14 @@ class GenericSingleActionAdapter:
                 f'单步动作后验证失败：{exc}', physical_actions=physical_actions, evidence=evidence,
                 observation_errors=tuple(getattr(exc, 'observation_errors', ())), verification_errors=tuple(getattr(exc,
                 'verification_errors', ())), execution_metadata=execution_metadata) from exc
-        return (
-            after, after_frames, after_frame_paths, all_after_paths,
-            observation_errors, controller_transition_evidence, after_model_decision,
+        return _PostActionObservation(
+            after_scene=after,
+            after_frames=after_frames,
+            after_frame_paths=after_frame_paths,
+            all_after_paths=all_after_paths,
+            observation_errors=observation_errors,
+            controller_transition_evidence=controller_transition_evidence,
+            after_model_decision=after_model_decision,
         )
 
     @staticmethod
@@ -701,44 +736,48 @@ class GenericSingleActionAdapter:
         available_action_kinds: frozenset[str] | None=None,
         post_action_available_action_kinds: frozenset[str] | None=None
         ) -> GenericActionExecutionResult:
-        (
-            evidence_prefix, before_frames, before_paths, before, rebound, resolved,
-            orientation_credential, clear_authorization,
-        ) = self._prepare_execution(
+        preparation = self._prepare_execution(
             requested_action, planned_scene, confirmed=confirmed, evidence_dir=evidence_dir,
             planned_frames=planned_frames,
         )
         text_scope = self._mint_text_scope(
-            resolved, requested_action, before, action_authority, before_paths
+            preparation.resolved_action, requested_action, preparation.before_scene,
+            action_authority, preparation.before_paths
         )
         physical_actions, robot_result, hardware_receipt, execution_metadata = self._execute_device_action(
-            resolved, text_scope, clear_authorization, before_paths
+            preparation.resolved_action, text_scope, preparation.clear_authorization,
+            preparation.before_paths
         )
-        (
-            after, after_frames, after_frame_paths, all_after_paths,
-            observation_errors, controller_transition_evidence, after_model_decision,
-        ) = self._observe_after_execution(
-            goal, requested_action, resolved, action_authority, physical_actions, execution_metadata,
-            before, before_frames, before_paths, evidence_dir, evidence_prefix,
+        observation = self._observe_after_execution(
+            goal, requested_action, preparation.resolved_action, action_authority,
+            physical_actions, execution_metadata, preparation.before_scene,
+            list(preparation.before_frames), preparation.before_paths, evidence_dir,
+            preparation.evidence_prefix,
             available_action_kinds, post_action_available_action_kinds,
         )
         execution_metadata = self._verify_effect_finish(
-            action_authority, after_model_decision, before_frames, after_frames,
-            before_paths, all_after_paths, physical_actions, execution_metadata,
+            action_authority, observation.after_model_decision, list(preparation.before_frames),
+            observation.after_frames, preparation.before_paths, observation.all_after_paths,
+            physical_actions, execution_metadata,
         )
-        return GenericActionExecutionResult(requested_action=requested_action, rebound_action=rebound,
-            resolved_action=resolved, before_scene=before, after_scene=after,
+        return GenericActionExecutionResult(requested_action=requested_action,
+            rebound_action=preparation.rebound_action,
+            resolved_action=preparation.resolved_action, before_scene=preparation.before_scene,
+            after_scene=observation.after_scene,
             planned_scene_fingerprint=planned_scene.fingerprint,
             confirmation_frame_identity_verified=False,
             confirmation_frame_delta=None, physical_actions=physical_actions,
             primary_input_confirmation_reused=False,
             action_outcome='executed', verification_errors=(),
             robot_result=robot_result, hardware_receipt=hardware_receipt, execution_metadata=execution_metadata,
-            evidence=before_paths + all_after_paths,
-            after_frames=after_frames, after_frame_paths=after_frame_paths, observation_errors=observation_errors,
-            controller_transition_evidence=controller_transition_evidence,
-            after_model_decision=after_model_decision, before_frames=before_frames,
-            before_frame_paths=before_paths, orientation_credential=orientation_credential)
+            evidence=preparation.before_paths + observation.all_after_paths,
+            after_frames=observation.after_frames, after_frame_paths=observation.after_frame_paths,
+            observation_errors=observation.observation_errors,
+            controller_transition_evidence=observation.controller_transition_evidence,
+            after_model_decision=observation.after_model_decision,
+            before_frames=preparation.before_frames,
+            before_frame_paths=preparation.before_paths,
+            orientation_credential=preparation.orientation_credential)
 
 
     def _save_frames(self, frames: list[Image.Image], evidence_dir: Path | None, prefix: str) -> tuple[str, ...]:

@@ -91,6 +91,16 @@ class ConfirmationExecutionCoordinator:
             host._best_effort_snapshot(session)
             raise
 
+        def decide_after_action(frames, new_observation, model_decision):
+            return host._decide(session, frames=frames, observation=new_observation,
+                model_decision=model_decision)
+
+        return self._record_executed_action_result(
+            host, session, authority, decision, observation, result, before_actions,
+            decide_after_action)
+
+    def _record_executed_action_result(self, host, session, authority, decision, observation,
+        result, before_actions, decide_after_action):
         host._remember(session, result.evidence, result.after_frame_paths)
         physical = int(result.physical_actions)
         wait = result.resolved_action.kind == 'wait_for_change'
@@ -122,13 +132,19 @@ class ConfirmationExecutionCoordinator:
             'before_observation_id': observation.observation_id, 'before_fingerprint': observation.fingerprint,
             'after_observation_id': new_observation.observation_id,
             'after_fingerprint': new_observation.fingerprint})
+        return self._record_post_action_decision(
+            host, session, authority, decision, observation, result, before_actions,
+            physical, outcome, errors, after_frames, new_observation, decide_after_action)
+
+    def _record_post_action_decision(self, host, session, authority, decision, observation,
+        result, before_actions, physical, outcome, errors, after_frames, new_observation,
+        decide_after_action):
         reject_if(not isinstance(result.after_model_decision, Mapping),
             UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
         session.recent_navigation.record_execution(result.resolved_action.kind)
         try:
             next_model_decision = host._record_qwen_reply(session, result.after_model_decision)
-            next_decision = host._decide(session, frames=after_frames, observation=new_observation,
-                model_decision=next_model_decision)
+            next_decision = decide_after_action(after_frames, new_observation, next_model_decision)
             session.history[-1]["visual_outcome"] = next_decision.previous_action_outcome
             host._remember(session, session.evidence_store.write_verification(session.step_number - 1,
                 {'execution_outcome': outcome, 'visual_outcome': next_decision.previous_action_outcome,

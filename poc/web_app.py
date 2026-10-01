@@ -224,8 +224,10 @@ _GENERIC_START_TASKS = AsyncTaskRegistry(
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
-    print("机械臂网页控制台：http://127.0.0.1:8765/")
-    print("控制令牌已生成，仅通过本机受保护的页面初始化接口使用。")
+    # Keep startup notices ASCII-only so a Windows cp1252 stdout cannot fail
+    # the lifespan before the application is ready.
+    print("Phone Visual Agent web console: http://127.0.0.1:8765/", flush=True)
+    print("Local control token generated for the protected bootstrap page.", flush=True)
     if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
         threading.Timer(
             1.0, lambda: webbrowser.open("http://127.0.0.1:8765/")

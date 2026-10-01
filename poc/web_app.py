@@ -332,6 +332,57 @@ def select_device_machine_position(
     }
 
 
+def _effective_hardware_capabilities(
+    hardware_capabilities: dict[str, Any],
+    hardware_capability_profile: dict[str, Any] | None,
+    default_text_transport: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    effective_profile = hardware_capability_profile
+    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
+        effective_profile = dict(hardware_capability_profile)
+        copied_actions = {
+            str(name): dict(spec)
+            for name, spec in dict(effective_profile.get("actions") or {}).items()
+            if isinstance(spec, dict)
+        }
+        for action_name, operation in (
+            ("input_verified_text", "append_text"),
+            ("clear_verified_text", "clear_text"),
+        ):
+            if action_name in copied_actions:
+                copied_actions[action_name]["text_transport"] = "adb_keyboard"
+                copied_actions[action_name]["operation"] = operation
+                copied_actions[action_name]["implicit_clear"] = False
+                copied_actions[action_name]["retry_on_failure"] = False
+        effective_profile["actions"] = copied_actions
+    profile_actions = (
+        effective_profile.get("actions", {})
+        if isinstance(effective_profile, dict)
+        else {}
+    )
+    profile_capabilities = {
+        str(action): bool(spec.get("enabled"))
+        for action, spec in profile_actions.items()
+        if isinstance(action, str) and isinstance(spec, dict)
+    }
+    return effective_profile, profile_capabilities or hardware_capabilities
+
+
+def _enabled_physical_actions(
+    device_capabilities: dict[str, Any],
+    app_launcher: Any,
+) -> set[str]:
+    enabled_physical_actions = {
+        action
+        for action in CANONICAL_ACTION_KINDS
+        if action != "wait_for_change"
+        and bool(device_capabilities.get(physical_capability_for_action(action), False))
+    }
+    if bool(getattr(app_launcher, "enabled", False)):
+        enabled_physical_actions.add("launch_app")
+    return enabled_physical_actions
+
+
 def _device_capability_snapshot(
     active_runtime: Runtime,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, set[str]]:
@@ -357,43 +408,10 @@ def _device_capability_snapshot(
         and callable(getattr(default_text_transport, "status", None))
         else None
     )
-    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
-        hardware_capability_profile = dict(hardware_capability_profile)
-        copied_actions = {
-            str(name): dict(spec)
-            for name, spec in dict(hardware_capability_profile.get("actions") or {}).items()
-            if isinstance(spec, dict)
-        }
-        for action_name, operation in (
-            ("input_verified_text", "append_text"),
-            ("clear_verified_text", "clear_text"),
-        ):
-            if action_name in copied_actions:
-                copied_actions[action_name]["text_transport"] = "adb_keyboard"
-                copied_actions[action_name]["operation"] = operation
-                copied_actions[action_name]["implicit_clear"] = False
-                copied_actions[action_name]["retry_on_failure"] = False
-        hardware_capability_profile["actions"] = copied_actions
-    profile_actions = (
-        hardware_capability_profile.get("actions", {})
-        if isinstance(hardware_capability_profile, dict)
-        else {}
-    )
-    effective_hardware_capabilities = {
-        str(action): bool(spec.get("enabled"))
-        for action, spec in profile_actions.items()
-        if isinstance(action, str) and isinstance(spec, dict)
-    }
-    device_capabilities = effective_hardware_capabilities or hardware_capabilities
-    enabled_physical_actions = {
-        action
-        for action in CANONICAL_ACTION_KINDS
-        if action != "wait_for_change"
-        and bool(device_capabilities.get(physical_capability_for_action(action), False))
-    }
+    hardware_capability_profile, device_capabilities = _effective_hardware_capabilities(
+        hardware_capabilities, hardware_capability_profile, default_text_transport)
     default_app_launcher = active_runtime.app_launcher_for_device(default_device_id)
-    if bool(getattr(default_app_launcher, "enabled", False)):
-        enabled_physical_actions.add("launch_app")
+    enabled_physical_actions = _enabled_physical_actions(device_capabilities, default_app_launcher)
     return (
         default_device_id,
         hardware_capabilities,

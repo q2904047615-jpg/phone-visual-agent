@@ -47,6 +47,9 @@ class QwenTaskContext:
         return dataclass_wire(self)
 
 def action_effect_kind(action: Any) -> str:
+    """Read the declared effect class, while allowing finish to have no action."""
+    if action is None:
+        return ""
     if action.action in {"input_verified_text", "clear_verified_text", "press_enter"}:
         return "data_mutation"
     meaning = str(action.params.get("target") or "")

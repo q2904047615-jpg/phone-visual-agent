@@ -30,6 +30,7 @@ class UniversalAgentSessionState:
     run_dir: Path
     adapter: Any = field(repr=False)
     evidence_store: AgentEvidenceStorePort = field(repr=False)
+    visual_reference_paths: tuple[Path, ...] = field(default_factory=tuple, repr=False)
     vision_usage: VisionSessionUsageLedger | None = field(default=None, repr=False)
     exact_input_text: str | None = None
     exact_target_label: str = ''
@@ -38,7 +39,6 @@ class UniversalAgentSessionState:
     trusted_observation: Any = None
     trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     observation_action_kinds: frozenset[str] = field(default_factory=frozenset, repr=False)
-    observation_launch_target: dict[str, str] | None = field(default=None, repr=False)
     qwen_decision: Any = None
     confirmation_authority: ConfirmationAuthority | None = field(default=None, repr=False)
     effect_confirmation_authority: EffectConfirmationAuthority | None = field(default=None, repr=False)
@@ -52,6 +52,8 @@ class UniversalAgentSessionState:
     pause_requested: Event = field(default_factory=Event, repr=False)
     automatic_loop_enabled: bool = False
     auto_pause_reason: str = ""
+    conversation: list[dict[str, str]] = field(default_factory=list)
+    qwen_reply: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
@@ -95,13 +97,16 @@ class UniversalAgentSessionState:
             None)) if self.trusted_observation is not None else None
         return {'session_id': self.session_id, 'raw_goal': self.raw_goal, 'device_id': self.device_id,
             'created_at': self.created_at, 'status': self.status, 'step_number': self.step_number,
-            'physical_actions': self.physical_actions, 'qwen_usage': self._serialize(self.vision_usage),
+            'physical_actions': self.physical_actions,
+            'visual_reference_count': len(self.visual_reference_paths), 'qwen_usage': self._serialize(self.vision_usage),
             'local_exact_input_authority': self.local_exact_input_authority,
             'failed_reason': self.failed_reason, 'task_context_protocol': '2026-09-06-single-visual-task-v1',
             'task_id': self.session_id, 'revision': self.step_number,
             'goal': self._serialize(self.goal_draft), 'trusted_observation': observation, 'current_scene': scene,
             'qwen_decision': decision, 'proposal': proposal, 'controller_decision': controller,
-            'history': list(self.history), 'evidence': list(dict.fromkeys(self.evidence_paths)),
+            'qwen_reply': self.qwen_reply, 'history': list(self.history),
+            'conversation': [dict(item) for item in self.conversation],
+            'evidence': list(dict.fromkeys(self.evidence_paths)),
             'pause_requested': self.pause_requested.is_set(),
             'automatic_loop_enabled': self.automatic_loop_enabled, 'auto_pause_reason': self.auto_pause_reason,
             'execution_budget': self.execution_budget.snapshot(self.physical_actions),

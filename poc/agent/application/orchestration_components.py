@@ -11,6 +11,11 @@ import uuid
 from typing import Any
 
 from agent.application.action_adapter import GenericActionAdapterError
+from agent.application.orchestration_support import (
+    UniversalAgentOrchestratorError,
+    _action_digest,
+    _is_zero_action_reobservation_fault,
+)
 from agent.application.runtime_session import POST_ACTION_TRANSITION_PROTOCOL_VERSION, UniversalAgentSessionState
 from agent.application.vision_usage import VisionSessionUsageLedger
 from agent.domain import CANONICAL_SELECTION_RECEIPT_VERSION, ConfirmationAuthority, EffectConfirmationAuthority
@@ -19,12 +24,6 @@ from agent.domain.execution_budget import (
     TaskExecutionBudget,
 )
 from agent.domain.validation import reject_if
-from agent.application.universal_agent_orchestrator import (
-    UniversalAgentOrchestratorError,
-    _action_digest,
-    _is_zero_action_reobservation_fault,
-)
-
 class ObservationDecisionCoordinator:
     def observe_and_decide(self, host, session: UniversalAgentSessionState) -> Any:
         host._clear_action(session)
@@ -83,8 +82,7 @@ class ConfirmationExecutionCoordinator:
                 host._record_uncertain_execution(session, authority=authority, decision=decision,
                     physical_actions=physical_actions, error=exc)
                 host._clear_action(session)
-                host._set_status(session, 'needs_reobservation',
-                    '动作已派发但动作后观察失败；保留不确定效果并重新观察，不自动重复。')
+                host._set_status(session, 'failed', str(exc))
             elif _is_zero_action_reobservation_fault(exc):
                 host._clear_action(session)
                 host._set_status(session, 'needs_reobservation', str(exc).strip() or type(exc).__name__)
@@ -144,8 +142,7 @@ class ConfirmationExecutionCoordinator:
             # replaying the action; retain the frame/evidence and reobserve.
             host._mark_last_execution_uncertain(session, exc)
             host._clear_action(session)
-            host._set_status(session, 'needs_reobservation',
-                '动作已派发但动作后Qwen决策失败；保留不确定效果并重新观察，不自动重复。')
+            host._set_status(session, 'failed', str(exc).strip() or type(exc).__name__)
             host._best_effort_snapshot(session)
             raise
         transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,

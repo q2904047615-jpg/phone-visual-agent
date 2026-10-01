@@ -31,11 +31,23 @@ jobs:
   frontend-offline:
     name: Frontend protocol and browser contracts
     runs-on: ubuntu-latest
+    env:
+      ROBOT_WEB_MOCK: "1"
+      DASHSCOPE_API_KEY: ""
     defaults:
       run:
         working-directory: poc
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: poc/requirements-web.txt
+      - name: Install Python fixture dependencies (including Pillow)
+        run: python -m pip install -r requirements-web.txt
+      - name: Verify Python fixture dependencies
+        run: python -m pip check
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

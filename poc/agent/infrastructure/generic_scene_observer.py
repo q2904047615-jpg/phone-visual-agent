@@ -42,7 +42,12 @@ from agent.domain.ui_scene import (
     UISceneError,
     camera_alignment_evidence_is_safe,
 )
-from agent.infrastructure.dashscope_vision_provider import _extract_json_object, _image_data_url, _image_request_size
+from agent.infrastructure.vision_payload_support import (
+    extract_json_object as _extract_json_object,
+    image_data_url as _image_data_url,
+    image_request_size as _image_request_size,
+)
+from agent.application.vision_provider import VisionProviderPort
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 import agent.domain.generic_goal as generic_goal_domain
@@ -135,7 +140,7 @@ STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查当前画面', 'w
 class SingleStepGenericSceneObserver():
     """Use one Qwen envelope per fresh scene as the only scene/input observation authority."""
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(self, provider: VisionProviderPort) -> None:
         self.provider = provider
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
@@ -155,7 +160,7 @@ class SingleStepGenericSceneObserver():
 
     def _provider_chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None,
         response_format: dict[str, Any] | None=None) -> str:
-        return self.provider._chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS,
+        return self.provider.chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS,
             max_attempts=OBSERVATION_MAX_ATTEMPTS,
             response_format=response_format or {'type': 'json_object'})
 

@@ -99,7 +99,7 @@ class LaunchDescriptionTests(unittest.TestCase):
                 raw = json.dumps(payload, ensure_ascii=False)
                 calls = []
                 provider = SimpleNamespace(status=lambda: {"configured": True, "model": "offline"},
-                    _chat=lambda *args, **kwargs: (calls.append((args, kwargs)) or raw))
+                    chat=lambda *args, **kwargs: (calls.append((args, kwargs)) or raw))
                 observer = SingleStepGenericSceneObserver(provider)
                 scene, normalized = observer.observe_with_decision(
                     frames=[Image.new("RGB", (160, 240), "white") for _ in range(4)],

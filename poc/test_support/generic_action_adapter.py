@@ -60,7 +60,7 @@ class RawSceneProvider:
         self.calls = 0
         self.max_tokens_seen = []
 
-    def _chat(self, messages, *, max_tokens, **_kwargs):
+    def chat(self, messages, *, max_tokens, **_kwargs):
         self.calls += 1
         self.max_tokens_seen.append(max_tokens)
         value = self.responses.pop(0)

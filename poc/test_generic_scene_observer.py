@@ -691,7 +691,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             def status(self) -> dict:
                 return {"configured": True, "model": "offline-sequence"}
 
-            def _chat(self, messages, max_tokens, **_kwargs) -> str:
+            def chat(self, messages, max_tokens, **_kwargs) -> str:
                 self.calls += 1
                 return json.dumps(
                     self.responses.pop(0),

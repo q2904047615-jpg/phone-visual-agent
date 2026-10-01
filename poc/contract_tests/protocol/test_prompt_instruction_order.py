@@ -44,7 +44,7 @@ class PromptInstructionOrderTests(unittest.TestCase):
                 provider = RawSceneProvider([wire(decision('home'))])
                 observer = SingleStepGenericSceneObserver(provider)
                 frames = [frame.resize((240, 480)) for frame in patterned_frames()]
-                with patch.object(provider, '_chat', wraps=provider._chat) as chat:
+                with patch.object(provider, 'chat', wraps=provider.chat) as chat:
                     _, chosen = observer.observe_with_decision(frames=frames,
                         goal_context={'objective': goal, 'entities': {'history': []}},
                         device_id='device-1', available_action_kinds=('home',))

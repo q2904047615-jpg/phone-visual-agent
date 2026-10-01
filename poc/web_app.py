@@ -97,13 +97,21 @@ def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
     if not text:
         return type(error).__name__
     return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
-from features.lucky_bag import LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
+from features.lucky_bag import DedicatedLuckyBagMonitor, LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
 from features.lucky_bag.http import LuckyBagDeviceRequest, LuckyBagStartRequest
-from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink
+from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink, gmail_configuration_status
 from features.notifications import JsonlNotificationOutbox
 
 
 ROOT = Path(__file__).resolve().parent
+_TRIAL_CONFIG_PATH = ROOT.parent / "trial.json"
+try:
+    _TRIAL_CONFIG = json.loads(_TRIAL_CONFIG_PATH.read_text(encoding="utf-8"))
+except (OSError, ValueError, TypeError):
+    _TRIAL_CONFIG = {}
+_TRIAL_MODE = str(_TRIAL_CONFIG.get("mode") or "")
+_TRIAL_PORT = int(_TRIAL_CONFIG.get("port") or 8765)
+_SERVICE_VERSION = f"0.2.0-trial-{_TRIAL_MODE}" if _TRIAL_MODE else "0.2.0"
 STATIC_DIR = ROOT / "static"
 CONTROL_TOKEN = secrets.token_urlsafe(24)
 DEVICE_REGISTRY_PATH = Path(
@@ -224,8 +232,9 @@ _LUCKY_BAG_NOTIFICATIONS = DurableNotificationRouter(
     outbox=_LUCKY_BAG_OUTBOX,
     remote=configured_gmail_sink(),
 )
-_LUCKY_BAG_MONITOR = LuckyBagMonitor(
-    gateway=_LuckyBagGateway(),
+_LUCKY_BAG_MONITOR = DedicatedLuckyBagMonitor(
+    runtime=runtime,
+    hardware_lock=lambda device_id: _supervised_hardware_lock(device_id),
     output_root=_LUCKY_BAG_OUTPUT_DIR,
     notification_sink=_LUCKY_BAG_NOTIFICATIONS,
 )
@@ -241,11 +250,11 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
     # Keep startup notices ASCII-only so a Windows cp1252 stdout cannot fail
     # the lifespan before the application is ready.
-    print("Phone Visual Agent web console: http://127.0.0.1:8765/", flush=True)
+    print(f"Phone Visual Agent web console: http://127.0.0.1:{_TRIAL_PORT}/", flush=True)
     print("Local control token generated for the protected bootstrap page.", flush=True)
     if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
         threading.Timer(
-            1.0, lambda: webbrowser.open("http://127.0.0.1:8765/")
+            1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
         ).start()
     yield
     runtime.shutdown()
@@ -255,7 +264,7 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
 
 app = FastAPI(
     title="多 App 机械臂网页控制平台",
-    version="0.2.0",
+    version=_SERVICE_VERSION,
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -536,6 +545,8 @@ def lucky_bag_feature(
     return {
         "feature_id": "lucky_bag",
         "stage": "goal_preset",
+        "trial": _LUCKY_BAG_MONITOR.config,
+        "notification": gmail_configuration_status(),
         "profile": {
             "device_id": profile.device_id,
             "recipient": profile.recipient,
@@ -590,7 +601,8 @@ def start_lucky_bag_monitor(
         "monitor": record.snapshot(),
         "profile": _lucky_bag_profile_payload(profile),
         "goal": goal,
-        "notice": "监控已排队启动；用户仍需手动打开直播间，通知暂写入本地队列。",
+        "notification": gmail_configuration_status(),
+        "notice": "监控已排队启动；用户仍需手动打开直播间。",
     }
 
 

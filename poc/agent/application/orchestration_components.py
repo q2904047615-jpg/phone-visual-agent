@@ -7,6 +7,8 @@ protocol helpers, so canonical action semantics and persistence stay unchanged.
 
 from collections.abc import Mapping
 from pathlib import Path
+import logging
+import re
 import uuid
 from typing import Any
 
@@ -24,6 +26,22 @@ from agent.domain.execution_budget import (
     TaskExecutionBudget,
 )
 from agent.domain.validation import reject_if
+
+
+_LOGGER = logging.getLogger(__name__)
+_SENSITIVE_DIAGNOSTIC_RE = re.compile(
+    r"(?i)(authorization|api[-_ ]?key|token|password|secret|cookie)\s*[:=]\s*[^\s,;]+"
+)
+
+
+def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
+    """Return a short, single-line diagnostic with common credentials redacted."""
+    text = " ".join(str(error).split())
+    if not text:
+        return type(error).__name__
+    return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
+
+
 class ObservationDecisionCoordinator:
     def observe_and_decide(self, host, session: UniversalAgentSessionState) -> Any:
         host._clear_action(session)
@@ -272,7 +290,23 @@ class SessionLifecycleCoordinator:
     def best_effort_snapshot(self, host, session: UniversalAgentSessionState) -> None:
         try:
             host._write_snapshot(session)
-        except Exception:
+        except Exception as exc:
+            error_type = type(exc).__name__
+            error_text = _diagnostic_error_text(exc)
+            _LOGGER.warning(
+                "best_effort_snapshot_failed session_id=%s device_id=%s error_type=%s error=%s",
+                getattr(session, "session_id", ""),
+                getattr(session, "device_id", ""),
+                error_type,
+                error_text,
+                extra={
+                    "event": "best_effort_snapshot_failed",
+                    "session_id": getattr(session, "session_id", ""),
+                    "device_id": getattr(session, "device_id", ""),
+                    "error_type": error_type,
+                    "error_message": error_text,
+                },
+            )
             pass
     def _build_session(self, host, *, session_id: str, raw_goal: str,
         exact_input_text: str | None, exact_action_kind: str | None,

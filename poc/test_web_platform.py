@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from agent.domain import EvidenceStoreError
 from PIL import Image
 from agent.infrastructure import InterProcessLease
@@ -1291,6 +1292,35 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertTrue(
             all(item.headers["X-Camera-Source"] == "cache" for item in cached)
         )
+
+    def test_preview_mjpg_logs_and_stops_after_later_capture_failure(self) -> None:
+        captures = iter([
+            (b"jpeg-first", False),
+            RuntimeError("camera token=secret dropped"),
+        ])
+
+        def capture_preview(device_id, *, quality):
+            item = next(captures)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with (
+            patch.object(web_app.runtime, "controller_for_device", return_value=object()),
+            patch.object(web_app.runtime, "capture_preview", side_effect=capture_preview),
+            patch.object(web_app.time, "sleep"),
+            self.assertLogs("web_app", level="WARNING") as logs,
+        ):
+            response = web_app.preview_mjpg("phone-mjpg")
+            first = asyncio.run(response.body_iterator.__anext__())
+            with self.assertRaises(StopAsyncIteration):
+                asyncio.run(response.body_iterator.__anext__())
+
+        self.assertIn(b"jpeg-first", first)
+        self.assertIn("mjpg_preview_stopped", "\n".join(logs.output))
+        self.assertIn("device_id=phone-mjpg", "\n".join(logs.output))
+        self.assertIn("error_type=RuntimeError", "\n".join(logs.output))
+        self.assertNotIn("token=secret", "\n".join(logs.output))
 
     def test_device_status_identifies_each_active_generic_session_device(self) -> None:
         def active_session(session_id: str, device_id: str):

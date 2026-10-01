@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -82,6 +83,20 @@ from agent.interfaces.http_models import (
     GenericSupervisedStepRequest,
     MachinePositionRequest,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
+_SENSITIVE_DIAGNOSTIC_RE = re.compile(
+    r"(?i)(authorization|api[-_ ]?key|token|password|secret|cookie)\s*[:=]\s*[^\s,;]+"
+)
+
+
+def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
+    """Return a short, single-line diagnostic without a traceback or payload."""
+    text = " ".join(str(error).split())
+    if not text:
+        return type(error).__name__
+    return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
 from features.lucky_bag import LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
 from features.lucky_bag.http import LuckyBagDeviceRequest, LuckyBagStartRequest
 from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink
@@ -1756,7 +1771,21 @@ def preview_mjpg(device_id: str) -> StreamingResponse:
         while True:
             try:
                 frame, _cached = runtime.capture_preview(device_id, quality=68)
-            except Exception:
+            except Exception as exc:
+                error_type = type(exc).__name__
+                error_text = _diagnostic_error_text(exc)
+                _LOGGER.warning(
+                    "mjpg_preview_stopped device_id=%s error_type=%s error=%s",
+                    device_id,
+                    error_type,
+                    error_text,
+                    extra={
+                        "event": "mjpg_preview_stopped",
+                        "device_id": device_id,
+                        "error_type": error_type,
+                        "error_message": error_text,
+                    },
+                )
                 return
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n"

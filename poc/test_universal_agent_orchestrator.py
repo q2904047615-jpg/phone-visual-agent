@@ -2,9 +2,13 @@
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
-from agent.application.universal_agent_orchestrator import ObservationBridge
+from agent.application.universal_agent_orchestrator import (
+    ObservationBridge,
+    UniversalAgentOrchestrator,
+)
 from test_single_visual_loop import Adapter, LoopHarness, scene, decision
 
 
@@ -46,6 +50,35 @@ class FixtureAdapter(Adapter):
 
 
 class RuntimeLifecycleTests(LoopHarness):
+    def test_main_failure_preserves_error_when_best_effort_snapshot_fails(self):
+        class FailingAdapter(FixtureAdapter):
+            def capture_scene(self, *args, **kwargs):
+                raise RuntimeError("main failure")
+
+        with patch.object(
+            UniversalAgentOrchestrator,
+            "_write_snapshot",
+            side_effect=RuntimeError("snapshot token=secret"),
+        ) as write_snapshot:
+            with self.assertLogs(
+                "agent.application.orchestration_components", level="WARNING"
+            ) as logs:
+                with self.assertRaisesRegex(RuntimeError, "main failure") as raised:
+                    self.start(
+                        [(scene(0), decision("home"))],
+                        adapter=FailingAdapter([(scene(0), decision("home"))]),
+                    )
+
+        session = raised.exception.session
+        self.assertEqual("failed", session.status)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(1, write_snapshot.call_count)
+        output = "\n".join(logs.output)
+        self.assertIn("best_effort_snapshot_failed", output)
+        self.assertIn("session_id=session-1", output)
+        self.assertIn("device_id=device-1", output)
+        self.assertNotIn("token=secret", output)
+
     def test_start_only_observes_and_stages_one_action(self):
         q = CountingQwen()
         loop,s,a = self.start([(scene(0),decision('home'))],observer=q)

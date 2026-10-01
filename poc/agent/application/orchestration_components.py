@@ -274,6 +274,31 @@ class SessionLifecycleCoordinator:
             host._write_snapshot(session)
         except Exception:
             pass
+    def _build_session(self, host, *, session_id: str, raw_goal: str,
+        exact_input_text: str | None, exact_action_kind: str | None,
+        exact_target_label: str, device_id: str, run_dir: Path,
+        visual_reference_paths: tuple[Path, ...], conversation: tuple[dict[str, str], ...],
+        adapter: Any, evidence_store: Any, vision_usage: VisionSessionUsageLedger,
+        execution_budget: TaskExecutionBudget) -> UniversalAgentSessionState:
+        """Assemble and validate the session before its first observation."""
+        visual_paths = tuple(Path(item) for item in visual_reference_paths)
+        # Reference assets are an internal visual-prompt input, never goal text or action authority.
+        setattr(adapter, "visual_reference_paths", visual_paths)
+        session = UniversalAgentSessionState(session_id=session_id,
+            raw_goal=str(raw_goal or ''), device_id=device_id, run_dir=Path(run_dir),
+            visual_reference_paths=visual_paths,
+            conversation=[dict(item) for item in conversation],
+            adapter=adapter, evidence_store=evidence_store, vision_usage=vision_usage,
+            execution_budget=execution_budget,
+            local_exact_input_authority=exact_input_text is not None,
+            exact_input_text=exact_input_text,
+            exact_action_kind=exact_action_kind or host.required_action_kind,
+            exact_target_label=exact_target_label)
+        reject_if(not session.session_id or not session.raw_goal or not session.device_id,
+            UniversalAgentOrchestratorError('启动Agent需要session_id、目标和device_id。'))
+        reject_if(exact_input_text is not None and exact_action_kind is not None,
+            UniversalAgentOrchestratorError('exact_input_text与exact_action_kind不能同时使用。'))
+        return session
     def start(self, host, *, session_id: str, raw_goal: str, exact_input_text: str | None=None,
         exact_action_kind: str | None=None, exact_target_label: str='', device_id: str,
         run_dir: Path, visual_reference_paths: tuple[Path, ...] = (),
@@ -289,20 +314,13 @@ class SessionLifecycleCoordinator:
             ledger = VisionSessionUsageLedger(session_id=resolved_session)
             with host.device_registry.device_lock(resolved_device), host._vision_usage_scope(ledger):
                 adapter = host.adapter_factory(resolved_device)
-                # Reference assets are an internal visual-prompt input, never goal text or action authority.
-                setattr(adapter, "visual_reference_paths", tuple(Path(item) for item in visual_reference_paths))
                 store = host.evidence_store_factory(Path(run_dir))
-                session = UniversalAgentSessionState(session_id=resolved_session,
-                    raw_goal=str(raw_goal or ''), device_id=resolved_device, run_dir=Path(run_dir),
-                    visual_reference_paths=tuple(Path(item) for item in visual_reference_paths),
-                    conversation=[dict(item) for item in conversation],
-                    adapter=adapter, evidence_store=store, vision_usage=ledger, execution_budget=budget,
-                    local_exact_input_authority=exact_input_text is not None, exact_input_text=exact_input_text,
-                    exact_action_kind=exact_action_kind or host.required_action_kind, exact_target_label=exact_target_label)
-                reject_if(not session.session_id or not session.raw_goal or not session.device_id,
-                    UniversalAgentOrchestratorError('启动Agent需要session_id、目标和device_id。'))
-                reject_if(exact_input_text is not None and exact_action_kind is not None,
-                    UniversalAgentOrchestratorError('exact_input_text与exact_action_kind不能同时使用。'))
+                session = self._build_session(host, session_id=resolved_session, raw_goal=raw_goal,
+                    exact_input_text=exact_input_text, exact_action_kind=exact_action_kind,
+                    exact_target_label=exact_target_label, device_id=resolved_device,
+                    run_dir=run_dir, visual_reference_paths=visual_reference_paths,
+                    conversation=conversation, adapter=adapter, evidence_store=store,
+                    vision_usage=ledger, execution_budget=budget)
                 try:
                     host._observe_and_decide(session)
                     host._write_snapshot(session)

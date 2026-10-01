@@ -206,37 +206,7 @@ class AutonomousExecutionCoordinator:
                         # Preserve the reason that caused the recoverable pause;
                         # do not replace it with a generic loop-state message.
                         break
-                    if session.status == 'needs_reobservation':
-                        try:
-                            host._observe_and_decide(session)
-                        except GenericActionAdapterError as exc:
-                            # A transient model/observation failure consumed no
-                            # device action. Keep the lease and spend the next
-                            # observation budget on a fresh screenshot.
-                            if session.status != 'needs_reobservation':
-                                raise
-                            host._remember(session, exc.evidence)
-                            iterations += 1
-                            continue
-                    elif session.status == 'awaiting_confirmation':
-                        authority = session.confirmation_authority
-                        reject_if(authority is None or authority.consumed,
-                            UniversalAgentOrchestratorError('待执行动作缺少一次性scope。'))
-                        try:
-                            host._confirm_one_locked(session, authority.scope())
-                        except Exception as exc:
-                            # The action authority is consumed.  For both a
-                            # stale pre-action frame and an uncertain
-                            # post-action result, the next iteration must only
-                            # obtain a fresh screenshot; never replay here.
-                            if session.status != 'needs_reobservation':
-                                raise
-                            host._clear_action(session)
-                            host._remember(session, getattr(exc, 'evidence', ()))
-                            iterations += 1
-                            continue
-                    else:
-                        session.auto_pause_reason = f'当前状态不能自动推进：{session.status}。'
+                    if not self._run_active_state_step(host, session):
                         break
                     iterations += 1
                 host._apply_pause_request(session)
@@ -257,6 +227,39 @@ class AutonomousExecutionCoordinator:
             host._release_if_terminal(session)
         return {'physical_actions': session.physical_actions - start_actions, 'iterations': iterations,
             'status': session.status, 'pause_reason': session.auto_pause_reason}
+
+    def _run_active_state_step(self, host, session: UniversalAgentSessionState) -> bool:
+        if session.status == 'needs_reobservation':
+            try:
+                host._observe_and_decide(session)
+            except GenericActionAdapterError as exc:
+                # A transient model/observation failure consumed no device
+                # action. Keep the lease and spend the next observation budget
+                # on a fresh screenshot.
+                if session.status != 'needs_reobservation':
+                    raise
+                host._remember(session, exc.evidence)
+                return True
+            return True
+        if session.status == 'awaiting_confirmation':
+            authority = session.confirmation_authority
+            reject_if(authority is None or authority.consumed,
+                UniversalAgentOrchestratorError('待执行动作缺少一次性scope。'))
+            try:
+                host._confirm_one_locked(session, authority.scope())
+            except Exception as exc:
+                # The action authority is consumed. For both a stale
+                # pre-action frame and an uncertain post-action result, the
+                # next iteration must only obtain a fresh screenshot; never
+                # replay here.
+                if session.status != 'needs_reobservation':
+                    raise
+                host._clear_action(session)
+                host._remember(session, getattr(exc, 'evidence', ()))
+                return True
+            return True
+        session.auto_pause_reason = f'当前状态不能自动推进：{session.status}。'
+        return False
 
 class SessionLifecycleCoordinator:
     def write_snapshot(self, host, session: UniversalAgentSessionState) -> None:

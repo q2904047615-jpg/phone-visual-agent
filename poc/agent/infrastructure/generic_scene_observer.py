@@ -936,6 +936,28 @@ def _input_structure_audit_prompt(context: dict[str, Any], *, wire_height: int=1
         WIRE_HEIGHT=str(wire_height), AUDIT_VERSION=INPUT_STRUCTURE_AUDIT_VERSION)
 
 
+def _retain_scene_elements(raw_elements: list[Any], required: frozenset[str]) -> list[dict[str, Any]]:
+    """Retain selected elements strictly and drop malformed optional hints."""
+    retained: list[dict[str, Any]] = []
+    required_counts: dict[str, int] = {}
+    for raw_element in raw_elements:
+        if not isinstance(raw_element, dict):
+            continue
+        element_id = str(raw_element.get('element_id') or '').strip()
+        if element_id in required:
+            required_counts[element_id] = required_counts.get(element_id, 0) + 1
+            reject_if(required_counts[element_id] > 1,
+                UISceneError(f"Qwen决策引用的element_id不唯一：{element_id}"))
+            retained.append(_required_scene_element(raw_element))
+            continue
+        try:
+            UIElement.from_dict(raw_element, coordinate_scale=1000.0)
+        except (UISceneError, TypeError, ValueError):
+            continue
+        retained.append(raw_element)
+    return retained
+
+
 def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None,
     strict_element_ids: Iterable[str]=()) -> UIScene:
     """Parse the current scene, revoking only malformed optional model facts.
@@ -963,24 +985,7 @@ def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str |
         required = frozenset(str(item or '').strip() for item in strict_element_ids if str(item or '').strip())
         raw_elements = payload.get('elements')
         if isinstance(raw_elements, list):
-            retained: list[dict[str, Any]] = []
-            required_counts: dict[str, int] = {}
-            for raw_element in raw_elements:
-                if not isinstance(raw_element, dict):
-                    continue
-                element_id = str(raw_element.get('element_id') or '').strip()
-                if element_id in required:
-                    required_counts[element_id] = required_counts.get(element_id, 0) + 1
-                    reject_if(required_counts[element_id] > 1,
-                        UISceneError(f"Qwen决策引用的element_id不唯一：{element_id}"))
-                    retained.append(_required_scene_element(raw_element))
-                    continue
-                try:
-                    UIElement.from_dict(raw_element, coordinate_scale=1000.0)
-                except (UISceneError, TypeError, ValueError):
-                    continue
-                retained.append(raw_element)
-            payload['elements'] = retained
+            payload['elements'] = _retain_scene_elements(raw_elements, required)
         return UIScene.from_dict(payload, coordinate_scale=1000.0, stable_override=True,
             fingerprint_override=fingerprint)
     except (UISceneError, ValueError, TypeError) as exc:

@@ -40,10 +40,6 @@ class EvalProvider:
     def status(self) -> dict:
         return {"configured": True, "model": self.model}
 
-    def chat(self, messages, max_tokens, **kwargs) -> str:
-        """Expose the public provider boundary while retaining the legacy hook."""
-        return self._chat(messages, max_tokens, **kwargs)
-
     def _chat(self, messages, max_tokens, **kwargs) -> str:
         self.calls += 1
         if self.failure:
@@ -87,7 +83,9 @@ class SuccessfulEvalProvider(EvalProvider):
                         "confidence": 0.9,
                         "evidence": [],
                     },
-                    "elements": [],
+                    "elements": [{"element_id": "settings-icon", "role": "icon",
+                        "meaning": "settings_app_icon", "label": "设置",
+                        "bounds": [700, 300, 780, 370], "states": {}, "evidence": ["设置"]}],
                     "overlays": [],
                     "stable": True,
                     "confidence": 0.97,
@@ -96,15 +94,8 @@ class SuccessfulEvalProvider(EvalProvider):
                 "input_structure": None,
                 "decision": {
                     "status": "action",
-                    "action": "tap_semantic",
-                    "target": {
-                        "element_id": "settings-icon",
-                        "role": "icon",
-                        "meaning": "settings_app_icon",
-                        "label": "设置",
-                        "evidence": ["设置"],
-                    },
-                    "tap_point": [740, 335],
+                    "action": "tap",
+                    "point": [740, 335],
                     "reason": "设置图标与当前目标逐字对应",
                 },
             },
@@ -244,6 +235,21 @@ class QwenOfflineReportTests(unittest.TestCase):
         self.assertEqual(result["observation_diagnostics"]["model_calls"], 1)
         self.assertTrue(result["decision_diagnostics"]["decision_from_same_observation_response"])
         self.assertEqual(providers[0].calls, 1)
+
+    def test_coordinate_target_scoring_rejects_missing_outside_and_wrong_evidence(self):
+        expected = {'accepted_statuses': ['action'], 'accepted_actions': ['tap_semantic'],
+            'expectations': {'target': {'label_any': ['设置'], 'role_any': ['icon']}}}
+        element = {'label': '设置', 'role': 'icon', 'bounds': [.7, .3, .78, .37]}
+        variants = [([.74, .335], [element], True),
+            ([.1, .1], [element], False), ([.74, .335], [], False),
+            ([.74, .335], [{**element, 'label': '浏览器'}], False),
+            ([.74, .335], [element, dict(element)], False)]
+        for point, elements, passes in variants:
+            with self.subTest(point=point, elements=elements):
+                score = _score(expected, status='action',
+                    decision={'next_action': {'action': 'tap_semantic', 'params': {'tap_point': point}}},
+                    observation={'scene': {'elements': elements}})
+                self.assertEqual(passes, score['dimensions']['target']['passed'])
 
     def test_score_page_and_bound_target_from_same_observation(self) -> None:
         score = _score(

@@ -118,8 +118,8 @@ class TransportHistoryTests(unittest.TestCase):
     def test_prompt_distinguishes_launch_transport_from_icon_tap(self):
         prompt = _single_step_observation_prompt({}, include_input_structure=False, image_count=1,
             request_image_size=(720, 1280), available_action_kinds=('launch_app', 'tap_semantic'))
-        for rule in ('transport_status', 'transport_error', 'launch_app不是点击图标',
-            '点击App图标时选择tap_semantic', 'tap_point必须为null', '不能仅因已尝试就假定成功'):
+        for rule in ('transport_status', 'transport_error', 'app只填写已登记的App语义名称',
+            'tap：直接点击当前截图中的point坐标', '所有不适用字段必须为null', '不能仅因已尝试就假定成功'):
             self.assertTrue(rule in prompt, msg=rule)
 
 

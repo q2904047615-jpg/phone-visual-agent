@@ -23,18 +23,17 @@ class PromptInstructionOrderTests(unittest.TestCase):
                     '用户未指定顺序时，才自行选择执行路径',
                     '依据本会话实际历史与当前画面判断前项是否满足，再推进后项',
                     '不能反过来要求所有任务必须有动作',
-                    '输入、发送等效果不确定时不得自动重做',
+                    '输入、发送、发布等效果不确定时不要重复动作',
                     '不生成固定步骤清单', '本地不按业务子目标清单推进',
-                    '通用文字效果闭环', '输入动作后必须以新画面确认正文匹配',
-                    '效果动作后再次观察'):
+                    '执行后必须取得新截图', '交给下一轮Qwen根据新图判断'):
                     self.assertTrue(text in prompt, msg=text)
 
     def test_input_append_requires_complete_expected_text(self):
         prompt = _single_step_observation_prompt({}, include_input_structure=True,
             image_count=1, request_image_size=(720, 1280),
             available_action_kinds=('input_verified_text',))
-        self.assertIn('text仍必须填写追加后的完整正文', prompt)
-        self.assertIn('本地会从完整text计算唯一input_fragment', prompt)
+        self.assertIn('text填写当前输入框应达到的完整正文', prompt)
+        self.assertIn('input_structure同时报告当前输入事实', prompt)
     def test_original_goals_and_guidance_reach_actual_request_without_local_planning(self):
         goals = ('先清空卡片，再打开抖音，给十条视频点赞',
             '先打开备忘录，再清空输入框，最后回到主屏幕',
@@ -44,7 +43,7 @@ class PromptInstructionOrderTests(unittest.TestCase):
                 provider = RawSceneProvider([wire(decision('home'))])
                 observer = SingleStepGenericSceneObserver(provider)
                 frames = [frame.resize((240, 480)) for frame in patterned_frames()]
-                with patch.object(provider, 'chat', wraps=provider.chat) as chat:
+                with patch.object(provider, '_chat', wraps=provider._chat) as chat:
                     _, chosen = observer.observe_with_decision(frames=frames,
                         goal_context={'objective': goal, 'entities': {'history': []}},
                         device_id='device-1', available_action_kinds=('home',))
@@ -56,12 +55,12 @@ class PromptInstructionOrderTests(unittest.TestCase):
                 self.assertEqual('home', chosen['action'])
 
 
-    def test_publish_capability_is_scoped_to_supported_surfaces(self):
+    def test_publish_effect_is_generic_and_not_app_restricted(self):
         prompt = _single_step_observation_prompt({}, include_input_structure=True,
-            image_count=1, request_image_size=(720, 1280),
-            available_action_kinds=('tap_semantic',))
-        self.assertIn('publish_content仅在当前前台画面明确属于小红书', prompt)
-        self.assertIn('微信（com.tencent.mm）及其他应用不选择publish_content', prompt)
-        self.assertIn('不改变通用输入、观察、验证闭环', prompt)
+            image_count=1, request_image_size=(720, 1280), available_action_kinds=('tap_semantic',))
+        self.assertIn('publish_content', prompt)
+        self.assertIn('本动作直接造成通用效果', prompt)
+        self.assertNotIn('publish_content仅在', prompt)
+        self.assertNotIn('其他应用不选择publish_content', prompt)
 if __name__ == '__main__':
     unittest.main()

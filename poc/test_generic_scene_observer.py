@@ -30,7 +30,7 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
         self.assertNotIn("oneOf", wrapper["schema"])
         self.assertEqual(["action", "finish"], decision["properties"]["status"]["enum"])
         self.assertEqual(set(decision["properties"]), set(decision["required"]))
-        self.assertEqual(["clear_verified_text", "input_verified_text", None],
+        self.assertEqual(["clear_input", "input", None],
             decision["properties"]["action"]["enum"])
         self.assertEqual([1000], wrapper["schema"]["properties"]["coordinate_space"]["properties"][
             "height"]["enum"])
@@ -47,13 +47,32 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
+    def test_single_step_keeps_natural_reply_with_the_same_decision(self) -> None:
+        payload = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
+            "scene": scene_payload(),
+            "input_structure": None,
+            "reply": "我看到了当前页面，暂时不需要操作手机。",
+            "decision": {"status": "finish", "action": None, "reason": "当前画面已满足查看要求"},
+        }
+        provider = SequenceProvider([json.dumps(payload, ensure_ascii=False)])
+
+        observed, decision = SingleStepGenericSceneObserver(provider).observe_with_decision(
+            frames=stable_frames(), goal_context={"objective": "确认当前页面"},
+            device_id="device-local-01")
+
+        self.assertEqual("finish", decision["status"])
+        self.assertEqual("我看到了当前页面，暂时不需要操作手机。", decision["_qwen_reply"])
+        self.assertEqual("app_home", observed.screen_id)
+
     def test_single_step_accepts_exactly_one_object_wrapped_in_array(self) -> None:
         payload = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+            "decision": {"status": "finish"},
         }
         provider = SequenceProvider([json.dumps([payload], ensure_ascii=False)])
 
@@ -71,7 +90,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+            "decision": {"status": "finish"},
         }
         cases = ([], [payload, payload], ["not-an-object"])
         for value in cases:
@@ -102,14 +121,28 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(VisionAgentError, "必须是 JSON 对象"):
             _extract_json_object('[{"value":1}]')
 
+    def test_raw_provider_does_not_repair_retired_decision_fields(self):
+        for extra in ({'target': {'role': 'button'}}, {'tap_point': [300, 400]},
+                      {'element_id': 'old-id'}, {'evidence_refs': ['scene.summary']}):
+            payload = {'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': 1000},
+                'scene': scene_payload(), 'input_structure': None,
+                'decision': {'status': 'action', 'action': 'tap', 'point': [300, 400], **extra}}
+            raw = json.dumps(payload, ensure_ascii=False)
+            provider = SequenceProvider([raw])
+            observer = SingleStepGenericSceneObserver(provider)
+            with self.subTest(extra=extra), self.assertRaisesRegex(VisionAgentError, '协议外字段'):
+                observer.observe(frames=stable_frames(), available_action_kinds={'tap_semantic'})
+            self.assertEqual(raw, observer.last_raw_response)
+            self.assertEqual(1, provider.calls)
+
     def test_element_swipe_axis_grid_points_normalize_with_current_image_height(self) -> None:
         payload = {
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {"status": "action", "action": "swipe_element",
-                "element_id": "e1", "start": [180, 680], "end": [500, 680]},
+            "decision": {'status': "action", 'action': 'swipe', 'start': [180, 680], 'end': [500, 680]},
         }
         observed, decision = SingleStepGenericSceneObserver(
             SequenceProvider([payload])
@@ -132,17 +165,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             },
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {
-                "status": "blocked",
-                "action": None,
-                "element_id": None,
-                "source_element_id": None,
-                "destination_element_id": None,
-                "direction": None,
-                "evidence_refs": [],
-                "confidence": 0.9,
-                "reason": "legacy model veto",
-            },
+            "decision": {'status': "blocked", 'action': None, 'direction': None, 'confidence': 0.9, 'reason': "legacy model veto"},
         }
         provider = SequenceProvider([payload])
 
@@ -163,7 +186,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             },
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+            "decision": {"status": "finish"},
         }
         provider = SequenceProvider([payload])
 
@@ -186,7 +209,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             },
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+            "decision": {"status": "finish"},
         }
         provider = SequenceProvider([payload])
 
@@ -205,7 +228,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene_payload(),
             "input_structure": None,
-            "decision": {"status": "finish", "evidence_refs": ["scene.summary"]},
+            "decision": {"status": "finish"},
             "metadata": {"plan": ["click once", "click again"]},
         }
         provider = SequenceProvider([payload])
@@ -232,10 +255,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     },
                     "scene": compact_scene,
                     "input_structure": None,
-                    "decision": {
-                        "status": "finish",
-                        "evidence_refs": ["scene.summary"],
-                    },
+                    "decision": {'status': "finish"},
                 }
             ]
         )
@@ -250,7 +270,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("portrait", observed.camera_alignment.camera_layout_orientation)
         self.assertEqual("unknown", observed.camera_alignment.phone_content_rotation)
 
-    def test_duplicate_finish_evidence_is_normalized_without_a_second_veto(self) -> None:
+    def test_finish_without_reference_strings_uses_current_scene(self) -> None:
         provider = SequenceProvider(
             [
                 {
@@ -262,10 +282,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     },
                     "scene": scene_payload(),
                     "input_structure": None,
-                    "decision": {
-                        "status": "finish",
-                        "evidence_refs": ["scene.summary", "scene.summary"],
-                    },
+                    "decision": {'status': "finish"},
                 }
             ]
         )
@@ -285,23 +302,20 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(["action", "finish"],
             schema["properties"]["decision"]["properties"]["status"]["enum"])
 
-    def test_strict_direct_target_rejects_bounds_geometry(self) -> None:
+    def test_direct_point_accepts_coordinate_without_element_target(self) -> None:
         scene = scene_payload()
         scene["elements"] = []
         provider = SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "action", "action": "tap_semantic",
-                "target": {"element_id": "selected-target", "role": "button", "meaning": "open_target",
-                    "label": "打开", "evidence": ["打开"], "bounds": [200, 400, 500, 500]},
-                "tap_point": [500, 500]},
+            "decision": {"status": "action", "action": "tap", "point": [500, 500]},
         }])
-
-        with self.assertRaisesRegex(VisionAgentError, "decision.target不得携带几何"):
-            SingleStepGenericSceneObserver(provider).observe(
-                frames=stable_frames(), goal_context={"objective": "打开目标"},
-                device_id="device-local-01")
+        observed, decision = SingleStepGenericSceneObserver(provider).observe_with_decision(
+            frames=stable_frames(), goal_context={"objective": "打开目标"}, device_id="device-local-01")
+        self.assertEqual("tap", decision["action"])
+        self.assertEqual([500, 500], decision["point"])
+        self.assertEqual((), observed.elements)
 
     def test_direct_point_branch_discards_duplicate_scene_geometry(self) -> None:
         scene = scene_payload()
@@ -318,19 +332,17 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "action", "action": "tap_semantic",
-                "target": {"element_id": "selected-target", "role": "button", "meaning": "open_target",
-                    "label": "打开", "evidence": ["打开"]}, "tap_point": [500, 500]},
+            "decision": {"status": "action", "action": "tap", "point": [500, 500]},
         }])
 
         observer = SingleStepGenericSceneObserver(provider)
         scene, decision = observer.observe_with_decision(
             frames=stable_frames(), goal_context={"objective": "打开目标"},
             device_id="device-local-01")
-        self.assertEqual((), scene.elements)
-        self.assertEqual("selected-target", decision['target']['element_id'])
+        self.assertGreaterEqual(len(scene.elements), 1)
+        self.assertNotIn("target", decision)
         raw = json.loads(observer.last_raw_response)
-        self.assertEqual([500, round(500 * 1000 / raw['coordinate_space']['height'])], decision['tap_point'])
+        self.assertEqual([500, round(500 * 1000 / raw['coordinate_space']['height'])], decision['point'])
         self.assertEqual(2, len(json.loads(observer.last_raw_response)['scene']['elements']))
 
     def test_invalid_unselected_goal_hint_does_not_veto_selected_scene_element(self) -> None:
@@ -349,15 +361,14 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "action", "action": "swipe_element",
-                "element_id": "selected-target", "start": [400, 450], "end": [200, 450]},
+            "decision": {"status": "action", "action": "swipe", "start": [400, 450], "end": [200, 450]},
         }])
 
         observed = SingleStepGenericSceneObserver(provider).observe(
             frames=stable_frames(), goal_context={"objective": "打开目标"},
             device_id="device-local-01")
 
-        self.assertEqual(["selected-target"], [item.element_id for item in observed.elements])
+        self.assertGreaterEqual(len(observed.elements), 1)
 
     def test_malformed_optional_states_do_not_veto_selected_scene_element(self) -> None:
         scene = scene_payload()
@@ -375,8 +386,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "action", "action": "swipe_element",
-                "element_id": "selected-target", "start": [400, 450], "end": [200, 450]},
+            "decision": {"status": "action", "action": "swipe", "start": [400, 450], "end": [200, 450]},
         }])
 
         observed = SingleStepGenericSceneObserver(provider).observe(
@@ -405,41 +415,32 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "action", "action": "swipe_element",
-                "element_id": "selected-target", "start": [400, 450], "end": [200, 450]},
+            "decision": {"status": "action", "action": "swipe", "start": [400, 450], "end": [200, 450]},
         }])
 
         observed = SingleStepGenericSceneObserver(provider).observe(
             frames=stable_frames(), goal_context={"objective": "打开目标"},
             device_id="device-local-01")
 
-        self.assertEqual(["selected-target"], [item.element_id for item in observed.elements])
+        self.assertGreaterEqual(len(observed.elements), 1)
         self.assertEqual(1, provider.calls)
 
-    def test_action_referenced_element_with_invalid_semantics_is_rejected(self) -> None:
+    def test_invalid_scene_element_is_diagnostic_only(self) -> None:
         scene = scene_payload()
         scene["elements"] = [{
-            "element_id": "selected-target",
-            "role": "future_widget",
-            "meaning": "open_target",
-            "bounds": [100, 300, 500, 400],
-            "confidence": 1.0,
-            "states": {"goal_relevant": True},
+            "element_id": "selected-target", "role": "future_widget", "meaning": "open_target",
+            "bounds": [100, 300, 500, 400], "confidence": 1.0, "states": {"goal_relevant": True},
         }]
         provider = SequenceProvider([{
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
-            "scene": scene,
-            "decision": {"status": "action", "action": "swipe_element",
-                "element_id": "selected-target", "start": [400, 350], "end": [200, 350]},
+            "scene": scene, "decision": {"status": "action", "action": "swipe",
+                "start": [400, 350], "end": [200, 350]},
         }])
-
-        with self.assertRaisesRegex(VisionAgentError, "不支持的元素角色"):
-            SingleStepGenericSceneObserver(provider).observe(
-                frames=stable_frames(), goal_context={"objective": "打开目标"},
-                device_id="device-local-01")
-
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(), goal_context={"objective": "滑动当前页面"}, device_id="device-local-01")
         self.assertEqual(1, provider.calls)
+        self.assertEqual(0, len(observed.elements))
 
     def test_finish_optional_element_does_not_create_reference_gate(self) -> None:
         scene = scene_payload()
@@ -456,7 +457,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "finish", "evidence_refs": ["element:bad-proof"]},
+            "decision": {'status': "finish"},
         }])
 
         _, choice = SingleStepGenericSceneObserver(provider).observe_with_decision(
@@ -497,6 +498,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "scene": scene,
             "input_structure": audit,
         }
+        retired["decision"] = default_model_decision()
         provider = SequenceProvider([json.dumps(retired, ensure_ascii=False)])
 
         with self.assertRaisesRegex(VisionAgentError, "coordinate_space"):
@@ -530,17 +532,14 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "overlays": [], "stable": True, "confidence": 0.9, "fingerprint": "wire-only",
                 },
                 "input_structure": None,
-                "decision": {"status": "action", "action": "tap_semantic",
-                    "target": {"element_id": "target-row", "role": "list_item",
-                        "meaning": "open_target", "label": "目标条目", "evidence": ["目标条目"]},
-                    "tap_point": tap_point},
+                "decision": {"status": "action", "action": "tap", "point": tap_point},
             }
             with self.subTest(app_id=app_id, height=height):
                 parsed = _parse_single_step_observation_envelope(json.dumps(payload, ensure_ascii=False),
                     input_structure_required=False, request_image_size=(720, height))
-                self.assertEqual(expected, parsed["decision"]["tap_point"])
+                self.assertEqual(expected, parsed["decision"]["point"])
                 center_y = round((bounds[1] + bounds[3]) * 500 / height)
-                self.assertNotEqual(center_y, parsed["decision"]["tap_point"][1])
+                self.assertNotEqual(center_y, parsed["decision"]["point"][1])
 
     def test_single_step_observer_rejects_retired_normalized_y_declaration(
         self,
@@ -557,6 +556,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "scene": scene,
             "input_structure": audit,
         }
+        retired["decision"] = default_model_decision()
         provider = SequenceProvider([json.dumps(retired, ensure_ascii=False)])
         context = {
             "entities": {
@@ -630,6 +630,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "scene": scene,
                     "input_structure": current_audit,
                 }
+                raw["decision"] = default_model_decision()
                 provider = SequenceProvider([json.dumps(raw, ensure_ascii=False)])
                 with self.assertRaisesRegex(VisionAgentError, error):
                     SingleStepGenericSceneObserver(provider).observe(
@@ -691,7 +692,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             def status(self) -> dict:
                 return {"configured": True, "model": "offline-sequence"}
 
-            def chat(self, messages, max_tokens, **_kwargs) -> str:
+            def _chat(self, messages, max_tokens, **_kwargs) -> str:
                 self.calls += 1
                 return json.dumps(
                     self.responses.pop(0),
@@ -736,5 +737,3 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

@@ -49,6 +49,7 @@ class ResolvedSemanticAction:
     target_app_name: str | None = None
     direction: str | None = None
     hold_seconds: float | None = None
+    wait_seconds: float | None = None
     path_distance: float | None = None
     target_element_id: str | None = None
     input_element_id: str | None = None
@@ -120,8 +121,16 @@ class UniversalActionController:
         if action.action == "drag":
             return self._resolve_drag(action, scene, resolved)
 
-        if action.action in {"back", "home", "open_recent_apps", "wait_for_change"}:
+        if action.action in {"back", "home", "open_recent_apps"}:
             return resolved()
+
+        if action.action == "wait_for_change":
+            wait_seconds = action.params.get("wait_seconds")
+            reject_if(wait_seconds is not None and (isinstance(wait_seconds, bool)
+                or not isinstance(wait_seconds, (int, float)) or wait_seconds < 0
+                or not math.isfinite(float(wait_seconds))),
+                UniversalActionError("wait_for_change等待时长必须是非负有限数字或null。"))
+            return resolved(wait_seconds=None if wait_seconds is None else float(wait_seconds))
 
         raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
 
@@ -154,27 +163,37 @@ class UniversalActionController:
         scene: UIScene,
         resolved: Any,
     ) -> ResolvedSemanticAction:
-        source = self._resolve_target(action, scene, prefix="source_")
-        destination = self._resolve_target(action, scene, prefix="destination_")
-        reject_if(
-            source.element_id == destination.element_id,
-            UniversalActionError("拖动起点和终点不能是同一元素。"),
-        )
-        self._validate_executable_element(source)
-        self._validate_executable_element(destination)
-        self._validate_gesture_point(source.center, label="拖动起点")
-        self._validate_gesture_point(destination.center, label="拖动终点")
-        distance = math.dist(source.center, destination.center)
+        # Qwen wire actions provide direct coordinates. Keep the older
+        # element-bound form for internal SemanticAction callers only; the
+        # wire normalizer never emits source/destination element fields.
+        if action.params.get("start") is None and action.params.get("end") is None and (
+            action.params.get("source_element_id") or action.params.get("destination_element_id")
+        ):
+            source = self._resolve_target(action, scene, prefix="source_")
+            destination = self._resolve_target(action, scene, prefix="destination_")
+            reject_if(source.element_id == destination.element_id,
+                UniversalActionError("拖动起点和终点不能是同一元素。"))
+            self._validate_executable_element(source)
+            self._validate_executable_element(destination)
+            start, end = source.center, destination.center
+            target_element_id = source.element_id
+            destination_element_id = destination.element_id
+        else:
+            start = self._gesture_param_point(action.params.get("start"), "拖动起点")
+            end = self._gesture_param_point(action.params.get("end"), "拖动终点")
+            target_element_id = None
+            destination_element_id = None
+        distance = math.dist(start, end)
         reject_if(
             not math.isfinite(distance) or distance <= 0,
             UniversalActionError("拖动轨迹必须是有限非零距离。"),
         )
         return resolved(
             "drag",
-            normalized_point=source.center,
-            normalized_end_point=destination.center,
-            target_element_id=source.element_id,
-            destination_element_id=destination.element_id,
+            normalized_point=start,
+            normalized_end_point=end,
+            target_element_id=target_element_id,
+            destination_element_id=destination_element_id,
             hold_seconds=DRAG_DURATION_SECONDS,
             path_distance=distance,
         )
@@ -233,7 +252,7 @@ class UniversalActionController:
             direction=direction,
             hold_seconds=DRAG_DURATION_SECONDS,
             path_distance=math.dist(start, end),
-            target_element_id=element.element_id,
+            target_element_id=element.element_id if element is not None else None,
         )
 
     def _resolve_element_swipe(
@@ -242,12 +261,17 @@ class UniversalActionController:
         scene: UIScene,
         resolved: Any,
     ) -> ResolvedSemanticAction:
-        element = self._resolve_target(action, scene)
-        self._validate_executable_element(element)
-        start = self._gesture_param_point(action.params.get("start"), "元素滑动起点")
-        end = self._gesture_param_point(action.params.get("end"), "元素滑动终点")
-        self._validate_element_swipe_start(element, start)
-        self._validate_gesture_point(end, label="元素滑动终点")
+        element_id = str(action.params.get("element_id") or "").strip()
+        element = self._resolve_target(action, scene) if element_id else None
+        if element is not None:
+            self._validate_executable_element(element)
+        start = self._gesture_param_point(action.params.get("start"), "滑动起点")
+        end = self._gesture_param_point(action.params.get("end"), "滑动终点")
+        if element is not None:
+            self._validate_element_swipe_start(element, start)
+        else:
+            self._validate_gesture_point(start, label="滑动起点")
+        self._validate_gesture_point(end, label="滑动终点")
         distance = math.dist(start, end)
         reject_if(
             not math.isfinite(distance) or distance <= 0,
@@ -261,7 +285,7 @@ class UniversalActionController:
             direction=direction,
             hold_seconds=DRAG_DURATION_SECONDS,
             path_distance=distance,
-            target_element_id=element.element_id,
+            target_element_id=element.element_id if element is not None else None,
         )
 
     def _resolve_verified_input(self, action: SemanticAction, scene: UIScene, resolved: Any) -> ResolvedSemanticAction:
@@ -630,7 +654,8 @@ class UniversalActionController:
         """Resolve only locally projected input controls; ordinary point targets have no bounds."""
 
         element_id = str(action.params.get("element_id") or "").strip()
-        reject_if(not element_id, UniversalActionError(f"{action.action} 缺少 Qwen 同帧严格目标身份。"))
+        if not element_id:
+            return None
         try:
             element = scene.get_element(element_id)
         except UISceneError:
@@ -650,11 +675,7 @@ class UniversalActionController:
             self._validate_executable_element(element)
             target_element_id = element.element_id
         else:
-            target_element_id = str(action.params.get("element_id") or "").strip()
-            target = str(action.params.get("target") or "").strip()
-            role = str(action.params.get("role") or "").strip()
-            reject_if(not target_element_id or not target or not role,
-                UniversalActionError("Qwen点按动作缺少同帧唯一目标身份。"))
+            target_element_id = None
         point = self._gesture_param_point(action.params.get("tap_point"), "Qwen明确点击点")
         if element is not None and element.role == "input":
             left, top, right, bottom = element.bounds

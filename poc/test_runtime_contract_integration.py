@@ -89,7 +89,7 @@ class RuntimeContractIntegrationTests(LoopHarness):
     def test_final_success_and_uncertain_effect_are_not_overwritten_by_pause(self):
         for kind, meaning, outcome, expected in [
             ('home', 'open_details', 'matched', 'succeeded'),
-            ('tap_semantic', 'send_message', 'uncertain', 'failed'),
+            ('tap_semantic', 'send_message', 'uncertain', 'paused'),
         ]:
             with self.subTest(expected=expected):
                 loop, session, adapter = self.start([(scene(0), decision(kind, meaning=meaning)),
@@ -102,7 +102,10 @@ class RuntimeContractIntegrationTests(LoopHarness):
                 loop.run_autonomous_safe_loop(session)
                 self.assertEqual(expected, session.status)
                 self.assertEqual(1, session.physical_actions)
-                self.assertIsNone(loop.device_registry.active_session(session.device_id))
+                if expected == 'succeeded':
+                    self.assertIsNone(loop.device_registry.active_session(session.device_id))
+                else:
+                    self.assertEqual(session.session_id, loop.device_registry.active_session(session.device_id))
 
     def test_real_loop_result_report_writer_and_scope_parser_compose(self):
         from dataclasses import replace

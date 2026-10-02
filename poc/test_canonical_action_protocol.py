@@ -38,15 +38,27 @@ def context(**_ignored) -> SimpleNamespace:
 
 
 def payload(action: str, **parts) -> dict:
+    aliases = {"tap_semantic": "tap", "dismiss_overlay": "dismiss", "swipe_element": "swipe",
+        "input_verified_text": "input", "clear_verified_text": "clear_input"}
+    wire_action = aliases.get(action, action)
     if action in {"tap_semantic", "dismiss_overlay", "double_tap", "long_press"}:
-        element_id = parts.pop("element_id", "direct-target")
-        role = parts.pop("target_role", "button")
-        meaning = parts.pop("target_meaning", "target")
-        label = parts.pop("target_label", "目标")
-        parts.setdefault("target", {"element_id": element_id, "role": role, "meaning": meaning,
-            "label": label, "evidence": [label or meaning]})
-        parts.setdefault("tap_point", [325, 275])
-    return {"status": "action", "action": action, **parts}
+        parts.pop("element_id", None)
+        parts.pop("target_role", None)
+        parts.pop("target_meaning", None)
+        parts.pop("target_label", None)
+        parts.pop("target", None)
+        parts.setdefault("point", parts.pop("tap_point", [325, 275]))
+    elif action in {"input_verified_text", "clear_verified_text"}:
+        parts.pop("element_id", None)
+        parts.pop("target", None)
+    elif action == "swipe_element":
+        parts.pop("element_id", None)
+    elif action == "drag":
+        parts.pop("source_element_id", None)
+        parts.pop("destination_element_id", None)
+        parts.setdefault("start", [100, 100])
+        parts.setdefault("end", [200, 200])
+    return {"status": "action", "action": wire_action, **parts}
 
 
 def ime_profile(*, device_id: str="device-local-01") -> TextTransportProfile:
@@ -66,7 +78,7 @@ class DirectCanonicalBindingTests(unittest.TestCase):
             context=context(), observation=observation(current), available_action_kinds={"tap_semantic"})
 
         self.assertEqual("tap_semantic", action.action)
-        self.assertEqual("target-button", action.params["element_id"])
+        self.assertNotIn("element_id", action.params)
         self.assertEqual((0.12, 0.18), action.params["tap_point"])
         self.assertEqual((0.1, 0.2, 0.5, 0.35), current.bounds)
         self.assertFalse({"expected_effect", "expected_result", "formal_candidate_id", "formal_transition"}
@@ -75,8 +87,8 @@ class DirectCanonicalBindingTests(unittest.TestCase):
     def test_direct_tap_point_is_required_and_does_not_inherit_coarse_bounds_center(self) -> None:
         current = element("adjacent-row", bounds=(0.05, 0.25, 0.95, 0.352))
         raw = payload("tap_semantic", element_id=current.element_id)
-        raw.pop("tap_point")
-        with self.assertRaisesRegex(CanonicalActionProtocolError, "tap_point"):
+        raw.pop("point")
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "point"):
             normalize_model_step_decision(raw)
 
         action = bind_same_response_action(payload("tap_semantic", element_id=current.element_id,
@@ -86,31 +98,19 @@ class DirectCanonicalBindingTests(unittest.TestCase):
         self.assertEqual((0.5, 0.22), action.params["tap_point"])
         self.assertNotEqual(current.center, action.params["tap_point"])
 
-    def test_container_dialog_and_unknown_are_not_denied_only_by_role(self) -> None:
+    def test_point_action_does_not_require_scene_element_role(self) -> None:
         for role in ("container", "dialog", "unknown"):
             with self.subTest(role=role):
                 current = element(f"{role}-surface", role=role)
-                action = bind_same_response_action(payload("tap_semantic", element_id=current.element_id,
-                    target_role=role),
+                action = bind_same_response_action(payload("tap_semantic"),
                     context=context(), observation=observation(current), available_action_kinds={"tap_semantic"})
-                self.assertEqual(role, action.params["role"])
+                self.assertEqual((0.325, 0.275), action.params["tap_point"])
 
-    def test_strict_direct_target_identity_is_hard_but_optional_scene_states_do_not_veto(self) -> None:
-        enabled = element("enabled")
-        invalid = payload("tap_semantic", element_id="old-frame-id")
-        invalid["target"]["bounds"] = [0, 0, 1, 1]
-        with self.assertRaisesRegex(CanonicalActionProtocolError, "decision.target不得携带几何"):
-            bind_same_response_action(invalid, context=context(),
-                observation=observation(enabled), available_action_kinds={"tap_semantic"})
-
-        for state in ({"visible": False}, {"enabled": False}, {"occluded": True},
-            {"fully_visible": False}):
-            with self.subTest(state=state):
-                diagnostic = replace(enabled, states=state)
-                action = bind_same_response_action(payload("tap_semantic", element_id="enabled"),
-                    context=context(), observation=observation(diagnostic),
-                    available_action_kinds={"tap_semantic"})
-                self.assertEqual("enabled", action.params["element_id"])
+    def test_old_target_field_is_rejected_by_wire_contract(self) -> None:
+        raw = payload("tap_semantic")
+        raw["target"] = {"role": "button", "meaning": "legacy"}
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "协议外字段"):
+            normalize_model_step_decision(raw)
 
     def test_device_action_kind_is_a_hard_check(self) -> None:
         current = element("target-button")
@@ -125,29 +125,27 @@ class DirectCanonicalBindingTests(unittest.TestCase):
 
         scroll = bind_same_response_action(payload("scroll", direction="left", element_id="source"),
             context=context(), observation=current, available_action_kinds={"scroll"})
-        self.assertEqual({"direction": "left", "element_id": "source", "target": "target", "role": "button",
-            "label": "目标", "states": {"enabled": True, "fully_visible": True}}, scroll.params)
+        self.assertEqual({"direction": "left"}, scroll.params)
 
         element_swipe = bind_same_response_action(payload("swipe_element", element_id="source",
             start=[200, 180], end=[50, 180]), context=context(), observation=current,
             available_action_kinds={"swipe_element"})
         self.assertEqual((0.2, 0.18), element_swipe.params["start"])
         self.assertEqual((0.05, 0.18), element_swipe.params["end"])
-        self.assertEqual("source", element_swipe.params["element_id"])
+        self.assertNotIn("element_id", element_swipe.params)
 
-        drag = bind_same_response_action(payload("drag", source_element_id="source",
-            destination_element_id="destination"), context=context(), observation=current,
-            available_action_kinds={"drag"})
-        self.assertEqual("source", drag.params["source_element_id"])
-        self.assertEqual("destination", drag.params["destination_element_id"])
+        drag = bind_same_response_action(payload("drag", start=[100, 100], end=[800, 800]),
+            context=context(), observation=current, available_action_kinds={"drag"})
+        self.assertEqual((0.1, 0.1), drag.params["start"])
+        self.assertEqual((0.8, 0.8), drag.params["end"])
         self.assertFalse({"expected_effect", "formal_candidate_id", "formal_transition"}.intersection(drag.params))
 
     def test_element_swipe_requires_complete_in_frame_trajectory(self) -> None:
         current = observation(element("source", bounds=(0.1, 0.1, 0.5, 0.5)))
         with self.assertRaisesRegex(CanonicalActionProtocolError, "起点和终点"):
-            normalize_model_step_decision(payload("swipe_element", element_id="source", start=[200, 200]))
+            normalize_model_step_decision(payload("swipe_element", start=[200, 200]))
         with self.assertRaisesRegex(CanonicalActionProtocolError, "坐标范围"):
-            bind_same_response_action(payload("swipe_element", element_id="source",
+            bind_same_response_action(payload("swipe_element",
                 start=[200, 200], end=[1001, 200]), context=context(), observation=current,
                 available_action_kinds={"swipe_element"})
 
@@ -180,13 +178,11 @@ class DirectCanonicalBindingTests(unittest.TestCase):
         self.assertEqual("aa你好", action.params["expected_input_value"])
         self.assertNotIn("expected_effect", action.params)
 
-    def test_text_action_accepts_redundant_input_description_without_binding_it(self) -> None:
+    def test_old_input_target_description_is_rejected_by_wire_contract(self) -> None:
         raw = payload("input_verified_text", text="aa你好")
-        raw["target"] = {"role": "input", "meaning": "message_input",
-                          "label": "输入框", "evidence": ["当前焦点输入框"]}
-        normalized = normalize_model_step_decision(raw)
-        self.assertIsNone(normalized["target"])
-        self.assertEqual("aa你好", normalized["text"])
+        raw["target"] = {"role": "input", "meaning": "message_input"}
+        with self.assertRaisesRegex(CanonicalActionProtocolError, "协议外字段"):
+            normalize_model_step_decision(raw)
 
     def test_adb_keyboard_input_rejects_unfocused_field_even_when_unique_and_visible(self) -> None:
         input_box = element("message-input", role="input", meaning="message_input", label="消息",

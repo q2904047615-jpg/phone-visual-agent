@@ -9,6 +9,8 @@ from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneOb
 from agent.infrastructure.dashscope_vision_provider import _image_data_url
 from agent.infrastructure.generic_scene_observer import _single_step_observation_prompt
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from test_support.generic_scene_observer import (
     SequenceProvider,
@@ -35,15 +37,39 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
             request_image_size=(540, 960),
             available_action_kinds=('scroll', 'swipe_element'),
         )
+        self.assertIn('当前设备本轮可用动作', prompt)
         self.assertIn('整任务预算', prompt)
         self.assertNotIn('gesture_correction', prompt)
         self.assertNotIn('绝不能重复原轨迹', prompt)
-        self.assertIn('落点应明确位于target的可交互区域内部', prompt)
-        self.assertIn('不能原样复用该落点', prompt)
-        self.assertIn('顶部标题、页面标题或其它明确身份信息', prompt)
+        self.assertIn('HISTORY', prompt)
+        self.assertIn('CURRENT', prompt)
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
+    def test_visual_references_are_sent_as_separate_labeled_examples(self) -> None:
+        envelope = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
+            "scene": scene_payload(),
+            "input_structure": None,
+            "decision": {"status": "finish", "reason": "当前任务已完成"},
+        }
+        provider = SequenceProvider([envelope])
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "example.jpg"
+            Image.new("RGB", (1179, 2556), (220, 20, 60)).save(reference)
+            SingleStepGenericSceneObserver(provider).observe_with_decision(
+                frames=stable_frames(), goal_context={"objective": "识别页面"},
+                device_id="device-local-01", visual_reference_paths=(reference,),
+            )
+        content = provider.messages_seen[0][1]["content"]
+        image_parts = [part for part in content if part.get("type") == "image_url"]
+        self.assertEqual(5, len(image_parts))
+        self.assertIn("REFERENCE IMAGE 1 - VISUAL EXAMPLE ONLY", content[1]["text"])
+        self.assertIn("参考图坐标", content[0]["text"])
+        self.assertTrue(image_parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(1, provider.calls)
+
     def test_explicit_system_home_observation_sends_unmasked_phone_frame(
         self,
     ) -> None:
@@ -106,11 +132,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 prompt = provider.messages_seen[0][1]["content"][0]["text"]
                 self.assertNotIn("中央App内容未披露", prompt)
                 self.assertNotIn("固定遮罩", prompt)
-                for text in ("可以先home再按新图寻找", "back返回上一级", "系统一键清理按钮",
-                    "不得用 swipe_element 划卡片", "系统清理按钮规则不适用于普通查看后台",
-                    "打开后台统一选择 open_recent_apps",
-                    "应用卡片叠放/缩略图",
-                    "不能把卡片内容当成当前前台页面",
+                for text in ("open_recent_apps", "Home", "HISTORY", "CURRENT",
                     '当前设备本轮可用动作（唯一运行时动作集合）：["back","home"]'):
                     self.assertIn(text, prompt)
 

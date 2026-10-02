@@ -1,4 +1,4 @@
-"""Trusted-launch descriptive target tolerance; no real model/device calls."""
+"""Trusted launch uses only app; retired decision targets are rejected."""
 from __future__ import annotations
 import copy
 import json
@@ -22,25 +22,21 @@ from agent.infrastructure.generic_scene_observer import (
 
 def decision(app="示例应用"):
     return {"status": "action", "action": "launch_app", "app": app,
-            "target": {"role": "icon", "meaning": "launch_app", "label": app,
-                       "evidence": ["当前画面可见应用图标"]}}
+            "reason": "打开已登记应用"}
 
 
 class LaunchDescriptionTests(unittest.TestCase):
-    def test_pure_description_is_projected_without_mutating_raw_or_app(self):
+    def test_launch_app_preserves_alias_and_rejects_retired_target(self):
         for app in ("抖音", "微信", "便签"):
-            for description in ({"role": "icon", "meaning": "launch_app"},
-                                {"role": "input", "meaning": "page_context",
-                                 "element_id": "diagnostic-only", "label": "无关说明", "evidence": []}):
-                with self.subTest(app=app, description=description):
-                    raw = {**decision(app), "target": description}
-                    before = copy.deepcopy(raw)
-                    result = normalize_model_step_decision(raw)
-                    self.assertEqual(before, raw)
-                    self.assertEqual("launch_app", result["action"])
-                    self.assertEqual(app, result["app"])
-                    self.assertIsNone(result["target"])
-                    self.assertEqual(result, normalize_model_step_decision(result))
+            raw = decision(app)
+            before = copy.deepcopy(raw)
+            result = normalize_model_step_decision(raw)
+            self.assertEqual(before, raw)
+            self.assertEqual(app, result["app"])
+            self.assertIsNone(result["target"])
+            for target in ({}, {"role": "icon", "label": app}):
+                with self.subTest(app=app, target=target), self.assertRaises(CanonicalActionProtocolError):
+                    normalize_model_step_decision({**raw, "target": target})
 
     def test_top_level_action_conflicts_still_rejected(self):
         conflicts = {"tap_point": [100, 200], "start": [100, 200], "end": [200, 300],
@@ -57,27 +53,25 @@ class LaunchDescriptionTests(unittest.TestCase):
                              "states": {}, "label": {"shell": "example"},
                              "evidence": [{"command": "example"}], "element_id": ["e1"]}.items():
             raw = decision()
-            raw["target"][field] = value
+            raw["target"] = {field: value}
             with self.subTest(field=field), self.assertRaises(CanonicalActionProtocolError):
                 normalize_model_step_decision(raw)
         for target in ("icon", []):
             with self.subTest(target=target), self.assertRaises(CanonicalActionProtocolError):
                 normalize_model_step_decision({**decision(), "target": target})
 
-    def test_text_point_and_finish_do_not_gain_system_description_tolerance(self):
-        for action in ("clear_verified_text", "press_enter"):
-            with self.subTest(action=action), self.assertRaises(CanonicalActionProtocolError):
-                normalize_model_step_decision({**decision(), "action": action, "app": None})
-        with self.assertRaises(CanonicalActionProtocolError):
-            normalize_model_step_decision({**decision(), "status": "finish", "action": None, "app": None})
-        for action in ("tap_semantic", "dismiss_overlay", "double_tap", "long_press"):
-            raw = {**decision(), "action": action, "app": None, "tap_point": [321, 654]}
-            result = normalize_model_step_decision(raw)
-            self.assertEqual([321, 654], result["tap_point"])
-            self.assertEqual(raw["target"]["meaning"], result["target"]["meaning"])
-            raw["tap_point"] = None
+    def test_point_text_and_finish_use_only_their_current_fields(self):
+        for action in ("clear_input", "press_enter"):
+            raw = {"status": "action", "action": action}
+            self.assertIsNone(normalize_model_step_decision(raw)["target"])
             with self.assertRaises(CanonicalActionProtocolError):
-                normalize_model_step_decision(raw)
+                normalize_model_step_decision({**raw, "target": {"role": "input"}})
+        self.assertEqual("finish", normalize_model_step_decision({"status": "finish"})["status"])
+        for action in ("tap", "dismiss", "double_tap", "long_press"):
+            raw = {"status": "action", "action": action, "point": [321, 654]}
+            self.assertEqual([321, 654], normalize_model_step_decision(raw)["tap_point"])
+            with self.assertRaises(CanonicalActionProtocolError):
+                normalize_model_step_decision({**raw, "point": None})
 
     def test_missing_app_is_not_inferred_from_description(self):
         for app in (None, "", "  "):
@@ -99,7 +93,7 @@ class LaunchDescriptionTests(unittest.TestCase):
                 raw = json.dumps(payload, ensure_ascii=False)
                 calls = []
                 provider = SimpleNamespace(status=lambda: {"configured": True, "model": "offline"},
-                    chat=lambda *args, **kwargs: (calls.append((args, kwargs)) or raw))
+                    _chat=lambda *args, **kwargs: (calls.append((args, kwargs)) or raw))
                 observer = SingleStepGenericSceneObserver(provider)
                 scene, normalized = observer.observe_with_decision(
                     frames=[Image.new("RGB", (160, 240), "white") for _ in range(4)],
@@ -109,7 +103,7 @@ class LaunchDescriptionTests(unittest.TestCase):
                 self.assertEqual(raw, observer.last_raw_response)
                 saved = json.loads(Path(observer.last_response_evidence_path).read_text(encoding="utf-8"))
                 self.assertEqual(raw, saved["redacted_raw_response"])
-                self.assertIsNone(normalized["target"])
+                self.assertNotIn("target", normalized)
                 adb = root / "adb.exe"
                 adb.write_bytes(b"")
                 registry = root / "registry.json"

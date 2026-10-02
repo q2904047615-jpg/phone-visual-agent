@@ -47,13 +47,15 @@ class QwenTaskContext:
         return dataclass_wire(self)
 
 def action_effect_kind(action: Any) -> str:
-    """Read the declared effect class, while allowing finish to have no action."""
+    """Read the Qwen-declared generic effect class, never infer it from UI IDs."""
     if action is None:
         return ""
+    declared = action.params.get("effect_kind")
+    if declared in EFFECT_KINDS:
+        return str(declared)
     if action.action in {"input_verified_text", "clear_verified_text", "press_enter"}:
         return "data_mutation"
-    meaning = str(action.params.get("target") or "")
-    return meaning if meaning in EFFECT_KINDS else ""
+    return ""
 
 
 def execution_history_entry(*, step: int, requested_action: dict[str, Any],

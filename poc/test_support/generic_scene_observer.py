@@ -11,7 +11,7 @@ from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION, UIScene
 
 
 def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
-    """Translate old normalized fixtures to the sole current wire contract."""
+    """Build a current envelope for scene-only test fixtures; decision fields are never repaired."""
 
     payload = json.loads(json.dumps(value, ensure_ascii=False))
     flat_scene = payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
@@ -20,9 +20,10 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
         old_height = (payload.get("coordinate_space") or {}).get("height")
         if isinstance(old_height, (int, float)) and old_height not in (0, 1000):
             decision = payload.get("decision")
-            point = decision.get("tap_point") if isinstance(decision, dict) else None
-            if isinstance(point, list) and len(point) == 2 and isinstance(point[1], (int, float)):
-                point[1] = round(point[1] * 1000 / old_height)
+            if isinstance(decision, dict):
+                for point in (decision.get("point"), decision.get("start"), decision.get("end")):
+                    if isinstance(point, list) and len(point) == 2 and isinstance(point[1], (int, float)):
+                        point[1] = round(point[1] * 1000 / old_height)
             scene = payload.get("scene")
             for element in scene.get("elements", []) if isinstance(scene, dict) else []:
                 bounds = element.get("bounds") if isinstance(element, dict) else None
@@ -63,34 +64,9 @@ def current_axis_grid_payload(value: dict, *, request_height: int) -> dict:
                 }
         if set(payload) >= {"coordinate_space", "tap_point"} and isinstance(payload.get("coordinate_space"), dict):
             payload["coordinate_space"] = {"kind": "axis_grid", "width": 1000, "height": request_height}
-        _adapt_direct_point_fixture(payload)
         return payload
     payload.setdefault("decision", default_model_decision())
-    _adapt_direct_point_fixture(payload)
     return payload
-
-
-def _adapt_direct_point_fixture(payload: dict) -> None:
-    """Project historical point fixtures into the strict target-only branch."""
-
-    decision = payload.get("decision")
-    scene = payload.get("scene")
-    if (not isinstance(decision, dict) or not isinstance(scene, dict)
-        or decision.get("action") not in {"tap_semantic", "dismiss_overlay", "press_enter", "double_tap",
-            "long_press"} or isinstance(decision.get("target"), dict)):
-        return
-    element_id = str(decision.pop("element_id", "") or "").strip()
-    elements = scene.get("elements") if isinstance(scene.get("elements"), list) else []
-    selected = next((item for item in elements if isinstance(item, dict)
-        and str(item.get("element_id") or "").strip() == element_id), {})
-    role = str(selected.get("role") or "button").strip()
-    meaning = str(selected.get("meaning") or "test_target").strip()
-    label = str(selected.get("label") or "").strip()
-    evidence = [str(item).strip() for item in selected.get("evidence") or []
-        if isinstance(item, str) and item.strip()]
-    decision["target"] = {"element_id": element_id or "test-direct-target", "role": role,
-        "meaning": meaning, "label": label, "evidence": evidence or [label or meaning]}
-    scene["elements"] = []
 
 
 def default_model_decision() -> dict:
@@ -99,11 +75,10 @@ def default_model_decision() -> dict:
     return {
         "status": "finish",
         "action": None,
-        "element_id": None,
-        "source_element_id": None,
-        "destination_element_id": None,
+        "point": None,
         "direction": None,
-        "evidence_refs": ["scene.summary"],
+        "start": None,
+        "end": None,
         "confidence": 0.95,
         "reason": "test fixture only: current scene is the requested observation",
         "postcondition": None,
@@ -133,7 +108,7 @@ class FakeProvider:
     def status(self) -> dict:
         return {"configured": True, "model": "fake-qwen"}
 
-    def chat(
+    def _chat(
         self,
         messages: list[dict],
         max_tokens: int | None,
@@ -164,7 +139,7 @@ class SequenceProvider(FakeProvider):
         self.max_tokens_seen: list[int] = []
         self.messages_seen: list[list[dict]] = []
 
-    def chat(
+    def _chat(
         self,
         messages: list[dict],
         max_tokens: int | None,
@@ -189,22 +164,6 @@ class SequenceProvider(FakeProvider):
                 value,
                 request_height=request_axis_height(messages),
             )
-        elif isinstance(value, str):
-            try:
-                decoded = json.loads(value)
-            except json.JSONDecodeError:
-                decoded = None
-            if (
-                isinstance(decoded, dict)
-                and decoded.get("protocol_version")
-                == SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
-                and "decision" not in decoded
-            ):
-                decoded["decision"] = default_model_decision()
-            if (isinstance(decoded, dict) and decoded.get("protocol_version")
-                == SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION):
-                _adapt_direct_point_fixture(decoded)
-                value = json.dumps(decoded, ensure_ascii=False)
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 

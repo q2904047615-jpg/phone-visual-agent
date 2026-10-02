@@ -33,11 +33,14 @@ def task_context(raw_goal='执行当前任务', exact_input_text=None):
 
 
 def decision(kind='tap_semantic', **parts):
+    aliases = {'tap_semantic': 'tap', 'dismiss_overlay': 'dismiss',
+        'swipe_element': 'swipe', 'input_verified_text': 'input',
+        'clear_verified_text': 'clear_input'}
+    wire_kind = aliases.get(kind, kind)
     value = dict.fromkeys(MODEL_STEP_DECISION_FIELDS)
-    value.update(status='action', action=kind, evidence_refs=[], confidence=1, reason='当前截图证据')
-    if kind in {'tap_semantic', 'dismiss_overlay', 'long_press', 'double_tap'}:
-        value.update(target={'element_id': 'e1', 'role': 'button', 'meaning': 'open_entry',
-            'label': '入口', 'evidence': ['入口可见']}, tap_point=[420, 220])
+    value.update(status='action', action=wire_kind, confidence=1, reason='当前截图证据')
+    if wire_kind in {'tap', 'dismiss', 'long_press', 'double_tap'}:
+        value['point'] = [420, 220]
     value.update(parts)
     return value
 
@@ -45,7 +48,7 @@ def decision(kind='tap_semantic', **parts):
 def wire(choice=None, audit=None):
     scene = scene_payload()
     scene['elements'][0]['bounds'] = [100, 280, 400, 350]
-    return {'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+    return {'reply': '根据当前画面继续处理任务。', 'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
         'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': 1000},
         'scene': scene, 'input_structure': audit, 'decision': choice or decision()}
 
@@ -61,6 +64,8 @@ def observe(payload, graph=None, *, allowed=None):
         'press_enter', 'clear_verified_text', 'input_verified_text', 'scroll', 'home', 'swipe_element'})
     scene, choice = observer.observe_with_decision(frames=frames,
         goal_context=goal_context, device_id=graph.device_id, available_action_kinds=allowed)
+    # The production orchestrator records reply separately before binding the action.
+    choice.pop("_qwen_reply")
     trusted = build_trusted_observation(frames=frames, device_id=graph.device_id, scene=scene)
     binder = QwenVisualDecisionObserver(StatusOnlyProvider(),
         trusted_observation_frame_validator=validate_trusted_observation_against_frames)
@@ -78,11 +83,13 @@ class PointSceneProjectionTests(unittest.TestCase):
         archived = json.loads((Path(__file__).resolve().parents[2] / 'test_fixtures/point_scene_saved_response.json').read_text(encoding='utf-8'))
         self.assertEqual('2026-09-04-single-step-flat-target-point-v13', archived['protocol_version'])
         current = deepcopy(archived)
-        # Explicit offline version rebind only; production does not accept historical versions.
+        # Explicit offline migration of an archived response; no runtime compatibility.
         current['protocol_version'] = SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+        current['decision'] = decision(point=archived['decision']['tap_point'],
+            reason=archived['decision']['reason'])
         scene, result, resolved, observer = observe(current)
-        self.assertEqual((), scene.elements)
-        self.assertEqual('e1', result.proposal.action.params['element_id'])
+        self.assertEqual('e1', scene.elements[0].element_id)
+        self.assertIsNone(result.proposal.action.params.get('element_id'))
         self.assertEqual((.45, .648), resolved.normalized_point)
         self.assertEqual(current, json.loads(observer.last_raw_response))
         with self.assertRaisesRegex(VisionAgentError, '协议版本'):
@@ -91,23 +98,22 @@ class PointSceneProjectionTests(unittest.TestCase):
 
     def test_unconsumed_scene_variations_cannot_change_any_noninput_point_action(self):
         for kind in ('tap_semantic', 'dismiss_overlay', 'double_tap', 'long_press'):
-            baseline = wire(decision(kind, evidence_refs=['element:e1']))
+            baseline = wire(decision(kind))
             baseline['scene']['elements'] = []
             expected = observe(baseline)[2]
             for extra in (None, 'irrelevant', {}, [42],
                     [{'element_id': 'e1', 'role': 'input', 'bounds': [-1, 0, 9000, 9000],
-                      'states': {'focused': False}, 'action': 'home'}, {'element_id': 'e1'}]):
+                      'states': {'focused': False}}, {'element_id': 'e1'}]):
                 with self.subTest(kind=kind, extra=extra):
                     payload = deepcopy(baseline)
                     payload['scene']['elements'] = extra
                     scene, _, actual, observer = observe(payload)
-                    self.assertEqual((), scene.elements)
                     self.assertEqual(expected, actual)
                     self.assertEqual(extra, json.loads(observer.last_raw_response)['scene']['elements'])
 
     def test_missing_target_point_and_second_target_still_reject(self):
-        for extra in ({'target': None}, {'tap_point': None}, {'tap_point': [1001, 220]},
-                {'element_id': 'second'}, {'target': {**decision()['target'], 'bounds': [1, 2, 3, 4]}}):
+        for extra in ({'point': None}, {'point': [1001, 220]}, {'start': [10, 10]},
+                {'direction': 'up'}):
             with self.subTest(extra=extra), self.assertRaises(VisionAgentError):
                 observe(wire(decision(**extra)))
 
@@ -123,14 +129,12 @@ class PointSceneProjectionTests(unittest.TestCase):
         item = audited_application_input(bounds=[80, 320, 850, 410], text='旧草稿', focused=False,
             visible_editable_cues=['完整输入边框'])
         item['element_id'] = 'field'
-        target = {'element_id': 'field', 'role': 'input', 'meaning': 'application_text_input',
-            'label': '输入框', 'evidence': ['完整输入边框']}
-        payload = wire(decision(target=target, tap_point=[610, 370], evidence_refs=['element:field']),
+        payload = wire(decision('tap_semantic', point=[610, 370]),
             input_audit_payload(application_inputs=[item]))
         payload['scene']['elements'] = [{'element_id': 'field', 'role': 'input',
             'bounds': [0, 0, 0, 0], 'states': {'value': '冲突文字', 'focused': True}}]
         scene, result, resolved, _ = observe(payload, task_context('清空当前输入框'))
-        self.assertEqual('field', result.proposal.action.params['element_id'])
+        self.assertIsNone(result.proposal.action.params.get('element_id'))
         audited_input = scene.get_element('local_audited_input_1')
         self.assertEqual('旧草稿', audited_input.states['value'])
         self.assertIsNot(audited_input.states.get('focused'), True)
@@ -138,8 +142,8 @@ class PointSceneProjectionTests(unittest.TestCase):
         self.assertEqual((.61, .37), resolved.normalized_point)
         broken = deepcopy(payload)
         broken['input_structure']['application_inputs'][0]['bounds'] = [0, 0, 0, 0]
-        with self.assertRaises(VisionAgentError):
-            observe(broken, task_context('清空当前输入框'))
+        # A coordinate tap does not acquire a second veto from optional input facts.
+        self.assertEqual(resolved.normalized_point, observe(broken, task_context('清空当前输入框'))[2].normalized_point)
 
     def test_press_enter_keeps_same_frame_typed_projection(self):
         graph = task_context('换行', exact_input_text='draft\n')
@@ -160,19 +164,18 @@ class PointSceneProjectionTests(unittest.TestCase):
         with self.assertRaises(VisionAgentError):
             observe(bad, graph)
 
-    def test_nonpoint_actions_still_bind_referenced_scene_elements(self):
-        for choice in (decision('scroll', direction='up', element_id='e1'),):
+    def test_scroll_does_not_bind_optional_scene_elements(self):
+        for choice in (decision('scroll', direction='up'),):
             payload = wire(choice)
             scene, _, _, _ = observe(payload)
             self.assertEqual('e1', scene.elements[0].element_id)
             bad = deepcopy(payload)
             bad['scene']['elements'].append(deepcopy(bad['scene']['elements'][0]))
-            with self.assertRaisesRegex(VisionAgentError, '不唯一'):
-                observe(bad)
+            self.assertEqual(observe(payload)[2], observe(bad)[2])
 
 
     def test_finish_does_not_make_optional_scene_ids_authoritative(self):
-        payload = wire(decision(None, status='finish', evidence_refs=['element:missing']))
+        payload = wire(decision(None, status='finish'))
         payload['scene']['elements'][0]['bounds'] = [0, 0, 0, 0]
         self.assertEqual('finish', observe(payload)[1].proposal.status)
 

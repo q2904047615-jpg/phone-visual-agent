@@ -112,6 +112,23 @@ class FakeAdbKeyboardTransport:
 
 
 class DeviceExecutorTests(unittest.TestCase):
+    def test_all_four_dynamic_scroll_methods_remain_executable(self):
+        from agent.infrastructure.robot_controller import RobotController
+
+        class RecordingRobot(RobotController):
+            def __init__(self):
+                self.calls = []  # No real controller construction or window access.
+
+            def _vision_swipe(self, direction):
+                self.calls.append(direction)
+
+        for direction in ('up', 'down', 'left', 'right'):
+            with self.subTest(direction=direction):
+                robot = RecordingRobot()
+                result = RobotDeviceExecutor(robot).execute(DeviceActionRequest(kind='scroll', direction=direction))
+                self.assertEqual([direction], robot.calls)
+                self.assertEqual(1, result.physical_actions)
+
     def test_relative_swipe_dispatches_once_and_consumes_path_receipt(self):
         robot = FakeRobot()
         executor = RobotDeviceExecutor(robot)
@@ -174,47 +191,6 @@ class DeviceExecutorTests(unittest.TestCase):
 
         self.assertEqual(context.exception.physical_actions, 1)
         self.assertEqual(robot.calls, [("tap", 100, 200)])
-
-    def test_click_receipt_exception_is_a_failed_physical_action(self):
-        robot = FakeRobot()
-
-        def raise_click_receipt():
-            raise RuntimeError("receipt unavailable")
-
-        robot.consume_last_click_receipt = raise_click_receipt
-        executor = RobotDeviceExecutor(robot)
-
-        with self.assertRaises(DeviceExecutionError) as context:
-            executor.execute(
-                DeviceActionRequest(kind="tap_semantic", point=(100, 200))
-            )
-
-        self.assertEqual(context.exception.physical_actions, 1)
-        self.assertIn("点击", str(context.exception))
-        self.assertEqual(robot.calls, [("tap", 100, 200)])
-
-    def test_swipe_receipt_exception_is_a_failed_physical_action(self):
-        robot = FakeRobot()
-
-        def raise_swipe_receipt():
-            raise OSError("receipt unavailable")
-
-        robot.consume_last_swipe_receipt = raise_swipe_receipt
-        executor = RobotDeviceExecutor(robot)
-
-        with self.assertRaises(DeviceExecutionError) as context:
-            executor.execute(
-                DeviceActionRequest(
-                    kind="swipe_element",
-                    point=(700, 500),
-                    end_point=(100, 500),
-                    direction="left",
-                )
-            )
-
-        self.assertEqual(context.exception.physical_actions, 1)
-        self.assertIn("滑动", str(context.exception))
-        self.assertEqual(robot.calls, [("swipe", 700, 500, 100, 500, "left")])
 
 
     def test_adb_keyboard_append_and_clear_never_call_mechanical_keyboard(self):

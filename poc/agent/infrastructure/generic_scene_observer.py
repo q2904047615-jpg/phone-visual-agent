@@ -29,8 +29,10 @@ from agent.infrastructure.observation_images import (
     measure_local_stability,
 )
 from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
+from agent.domain.qwen_task_context import EFFECT_KINDS
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
+    MODEL_ACTION_ALIASES,
     MODEL_STEP_DIRECT_POINT_ACTIONS,
     normalize_model_step_decision,
 )
@@ -42,20 +44,17 @@ from agent.domain.ui_scene import (
     UISceneError,
     camera_alignment_evidence_is_safe,
 )
-from agent.infrastructure.vision_payload_support import (
-    extract_json_object as _extract_json_object,
-    image_data_url as _image_data_url,
-    image_request_size as _image_request_size,
-)
-from agent.application.vision_provider import VisionProviderPort
+from agent.infrastructure.dashscope_vision_provider import _extract_json_object, _image_data_url, _image_request_size
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-15-history-thumbnails-v25"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-25-multimodal-reply-v27"
 HISTORY_THUMBNAIL_MAX_SIZE = (360, 640)
 HISTORY_THUMBNAIL_JPEG_QUALITY = 70
+REFERENCE_THUMBNAIL_MAX_SIZE = (480, 480)
+REFERENCE_THUMBNAIL_JPEG_QUALITY = 72
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-09-06-input-structure-field-preedit-v17"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 @lru_cache(maxsize=4)
@@ -99,6 +98,32 @@ def _history_image_data_url(path: Path) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
 
 
+def _reference_image_data_url(path: Path) -> str:
+    """Encode a project-owned visual example without exposing it as task history."""
+
+    candidate = Path(path)
+    reject_if(not candidate.is_file(), VisionAgentError(f"视觉参考图不可用：{candidate.name}"))
+    try:
+        with Image.open(candidate) as saved:
+            image = saved.convert("RGB")
+            image.thumbnail(REFERENCE_THUMBNAIL_MAX_SIZE, Image.Resampling.LANCZOS)
+    except (OSError, ValueError) as exc:
+        raise VisionAgentError(f"视觉参考图无法读取：{candidate.name}") from exc
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=REFERENCE_THUMBNAIL_JPEG_QUALITY, optimize=True)
+    return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _validated_reference_paths(value: Iterable[Path] | None) -> tuple[Path, ...]:
+    try:
+        paths = tuple(Path(item) for item in (value or ()))
+    except (TypeError, ValueError) as exc:
+        raise VisionAgentError("视觉参考图路径格式无效。") from exc
+    for path in paths:
+        reject_if(not path.is_file(), VisionAgentError(f"视觉参考图不可用：{path.name}"))
+    return paths
+
+
 _ACTION_LIKE_WIRE_KEYS = frozenset({'action', 'actions', 'plan', 'plans', 'step', 'steps', 'tap', 'swipe',
     'command', 'shell', 'coordinates', 'next_action', 'execution_plan'})
 
@@ -140,7 +165,7 @@ STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查当前画面', 'w
 class SingleStepGenericSceneObserver():
     """Use one Qwen envelope per fresh scene as the only scene/input observation authority."""
 
-    def __init__(self, provider: VisionProviderPort) -> None:
+    def __init__(self, provider: Any) -> None:
         self.provider = provider
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
@@ -150,6 +175,7 @@ class SingleStepGenericSceneObserver():
         self.supports_runtime_action_contract = True
         self.supports_response_evidence = True
         self.supports_task_screenshots = True
+        self.supports_visual_references = True
         self.last_response_evidence_path: str | None = None
 
     def _set_stage(self, stage: str) -> None:
@@ -160,7 +186,7 @@ class SingleStepGenericSceneObserver():
 
     def _provider_chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None,
         response_format: dict[str, Any] | None=None) -> str:
-        return self.provider.chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS,
+        return self.provider._chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS,
             max_attempts=OBSERVATION_MAX_ATTEMPTS,
             response_format=response_format or {'type': 'json_object'})
 
@@ -195,6 +221,7 @@ class SingleStepGenericSceneObserver():
         frames: list[Image.Image],
         goal_context: dict[str, Any] | None,
         available_action_kinds: Iterable[str] | None,
+        visual_reference_paths: Iterable[Path] | None = None,
     ) -> dict[str, Any]:
         reject_if(len(frames) < 4, VisionAgentError("通用页面观察至少需要4帧。"))
         stability = measure_local_stability(frames, allow_leading_outlier=True)
@@ -208,6 +235,7 @@ class SingleStepGenericSceneObserver():
         context = generic_goal_domain.safe_goal_context(goal_context or {})
         goal = _goal_view(context)
         runtime_actions = _normalize_runtime_action_kinds(available_action_kinds)
+        reference_paths = _validated_reference_paths(visual_reference_paths)
         model_frames = tuple(frames)
         request_image_sizes = {_image_request_size(item) for item in model_frames}
         reject_if(
@@ -227,6 +255,8 @@ class SingleStepGenericSceneObserver():
             "input_structure_required": goal.input_requested,
             "model_frames": model_frames,
             "request_image_size": request_image_size,
+            "visual_reference_paths": reference_paths,
+            "reference_image_count": len(reference_paths),
             "response_format": _single_step_response_format(
                 context,
                 input_structure_required=goal.input_requested,
@@ -237,6 +267,7 @@ class SingleStepGenericSceneObserver():
                 context,
                 include_input_structure=goal.input_requested,
                 image_count=len(model_frames),
+                reference_image_count=len(reference_paths),
                 request_image_size=request_image_size,
                 available_action_kinds=runtime_actions,
             ),
@@ -255,6 +286,14 @@ class SingleStepGenericSceneObserver():
         context = prepared["context"]
         content: list[dict[str, Any]] = [{"type": "text", "text": prepared["prompt"]}]
         screenshot_manifest: list[dict[str, Any]] = []
+        for index, path in enumerate(prepared.get("visual_reference_paths", ()), start=1):
+            content.extend((
+                {"type": "text", "text": (
+                    f"REFERENCE IMAGE {index} - VISUAL EXAMPLE ONLY - {path.name}; "
+                    "semantic appearance only, never current phone state or coordinates"
+                )},
+                {"type": "image_url", "image_url": {"url": _reference_image_data_url(path)}},
+            ))
         reject_if(
             not current_frame_paths
             and response_evidence_dir is not None
@@ -382,6 +421,7 @@ class SingleStepGenericSceneObserver():
             request_image_size=prepared["request_image_size"],
         )
         model_decision = dict(envelope["decision"])
+        model_decision["_qwen_reply"] = envelope["reply"]
         scene_payload = dict(envelope["scene"])
         model_foreground_app_id = str(
             scene_payload.get("foreground_app_id") or scene_payload.get("app_id") or "unknown"
@@ -389,12 +429,10 @@ class SingleStepGenericSceneObserver():
         obstructions = consensus_top_edge_obstructions(
             prepared["model_frames"][prepared["stable_tail_start"]:]
         )
-        referenced_element_ids = _decision_element_ids(model_decision)
         scene = _parse_scene(
             json.dumps(scene_payload, ensure_ascii=False, separators=(",", ":")),
             fingerprint=prepared["fingerprint"],
             camera_layout_orientation=_camera_layout_orientation(prepared["frame"]),
-            strict_element_ids=referenced_element_ids,
         )
         if prepared["input_structure_required"]:
             input_payload = envelope["input_structure"]
@@ -404,12 +442,6 @@ class SingleStepGenericSceneObserver():
                 json.dumps(input_payload, ensure_ascii=False, separators=(",", ":")),
                 fingerprint=prepared["fingerprint"],
                 goal_context=prepared["context"],
-            )
-        for selected_ref in referenced_element_ids:
-            matches = [item for item in scene.elements if item.element_id == selected_ref]
-            reject_if(
-                len(matches) != 1,
-                VisionAgentError(f"当前Qwen决策引用的元素不唯一或不可执行：{selected_ref}"),
             )
         return scene, model_decision, envelope, model_foreground_app_id, obstructions
 
@@ -433,6 +465,8 @@ class SingleStepGenericSceneObserver():
             "model_calls": 1,
             "task_screenshot_count": len(screenshot_manifest),
             "current_screenshot_count": len(prepared["model_frames"]),
+            "reference_image_count": prepared["reference_image_count"],
+            "reference_image_names": [path.name for path in prepared["visual_reference_paths"]],
             "online_stages": ["single_step_observation"],
             "input_structure_in_same_response": prepared["input_structure_required"],
             "remote_retry_used": int(getattr(self.provider, "last_network_attempts", 0) or 0) > 1,
@@ -499,6 +533,7 @@ class SingleStepGenericSceneObserver():
         response_evidence_dir: Path | None = None,
         response_evidence_prefix: str = "observation",
         current_frame_paths: tuple[str, ...] = (),
+        visual_reference_paths: tuple[Path, ...] = (),
     ) -> tuple[UIScene, dict[str, Any]]:
         self.last_raw_response = ""
         self.last_diagnostics = {
@@ -513,7 +548,7 @@ class SingleStepGenericSceneObserver():
         input_structure_required = False
         screenshot_manifest: list[dict[str, Any]] = []
         try:
-            prepared = self._prepare_observation(frames, goal_context, available_action_kinds)
+            prepared = self._prepare_observation(frames, goal_context, available_action_kinds, visual_reference_paths)
             fingerprint = prepared["fingerprint"]
             input_structure_required = prepared["input_structure_required"]
             content, screenshot_manifest = self._build_observation_content(
@@ -556,8 +591,29 @@ class SingleStepGenericSceneObserver():
             self._set_stage("idle")
 
 
+PROJECT_FEATURE_CONTEXT = (
+    "项目功能说明（普通问答只用于解释；只有当前用户目标明确包含对应功能任务标记时，才作为该任务的活动约束，不能凭关键词自动执行）：\n"
+    "1. 福袋模块：持续观察用户手动打开的抖音直播间；依据当前 Android 画面识别左上角礼包袋入口，"
+    "打开后核对福袋详情和参与条件；没有福袋时等待60秒重新观察，确认已参与后通常等待300秒或按剩余开奖倒计时观察；"
+    "评论类条件只在画面已预填评论时点击发送，不输入或改写文字；明确没抽中时点击知道了继续观察；"
+    "开奖后只要没有明确显示没抽中就停止手机操作，并发送标题和正文均为‘疑似中奖’的通知邮件。"
+    "参考图只帮助理解界面语义；当当前目标明确是福袋监控时，福袋入口可见必须先点击入口，只有明确不可见时才按目标等待，所有位置都以当前 Android 实时画面为准。\n"
+    "2. 方向按钮：网页的左滑、右滑、上滑、下滑按钮是本地固定方向手势，每次点击只执行一次；"
+    "它们不创建 Qwen 任务、不让 Qwen 选择坐标，也不需要 Qwen 判断画面。用户只是询问这些按钮时只解释，不执行。"
+)
+
+
 def _json_only_system_message() -> dict[str, str]:
-    return {'role': 'system', 'content': '你是通用手机视觉操作Agent。根据用户整任务、本会话实际执行历史和全部任务截图判断进度；只从CURRENT本轮截图报告当前画面事实，并按协议选择一个canonical动作或整任务finish。只输出一个语法完整且符合响应schema的JSON对象；禁止Markdown、JSON之外的解释或思考过程、代码围栏、JSON字符串套壳或对象前后的任何文字。'}
+    content = (
+        '你是通用手机视觉操作Agent。根据用户整任务、本会话实际执行历史和全部任务截图判断进度；'
+        '需要了解手机当前状态时直接读取本轮CURRENT截图。一次响应同时给出给用户看的自然语言reply，'
+        '以及scene和一个canonical动作或整任务finish。仅询问、解释或查看状态而不要求改变手机时，'
+        'decision必须为finish且不得执行动作。'
+        + PROJECT_FEATURE_CONTEXT
+        + '只输出一个语法完整且符合响应schema的JSON对象；禁止Markdown、JSON之外的解释或思考过程、'
+        '代码围栏、JSON字符串套壳或对象前后的任何文字。'
+    )
+    return {'role': 'system', 'content': content}
 
 
 LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
@@ -570,7 +626,7 @@ LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
 
 def _single_step_observation_prompt(context: dict[str, Any], *, include_input_structure: bool,
     image_count: int, request_image_size: tuple[int, int],
-    available_action_kinds: tuple[str, ...]) -> str:
+    available_action_kinds: tuple[str, ...], reference_image_count: int = 0) -> str:
     request_width, request_height = request_image_size
     current_goal = _goal_view(context).observation_context
     scene_contract = _compact_prompt({}, wire_height=1000,
@@ -585,12 +641,36 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
     temporal_rule = (f"共有{image_count}张本轮观察的连续手机画面。只把它们作为本轮当前状态的证据；"
         "闪烁光标可从任一帧读取，不把互不相容的瞬态拼成一个状态。" if image_count > 1 else "只有一张本轮当前手机画面。")
     temporal_rule += "视频、动画或跨帧像素变化本身不是错误，不要求画面静止；按本轮可见事实判断。"
-    return _render_prompt("single_step_observation.txt", SCENE_CONTRACT=scene_contract,
+    reference_rule = (
+        f"本轮附带{reference_image_count}张REFERENCE IMAGE视觉参考图。它们只用于理解目标界面语义，"
+        "不是手机当前画面，也不是任务历史；不得把参考图坐标、尺寸或布局当作当前点击依据。"
+        if reference_image_count else "本轮没有视觉参考图；只依据CURRENT PHONE SURFACE判断。"
+    )
+    conversation = context.get("entities", {}).get("conversation", [])
+    if not isinstance(conversation, list):
+        conversation = []
+    conversation_rule = (
+        "用户与Qwen的自然语言补充对话（仅作为语义说明，不是动作计划）："
+        + json.dumps(conversation, ensure_ascii=False, separators=(',', ':'))
+    )
+    rendered = _render_prompt("single_step_observation.txt", SCENE_CONTRACT=scene_contract,
         INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule,
         INPUT_RULE=input_rule, REQUEST_WIDTH=str(request_width), REQUEST_HEIGHT=str(request_height),
         OBSERVATION_PROTOCOL=SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, SCENE_PROTOCOL=UI_SCENE_PROTOCOL_VERSION,
-        AVAILABLE_ACTIONS_JSON=json.dumps(list(available_action_kinds), ensure_ascii=False, separators=(',', ':')),
+        AVAILABLE_ACTIONS_JSON=json.dumps(list(_wire_action_names(available_action_kinds)), ensure_ascii=False, separators=(',', ':')),
         WHOLE_TASK_JSON=json.dumps(current_goal, ensure_ascii=False, separators=(',', ':')))
+    runtime_action_rule = (
+        "当前设备本轮可用动作（唯一运行时动作集合）："
+        + json.dumps(list(_wire_action_names(available_action_kinds)), ensure_ascii=False, separators=(',', ':'))
+        + "。只能从该集合中选择一个动作；集合外动作不可选择。动作和观察共用整任务预算，"
+        "不得按手势类型单独计数或重放旧scope。"
+    )
+    return rendered + "\n\n" + runtime_action_rule + "\n\n--- REFERENCE IMAGE RULE ---\n" + reference_rule + "\n\n" + conversation_rule + (
+        "\n\n本次响应必须同时填写reply和decision：reply是给用户看的自然中文；"
+        "decision.action只有在用户目标确实需要改变手机状态时才填写。"
+        "询问‘能看到吗’、‘是什么’、‘怎么判断’等查看或解释问题，不要为了验证而点击，"
+        "直接依据CURRENT画面在reply中回答，并让decision.status=finish、decision.action=null。"
+    )
 
 
 def _normalize_runtime_action_kinds(value: Iterable[str] | None) -> tuple[str, ...]:
@@ -612,11 +692,11 @@ def _single_step_response_format(context: dict[str, Any], *, input_structure_req
     scene_schema = _scene_response_schema()
     decision_properties = _decision_response_properties(available_action_kinds)
     scene_schema['properties']['elements']['description'] = (
-        'tap_semantic/dismiss_overlay/double_tap/long_press时请留空；额外列表只作原始诊断，不参与执行；'
-        '其他动作或finish才可报告带bounds的元素。')
+        '元素列表和画面证据只作Qwen判断与网页展示，不参与本地动作绑定；动作只消费point、start、end或direction。')
     schema = {
         'type': 'object',
         'properties': {
+            'reply': {'type': 'string', 'description': '给用户看的自然语言回答；必须与当前截图和decision一致。'},
             'protocol_version': {'type': 'string', 'enum': [SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION]},
             'coordinate_space': {
                 'type': 'object',
@@ -633,7 +713,7 @@ def _single_step_response_format(context: dict[str, Any], *, input_structure_req
             'decision': {'type': 'object', 'properties': decision_properties,
                 'required': list(decision_properties), 'additionalProperties': False},
         },
-        'required': ['protocol_version', 'coordinate_space', 'scene', 'input_structure', 'decision'],
+        'required': ['reply', 'protocol_version', 'coordinate_space', 'scene', 'input_structure', 'decision'],
         'additionalProperties': False,
     }
     return {'type': 'json_schema', 'json_schema': {
@@ -679,51 +759,47 @@ def _scene_response_schema() -> dict[str, Any]:
     }
 
 
+def _wire_action_name(action: str) -> str:
+    for wire, canonical in MODEL_ACTION_ALIASES.items():
+        if canonical == action:
+            return wire
+    return action
+
+
+def _wire_action_names(actions: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted({_wire_action_name(str(action)) for action in actions}))
+
+
 def _decision_response_properties(available_action_kinds: tuple[str, ...]) -> dict[str, Any]:
-    direct_actions = sorted(set(available_action_kinds) & set(MODEL_STEP_DIRECT_POINT_ACTIONS))
-    other_actions = sorted(set(available_action_kinds) - set(MODEL_STEP_DIRECT_POINT_ACTIONS))
+    wire_actions = _wire_action_names(available_action_kinds)
     decision_properties: dict[str, Any] = {
         'status': {'type': 'string', 'enum': ['action', 'finish']},
-        'action': {'type': ['string', 'null'], 'enum': [*available_action_kinds, None]},
-    }
-    if direct_actions:
-        decision_properties.update({
-            'target': {'type': 'object', 'properties': {
-                'role': {'type': 'string'}, 'meaning': {'type': 'string'},
-                'label': {'type': 'string'}, 'evidence': {'type': 'array', 'items': {'type': 'string'}},
-            }, 'required': ['role', 'meaning'], 'additionalProperties': False,
-                'description': '点按动作的唯一目标身份，不含bounds；其他动作和finish为null。'},
-            'tap_point': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
-        })
-    decision_properties.update({
+        'action': {'type': ['string', 'null'], 'enum': [*wire_actions, None]},
+        'point': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
+            'description': '仅tap/dismiss/double_tap/long_press使用；填写当前截图中的直接点击坐标。'},
+        'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right'],
+            'description': '仅scroll使用；其他动作必须为null。'},
+        'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
+            'description': '仅swipe/drag使用；填写当前截图中的起点。'},
+        'end': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
+            'description': '仅swipe/drag使用；填写当前截图中的终点。'},
         'text': {'type': ['string', 'null']}, 'app': {'type': ['string', 'null']},
+        'effect': {'type': ['string', 'null'], 'enum': [*sorted(EFFECT_KINDS), None],
+            'description': '当前动作直接造成的通用效果类别；没有则为null，不从元素或坐标推断。'},
+        'wait_seconds': {'type': ['number', 'null'],
+            'description': '仅wait_for_change使用；其他动作必须为null。'},
         'previous_action_outcome': {'type': ['string', 'null'], 'enum': ['matched', 'unmatched', 'uncertain', None]},
-        'state_action_consistent': {'type': ['boolean', 'null'],
-            'description': 'Qwen对当前明确状态与所选动作的一次一致性判断；矛盾时为false。'},
+        'state_action_consistent': {'type': ['boolean', 'null']},
         'postcondition': {'type': ['object', 'null'], 'properties': {
             'status': {'type': 'string', 'enum': ['confirmed', 'not_confirmed', 'unknown', 'not_applicable']},
-            'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False,
-            'description': '动作后当前目标状态；外部效果必须明确报告，无法判断填unknown。'},
+            'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False},
         'confidence': {'type': 'number'}, 'reason': {'type': 'string'},
-    })
-    if other_actions:
-        decision_properties.update({
-            'element_id': {'type': 'string'}, 'source_element_id': {'type': 'string'},
-            'destination_element_id': {'type': 'string'},
-            'direction': {'type': 'string', 'enum': ['up', 'down', 'left', 'right'],
-                'description': '仅scroll使用；scroll只能填写direction，其他轨迹字段必须为null。'},
-            'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
-                'description': '仅swipe_element使用；scroll必须为null。'},
-            'end': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2,
-                'description': '仅swipe_element使用；scroll必须为null。'},
-        })
+    }
     _make_decision_fields_nullable(decision_properties)
     return decision_properties
 
-
 def _make_decision_fields_nullable(decision_properties: dict[str, Any]) -> None:
-    for name in ('target', 'tap_point', 'element_id', 'source_element_id',
-            'destination_element_id', 'direction', 'start', 'end'):
+    for name in ('point', 'direction', 'start', 'end'):
         if name not in decision_properties:
             decision_properties[name] = {'type': 'null'}
             continue
@@ -731,18 +807,6 @@ def _make_decision_fields_nullable(decision_properties: dict[str, Any]) -> None:
         field['type'] = [field['type'], 'null']
         if 'enum' in field:
             field['enum'].append(None)
-
-
-def _decision_element_ids(decision: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return every scene element that this same-envelope decision makes authoritative."""
-
-    if decision.get('status') == 'action' and decision.get('action') in MODEL_STEP_DIRECT_POINT_ACTIONS:
-        # Direct target identity is independent of model scene elements/evidence_refs.
-        # Typed point targets are bound to the same-frame input audit downstream.
-        return ()
-    values = [str(decision.get(name) or '').strip() for name in (
-        'element_id', 'source_element_id', 'destination_element_id') if decision.get(name)]
-    return tuple(dict.fromkeys(values))
 
 
 def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_image_size: tuple[int,
@@ -756,8 +820,7 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
 
     scene = payload.get('scene')
     reject_if(_contains_action_like_wire_key(scene), UISceneError("单步观察scene包含动作或计划字段。"))
-    selected_ids = set(_decision_element_ids(decision))
-    _normalize_wire_scene_elements(scene, selected_ids)
+    _normalize_wire_scene_elements(scene)
 
     if decision.get('action') in MODEL_STEP_DIRECT_POINT_ACTIONS:
         decision['tap_point'] = _normalize_wire_point(decision.get('tap_point'),
@@ -776,13 +839,12 @@ def _normalize_single_step_wire_coordinates(payload: dict[str, Any], *, request_
         request_height], 'canonical_extent': [1000, 1000], 'applied': True}
 
 
-def _normalize_wire_bounds(value: Any, *, selected: bool = False) -> list[int] | None:
+def _normalize_wire_bounds(value: Any) -> list[int] | None:
     valid_shape = bool(
         isinstance(value, (list, tuple)) and len(value) == 4
         and all(isinstance(part, (int, float)) and not isinstance(part, bool) for part in value)
     )
     if not valid_shape:
-        reject_if(selected, UISceneError("已选目标的bounds格式无效。"))
         return None
     left, top, right, bottom = (float(part) for part in value)
     valid_extent = bool(
@@ -790,10 +852,8 @@ def _normalize_wire_bounds(value: Any, *, selected: bool = False) -> list[int] |
         and 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
     )
     if not valid_extent:
-        reject_if(selected, UISceneError("已选目标的bounds超出声明的axis_grid。"))
         return None
     result = [round(left), round(top), round(right), round(bottom)]
-    reject_if(selected and not _valid_1000_bounds(result), UISceneError("已选目标的axis_grid换算后bounds退化。"))
     return result
 
 
@@ -822,25 +882,16 @@ def _normalize_optional_wire_control(value: Any) -> dict[str, Any] | None:
     return result
 
 
-def _normalize_wire_scene_elements(scene: Any, selected_ids: set[str]) -> None:
+def _normalize_wire_scene_elements(scene: Any) -> None:
     if not isinstance(scene, dict):
         return
     raw_elements = scene.get('elements')
     normalized_elements: list[dict[str, Any]] = []
-    selected_counts: dict[str, int] = {}
     if isinstance(raw_elements, list):
         for item in raw_elements:
             if not isinstance(item, dict):
                 continue
-            element_id = str(item.get('element_id') or '').strip()
-            selected = element_id in selected_ids
-            if selected:
-                selected_counts[element_id] = selected_counts.get(element_id, 0) + 1
-                reject_if(
-                    selected_counts[element_id] > 1,
-                    UISceneError(f"已选目标的element_id不唯一：{element_id}"),
-                )
-            bounds = _normalize_wire_bounds(item.get('bounds'), selected=selected)
+            bounds = _normalize_wire_bounds(item.get('bounds'))
             if bounds is None:
                 continue
             normalized = dict(item)
@@ -868,11 +919,9 @@ def _normalize_wire_input_structure(input_structure: Any, decision: Mapping[str,
             normalized['bounds'] = bounds
             normalized['right_button'] = _normalize_optional_wire_control(normalized.get('right_button'))
             normalized_inputs.append(normalized)
-    direct_target = decision.get('target') if isinstance(decision.get('target'), Mapping) else {}
     selected_input = bool(
         decision.get('status') == 'action'
-        and (decision.get('action') in {'input_verified_text', 'clear_verified_text', 'press_enter'}
-             or direct_target.get('role') == 'input')
+        and decision.get('action') in {'input_verified_text', 'clear_verified_text', 'press_enter'}
     )
     reject_if(
         selected_input and not normalized_inputs and invalid_inputs > 0,
@@ -893,6 +942,10 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
         reject_if(bool(missing), UISceneError("单步观察封装结构无效；缺少字段：" + ", ".join(missing)))
         reject_if(_contains_action_like_extra(payload, required | {'protocol_version', 'input_structure'}),
             UISceneError("单步观察封装包含动作或计划字段。"))
+        reply = payload.get('reply')
+        if not isinstance(reply, str) or not reply.strip():
+            reply = str(payload.get('decision', {}).get('reason') or payload.get('scene', {}).get('summary') or '').strip()
+        reject_if(not reply, UISceneError("单步观察reply必须是非空自然语言。"))
         version = payload.get('protocol_version', SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION)
         reject_if(version != SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, UISceneError("单步观察协议版本不匹配。"))
         reject_if(not isinstance(payload['scene'], dict), UISceneError("单步观察scene必须是对象。"))
@@ -902,17 +955,35 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
             # Irrelevant optional input facts cannot veto a non-input action.
             payload['input_structure'] = None
         decision = normalize_model_step_decision(payload['decision'])
-        if decision['status'] == 'action' and decision['action'] in MODEL_STEP_DIRECT_POINT_ACTIONS:
-            # Project once, before recursive field/geometry/input checks. All downstream
-            # consumers receive this scene; last_raw_response retains the untouched wire.
-            # Never use extra model elements to repair, compare or veto target/tap_point.
-            payload['scene'] = {**payload['scene'], 'elements': []}
         coordinate_normalization = _normalize_single_step_wire_coordinates(payload,
             request_image_size=request_image_size, decision=decision)
-        return {'scene': payload['scene'], 'input_structure': payload['input_structure'],
-        'decision': decision, 'coordinate_normalization': coordinate_normalization}
+        return {'reply': reply.strip(), 'scene': payload['scene'], 'input_structure': payload['input_structure'],
+        'decision': _wire_decision_payload(decision), 'coordinate_normalization': coordinate_normalization}
     except (CanonicalActionProtocolError, UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
+
+
+def _wire_decision_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
+    """Project normalized internal fields back to the public Qwen wire shape."""
+    action = str(decision.get("action") or "")
+    wire_action = _wire_action_name(action) if action else None
+    return {
+        "status": decision.get("status"),
+        "action": wire_action,
+        "point": decision.get("tap_point") if action in MODEL_STEP_DIRECT_POINT_ACTIONS else None,
+        "direction": decision.get("direction") if action == "scroll" else None,
+        "start": decision.get("start") if action in {"swipe_element", "drag"} else None,
+        "end": decision.get("end") if action in {"swipe_element", "drag"} else None,
+        "effect": decision.get("effect"),
+        "confidence": decision.get("confidence"),
+        "reason": decision.get("reason"),
+        "text": decision.get("text"),
+        "app": decision.get("app"),
+        "wait_seconds": decision.get("wait_seconds"),
+        "previous_action_outcome": decision.get("previous_action_outcome"),
+        "state_action_consistent": decision.get("state_action_consistent"),
+        "postcondition": decision.get("postcondition"),
+    }
 
 
 def _compact_prompt(context: dict[str, Any], *, wire_height: int=1000,
@@ -941,37 +1012,8 @@ def _input_structure_audit_prompt(context: dict[str, Any], *, wire_height: int=1
         WIRE_HEIGHT=str(wire_height), AUDIT_VERSION=INPUT_STRUCTURE_AUDIT_VERSION)
 
 
-def _retain_scene_elements(raw_elements: list[Any], required: frozenset[str]) -> list[dict[str, Any]]:
-    """Retain selected elements strictly and drop malformed optional hints."""
-    retained: list[dict[str, Any]] = []
-    required_counts: dict[str, int] = {}
-    for raw_element in raw_elements:
-        if not isinstance(raw_element, dict):
-            continue
-        element_id = str(raw_element.get('element_id') or '').strip()
-        if element_id in required:
-            required_counts[element_id] = required_counts.get(element_id, 0) + 1
-            reject_if(required_counts[element_id] > 1,
-                UISceneError(f"Qwen决策引用的element_id不唯一：{element_id}"))
-            retained.append(_required_scene_element(raw_element))
-            continue
-        try:
-            UIElement.from_dict(raw_element, coordinate_scale=1000.0)
-        except (UISceneError, TypeError, ValueError):
-            continue
-        retained.append(raw_element)
-    return retained
-
-
-def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None,
-    strict_element_ids: Iterable[str]=()) -> UIScene:
-    """Parse the current scene, revoking only malformed optional model facts.
-
-    The same-envelope decision makes its referenced elements required facts.  A
-    malformed referenced element is therefore a contract error, while an
-    unrelated malformed hint is simply omitted and cannot veto the selected
-    action or finish evidence.
-    """
+def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str | None=None) -> UIScene:
+    """Parse optional scene context; executable input facts are projected separately."""
 
     try:
         payload = _extract_json_object(raw)
@@ -987,43 +1029,22 @@ def _parse_scene(raw: str, *, fingerprint: str, camera_layout_orientation: str |
         payload['camera_alignment'] = alignment
         _drop_forbidden_camera_alignment_evidence(payload)
         _strip_model_authored_local_attestations(payload)
-        required = frozenset(str(item or '').strip() for item in strict_element_ids if str(item or '').strip())
         raw_elements = payload.get('elements')
         if isinstance(raw_elements, list):
-            payload['elements'] = _retain_scene_elements(raw_elements, required)
+            retained: list[dict[str, Any]] = []
+            for raw_element in raw_elements:
+                if not isinstance(raw_element, dict):
+                    continue
+                try:
+                    UIElement.from_dict(raw_element, coordinate_scale=1000.0)
+                except (UISceneError, TypeError, ValueError):
+                    continue
+                retained.append(raw_element)
+            payload['elements'] = retained
         return UIScene.from_dict(payload, coordinate_scale=1000.0, stable_override=True,
             fingerprint_override=fingerprint)
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"通用页面观察结果不符合协议：{exc}") from exc
-
-
-def _required_scene_element(raw_element: dict[str, Any]) -> dict[str, Any]:
-    """Keep a selected element's hard identity and revoke malformed optional facts."""
-
-    core = {
-        'element_id': str(raw_element.get('element_id') or '').strip(),
-        'role': str(raw_element.get('role') or 'unknown').strip(),
-        'meaning': str(raw_element.get('meaning') or '').strip(),
-        'bounds': raw_element.get('bounds'),
-        'confidence': _diagnostic_confidence(raw_element.get('confidence')),
-        'label': str(raw_element.get('label') or '').strip(),
-        'states': {},
-        'evidence': [item.strip() for item in raw_element.get('evidence', [])
-            if isinstance(item, str) and item.strip()]
-            if isinstance(raw_element.get('evidence'), (list, tuple)) else [],
-    }
-    # The selected element must always have a legal id/role/meaning/bounds.
-    UIElement.from_dict(core, coordinate_scale=1000.0)
-    states = raw_element.get('states')
-    if isinstance(states, dict):
-        enriched = dict(core)
-        enriched['states'] = dict(states)
-        try:
-            UIElement.from_dict(enriched, coordinate_scale=1000.0)
-        except (UISceneError, TypeError, ValueError):
-            return core
-        return enriched
-    return core
 
 
 def _camera_layout_orientation(frame: Image.Image) -> str:

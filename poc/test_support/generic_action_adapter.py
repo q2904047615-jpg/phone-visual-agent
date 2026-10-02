@@ -60,7 +60,7 @@ class RawSceneProvider:
         self.calls = 0
         self.max_tokens_seen = []
 
-    def chat(self, messages, *, max_tokens, **_kwargs):
+    def _chat(self, messages, *, max_tokens, **_kwargs):
         self.calls += 1
         self.max_tokens_seen.append(max_tokens)
         value = self.responses.pop(0)
@@ -101,7 +101,6 @@ class FakeSceneObserver:
         result = self._next_scene(goal_context=goal_context)
         return result, {
             "status": "finish",
-            "evidence_refs": ["scene.summary"],
             "confidence": 1.0,
             "reason": "测试观察器在同一帧返回 scene 与 decision。",
         }

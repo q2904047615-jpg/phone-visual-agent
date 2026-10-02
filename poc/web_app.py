@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import secrets
@@ -9,7 +8,6 @@ import shutil
 import threading
 import time
 import uuid
-import webbrowser
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +43,7 @@ from agent.infrastructure.capability_acceptance import (
 from agent.domain.action_capabilities import physical_capability_for_action, unverified_promotable_actions
 from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
 from agent.infrastructure.generic_action_adapter import persist_observer_failure_diagnostic
+from agent.infrastructure.adb_pairing import AdbPairingError
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.application.universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
@@ -75,43 +74,25 @@ from agent.interfaces.http_models import (
     CapabilityCancelRequest,
     CapabilityEffectApprovalRequest,
     CapabilityPromotionRequest,
+    DevicePairRequest,
+    DirectionalSwipeRequest,
     GenericEffectApprovalRequest,
     GenericSceneRequest,
     GenericSupervisedAutoRequest,
     GenericSupervisedDeviceRequest,
     GenericSupervisedStartRequest,
     GenericSupervisedStepRequest,
+    QwenChatRequest,
+    QwenDraftChatRequest,
     MachinePositionRequest,
 )
-
-
-_LOGGER = logging.getLogger(__name__)
-_SENSITIVE_DIAGNOSTIC_RE = re.compile(
-    r"(?i)(authorization|api[-_ ]?key|token|password|secret|cookie)\s*[:=]\s*[^\s,;]+"
-)
-
-
-def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
-    """Return a short, single-line diagnostic without a traceback or payload."""
-    text = " ".join(str(error).split())
-    if not text:
-        return type(error).__name__
-    return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
-from features.lucky_bag import DedicatedLuckyBagMonitor, LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
+from features.lucky_bag import LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
 from features.lucky_bag.http import LuckyBagDeviceRequest, LuckyBagStartRequest
 from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink, gmail_configuration_status
 from features.notifications import JsonlNotificationOutbox
 
 
 ROOT = Path(__file__).resolve().parent
-_TRIAL_CONFIG_PATH = ROOT.parent / "trial.json"
-try:
-    _TRIAL_CONFIG = json.loads(_TRIAL_CONFIG_PATH.read_text(encoding="utf-8"))
-except (OSError, ValueError, TypeError):
-    _TRIAL_CONFIG = {}
-_TRIAL_MODE = str(_TRIAL_CONFIG.get("mode") or "")
-_TRIAL_PORT = int(_TRIAL_CONFIG.get("port") or 8765)
-_SERVICE_VERSION = f"0.2.0-trial-{_TRIAL_MODE}" if _TRIAL_MODE else "0.2.0"
 STATIC_DIR = ROOT / "static"
 CONTROL_TOKEN = secrets.token_urlsafe(24)
 DEVICE_REGISTRY_PATH = Path(
@@ -158,72 +139,6 @@ except Exception as exc:
     runtime = RuntimeUnavailable(exc)
 
 
-class _LuckyBagGateway:
-    """Adapter from the additive monitor to the existing session service."""
-
-    def start(self, *, goal: str, device_id: str, run_dir: Path) -> dict[str, Any]:
-        if isinstance(runtime, RuntimeUnavailable):
-            raise RuntimeError(runtime.startup_error)
-        session_id = uuid.uuid4().hex
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / ".evidence-run").touch()
-        (run_dir / ".active").touch()
-        started = runtime.universal_agent_session_service.start(
-            StartUniversalAgentSessionCommand(
-                session_id=session_id,
-                raw_goal=goal,
-                exact_input_text=None,
-                exact_action_kind=None,
-                exact_target_label="",
-                device_id=device_id,
-                run_dir=run_dir,
-                auto_advance=False,
-                max_physical_actions=20,
-                max_observations=40,
-            )
-        )
-        return {"session": started.session.snapshot()}
-
-    def get(self, session_id: str) -> dict[str, Any]:
-        if isinstance(runtime, RuntimeUnavailable):
-            raise RuntimeError(runtime.startup_error)
-        return {"session": runtime.universal_agent_session_service.require(session_id).snapshot()}
-
-    def auto(self, session_id: str, *, max_physical_actions: int, max_observations: int) -> dict[str, Any]:
-        if isinstance(runtime, RuntimeUnavailable):
-            raise RuntimeError(runtime.startup_error)
-        session = runtime.universal_agent_session_service.require(session_id)
-        result = runtime.universal_agent_session_service.run_automatic(
-            session,
-            requested_device_id=session.device_id,
-            confirmed=False,
-            confirmation=None,
-            max_physical_actions=max_physical_actions,
-            max_observations=max_observations,
-        )
-        return {"session": result.session.snapshot()}
-
-    def pause(self, session_id: str) -> dict[str, Any]:
-        if isinstance(runtime, RuntimeUnavailable):
-            raise RuntimeError(runtime.startup_error)
-        session = runtime.universal_agent_session_service.require(session_id)
-        result = runtime.universal_agent_session_service.pause(
-            session_id,
-            requested_device_id=session.device_id,
-        )
-        return {"session": result.session.snapshot()}
-
-    def cancel(self, session_id: str) -> dict[str, Any]:
-        if isinstance(runtime, RuntimeUnavailable):
-            raise RuntimeError(runtime.startup_error)
-        session = runtime.universal_agent_session_service.require(session_id)
-        result = runtime.universal_agent_session_service.cancel(
-            session_id,
-            requested_device_id=session.device_id,
-        )
-        return {"session": result.session.snapshot()}
-
-
 _LUCKY_BAG_OUTPUT_DIR = WEB_OUTPUT_DIR / "lucky_bag"
 _LUCKY_BAG_OUTBOX = JsonlNotificationOutbox(
     _LUCKY_BAG_OUTPUT_DIR / "lucky_bag_notifications.jsonl"
@@ -232,7 +147,7 @@ _LUCKY_BAG_NOTIFICATIONS = DurableNotificationRouter(
     outbox=_LUCKY_BAG_OUTBOX,
     remote=configured_gmail_sink(),
 )
-_LUCKY_BAG_MONITOR = DedicatedLuckyBagMonitor(
+_LUCKY_BAG_MONITOR = LuckyBagMonitor(
     runtime=runtime,
     hardware_lock=lambda device_id: _supervised_hardware_lock(device_id),
     output_root=_LUCKY_BAG_OUTPUT_DIR,
@@ -245,17 +160,40 @@ _GENERIC_START_TASKS = AsyncTaskRegistry(
 )
 
 
+_QWEN_ROUTER_SYSTEM_PROMPT = """你是本项目网页中的 Qwen 统一入口。
+福袋按钮调用独立的本地福袋流程，普通任务仍由你判断下一步。福袋是否正在运行须依据提供的实时任务状态，不要猜测。
+先根据用户消息和已有对话判断本轮是否需要操作手机：
+- chat_only：只回答问题，不需要读取手机画面，也不启动手机任务；
+- phone_task：用户明确要求手机完成目标，或必须读取手机当前画面才能继续。
+只返回 JSON，不要 Markdown：
+{"route":"chat_only或phone_task","reply":"给用户的自然语言回答","reason":"简短判断"}
+不要声称已经查看手机或已经执行动作。phone_task 只表示准备进入手机任务，不能声称任务已完成。
+"""
+
+_QWEN_ROUTER_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "qwen_entry_route",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "route": {"type": "string", "enum": ["chat_only", "phone_task"]},
+                "reply": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["route", "reply", "reason"],
+        },
+    },
+}
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
-    # Keep startup notices ASCII-only so a Windows cp1252 stdout cannot fail
-    # the lifespan before the application is ready.
-    print(f"Phone Visual Agent web console: http://127.0.0.1:{_TRIAL_PORT}/", flush=True)
-    print("Local control token generated for the protected bootstrap page.", flush=True)
-    if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
-        threading.Timer(
-            1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
-        ).start()
+    print("机械臂网页控制台：http://127.0.0.1:8767/")
+    print("控制令牌已生成，仅通过本机受保护的页面初始化接口使用。")
     yield
     runtime.shutdown()
     _LUCKY_BAG_MONITOR.shutdown()
@@ -264,7 +202,7 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
 
 app = FastAPI(
     title="多 App 机械臂网页控制平台",
-    version=_SERVICE_VERSION,
+    version="0.2.0-trial-local",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -356,55 +294,43 @@ def select_device_machine_position(
     }
 
 
-def _effective_hardware_capabilities(
-    hardware_capabilities: dict[str, Any],
-    hardware_capability_profile: dict[str, Any] | None,
-    default_text_transport: Any,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    effective_profile = hardware_capability_profile
-    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
-        effective_profile = dict(hardware_capability_profile)
-        copied_actions = {
-            str(name): dict(spec)
-            for name, spec in dict(effective_profile.get("actions") or {}).items()
-            if isinstance(spec, dict)
-        }
-        for action_name, operation in (
-            ("input_verified_text", "append_text"),
-            ("clear_verified_text", "clear_text"),
-        ):
-            if action_name in copied_actions:
-                copied_actions[action_name]["text_transport"] = "adb_keyboard"
-                copied_actions[action_name]["operation"] = operation
-                copied_actions[action_name]["implicit_clear"] = False
-                copied_actions[action_name]["retry_on_failure"] = False
-        effective_profile["actions"] = copied_actions
-    profile_actions = (
-        effective_profile.get("actions", {})
-        if isinstance(effective_profile, dict)
-        else {}
-    )
-    profile_capabilities = {
-        str(action): bool(spec.get("enabled"))
-        for action, spec in profile_actions.items()
-        if isinstance(action, str) and isinstance(spec, dict)
-    }
-    return effective_profile, profile_capabilities or hardware_capabilities
+@app.post("/api/device/{device_id}/directional-swipe")
+def execute_directional_swipe(
+    device_id: str,
+    body: DirectionalSwipeRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Execute one configured directional swipe locally, without Qwen."""
 
-
-def _enabled_physical_actions(
-    device_capabilities: dict[str, Any],
-    app_launcher: Any,
-) -> set[str]:
-    enabled_physical_actions = {
-        action
-        for action in CANONICAL_ACTION_KINDS
-        if action != "wait_for_change"
-        and bool(device_capabilities.get(physical_capability_for_action(action), False))
+    verify_local_request(request, x_control_token)
+    resolved_device = str(device_id or "").strip()
+    try:
+        controller = runtime.controller_for_device(resolved_device)
+    except (DeviceControllerRegistryError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if runtime.device_task_registry.active_session(resolved_device):
+        raise HTTPException(status_code=409, detail="该设备正在执行任务，暂不能直接滑动。")
+    status = controller.device_status()
+    if not status.get("controller_online") or not status.get("camera_online"):
+        raise HTTPException(status_code=409, detail="控制端或摄像头离线。")
+    if status.get("busy"):
+        raise HTTPException(status_code=409, detail="机械臂正在执行其他任务。")
+    try:
+        with _supervised_hardware_lock(resolved_device):
+            controller.begin_new_task()
+            execution = controller.vision_fixed_directional_swipe(body.direction)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"固定方向滑动执行失败：{exc}") from exc
+    return {
+        "device_id": resolved_device,
+        "direction": body.direction,
+        "physical_actions": 1,
+        "qwen_called": False,
+        "execution": execution,
     }
-    if bool(getattr(app_launcher, "enabled", False)):
-        enabled_physical_actions.add("launch_app")
-    return enabled_physical_actions
 
 
 def _device_capability_snapshot(
@@ -432,10 +358,43 @@ def _device_capability_snapshot(
         and callable(getattr(default_text_transport, "status", None))
         else None
     )
-    hardware_capability_profile, device_capabilities = _effective_hardware_capabilities(
-        hardware_capabilities, hardware_capability_profile, default_text_transport)
+    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
+        hardware_capability_profile = dict(hardware_capability_profile)
+        copied_actions = {
+            str(name): dict(spec)
+            for name, spec in dict(hardware_capability_profile.get("actions") or {}).items()
+            if isinstance(spec, dict)
+        }
+        for action_name, operation in (
+            ("input_verified_text", "append_text"),
+            ("clear_verified_text", "clear_text"),
+        ):
+            if action_name in copied_actions:
+                copied_actions[action_name]["text_transport"] = "adb_keyboard"
+                copied_actions[action_name]["operation"] = operation
+                copied_actions[action_name]["implicit_clear"] = False
+                copied_actions[action_name]["retry_on_failure"] = False
+        hardware_capability_profile["actions"] = copied_actions
+    profile_actions = (
+        hardware_capability_profile.get("actions", {})
+        if isinstance(hardware_capability_profile, dict)
+        else {}
+    )
+    effective_hardware_capabilities = {
+        str(action): bool(spec.get("enabled"))
+        for action, spec in profile_actions.items()
+        if isinstance(action, str) and isinstance(spec, dict)
+    }
+    device_capabilities = effective_hardware_capabilities or hardware_capabilities
+    enabled_physical_actions = {
+        action
+        for action in CANONICAL_ACTION_KINDS
+        if action != "wait_for_change"
+        and bool(device_capabilities.get(physical_capability_for_action(action), False))
+    }
     default_app_launcher = active_runtime.app_launcher_for_device(default_device_id)
-    enabled_physical_actions = _enabled_physical_actions(device_capabilities, default_app_launcher)
+    if bool(getattr(default_app_launcher, "enabled", False)):
+        enabled_physical_actions.add("launch_app")
     return (
         default_device_id,
         hardware_capabilities,
@@ -544,9 +503,8 @@ def lucky_bag_feature(
     )
     return {
         "feature_id": "lucky_bag",
-        "stage": "goal_preset",
+        "stage": "dedicated_monitor",
         "trial": _LUCKY_BAG_MONITOR.config,
-        "notification": gmail_configuration_status(),
         "profile": {
             "device_id": profile.device_id,
             "recipient": profile.recipient,
@@ -556,7 +514,8 @@ def lucky_bag_feature(
             "body": profile.body,
         },
         "goal": build_lucky_bag_goal(profile),
-        "notice": "此入口可填充通用Agent目标并启动分段长期监控；邮件先写入本地通知队列，Gmail发送仍需后续配置。",
+        "notification": gmail_configuration_status(),
+        "notice": "此按钮直接启动福袋专用流程；普通任务继续交给 Qwen。启动前查看 Gmail 通知状态。",
     }
 
 
@@ -694,6 +653,36 @@ def cancel_lucky_bag_monitor(
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"feature_id": "lucky_bag", "monitor": updated.snapshot()}
+
+@app.post("/api/device/{device_id}/pair")
+def pair_device(
+    device_id: str,
+    body: DevicePairRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Pair and reconnect one configured Android device from the local page."""
+
+    verify_local_request(request, x_control_token)
+    resolved_device = str(device_id or "").strip()
+    if runtime.device_task_registry.active_session(resolved_device):
+        raise HTTPException(status_code=409, detail="该设备正在执行任务，暂不能配对。")
+    try:
+        service = runtime.adb_pairing_service_for_device(resolved_device)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if service is None:
+        raise HTTPException(status_code=409, detail="该设备没有配置可用的 ADB 连接。")
+    try:
+        result = service.pair_and_connect(
+            pairing_host=body.pairing_host,
+            pairing_port=body.pairing_port,
+            pairing_code=body.pairing_code,
+        )
+    except AdbPairingError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "error": str(exc)}) from exc
+    return {"device_id": resolved_device, "pairing": result}
+
 
 @app.get("/api/device")
 def device() -> dict[str, Any]:
@@ -1365,7 +1354,21 @@ def start_generic_supervised_async(body: GenericSupervisedStartRequest, request:
     verify_local_request(request, x_control_token)
     task_id = uuid.uuid4().hex
     try:
-        _GENERIC_START_TASKS.reserve(task_id)
+        active = _GENERIC_START_TASKS.active_for("device_id", body.device_id)
+        if active is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "success": False,
+                    "code": "device_start_already_queued",
+                    "error": f"设备 {body.device_id} 已有待启动任务。",
+                    "task_id": active.get("task_id"),
+                },
+            )
+        _GENERIC_START_TASKS.reserve(
+            task_id,
+            metadata={"task_id": task_id, "device_id": body.device_id},
+        )
         _GENERIC_START_TASKS.submit(
             task_id,
             lambda: start_generic_supervised_session(body, request, x_control_token),
@@ -1387,7 +1390,34 @@ def get_generic_supervised_start_task(
     task = _GENERIC_START_TASKS.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="启动任务不存在或已过期。")
-    return {"task_id": task_id, **{key: value for key, value in task.items() if key != "created_monotonic"}}
+    payload = {"task_id": task_id, **{key: value for key, value in task.items() if key != "created_monotonic"}}
+    error_detail = payload.get("error_detail")
+    if error_detail is not None:
+        payload["detail"] = error_detail
+        if isinstance(error_detail, dict):
+            for key in ("code", "phase", "recoverable"):
+                if key in error_detail:
+                    payload[key if key != "code" else "error_code"] = error_detail[key]
+    return payload
+
+
+@app.post("/api/agent/generic-supervised/start-async/{task_id}/cancel")
+def cancel_generic_supervised_start_task(
+    task_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Cancel a queued asynchronous start before it creates a device session."""
+
+    verify_local_request(request, x_control_token)
+    task = _GENERIC_START_TASKS.cancel(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="启动任务不存在或已过期。")
+    payload = {"task_id": task_id, **{key: value for key, value in task.items() if key != "created_monotonic"}}
+    error_detail = payload.get("error_detail")
+    if error_detail is not None:
+        payload["detail"] = error_detail
+    return payload
 
 
 @app.post("/api/agent/generic-supervised/start")
@@ -1424,6 +1454,7 @@ def start_generic_supervised_session(
                 device_id=body.device_id,
                 run_dir=run_dir,
                 auto_advance=body.auto_advance,
+                conversation=tuple(item.model_dump() for item in body.conversation),
                 max_physical_actions=body.max_physical_actions,
                 max_observations=body.max_observations,
             )
@@ -1482,6 +1513,132 @@ def get_generic_supervised_session(
         "session": session.snapshot(),
         "report": str(session.run_dir / "report.json"),
     }
+
+
+@app.post("/api/qwen/chat")
+def unified_qwen_chat(
+    body: QwenDraftChatRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Let Qwen route a message to text chat or the explicit phone loop."""
+
+    verify_local_request(request, x_control_token)
+    if isinstance(runtime, RuntimeUnavailable):
+        raise HTTPException(status_code=503, detail=runtime.startup_error)
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(
+            status_code=422,
+            detail={"success": False, "code": "empty_message", "error": "消息不能为空。"},
+        )
+    try:
+        conversation = [
+            {"role": item.role, "content": item.content}
+            for item in body.conversation
+        ]
+        conversation.append({"role": "user", "content": text})
+        router_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": _QWEN_ROUTER_SYSTEM_PROMPT},
+            *conversation,
+        ]
+        with runtime.vision_provider.call_scope(stage="qwen_entry_route"):
+            raw_route = runtime.vision_provider._chat(
+                router_messages,
+                max_tokens=512,
+                response_format=_QWEN_ROUTER_RESPONSE_FORMAT,
+            )
+        try:
+            route = json.loads(raw_route)
+        except (TypeError, ValueError) as exc:
+            raise VisionAgentError(f"Qwen 入口路由不是有效 JSON：{exc}") from exc
+        if not isinstance(route, dict) or route.get("route") not in {"chat_only", "phone_task"}:
+            raise VisionAgentError("Qwen 入口路由缺少有效 route。")
+        reply = str(route.get("reply") or "").strip()
+        if route["route"] == "chat_only":
+            return {
+                "mode": "qwen_text_conversation",
+                "reply": reply,
+                "conversation": [*conversation, {"role": "assistant", "content": reply}],
+                "phone_task_started": False,
+                "route": route["route"],
+            }
+        start_body = GenericSupervisedStartRequest(
+            text=text,
+            device_id=body.device_id,
+            auto_advance=True,
+            conversation=conversation,
+            max_physical_actions=body.max_physical_actions,
+            max_observations=body.max_observations,
+        )
+        started = start_generic_supervised_async(start_body, request, x_control_token)
+        return {
+            "mode": "qwen_multimodal_conversation",
+            "task_id": started["task_id"],
+            "status": started["status"],
+            "reply": reply,
+            "conversation": conversation,
+            "phone_task_started": True,
+            "route": route["route"],
+        }
+    except HTTPException:
+        raise
+    except VisionAgentError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "success": False,
+                "code": "qwen_entry_route_failed",
+                "phase": "qwen_entry_route",
+                "error": str(exc),
+            },
+        ) from exc
+    except GENERIC_SESSION_ERRORS as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/generic-supervised/{session_id}/chat")
+def unified_qwen_chat_in_session(
+    session_id: str,
+    body: QwenChatRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Continue the same multimodal conversation and let Qwen choose reply/action together."""
+
+    verify_local_request(request, x_control_token)
+    if isinstance(runtime, RuntimeUnavailable):
+        raise HTTPException(status_code=503, detail=runtime.startup_error)
+    try:
+        with runtime.agent_session_repository.locked(session_id) as session:
+            if session.device_id != body.device_id:
+                raise AgentSessionDeviceMismatchError(session.device_id, body.device_id)
+            session.conversation.append({"role": "user", "content": body.text.strip()})
+            refreshed = runtime.universal_agent_session_service.refresh(
+                session, requested_device_id=body.device_id)
+            snapshot = refreshed.session.snapshot()
+        result = {
+            "mode": "qwen_multimodal_conversation",
+            "reply": snapshot.get("qwen_reply", ""),
+            "session": snapshot,
+        }
+        if snapshot.get("status") not in TERMINAL_SESSION_STATUSES:
+            automatic = runtime.universal_agent_session_service.run_automatic(
+                runtime.universal_agent_session_service.require(session_id),
+                requested_device_id=body.device_id,
+                confirmed=False,
+                confirmation=None,
+            )
+            result["session"] = automatic.session.snapshot()
+            result["automatic_progress"] = automatic.operation
+            result["reply"] = result["session"].get("qwen_reply", "")
+        return result
+    except AgentSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
+    except GENERIC_SESSION_ERRORS as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/agent/generic-supervised/{session_id}/approve-effect")
@@ -1783,21 +1940,7 @@ def preview_mjpg(device_id: str) -> StreamingResponse:
         while True:
             try:
                 frame, _cached = runtime.capture_preview(device_id, quality=68)
-            except Exception as exc:
-                error_type = type(exc).__name__
-                error_text = _diagnostic_error_text(exc)
-                _LOGGER.warning(
-                    "mjpg_preview_stopped device_id=%s error_type=%s error=%s",
-                    device_id,
-                    error_type,
-                    error_text,
-                    extra={
-                        "event": "mjpg_preview_stopped",
-                        "device_id": device_id,
-                        "error_type": error_type,
-                        "error_message": error_text,
-                    },
-                )
+            except Exception:
                 return
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n"

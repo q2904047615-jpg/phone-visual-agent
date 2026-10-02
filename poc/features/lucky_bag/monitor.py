@@ -1,337 +1,275 @@
-"""Long-running supervisor for the additive lucky-bag feature."""
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
+"""Dedicated trial monitor. Generic Qwen sessions keep their original owner."""
+from dataclasses import asdict, dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
+from features.notifications import NotificationEvent, utc_timestamp
+from .flow import Flow
+from .vision import LocalOcr, TemplateDetector, interpret
+from .transport import AdbTransport, ArmTransport
+from .upstream import UpstreamDetector
 
-from features.notifications import JsonlNotificationOutbox, NotificationEvent, NotificationSink, utc_timestamp
-from .profile import LuckyBagProfile
 
-
-class LuckyBagSessionGateway(Protocol):
-    def start(self, *, goal: str, device_id: str, run_dir: Path) -> Mapping[str, Any]: ...
-    def get(self, session_id: str) -> Mapping[str, Any]: ...
-    def auto(self, session_id: str, *, max_physical_actions: int, max_observations: int) -> Mapping[str, Any]: ...
-    def pause(self, session_id: str) -> Mapping[str, Any]: ...
-    def cancel(self, session_id: str) -> Mapping[str, Any]: ...
+PHASES = {"search":"寻找福袋", "open_bag":"打开福袋", "open_comment":"打开预填评论",
+    "verify_join":"确认参与结果", "joined":"已参与，等待开奖", "read_countdown":"读取倒计时",
+    "dismiss_loss":"关闭没抽中结果", "result":"核对开奖结果", "waiting_room":"等待手动换房",
+    "empty_comment":"评论没有预填", "inspect_conditions":"识别参与条件", "suspected_win":"疑似中奖，已停手"}
+TERMINAL = {"succeeded", "failed", "cancelled", "expired"}
 
 
 @dataclass
-class LuckyBagMonitorRecord:
+class Record:
     monitor_id: str
-    profile: LuckyBagProfile
+    profile: object
     goal: str
     run_dir: Path
     status: str = "starting"
-    session_id: str = ""
+    flow: Flow = field(default_factory=Flow)
     started_at: str = field(default_factory=utc_timestamp)
     updated_at: str = field(default_factory=utc_timestamp)
-    deadline_monotonic: float = 0.0
-    deadline_epoch: float = 0.0
+    deadline_epoch: float = 0
     detail: str = ""
+    current_phase: str = "准备启动"
+    last_action: str = ""
+    last_decision_reason: str = ""
+    last_qwen_reply: str = ""
     notified: bool = False
+    notification_status: str = "pending"
+    physical_actions: int = 0
+    observations: int = 0
+    next_observation_epoch: float = 0
+    screenshot_path: str = ""
+    event: Event = field(default_factory=Event)
 
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "monitor_id": self.monitor_id,
-            "feature_id": "lucky_bag",
-            "status": self.status,
-            "session_id": self.session_id,
-            "device_id": self.profile.device_id,
-            "recipient": self.profile.recipient,
-            "duration_seconds": self.profile.duration_seconds,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-            "deadline_epoch": self.deadline_epoch,
-            "detail": self.detail,
-            "notified": self.notified,
-            "run_dir": str(self.run_dir),
-        }
+    @property
+    def session_id(self):
+        # This dedicated monitor is not a Qwen session.
+        return ""
+
+    def snapshot(self):
+        return {"monitor_id":self.monitor_id, "feature_id":"lucky_bag", "session_id":"",
+            "device_id":self.profile.device_id, "recipient":self.profile.recipient,
+            "duration_seconds":self.profile.duration_seconds, "started_at":self.started_at,
+            "updated_at":self.updated_at, "deadline_epoch":self.deadline_epoch,
+            **{name:getattr(self,name) for name in ("status","detail","current_phase","last_action",
+                "last_decision_reason","last_qwen_reply","notified","notification_status",
+                "physical_actions","observations","next_observation_epoch","screenshot_path")},
+            "run_dir":str(self.run_dir), "draw_at":self.flow.draw_at}
 
 
 class LuckyBagMonitor:
-    """Resume the existing universal session in bounded cumulative chunks."""
-
-    def __init__(self, *, gateway: LuckyBagSessionGateway, output_root: Path,
-        chunk_actions: int = 20, chunk_observations: int = 40,
-        outbox_path: Path | None = None, notification_sink: NotificationSink | None = None,
-        clock: Callable[[], float] = time.monotonic,
-        wall_clock: Callable[[], float] = time.time,
-        state_path: Path | None = None) -> None:
-        if chunk_actions < 1 or chunk_observations < 1:
-            raise ValueError("监督器分段预算必须为正整数。")
-        self.gateway = gateway
+    def __init__(self, *, runtime, hardware_lock, output_root, notification_sink):
+        self.runtime, self.hardware_lock = runtime, hardware_lock
         self.output_root = Path(output_root)
-        self.chunk_actions = int(chunk_actions)
-        self.chunk_observations = int(chunk_observations)
-        self.outbox = JsonlNotificationOutbox(outbox_path or self.output_root / "lucky_bag_notifications.jsonl")
-        self.notification_sink = notification_sink or self.outbox
-        self.clock = clock
-        self.wall_clock = wall_clock
-        self.state_path = Path(state_path or self.output_root / "lucky_bag_monitors.json")
-        self._records: dict[str, LuckyBagMonitorRecord] = {}
-        self._lock = RLock()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lucky-bag")
-        self._restore()
+        self.notification_sink = notification_sink
+        self.state_path = self.output_root / "dedicated_monitors.json"
+        self.lock = RLock()
+        self.records, self.workers = {}, set()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dedicated-fudai")
+        self.config = json.loads((Path(__file__).resolve().parents[3] / "trial.json").read_text(encoding="utf-8"))
+        self.restore_error = ""
+        try:
+            self._restore()
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.records.clear()
+            self.restore_error = "福袋状态文件无法恢复，原文件已保留："+str(exc)
 
-    def start(self, *, profile: LuckyBagProfile, goal: str) -> LuckyBagMonitorRecord:
-        monitor_id = uuid4().hex
-        run_dir = self.output_root / f"lucky_bag_{monitor_id[:12]}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        record = LuckyBagMonitorRecord(
-            monitor_id=monitor_id, profile=profile, goal=goal, run_dir=run_dir,
-            deadline_monotonic=self.clock() + profile.duration_seconds,
-            deadline_epoch=self.wall_clock() + profile.duration_seconds,
-        )
-        with self._lock:
-            self._records[monitor_id] = record
-            self._persist_locked()
-        self._executor.submit(self._run, monitor_id)
-        return record
-
-    def get(self, monitor_id: str) -> LuckyBagMonitorRecord | None:
-        with self._lock:
-            return self._records.get(monitor_id)
-
-    def list(self) -> list[LuckyBagMonitorRecord]:
-        with self._lock:
-            return sorted(
-                self._records.values(),
-                key=lambda item: item.updated_at,
-                reverse=True,
-            )
-
-    def pause(self, monitor_id: str) -> LuckyBagMonitorRecord:
-        record = self._require(monitor_id)
-        if record.session_id:
-            self.gateway.pause(record.session_id)
-        self._set(record, "paused", "用户已暂停福袋监控。")
-        return record
-
-    def resume(self, monitor_id: str) -> LuckyBagMonitorRecord:
-        record = self._require(monitor_id)
-        if record.status in {"succeeded", "expired", "failed", "cancelled"}:
-            raise RuntimeError(f"当前监控状态不能恢复：{record.status}")
-        if record.status == "recovery_required":
-            # The previous process-owned session cannot be deserialized safely.
-            # Start a fresh observation only after explicit user action.
-            record.session_id = ""
-        self._set(record, "running", "正在恢复并重新观察。")
-        self._executor.submit(
-            self._run if not record.session_id else self._advance,
-            record.monitor_id,
-        )
-        return record
-
-    def cancel(self, monitor_id: str) -> LuckyBagMonitorRecord:
-        record = self._require(monitor_id)
-        if record.session_id:
-            self.gateway.cancel(record.session_id)
-        self._set(record, "cancelled", "用户已停止福袋监控。")
-        return record
-
-    def shutdown(self) -> None:
-        with self._lock:
-            self._persist_locked()
-        self._executor.shutdown(wait=False, cancel_futures=True)
-
-    def _require(self, monitor_id: str) -> LuckyBagMonitorRecord:
-        record = self.get(monitor_id)
-        if record is None:
-            raise KeyError("福袋监控不存在。")
-        return record
-
-    def _set(self, record: LuckyBagMonitorRecord, status: str, detail: str) -> None:
-        with self._lock:
-            record.status = status
-            record.detail = detail
-            record.updated_at = utc_timestamp()
-            self._persist_locked()
-
-    @staticmethod
-    def _profile_from_snapshot(payload: Mapping[str, Any]) -> LuckyBagProfile:
-        return LuckyBagProfile(
-            device_id=str(payload.get("device_id") or ""),
-            recipient=str(payload.get("recipient") or ""),
-            duration_seconds=int(payload.get("duration_seconds") or 0),
-            app_alias=str(payload.get("app_alias") or "抖音"),
-            subject=str(payload.get("subject") or "疑似中奖"),
-            body=str(payload.get("body") or "疑似中奖"),
-        )
-
-    def _persist_locked(self) -> None:
-        rows = []
-        for record in self._records.values():
-            item = record.snapshot()
-            item.update({
-                "goal": record.goal,
-                "run_dir": str(record.run_dir),
-                "profile": {
-                    "device_id": record.profile.device_id,
-                    "recipient": record.profile.recipient,
-                    "duration_seconds": record.profile.duration_seconds,
-                    "app_alias": record.profile.app_alias,
-                    "subject": record.profile.subject,
-                    "body": record.profile.body,
-                },
-            })
-            rows.append(item)
+    def _save(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-        temporary.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, self.state_path)
+        rows = [{"snapshot":r.snapshot(),"goal":r.goal,"profile":asdict(r.profile),"flow":asdict(r.flow)} for r in self.records.values()]
+        temporary = self.state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding="utf-8")
+        os.replace(temporary,self.state_path)
 
-    def _restore(self) -> None:
-        try:
-            rows = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError):
+    def _restore(self):
+        from .profile import LuckyBagProfile
+        if not self.state_path.exists():
             return
-        if not isinstance(rows, list):
-            return
-        now_wall = self.wall_clock()
-        now_mono = self.clock()
-        with self._lock:
-            for item in rows:
-                if not isinstance(item, Mapping):
-                    continue
-                try:
-                    profile_payload = item.get("profile")
-                    if not isinstance(profile_payload, Mapping):
-                        continue
-                    profile = self._profile_from_snapshot(profile_payload)
-                    deadline_epoch = float(item.get("deadline_epoch") or 0.0)
-                    remaining = max(0.0, deadline_epoch - now_wall)
-                    status = str(item.get("status") or "failed")
-                    if status in {"starting", "running", "waiting_confirmation", "paused", "recovery_required"}:
-                        if remaining <= 0:
-                            status = "expired"
-                            detail = "恢复时发现监控已达到时限。"
-                        else:
-                            status = "recovery_required"
-                            detail = "API 已重启；原 Agent 会话不能安全反序列化，等待用户恢复后重新观察。"
-                    else:
-                        detail = str(item.get("detail") or "")
-                    record = LuckyBagMonitorRecord(
-                        monitor_id=str(item.get("monitor_id") or ""),
-                        profile=profile,
-                        goal=str(item.get("goal") or ""),
-                        run_dir=Path(str(item.get("run_dir") or self.output_root)),
-                        status=status,
-                        session_id="",
-                        started_at=str(item.get("started_at") or utc_timestamp()),
-                        updated_at=utc_timestamp(),
-                        deadline_monotonic=now_mono + remaining,
-                        deadline_epoch=deadline_epoch,
-                        detail=detail,
-                        notified=bool(item.get("notified")),
-                    )
-                    if record.monitor_id:
-                        self._records[record.monitor_id] = record
-                except (TypeError, ValueError):
-                    continue
-            self._persist_locked()
+        for item in json.loads(self.state_path.read_text(encoding="utf-8")):
+            s = item["snapshot"]
+            r = Record(s["monitor_id"], LuckyBagProfile(**item["profile"]), item["goal"], Path(s["run_dir"]))
+            for name in ("status","detail","current_phase","deadline_epoch","started_at","notified",
+                "notification_status","physical_actions","observations","screenshot_path"):
+                setattr(r,name,s[name])
+            r.flow = Flow(**item["flow"])
+            if r.flow.halted and r.status not in TERMINAL:
+                r.status = "failed"
+                r.detail = "服务在通知期间中断；手机保持停手，请检查通知是否送达。"
+            elif r.status not in TERMINAL:
+                r.status = "recovery_required"
+                r.detail = "服务已重启，点击继续后读取新画面；已经尝试的发送不会重放。"
+            self.records[r.monitor_id] = r
 
-    @staticmethod
-    def _session_snapshot(result: Mapping[str, Any]) -> Mapping[str, Any]:
-        value = result.get("session") if isinstance(result.get("session"), Mapping) else result
-        if not isinstance(value, Mapping):
-            raise RuntimeError("会话网关没有返回有效状态。")
-        return value
+    def get(self, monitor_id):
+        with self.lock:
+            return self.records.get(monitor_id)
 
-    def _run(self, monitor_id: str) -> None:
-        record = self._require(monitor_id)
+    def list(self):
+        with self.lock:
+            return sorted(self.records.values(),key=lambda r:r.updated_at,reverse=True)
+
+    def start(self, *, profile, goal):
+        with self.lock:
+            if self.restore_error:
+                raise RuntimeError(self.restore_error)
+            monitor_id = uuid4().hex
+            # Same registry/OS lease as generic tasks and both trial processes.
+            self.runtime.device_task_registry.reserve(profile.device_id, "lucky-"+monitor_id)
+            try:
+                run_dir = self.output_root / ("lucky_bag_"+monitor_id)
+                run_dir.mkdir(parents=True)
+                r = Record(monitor_id,profile,goal,run_dir,deadline_epoch=time.time()+profile.duration_seconds)
+                self.records[monitor_id] = r
+                self._save()
+                self._submit(r)
+                return r
+            except Exception:
+                self.records.pop(monitor_id,None)
+                self.runtime.device_task_registry.release(profile.device_id,"lucky-"+monitor_id)
+                raise
+
+    def _require(self, monitor_id):
+        r = self.get(monitor_id)
+        if r is None:
+            raise KeyError("福袋监控不存在。")
+        return r
+
+    def pause(self, monitor_id):
+        with self.lock:
+            r = self._require(monitor_id)
+            if r.status not in TERMINAL:
+                r.status, r.detail = "paused", "已暂停；继续时重新观察，不重复发送。"
+                r.event.set()
+                self._save()
+            return r
+
+    def resume(self, monitor_id):
+        with self.lock:
+            r = self._require(monitor_id)
+            if r.status in TERMINAL or r.flow.halted:
+                raise RuntimeError("该监控已结束，不能继续手机操作。")
+            if r.status in {"running","starting"}:
+                return r
+            if r.monitor_id in self.workers:
+                raise RuntimeError("上一轮正在暂停，请稍后点击继续。")
+            self.runtime.device_task_registry.reserve(r.profile.device_id,"lucky-"+r.monitor_id)
+            r.status, r.detail = "starting", "正在重新观察当前画面。"
+            r.event.clear()
+            self._save()
+            self._submit(r)
+            return r
+
+    def cancel(self, monitor_id):
+        with self.lock:
+            r = self._require(monitor_id)
+            if r.status not in TERMINAL:
+                r.status, r.detail = "cancelled", "用户已停止福袋监控。"
+                r.event.set()
+                self._save()
+            if monitor_id not in self.workers:
+                self.runtime.device_task_registry.release(r.profile.device_id,"lucky-"+monitor_id)
+            return r
+
+    def shutdown(self):
+        for r in self.list():
+            self.pause(r.monitor_id)
+        self.executor.shutdown(wait=False,cancel_futures=True)
+
+    def _submit(self, r):
+        self.workers.add(r.monitor_id)
+        self.executor.submit(self._run,r)
+
+    def _run(self, r):
         try:
-            started = self.gateway.start(goal=record.goal, device_id=record.profile.device_id, run_dir=record.run_dir)
-            session = self._session_snapshot(started)
-            record.session_id = str(session.get("session_id") or "")
-            if not record.session_id:
-                raise RuntimeError("会话启动没有返回session_id。")
-            with self._lock:
-                self._persist_locked()
-            if record.status in {"paused", "cancelled"}:
-                if record.status == "paused":
-                    self.gateway.pause(record.session_id)
-                else:
-                    self.gateway.cancel(record.session_id)
-                return
-            self._set(record, "running", "福袋监控已启动。")
-            self._advance(monitor_id)
-        except Exception as exc:
-            self._set(record, "failed", str(exc) or type(exc).__name__)
-
-    def _advance(self, monitor_id: str) -> None:
-        record = self._require(monitor_id)
-        try:
+            mode = self.config["mode"]
+            transport = (AdbTransport if mode == "upstream" else ArmTransport)(self.runtime,r.profile.device_id,self.hardware_lock)
+            transport.preflight()
+            root = Path(__file__).resolve().parents[3]
+            detector = UpstreamDetector(root / "external/douyin_guaji", self.config.get("upstream_offset",0)) if mode == "upstream" else TemplateDetector(Path(__file__).parent / "templates")
+            ocr = LocalOcr()
+            if mode == "local":
+                transport.controller.begin_new_task()
             while True:
-                if record.status in {"paused", "cancelled", "failed", "succeeded", "expired"}:
-                    return
-                if self.clock() >= record.deadline_monotonic:
-                    if record.session_id:
-                        self.gateway.pause(record.session_id)
-                    self._set(record, "expired", "已达到福袋监控时限。")
-                    return
-                current = self._session_snapshot(self.gateway.get(record.session_id))
-                status = str(current.get("status") or "")
-                if status == "succeeded":
-                    self._notify(record, current)
-                    self._set(record, "succeeded", "Qwen报告任务终态，已记录通知事件。")
-                    return
-                if status in {"failed", "blocked", "cancelled"}:
-                    self._set(record, status, str(current.get("failed_reason") or current.get("blocked_reason") or "会话已结束。"))
-                    return
-                if status == "paused" and record.status == "paused":
-                    return
-                if status == "awaiting_effect_confirmation":
-                    self._set(record, "waiting_confirmation", "当前会话涉及登录或付款，需要用户确认后才能继续。")
-                    return
-                budget = current.get("execution_budget") if isinstance(current.get("execution_budget"), Mapping) else {}
-                actions = int(current.get("physical_actions") or 0)
-                observations = int(budget.get("observation_attempts") or 0)
-                result = self.gateway.auto(
-                    record.session_id,
-                    max_physical_actions=actions + self.chunk_actions,
-                    max_observations=observations + self.chunk_observations,
-                )
-                updated = self._session_snapshot(result)
-                updated_status = str(updated.get("status") or "")
-                if updated_status == "succeeded":
-                    self._notify(record, updated)
-                    self._set(record, "succeeded", "Qwen报告任务终态，已记录通知事件。")
-                    return
-                if updated_status in {"failed", "blocked", "cancelled"}:
-                    self._set(record, updated_status, str(updated.get("failed_reason") or updated.get("blocked_reason") or "会话已结束。"))
-                    return
-                if updated_status == "paused":
-                    self._set(record, "paused", "用户已暂停福袋监控。")
-                    return
-                if updated_status == "awaiting_effect_confirmation":
-                    self._set(record, "waiting_confirmation", "当前会话涉及登录或付款，需要用户确认后才能继续。")
-                    return
-                self._set(record, "running", "已续接下一段累计预算。")
+                with self.lock:
+                    if r.status in TERMINAL or r.status == "paused":
+                        break
+                    r.status = "running"
+                    if time.time() >= r.deadline_epoch:
+                        r.status, r.detail = "expired", "已达到监控时限，停止操作。"
+                        self._save()
+                        break
+                frame = transport.capture()
+                captured_at = time.time()
+                tokens = ocr.read(frame)
+                bag = detector.locate(frame)
+                page = interpret(tokens,frame.size,bag)
+                if page.countdown is not None:
+                    # OCR processing time must not postpone the actual draw.
+                    page.countdown = max(0,page.countdown-(time.time()-captured_at))
+                with self.lock:
+                    if r.status != "running":
+                        break
+                    r.observations += 1
+                    r.screenshot_path = str(r.run_dir / f"{r.observations:06d}.jpg")
+                    frame.save(r.screenshot_path,quality=92)
+                    step = r.flow.decide(page,time.time())
+                    r.flow.phase = step.phase
+                    r.current_phase = PHASES.get(step.phase,step.phase)
+                    r.detail = r.last_decision_reason = step.message
+                    r.last_action = "tap" if step.point else "wait" if not step.notify and not step.pause else "stop"
+                    r.updated_at = utc_timestamp()
+                    r.next_observation_epoch = time.time()+step.wait
+                    # Commit send_attempted/halted before any external effect.
+                    self._save()
+                    (r.run_dir / f"{r.observations:06d}.json").write_text(json.dumps({"captured_at":captured_at,"page":asdict(page),"step":asdict(step),"flow":asdict(r.flow)},ensure_ascii=False,indent=2),encoding="utf-8")
+                    if step.notify:
+                        self._notify(r)
+                        break
+                    if step.pause:
+                        r.status = "paused"
+                        self._save()
+                        break
+                    if step.point:
+                        # Count dispatched attempts even if transport returns an
+                        # uncertain error; sending is never automatically retried.
+                        r.physical_actions += 1
+                        self._save()
+                        transport.tap(step.point,frame)
+                r.event.wait(min(step.wait,max(0,r.deadline_epoch-time.time())))
+                if r.event.is_set():
+                    break
         except Exception as exc:
-            self._set(record, "failed", str(exc) or type(exc).__name__)
+            with self.lock:
+                if r.status not in {"paused","cancelled"}:
+                    r.status, r.detail = "failed", str(exc) or type(exc).__name__
+                self._save()
+        finally:
+            with self.lock:
+                self.workers.discard(r.monitor_id)
+                if r.status in TERMINAL:
+                    self.runtime.device_task_registry.release(r.profile.device_id,"lucky-"+r.monitor_id)
 
-    def _notify(self, record: LuckyBagMonitorRecord, session: Mapping[str, Any]) -> None:
-        if record.notified:
-            return
-        decision = session.get("qwen_decision") if isinstance(session.get("qwen_decision"), Mapping) else {}
-        reason = str(decision.get("reason") or session.get("failed_reason") or "")
-        evidence = sorted(record.run_dir.glob("*.jpg"))
-        screenshot_path = str(evidence[-1]) if evidence else str(record.run_dir)
-        self.notification_sink.publish(NotificationEvent(
-            event_id=record.monitor_id, recipient=record.profile.recipient,
-            subject=record.profile.subject, body=record.profile.body,
-            observed_at=utc_timestamp(), screenshot_path=screenshot_path, reason=reason,
-        ))
-        record.notified = True
+    def _notify(self, r):
+        r.notification_status = "sending"
+        self._save()
+        event = NotificationEvent(event_id=r.monitor_id,recipient=r.profile.recipient,
+            subject=r.profile.subject,body=r.profile.body,observed_at=utc_timestamp(),
+            screenshot_path=r.screenshot_path,reason=r.detail)
+        try:
+            self.notification_sink.publish(event)
+            remote = getattr(self.notification_sink,"remote",None)
+            r.notified = remote is not None
+            r.notification_status = "sent" if r.notified else "local_queue_only"
+            r.status = "succeeded" if r.notified else "failed"
+            r.detail += "邮件已发送。" if r.notified else "Gmail未配置，通知已保存到本地队列。"
+        except Exception as exc:
+            r.status, r.notification_status = "failed", "failed"
+            r.detail += "邮件发送失败，手机保持停手："+str(exc)
+        self._save()
 
 
-__all__ = ["LuckyBagMonitor", "LuckyBagMonitorRecord", "LuckyBagSessionGateway"]
+__all__ = ["LuckyBagMonitor"]

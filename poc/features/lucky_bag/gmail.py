@@ -237,6 +237,7 @@ def gmail_configuration_status() -> dict[str, str | bool]:
         "message": "Gmail 已配置，可发送疑似中奖通知。" if configured else "Gmail 未配置，中奖通知只能写入本地队列。",
     }
 
+
 __all__ = [
     "DurableNotificationRouter",
     "GmailApiNotificationSink",

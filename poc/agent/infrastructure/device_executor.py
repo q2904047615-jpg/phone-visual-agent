@@ -114,28 +114,16 @@ class RobotDeviceExecutor:
         click_count: int) -> DeviceExecutionResult:
         args = self._point(request) if needs_point else ()
         result = self._hardware_call(method, *args)
-        try:
-            hardware_receipt = self._consume_click_receipt(expected_count=click_count)
-        except DeviceExecutionError:
-            raise
-        except Exception as exc:
-            raise DeviceExecutionError(f'读取点击派发回执失败：{exc}', physical_actions=1) from exc
         return DeviceExecutionResult(physical_actions=1, transport_result=result,
-            hardware_receipt=hardware_receipt)
+            hardware_receipt=self._consume_click_receipt(expected_count=click_count))
 
     def _swipe(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         assert request.direction is not None
         if request.point is not None and request.end_point is not None:
             result = self._hardware_call('vision_swipe_relative', *request.point, *request.end_point,
                 request.direction)
-            try:
-                hardware_receipt = self._consume_swipe_receipt(expected_direction=request.direction)
-            except DeviceExecutionError:
-                raise
-            except Exception as exc:
-                raise DeviceExecutionError(f'读取滑动派发回执失败：{exc}', physical_actions=1) from exc
             return DeviceExecutionResult(physical_actions=1, transport_result=result,
-                hardware_receipt=hardware_receipt)
+                hardware_receipt=self._consume_swipe_receipt(expected_direction=request.direction))
         return DeviceExecutionResult(physical_actions=1, transport_result=self._hardware_call(f'vision_swipe_{
             request.direction}'))
 

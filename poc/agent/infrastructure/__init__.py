@@ -1,6 +1,7 @@
 """Infrastructure adapters for the agent modular monolith."""
 
 from .camera_coordinator import CameraPreviewUnavailable, DeviceCameraCoordinator
+from .adb_pairing import AdbPairingError, AdbPairingService
 from .device_controller_registry import (
     DeviceControllerRegistry,
     DeviceControllerRegistryError,
@@ -13,7 +14,7 @@ from .device_task_registry import DeviceTaskRegistry
 from .file_system_evidence_store import FileSystemAgentEvidenceStore
 from .in_memory_session_repository import InMemoryAgentSessionRepository
 
-__all__ = ['DeviceTaskRegistry', 'CameraPreviewUnavailable', 'DeviceCameraCoordinator', 'DeviceControllerRegistry',
+__all__ = ['AdbPairingError', 'AdbPairingService', 'DeviceTaskRegistry', 'CameraPreviewUnavailable', 'DeviceCameraCoordinator', 'DeviceControllerRegistry',
     'DeviceControllerRegistryError', 'DeviceRuntimeResourceError', 'DeviceRuntimeResourceRegistry',
     'FileSystemAgentEvidenceStore', 'InMemoryAgentSessionRepository', 'InterProcessLease', 'ReplayDeviceExecutor',
     'RobotDeviceExecutor', 'ProvisionalDeviceControllerError', 'SHARED_DEVICE_LEASE_DIR']

@@ -2,11 +2,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import cv2
 import numpy as np
-try:
-    import cv2
-except ImportError:  # installed by setup_trial.py for the dedicated variants
-    cv2 = None
 from .flow import Page
 
 
@@ -39,8 +36,6 @@ class LocalOcr:
 
 class TemplateDetector:
     def __init__(self, directory: Path, threshold=.86):
-        if cv2 is None:
-            raise RuntimeError("模板识别需要安装 requirements-trial.txt。")
         self.directory, self.threshold = directory, threshold
         self.last_score = 0.0
 
@@ -101,4 +96,3 @@ def interpret(tokens, size, bag=None):
     if countdowns:
         page.countdown = min(countdowns)
     return page
-

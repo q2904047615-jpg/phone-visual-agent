@@ -216,32 +216,10 @@ def configured_gmail_sink() -> NotificationSink | None:
     )
 
 
-def gmail_configuration_status() -> dict[str, str | bool]:
-    """Return secret-free preflight information for the lucky-bag UI."""
-
-    sender = bool(os.environ.get("GMAIL_SENDER", "").strip())
-    smtp = sender and bool(os.environ.get("GMAIL_APP_PASSWORD", "").strip())
-    values = _load_file_credentials()
-    api = sender and bool(
-        os.environ.get("GMAIL_ACCESS_TOKEN", "").strip() or values.get("access_token", "")
-        or (
-            (os.environ.get("GMAIL_REFRESH_TOKEN", "").strip() or values.get("refresh_token", ""))
-            and (os.environ.get("GMAIL_CLIENT_ID", "").strip() or values.get("client_id", ""))
-            and (os.environ.get("GMAIL_CLIENT_SECRET", "").strip() or values.get("client_secret", ""))
-        )
-    )
-    configured = bool(smtp or api)
-    return {
-        "configured": configured,
-        "mode": "smtp_app_password" if smtp else "gmail_api" if api else "local_outbox_only",
-        "message": "Gmail 已配置，可发送疑似中奖通知。" if configured else "Gmail 未配置，中奖通知只能写入本地队列。",
-    }
-
 __all__ = [
     "DurableNotificationRouter",
     "GmailApiNotificationSink",
     "GmailSmtpNotificationSink",
     "NotificationDeliveryError",
     "configured_gmail_sink",
-    "gmail_configuration_status",
 ]

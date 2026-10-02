@@ -97,21 +97,23 @@ def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
     if not text:
         return type(error).__name__
     return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
-from features.lucky_bag import DedicatedLuckyBagMonitor, LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
+from features.lucky_bag import LuckyBagMonitor, LuckyBagProfile, build_lucky_bag_goal
 from features.lucky_bag.http import LuckyBagDeviceRequest, LuckyBagStartRequest
-from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink, gmail_configuration_status
+from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink
 from features.notifications import JsonlNotificationOutbox
+from features.qishui_ad_test import (
+    QishuiAdTestMonitor,
+    QishuiAdTestProfile,
+    build_qishui_ad_test_goal,
+)
+from features.qishui_ad_test.http import (
+    QishuiAdTestConfirmationRequest,
+    QishuiAdTestDeviceRequest,
+    QishuiAdTestStartRequest,
+)
 
 
 ROOT = Path(__file__).resolve().parent
-_TRIAL_CONFIG_PATH = ROOT.parent / "trial.json"
-try:
-    _TRIAL_CONFIG = json.loads(_TRIAL_CONFIG_PATH.read_text(encoding="utf-8"))
-except (OSError, ValueError, TypeError):
-    _TRIAL_CONFIG = {}
-_TRIAL_MODE = str(_TRIAL_CONFIG.get("mode") or "")
-_TRIAL_PORT = int(_TRIAL_CONFIG.get("port") or 8765)
-_SERVICE_VERSION = f"0.2.0-trial-{_TRIAL_MODE}" if _TRIAL_MODE else "0.2.0"
 STATIC_DIR = ROOT / "static"
 CONTROL_TOKEN = secrets.token_urlsafe(24)
 DEVICE_REGISTRY_PATH = Path(
@@ -224,6 +226,66 @@ class _LuckyBagGateway:
         return {"session": result.session.snapshot()}
 
 
+class _QishuiAdTestGateway:
+    """Adapter that exposes only start, observe, one confirmed back, and cancel."""
+
+    def start(self, *, goal: str, device_id: str, run_dir: Path) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session_id = uuid.uuid4().hex
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / ".evidence-run").touch()
+        (run_dir / ".active").touch()
+        started = runtime.universal_agent_session_service.start(
+            StartUniversalAgentSessionCommand(
+                session_id=session_id,
+                raw_goal=goal,
+                exact_input_text=None,
+                exact_action_kind=None,
+                exact_target_label="",
+                device_id=device_id,
+                run_dir=run_dir,
+                auto_advance=False,
+                max_physical_actions=1,
+                max_observations=20,
+            )
+        )
+        return {"session": started.session.snapshot()}
+
+    def get(self, session_id: str) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        return {"session": runtime.universal_agent_session_service.require(session_id).snapshot()}
+
+    def observe(self, session_id: str, *, device_id: str) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session = runtime.universal_agent_session_service.require(session_id)
+        refreshed = runtime.universal_agent_session_service.refresh(
+            session, requested_device_id=device_id,
+        )
+        return {"session": refreshed.session.snapshot()}
+
+    def confirm(self, session_id: str, *, device_id: str,
+        confirmation: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session = runtime.universal_agent_session_service.require(session_id)
+        confirmed = runtime.universal_agent_session_service.confirm(
+            session, confirmed=True, confirmation=confirmation,
+        )
+        return {"session": confirmed.session.snapshot()}
+
+    def cancel(self, session_id: str, *, device_id: str) -> dict[str, Any]:
+        if isinstance(runtime, RuntimeUnavailable):
+            raise RuntimeError(runtime.startup_error)
+        session = runtime.universal_agent_session_service.require(session_id)
+        cancelled = runtime.universal_agent_session_service.cancel(
+            session_id, requested_device_id=device_id,
+        )
+        return {"session": cancelled.session.snapshot()}
+
+
 _LUCKY_BAG_OUTPUT_DIR = WEB_OUTPUT_DIR / "lucky_bag"
 _LUCKY_BAG_OUTBOX = JsonlNotificationOutbox(
     _LUCKY_BAG_OUTPUT_DIR / "lucky_bag_notifications.jsonl"
@@ -232,11 +294,16 @@ _LUCKY_BAG_NOTIFICATIONS = DurableNotificationRouter(
     outbox=_LUCKY_BAG_OUTBOX,
     remote=configured_gmail_sink(),
 )
-_LUCKY_BAG_MONITOR = DedicatedLuckyBagMonitor(
-    runtime=runtime,
-    hardware_lock=lambda device_id: _supervised_hardware_lock(device_id),
+_LUCKY_BAG_MONITOR = LuckyBagMonitor(
+    gateway=_LuckyBagGateway(),
     output_root=_LUCKY_BAG_OUTPUT_DIR,
     notification_sink=_LUCKY_BAG_NOTIFICATIONS,
+)
+
+_QISHUI_AD_TEST_OUTPUT_DIR = WEB_OUTPUT_DIR / "qishui_ad_test"
+_QISHUI_AD_TEST_MONITOR = QishuiAdTestMonitor(
+    gateway=_QishuiAdTestGateway(),
+    output_root=_QISHUI_AD_TEST_OUTPUT_DIR,
 )
 
 _GENERIC_START_TASKS = AsyncTaskRegistry(
@@ -250,21 +317,22 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
     # Keep startup notices ASCII-only so a Windows cp1252 stdout cannot fail
     # the lifespan before the application is ready.
-    print(f"Phone Visual Agent web console: http://127.0.0.1:{_TRIAL_PORT}/", flush=True)
+    print("Phone Visual Agent web console: http://127.0.0.1:8765/", flush=True)
     print("Local control token generated for the protected bootstrap page.", flush=True)
     if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
         threading.Timer(
-            1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
+            1.0, lambda: webbrowser.open("http://127.0.0.1:8765/")
         ).start()
     yield
     runtime.shutdown()
     _LUCKY_BAG_MONITOR.shutdown()
+    _QISHUI_AD_TEST_MONITOR.shutdown()
     _GENERIC_START_TASKS.shutdown()
 
 
 app = FastAPI(
     title="多 App 机械臂网页控制平台",
-    version=_SERVICE_VERSION,
+    version="0.2.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -545,8 +613,6 @@ def lucky_bag_feature(
     return {
         "feature_id": "lucky_bag",
         "stage": "goal_preset",
-        "trial": _LUCKY_BAG_MONITOR.config,
-        "notification": gmail_configuration_status(),
         "profile": {
             "device_id": profile.device_id,
             "recipient": profile.recipient,
@@ -558,6 +624,143 @@ def lucky_bag_feature(
         "goal": build_lucky_bag_goal(profile),
         "notice": "此入口可填充通用Agent目标并启动分段长期监控；邮件先写入本地通知队列，Gmail发送仍需后续配置。",
     }
+
+
+@app.get("/api/features/qishui-ad-test")
+def qishui_ad_test_feature(
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Return the explicit manual, single-ad test entry point."""
+
+    verify_local_request(request, x_control_token)
+    profile = QishuiAdTestProfile(device_id="device-local-01")
+    return {
+        "feature_id": "qishui_ad_test",
+        "stage": "manual_start",
+        "profile": {
+            "device_id": profile.device_id,
+            "app_alias": profile.app_alias,
+            "duration_seconds": profile.duration_seconds,
+        },
+        "goal": build_qishui_ad_test_goal(profile),
+        "notice": "用户手动打开一次广告；功能只观察页面并在奖励/结束页等待人工确认，不会自动领取金币。",
+        "automatic_loop_enabled": False,
+        "max_ads_per_round": 1,
+    }
+
+
+def _qishui_ad_test_profile_payload(profile: QishuiAdTestProfile) -> dict[str, Any]:
+    return {
+        "device_id": profile.device_id,
+        "app_alias": profile.app_alias,
+        "duration_seconds": profile.duration_seconds,
+    }
+
+
+def _qishui_ad_test_record_or_404(test_id: str):
+    record = _QISHUI_AD_TEST_MONITOR.get(test_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="汽水音乐广告测试不存在。")
+    return record
+
+
+@app.post("/api/features/qishui-ad-test/start")
+def start_qishui_ad_test(
+    body: QishuiAdTestStartRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    profile = QishuiAdTestProfile(
+        device_id=body.device_id,
+        duration_seconds=body.duration_seconds,
+    )
+    goal = build_qishui_ad_test_goal(profile)
+    try:
+        record = _QISHUI_AD_TEST_MONITOR.start(profile=profile, goal=goal)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "feature_id": "qishui_ad_test",
+        "stage": "manual_observe",
+        "test": record.snapshot(),
+        "profile": _qishui_ad_test_profile_payload(profile),
+        "goal": goal,
+        "notice": "请手动打开一次广告，然后按需请求observe；测试不会自动点击广告或领取金币。",
+    }
+
+
+@app.get("/api/features/qishui-ad-test/{test_id}")
+def get_qishui_ad_test(
+    test_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    record = _qishui_ad_test_record_or_404(test_id)
+    return {
+        "feature_id": "qishui_ad_test",
+        "stage": record.phase,
+        "test": record.snapshot(),
+        "profile": _qishui_ad_test_profile_payload(record.profile),
+        "goal": record.goal,
+    }
+
+
+@app.post("/api/features/qishui-ad-test/{test_id}/observe")
+def observe_qishui_ad_test(
+    test_id: str,
+    body: QishuiAdTestDeviceRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    record = _qishui_ad_test_record_or_404(test_id)
+    try:
+        updated = _QISHUI_AD_TEST_MONITOR.observe(test_id, device_id=body.device_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"feature_id": "qishui_ad_test", "stage": updated.phase, "test": updated.snapshot()}
+
+
+@app.post("/api/features/qishui-ad-test/{test_id}/confirm")
+def confirm_qishui_ad_test(
+    test_id: str,
+    body: QishuiAdTestConfirmationRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    _qishui_ad_test_record_or_404(test_id)
+    confirmation = body.confirmation.model_dump() if body.confirmation is not None else None
+    try:
+        updated = _QISHUI_AD_TEST_MONITOR.confirm(
+            test_id,
+            device_id=body.device_id,
+            confirmed=body.confirmed,
+            mode=body.mode,
+            confirmation=confirmation,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"feature_id": "qishui_ad_test", "stage": updated.phase, "test": updated.snapshot()}
+
+
+@app.post("/api/features/qishui-ad-test/{test_id}/cancel")
+def cancel_qishui_ad_test(
+    test_id: str,
+    body: QishuiAdTestDeviceRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    _qishui_ad_test_record_or_404(test_id)
+    try:
+        updated = _QISHUI_AD_TEST_MONITOR.cancel(test_id, device_id=body.device_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"feature_id": "qishui_ad_test", "stage": updated.phase, "test": updated.snapshot()}
 
 
 def _lucky_bag_profile_payload(profile: LuckyBagProfile) -> dict[str, Any]:
@@ -601,8 +804,7 @@ def start_lucky_bag_monitor(
         "monitor": record.snapshot(),
         "profile": _lucky_bag_profile_payload(profile),
         "goal": goal,
-        "notification": gmail_configuration_status(),
-        "notice": "监控已排队启动；用户仍需手动打开直播间。",
+        "notice": "监控已排队启动；用户仍需手动打开直播间，通知暂写入本地队列。",
     }
 
 

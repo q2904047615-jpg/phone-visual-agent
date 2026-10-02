@@ -1,8 +1,0 @@
-{
-  "mode": "upstream",
-  "port": 8766,
-  "title": "A 版 · 上游识别 / ADB",
-  "upstream_commit": "894cd38476374b75077d25f9f54884e090b694be",
-  "upstream_sha256": "bc2acd50fe89a7835fcd27199862a6e3b055837adcf7a56ab4d421f5c7bae6ba",
-  "upstream_offset": 0
-}

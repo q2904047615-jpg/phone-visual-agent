@@ -1,0 +1,14 @@
+{
+  "name": "phone-visual-agent-frontend-tests",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local frontend contract tests for the phone visual agent console.",
+  "scripts": {
+    "test": "npm run test:unit && npm run test:browser",
+    "test:unit": "node --test test_frontend_protocol.js test_touch_calibration_page.js",
+    "test:browser": "node --test test_frontend_browser_contract.js && node --test test_phase2_console_browser_contract.js"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

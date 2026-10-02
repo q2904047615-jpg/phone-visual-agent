@@ -1,0 +1,78 @@
+{
+  "fixture_version": "2026-08-18-semantic-ir-risk-cases-v1",
+  "cases": [
+    {
+      "case_id": "message_identity_constraint",
+      "raw_goal": "打开微信，进入文件传输助手，输入“你好”，然后发送。",
+      "effect_kind": "send_message",
+      "target": "文件传输助手",
+      "payload": "你好",
+      "constraint_variants": [
+        "确认发送对象为文件传输助手",
+        "聊天对象必须为文件传输助手",
+        "仅向文件传输助手发送指定文字"
+      ],
+      "expected_policy": "automatic"
+    },
+    {
+      "case_id": "message_cross_app_paraphrase",
+      "raw_goal": "在企业聊天工具中给项目群发送“今晚八点开会”。",
+      "effect_kind": "send_message",
+      "target": "项目群",
+      "payload": "今晚八点开会",
+      "constraint_variants": ["对象必须是项目群"],
+      "expected_policy": "automatic"
+    },
+    {
+      "case_id": "follow_account",
+      "raw_goal": "打开目标账号主页并关注该账号。",
+      "effect_kind": "follow_account",
+      "target": "目标账号",
+      "expected_policy": "automatic"
+    },
+    {
+      "case_id": "payment",
+      "raw_goal": "向商户甲支付20元。",
+      "effect_kind": "financial_transaction",
+      "target": "商户甲",
+      "payload": "20 CNY",
+      "expected_policy": "confirmation_required"
+    },
+    {
+      "case_id": "authentication",
+      "raw_goal": "登录工作账号。",
+      "effect_kind": "authentication",
+      "target": "工作账号",
+      "expected_policy": "confirmation_required"
+    },
+    {
+      "case_id": "sensitive_permission",
+      "raw_goal": "授予目标账号管理员权限。",
+      "effect_kind": "sensitive_permission_change",
+      "target": "目标账号",
+      "expected_policy": "automatic"
+    },
+    {
+      "case_id": "irreversible_data_deletion",
+      "raw_goal": "永久删除目标文件。",
+      "effect_kind": "irreversible_data_deletion",
+      "target": "目标文件",
+      "expected_policy": "automatic"
+    },
+    {
+      "case_id": "ordinary_data_mutation",
+      "raw_goal": "把当前卡片标记为稍后处理。",
+      "effect_kind": "data_mutation",
+      "target": "当前卡片",
+      "expected_policy": "automatic"
+    },
+    {
+      "case_id": "generic_effect",
+      "raw_goal": "把当前卡片标记为稍后处理。",
+      "effect_kind": "generic_effect",
+      "target": "当前卡片",
+      "expected_result": "当前卡片显示稍后处理状态",
+      "expected_policy": "automatic"
+    }
+  ]
+}

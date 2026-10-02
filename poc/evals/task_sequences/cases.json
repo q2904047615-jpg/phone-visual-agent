@@ -1,0 +1,57 @@
+{
+  "protocol_version": "2026-08-25-task-sequence-replay-v1",
+  "mode": "offline_read_only",
+  "cases": [
+    {
+      "case_id": "browser_search_navigation",
+      "app_scope": "browser",
+      "goal": "从桌面进入浏览器并浏览搜索结果",
+      "expected_terminal_status": "succeeded",
+      "recorded_terminal_status": "succeeded",
+      "expected_actions": [
+        {"kind": "home"},
+        {"kind": "tap_semantic", "point": [240, 310]},
+        {"kind": "scroll", "direction": "up"}
+      ],
+      "recorded_actions": [
+        {"kind": "home"},
+        {"kind": "tap_semantic", "point": [240, 310]},
+        {"kind": "scroll", "direction": "up"}
+      ]
+    },
+    {
+      "case_id": "settings_open_detail",
+      "app_scope": "settings",
+      "goal": "从桌面进入设置并打开一个详情页",
+      "expected_terminal_status": "succeeded",
+      "recorded_terminal_status": "succeeded",
+      "expected_actions": [
+        {"kind": "home"},
+        {"kind": "tap_semantic", "point": [510, 285]},
+        {"kind": "tap_semantic", "point": [500, 430]}
+      ],
+      "recorded_actions": [
+        {"kind": "home"},
+        {"kind": "tap_semantic", "point": [510, 285]},
+        {"kind": "tap_semantic", "point": [500, 430]}
+      ]
+    },
+    {
+      "case_id": "gallery_double_open",
+      "app_scope": "gallery",
+      "goal": "从桌面进入图库并双击打开一个预览目标",
+      "expected_terminal_status": "succeeded",
+      "recorded_terminal_status": "succeeded",
+      "expected_actions": [
+        {"kind": "home"},
+        {"kind": "tap_semantic", "point": [765, 320]},
+        {"kind": "double_tap", "point": [500, 520]}
+      ],
+      "recorded_actions": [
+        {"kind": "home"},
+        {"kind": "tap_semantic", "point": [765, 320]},
+        {"kind": "double_tap", "point": [500, 520]}
+      ]
+    }
+  ]
+}

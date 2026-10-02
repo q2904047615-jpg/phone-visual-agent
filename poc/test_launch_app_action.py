@@ -128,7 +128,7 @@ class _SequenceObserver:
 
     def observe_with_decision(self, *, frames, goal_context=None, **_kwargs):
         self.calls += 1
-        return self.scenes.pop(0), {"status": "finish", "evidence_refs": ["scene.summary"]}
+        return self.scenes.pop(0), {"status": "finish", "reason": "当前画面满足目标"}
 
 
 def _launch_goal() -> GenericIntentDraft:
@@ -215,11 +215,7 @@ class LaunchAppCanonicalTests(unittest.TestCase):
             model_decision={
                 "status": "action",
                 "action": "launch_app", "app": "设置",
-                "element_id": None,
-                "source_element_id": None,
-                "destination_element_id": None,
                 "direction": None,
-                "evidence_refs": [],
                 "confidence": 0.96,
                 "reason": "当前目标是启动已登记应用",
             },

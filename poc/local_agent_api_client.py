@@ -51,6 +51,7 @@ class LocalAgentApiClient:
 
     DEVICE_ROUTE = "/api/device"
     DOCTOR_ROUTE = "/api/doctor/{device_id}"
+    DIRECTIONAL_SWIPE_ROUTE = DEVICE_ROUTE + "/{device_id}/directional-swipe"
     START_ROUTE = "/api/agent/generic-supervised/start"
     SESSION_ROUTE = "/api/agent/generic-supervised/{session_id}"
     CONFIRM_ROUTE = SESSION_ROUTE + "/confirm"
@@ -67,11 +68,11 @@ class LocalAgentApiClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         normalized = base_url.rstrip("/")
-        if normalized not in {"http://127.0.0.1:8765", "http://localhost:8765"}:
+        if normalized not in {"http://127.0.0.1:8765", "http://localhost:8765", "http://127.0.0.1:8766", "http://localhost:8766"}:
             raise LocalAgentApiError(
                 ApiErrorDetails(
                     category="client_contract_error",
-                    message="本地 Agent API 只允许连接 127.0.0.1:8765。",
+                    message="本地 Agent API 只允许连接本机 8765 或本试用版 8766。",
                 )
             )
         if timeout_seconds <= 0:
@@ -140,12 +141,27 @@ class LocalAgentApiClient:
     def device_status(self) -> JsonObject:
         return self._request("GET", self.DEVICE_ROUTE, read_only=True)
 
+    def lucky_bag_configuration(self) -> JsonObject:
+        return self._request("GET", "/api/features/lucky-bag", read_only=True)
+
     def doctor(self, device_id: str) -> JsonObject:
         return self._request(
             "GET",
             self.DOCTOR_ROUTE,
             path_params={"device_id": self._resource_id(device_id)},
             read_only=True,
+        )
+
+    def directional_swipe(self, device_id: str, direction: str) -> JsonObject:
+        resolved_direction = str(direction or "").strip().lower()
+        if resolved_direction not in {"left", "right", "up", "down"}:
+            self._raise_contract("固定方向滑动方向无效。")
+        return self._request(
+            "POST",
+            self.DIRECTIONAL_SWIPE_ROUTE,
+            path_params={"device_id": self._resource_id(device_id)},
+            payload={"direction": resolved_direction},
+            read_only=False,
         )
 
     def start_session(

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from features.lucky_bag import LuckyBagProfile, build_lucky_bag_goal
-from features.lucky_bag.gmail import DurableNotificationRouter, GmailApiNotificationSink
+from features.lucky_bag.gmail import (
+    DurableNotificationRouter,
+    GmailApiNotificationSink,
+    gmail_configuration_status,
+)
 from features.notifications import JsonlNotificationOutbox, NotificationEvent
 
 
@@ -33,10 +39,47 @@ class LuckyBagFeatureTests(unittest.TestCase):
         self.assertIn("预填评论", goal)
         self.assertIn("不重复发送评论", goal)
         self.assertIn("没有明确显示没抽中", goal)
+        self.assertIn("wait_seconds 填为 60", goal)
+        self.assertIn("图1是直播间左上角", goal)
+        self.assertIn("图2是打开后的“福袋”详情页", goal)
+        self.assertIn("图3是评论框中已经自动填好的评论", goal)
+        self.assertIn("图4是发送后短暂出现的“成功参与福袋”提示", goal)
+        self.assertIn("图5是重新打开同一个福袋后显示“已参与”", goal)
+        self.assertIn("图6是开奖后的“没抽中福袋”和“知道了”", goal)
+        self.assertIn("红色或粉红色小礼包袋轮廓", goal)
+        self.assertIn("先点击该入口打开", goal)
+        self.assertIn("普通礼物、红包、游戏礼包和推荐卡没有这种袋状入口时才排除", goal)
+        self.assertIn("wait_seconds 填为 300", goal)
+        self.assertIn("可参与福袋可见时等待", goal)
         self.assertIn("当前 Android 实时画面", goal)
         self.assertNotIn("点击(", goal)
         self.assertNotIn("x=", goal)
         self.assertNotIn("y=", goal)
+
+    def test_profile_exposes_six_project_owned_visual_references(self) -> None:
+        paths = self.profile.visual_reference_paths
+        self.assertEqual(6, len(paths))
+        self.assertTrue(all(path.is_file() for path in paths))
+        self.assertEqual("01_live_room_lucky_bag.png", paths[0].name)
+        self.assertEqual("06_not_selected.jpg", paths[-1].name)
+
+    def test_profile_marks_lucky_bag_goal_as_active_ordered_execution(self) -> None:
+        goal = build_lucky_bag_goal(self.profile)
+        self.assertIn("【ACTIVE_EXECUTION_POLICY:lucky_bag】", goal)
+        self.assertIn("当前画面出现可信的袋状礼包入口", goal)
+        self.assertIn("禁止选择wait_for_change", goal)
+
+    def test_gmail_configuration_status_is_secret_free_when_unconfigured(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            status = gmail_configuration_status()
+        self.assertEqual(
+            {
+                "configured": False,
+                "mode": "local_outbox_only",
+                "message": "Gmail 未配置，中奖通知只能写入本地队列。",
+            },
+            status,
+        )
 
     def test_profile_rejects_invalid_runtime_values(self) -> None:
         with self.assertRaises(ValueError):

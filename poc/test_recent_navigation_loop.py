@@ -134,13 +134,15 @@ class RecentNavigationTests(LoopHarness):
         self.assertEqual(0, loop.qwen_observer.status()['model_action_count'])
         self.assertEqual([], s.history)
 
-    def test_post_action_observation_failure_never_continues_navigation(self):
+    def test_post_action_observation_failure_requires_new_observation_before_navigation(self):
         loop, s, a = self.start(self.rows())
-        with patch.object(a, 'execute', side_effect=GenericActionAdapterError('新图不可用', physical_actions=1)):
+        with patch.object(a, 'execute', side_effect=GenericActionAdapterError('新图不可用', physical_actions=1)) as execute:
             with self.assertRaises(GenericActionAdapterError):
-                loop.run_autonomous_safe_loop(s)
-        self.assertEqual(('failed', 1), (s.status, s.physical_actions))
-        self.assertIsNone(loop.device_registry.active_session(s.device_id))
+                loop.confirm_one(s, s.confirmation_authority.scope())
+        self.assertEqual(1, execute.call_count)
+        self.assertEqual(('needs_reobservation', 1), (s.status, s.physical_actions))
+        self.assertIsNone(s.confirmation_authority)
+        self.assertEqual(s.session_id, loop.device_registry.active_session(s.device_id))
 
     def test_cancelled_navigation_is_not_inherited_by_new_session(self):
         loop, s, a = self.start(self.rows())

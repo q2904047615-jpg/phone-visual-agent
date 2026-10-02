@@ -53,3 +53,9 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# Trial local installation and credentials
+external/
+trial-baseline.json
+trial.local.json
+trial-service*.log

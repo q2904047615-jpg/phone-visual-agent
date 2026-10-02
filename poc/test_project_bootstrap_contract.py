@@ -19,6 +19,8 @@ class ProjectBootstrapContractTests(unittest.TestCase):
     def test_real_launcher_uses_typed_bootstrap_client(self) -> None:
         launcher = (PROJECT_ROOT / "启动机械臂网页控制台.cmd").read_text(encoding="utf-8")
 
+        self.assertIn("start_trial.py", launcher)
+        launcher = (PROJECT_ROOT / "start_trial.py").read_text(encoding="utf-8")
         self.assertIn("agent_api_cli.py", launcher)
         self.assertIn("bootstrap", launcher)
         self.assertNotIn("Invoke-WebRequest", launcher)
@@ -26,12 +28,13 @@ class ProjectBootstrapContractTests(unittest.TestCase):
 
     def test_only_current_launcher_remains(self) -> None:
         self.assertEqual(
-            ["启动机械臂网页控制台.cmd"],
+            ["启动机械臂网页控制台.cmd", "启动试用版.cmd"],
             sorted(path.name for path in PROJECT_ROOT.glob("启动*.cmd")),
         )
         self.assertEqual([], list(PROJECT_ROOT.glob(".task-backups/**/启动*.cmd")))
         launcher = (PROJECT_ROOT / "启动机械臂网页控制台.cmd").read_text(encoding="utf-8")
-        self.assertIn('import fastapi, uvicorn, httpx"', launcher)
+        self.assertIn("python start_trial.py", launcher)
+        self.assertIn("service_version", (PROJECT_ROOT / "start_trial.py").read_text(encoding="utf-8"))
         self.assertNotIn("pypinyin", launcher)
 
     def test_retired_deepseek_configuration_launchers_are_absent(self) -> None:

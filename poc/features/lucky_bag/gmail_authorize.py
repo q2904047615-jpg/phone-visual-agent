@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path

@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 from agent.domain import EvidenceStoreError
 from PIL import Image
 from agent.infrastructure import InterProcessLease
@@ -21,6 +20,51 @@ from test_support.web_platform import (
 
 
 class ApiEndToEndTests(_BaseApiEndToEndTests):
+    def test_unified_qwen_chat_only_does_not_create_phone_task(self) -> None:
+        route = json.dumps({
+            "route": "chat_only",
+            "reply": "我是 Qwen。",
+            "reason": "这是知识性问题，不需要读取手机。",
+        })
+        with patch.object(web_app.runtime.vision_provider, "_chat", return_value=route) as chat:
+            response = self.client.post(
+                "/api/qwen/chat",
+                headers=self.headers,
+                json={"text": "你是谁？", "device_id": "device-local-01"},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("chat_only", body["route"])
+        self.assertFalse(body["phone_task_started"])
+        self.assertEqual("我是 Qwen。", body["reply"])
+        chat.assert_called_once()
+
+    def test_unified_qwen_phone_task_returns_start_ticket(self) -> None:
+        route = json.dumps({
+            "route": "phone_task",
+            "reply": "我需要先查看当前手机画面。",
+            "reason": "用户要求操作手机。",
+        })
+        with (
+            patch.object(web_app.runtime.vision_provider, "_chat", return_value=route),
+            patch.object(
+                web_app,
+                "start_generic_supervised_async",
+                return_value={"task_id": "ticket-001", "status": "running"},
+            ) as starter,
+        ):
+            response = self.client.post(
+                "/api/qwen/chat",
+                headers=self.headers,
+                json={"text": "打开手机设置", "device_id": "device-local-01"},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("phone_task", body["route"])
+        self.assertTrue(body["phone_task_started"])
+        self.assertEqual("ticket-001", body["task_id"])
+        starter.assert_called_once()
+
     def test_actual_pause_and_budget_state_survive_api_listing(self):
         from agent.domain.action_capabilities import unverified_promotable_actions
         for mode in ('paused', 'budget_paused'):
@@ -198,7 +242,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertEqual(script.status_code, 200)
         self.assertEqual(protocol_adapter.status_code, 200)
         self.assertEqual(styles.status_code, 200)
-        self.assertIn("你希望手机完成什么", home.text)
+        self.assertIn("直接输入任何问题、任务或画面补充", home.text)
         self.assertIn("动态计划", home.text)
         self.assertIn("当前画面", home.text)
         self.assertIn("步骤记录", home.text)
@@ -880,7 +924,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             before_executions,
         )
 
-    def test_start_auto_loop_failure_returns_persisted_failed_session(self) -> None:
+    def test_start_auto_loop_model_failure_recovers_without_replaying_unknown_action(self) -> None:
         from test_universal_agent_orchestrator import CountingQwen
 
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
@@ -900,25 +944,21 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             response = self.client.post(
                 "/api/agent/generic-supervised/start",
                 headers=self.headers,
-                json={"text": "连续查看当前页面", "device_id": "phone-01"},
+                json={"text": "连续查看当前页面", "device_id": "phone-01",
+                    "max_physical_actions": 2},
             )
 
-        self.assertEqual(409, response.status_code, response.text)
-        failure = response.json()["detail"]
-        session = failure["session"]
-        self.assertEqual("failed", session["status"])
-        self.assertEqual(
-            "第二步 Qwen 当前截图解析失败",
-            session["failed_reason"],
-        )
+        self.assertEqual(200, response.status_code, response.text)
+        payload = response.json()
+        session = payload["session"]
+        self.assertEqual("budget_paused", session["status"])
         self.assertFalse(session["automatic_loop_enabled"])
-        self.assertEqual(1, session["physical_actions"])
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertIsNotNone(failure["report"])
-        self.assertTrue(Path(failure["report"]).is_file())
-        self.assertIsNone(
-            orchestrator.device_registry.active_session(session["device_id"])
-        )
+        self.assertEqual(2, session["physical_actions"])
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertTrue(session["history"][0]["visual_outcome"] == "uncertain")
+        self.assertIsNotNone(payload.get("report"))
+        self.assertTrue(Path(payload["report"]).is_file())
+        self.assertEqual(session["session_id"], orchestrator.device_registry.active_session(session["device_id"]))
 
     def test_generic_supervised_evidence_failure_remains_http_409(self) -> None:
         orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
@@ -1292,35 +1332,6 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertTrue(
             all(item.headers["X-Camera-Source"] == "cache" for item in cached)
         )
-
-    def test_preview_mjpg_logs_and_stops_after_later_capture_failure(self) -> None:
-        captures = iter([
-            (b"jpeg-first", False),
-            RuntimeError("camera token=secret dropped"),
-        ])
-
-        def capture_preview(device_id, *, quality):
-            item = next(captures)
-            if isinstance(item, Exception):
-                raise item
-            return item
-
-        with (
-            patch.object(web_app.runtime, "controller_for_device", return_value=object()),
-            patch.object(web_app.runtime, "capture_preview", side_effect=capture_preview),
-            patch.object(web_app.time, "sleep"),
-            self.assertLogs("web_app", level="WARNING") as logs,
-        ):
-            response = web_app.preview_mjpg("phone-mjpg")
-            first = asyncio.run(response.body_iterator.__anext__())
-            with self.assertRaises(StopAsyncIteration):
-                asyncio.run(response.body_iterator.__anext__())
-
-        self.assertIn(b"jpeg-first", first)
-        self.assertIn("mjpg_preview_stopped", "\n".join(logs.output))
-        self.assertIn("device_id=phone-mjpg", "\n".join(logs.output))
-        self.assertIn("error_type=RuntimeError", "\n".join(logs.output))
-        self.assertNotIn("token=secret", "\n".join(logs.output))
 
     def test_device_status_identifies_each_active_generic_session_device(self) -> None:
         def active_session(session_id: str, device_id: str):

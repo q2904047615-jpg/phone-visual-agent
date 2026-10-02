@@ -1,133 +1,123 @@
-from __future__ import annotations
-
+"""Lifecycle regression for the new dedicated monitor, without a real phone."""
+from contextlib import nullcontext
+from dataclasses import asdict
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+from PIL import Image
+from agent.infrastructure.device_task_registry import DeviceTaskRegistry
+from features.lucky_bag.monitor import LuckyBagMonitor, Record
+from features.lucky_bag.flow import Flow, Page
+from features.lucky_bag.profile import LuckyBagProfile
 
-from features.lucky_bag.monitor import LuckyBagMonitor
-from features.lucky_bag.profile import LuckyBagProfile, build_lucky_bag_goal
+def wait_until(predicate):
+    end = time.monotonic()+3
+    while not predicate() and time.monotonic() < end:
+        time.sleep(.01)
+    assert predicate(), 'worker did not settle'
 
+class MonitorTests(unittest.TestCase):
+    def make(self,root,sink=None):
+        runtime = SimpleNamespace(device_task_registry=DeviceTaskRegistry(lease_directory=Path(root)/'leases'))
+        return LuckyBagMonitor(runtime=runtime,hardware_lock=lambda _:nullcontext(),output_root=Path(root),notification_sink=sink or SimpleNamespace(publish=lambda _:None,remote=None))
 
-class _Gateway:
-    def __init__(self, *, block_start: bool = False) -> None:
-        self.calls: list[tuple[str, int, int]] = []
-        self.auto_count = 0
-        self.start_entered = threading.Event()
-        self.release_start = threading.Event()
-        self.block_start = block_start
-
-    def start(self, *, goal: str, device_id: str, run_dir: Path):
-        self.start_entered.set()
-        if self.block_start:
-            self.release_start.wait(timeout=2)
-        return {"session": {"session_id": "session-1", "status": "running", "physical_actions": 0,
-                            "execution_budget": {"observation_attempts": 0}}}
-
-    def get(self, session_id: str):
-        return {"session": {"session_id": session_id, "status": "running", "physical_actions": self.auto_count,
-                            "execution_budget": {"observation_attempts": self.auto_count}}}
-
-    def auto(self, session_id: str, *, max_physical_actions: int, max_observations: int):
-        self.calls.append((session_id, max_physical_actions, max_observations))
-        self.auto_count += 1
-        status = "succeeded" if self.auto_count >= 2 else "budget_paused"
-        return {"session": {"session_id": session_id, "status": status,
-                            "physical_actions": self.auto_count,
-                            "execution_budget": {"observation_attempts": self.auto_count},
-                            "qwen_decision": {"reason": "未看到明确的没抽中结果"}}}
-
-    def pause(self, session_id: str):
-        return {"session": {"session_id": session_id, "status": "paused"}}
-
-    def cancel(self, session_id: str):
-        return {"session": {"session_id": session_id, "status": "cancelled"}}
-
-
-class LuckyBagMonitorTests(unittest.TestCase):
-    def test_resumes_cumulative_chunks_and_writes_one_notification(self) -> None:
+    def test_cancel_paused_releases_same_device_for_generic_task(self):
         with TemporaryDirectory() as tmp:
-            gateway = _Gateway()
-            monitor = LuckyBagMonitor(
-                gateway=gateway, output_root=Path(tmp), chunk_actions=2,
-                chunk_observations=3,
-            )
-            profile = LuckyBagProfile(device_id="device-local-01", recipient="q2904047615@gmail.com")
-            record = monitor.start(profile=profile, goal=build_lucky_bag_goal(profile))
-            deadline = time.monotonic() + 2
-            while record.status not in {"succeeded", "failed"} and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertEqual(record.status, "succeeded")
-            self.assertEqual(gateway.calls, [("session-1", 2, 3), ("session-1", 3, 4)])
-            outbox = Path(tmp) / "lucky_bag_notifications.jsonl"
-            rows = [json.loads(line) for line in outbox.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["event_id"], record.monitor_id)
-            self.assertEqual(rows[0]["subject"], "疑似中奖")
+            monitor = self.make(tmp)
+            with patch.object(monitor,'_submit'):
+                r = monitor.start(profile=LuckyBagProfile('test-device','a@example.com'),goal='test')
+            monitor.pause(r.monitor_id)
+            with self.assertRaises(Exception):
+                monitor.runtime.device_task_registry.reserve('test-device','generic')
+            monitor.cancel(r.monitor_id)
+            monitor.runtime.device_task_registry.reserve('test-device','generic')
+            monitor.runtime.device_task_registry.release('test-device','generic')
             monitor.shutdown()
 
-    def test_restored_active_monitor_requires_explicit_resume(self) -> None:
+    def test_restart_keeps_send_attempted_and_requires_resume(self):
         with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            monitor_id = "persisted-monitor"
-            now = time.time()
-            state = [{
-                "monitor_id": monitor_id,
-                "feature_id": "lucky_bag",
-                "status": "running",
-                "session_id": "old-session",
-                "device_id": "device-local-01",
-                "recipient": "q2904047615@gmail.com",
-                "duration_seconds": 60,
-                "started_at": "2026-09-23T06:00:00+08:00",
-                "updated_at": "2026-09-23T06:00:01+08:00",
-                "deadline_epoch": now + 60,
-                "detail": "运行中",
-                "notified": False,
-                "run_dir": str(root / "lucky_bag_persisted"),
-                "goal": "观察当前直播间福袋",
-                "profile": {
-                    "device_id": "device-local-01",
-                    "recipient": "q2904047615@gmail.com",
-                    "duration_seconds": 60,
-                    "app_alias": "抖音",
-                    "subject": "疑似中奖",
-                    "body": "疑似中奖",
-                },
-            }]
-            (root / "lucky_bag_monitors.json").write_text(
-                json.dumps(state, ensure_ascii=False), encoding="utf-8"
-            )
-            gateway = _Gateway()
-            monitor = LuckyBagMonitor(gateway=gateway, output_root=root)
-            restored = monitor.get(monitor_id)
-            self.assertIsNotNone(restored)
-            self.assertEqual("recovery_required", restored.status)
-            self.assertEqual("", restored.session_id)
-            resumed = monitor.resume(monitor_id)
-            deadline = time.monotonic() + 2
-            while resumed.status not in {"succeeded", "failed"} and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertEqual("succeeded", resumed.status)
-            self.assertEqual([("session-1", 20, 40), ("session-1", 21, 41)], gateway.calls)
+            first = self.make(tmp)
+            with patch.object(first,'_submit'):
+                r = first.start(profile=LuckyBagProfile('test-device','a@example.com'),goal='test')
+            r.flow.send_attempted = True
+            first.pause(r.monitor_id)
+            first.runtime.device_task_registry.release('test-device','lucky-'+r.monitor_id)
+            second = self.make(tmp)
+            restored = second.get(r.monitor_id)
+            self.assertEqual('recovery_required',restored.status)
+            self.assertTrue(restored.flow.send_attempted)
+            self.assertFalse(second.workers)
+            first.shutdown()
+            second.cancel(r.monitor_id)
+            second.shutdown()
+
+    def test_corrupt_state_does_not_crash_generic_service(self):
+        with TemporaryDirectory() as tmp:
+            state = Path(tmp)/'dedicated_monitors.json'
+            state.write_text('broken',encoding='utf-8')
+            monitor = self.make(tmp)
+            with self.assertRaisesRegex(RuntimeError,'状态文件'):
+                monitor.start(profile=LuckyBagProfile('test-device','a@example.com'),goal='test')
+            self.assertEqual('broken',state.read_text())
             monitor.shutdown()
 
-    def test_pause_prevents_worker_from_advancing(self) -> None:
+    def test_no_remote_mail_is_visible_failure_and_still_halted(self):
         with TemporaryDirectory() as tmp:
-            gateway = _Gateway(block_start=True)
-            monitor = LuckyBagMonitor(gateway=gateway, output_root=Path(tmp))
-            profile = LuckyBagProfile(device_id="device-local-01", recipient="a@example.com")
-            record = monitor.start(profile=profile, goal="等待当前直播间的福袋")
-            self.assertTrue(gateway.start_entered.wait(timeout=1))
-            self.assertEqual(monitor.pause(record.monitor_id).status, "paused")
-            gateway.release_start.set()
-            time.sleep(0.05)
-            self.assertEqual(record.status, "paused")
-            self.assertEqual(gateway.calls, [])
+            sent=[]
+            monitor = self.make(tmp,SimpleNamespace(publish=sent.append,remote=None))
+            r = Record('test',LuckyBagProfile('test-device','a@example.com'),'test',Path(tmp),flow=Flow(halted=True))
+            monitor.records[r.monitor_id] = r
+            monitor._notify(r)
+            self.assertEqual('local_queue_only',r.notification_status)
+            self.assertEqual('failed',r.status)
+            self.assertEqual('疑似中奖',sent[0].subject)
+            self.assertTrue(r.flow.halted)
             monitor.shutdown()
 
+    def test_mail_error_never_clears_stop_latch(self):
+        with TemporaryDirectory() as tmp:
+            def fail(_):
+                raise OSError('offline')
+            monitor = self.make(tmp,SimpleNamespace(publish=fail,remote=object()))
+            r = Record('test',LuckyBagProfile('test-device','a@example.com'),'test',Path(tmp),flow=Flow(halted=True))
+            monitor.records[r.monitor_id] = r
+            monitor._notify(r)
+            self.assertEqual('failed',r.status)
+            self.assertTrue(r.flow.halted)
+            monitor.shutdown()
 
-if __name__ == "__main__":
+    def test_send_state_saved_before_transport_error_and_no_retry(self):
+        with TemporaryDirectory() as tmp:
+            monitor = self.make(tmp)
+            monitor.config['mode'] = 'local'
+            calls=[]
+            class Transport:
+                def __init__(self,*_):
+                    self.controller=SimpleNamespace(begin_new_task=lambda:None)
+                def preflight(self): pass
+                def capture(self): return Image.new('RGB',(100,200),'white')
+                def tap(self,point,frame):
+                    state = json.loads(monitor.state_path.read_text(encoding='utf-8'))
+                    assert state[0]['flow']['send_attempted']
+                    calls.append(point)
+                    raise OSError('uncertain send')
+            with patch('features.lucky_bag.monitor.ArmTransport',Transport),patch('features.lucky_bag.monitor.LocalOcr') as ocr,patch('features.lucky_bag.monitor.TemplateDetector') as detector,patch('features.lucky_bag.monitor.interpret',return_value=Page(send_button=(20,30),prefilled=True)):
+                ocr.return_value.read.return_value=[]
+                detector.return_value.locate.return_value=None
+                with patch.object(monitor,'_submit'):
+                    r = monitor.start(profile=LuckyBagProfile('test-device','a@example.com'),goal='test')
+                r.flow.clicked_comment=True
+                monitor._submit(r)
+                wait_until(lambda:r.status=='failed' and not monitor.workers)
+            self.assertEqual([(20,30)],calls)
+            self.assertTrue(r.flow.send_attempted)
+            self.assertIsNone(monitor.runtime.device_task_registry.active_session('test-device'))
+            monitor.shutdown()
+
+if __name__ == '__main__':
     unittest.main()

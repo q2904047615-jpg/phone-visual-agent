@@ -297,7 +297,7 @@ function createServer({
       response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
       return;
     }
-    if (request.method === "POST" && url.pathname === "/api/agent/generic-supervised/start-async") {
+    if (request.method === "POST" && url.pathname === "/api/qwen/chat") {
       requests.startTokens.push(String(request.headers["x-control-token"] || ""));
       if (enforceToken && request.headers["x-control-token"] !== runtimeSession.token) {
         json(response, 403, { detail: "控制令牌无效。" });
@@ -305,6 +305,7 @@ function createServer({
       }
       const body = await readBody(request);
       requests.start.push(body);
+      if (body.text.includes("slow")) await new Promise(resolve => setTimeout(resolve, 300));
       const taskId = `browser-start-${genericStartTasks.size + 1}`;
       if (body.text.includes("start failure")) {
         genericStartTasks.set(taskId, { status: "failed", error: "规划服务暂时不可用" });
@@ -314,6 +315,9 @@ function createServer({
           : body.text.includes("本地确认")
           ? externalSession()
           : safeActionSession();
+        session.conversation = [...(body.conversation || []), {role: "user", content: body.text},
+          {role: "assistant", content: "已收到，我会根据当前画面处理。"}];
+        restoredSessions[session.session_id] = session;
         genericStartTasks.set(taskId, { status: "completed", result: { session } });
       }
       json(response, 200, { task_id: taskId, status: "running" });
@@ -442,7 +446,11 @@ function createServer({
     }
     if (request.method === "POST" && url.pathname.endsWith("/pause")) {
       requests.pause.push(await readBody(request));
-      json(response, 200, { physical_actions: 0, session: {...safeActionSession(), status: "paused", confirmation_scope: null, confirmation_ready: false} });
+      const id = decodeURIComponent(url.pathname.split("/").at(-2));
+      const source = restoredSessions[id] || safeActionSession();
+      const paused = {...source, status: "paused", confirmation_scope: null, confirmation_ready: false};
+      restoredSessions[id] = paused;
+      json(response, 200, { physical_actions: 0, session: paused });
       return;
     }
     if (request.method === "POST" && url.pathname.endsWith("/cancel")) {
@@ -489,7 +497,7 @@ test("task budget fields submit configured limits", { timeout: 30000 }, async ()
     await page.locator("#agentActionBudget").fill("123");
     await page.locator("#agentObservationBudget").fill("456");
     await page.locator("#agentText").fill("打开系统设置");
-    const response = page.waitForResponse(response => response.url().includes("/start-async"));
+    const response = page.waitForResponse(response => response.url().endsWith("/api/qwen/chat"));
     await page.locator("#startSupervisedAgent").click();
     await response;
     assert.equal(requests.start.at(-1).max_physical_actions, 123);
@@ -514,7 +522,7 @@ test("budget pause restores progress and resumes via the budget endpoint", { tim
   const server = createServer({ activeSessions: [session], restoredSessions: { [session.session_id]: session } });
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#continueBudgetAgent").waitFor();
+    await page.locator("#continueTaskButton").waitFor();
     assert.match(await page.locator("#sceneMeta").innerText(), /100 \/ 100/);
     assert.match(await page.locator("#sceneMeta").innerText(), /150 \/ 200/);
     assert.equal(await page.locator("#reviewAction").count(), 0);
@@ -522,7 +530,7 @@ test("budget pause restores progress and resumes via the budget endpoint", { tim
     await page.locator("#agentActionBudget").fill("300");
     await page.locator("#agentObservationBudget").fill("600");
     const response = page.waitForResponse(response => response.url().endsWith("/auto"));
-    await page.locator("#continueBudgetAgent").click();
+    await page.locator("#continueTaskButton").click();
     await response;
     assert.deepEqual(requests.auto.at(-1), { device_id: "phone-01", max_physical_actions: 300, max_observations: 600 });
     assert.equal(requests.confirm.length, 0);
@@ -538,8 +546,9 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20260913-async-start-v1"));
-    assert.ok(requests.assets.includes("/assets/styles.css?v=20260912-machine-position-v1"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=trial-upstream-20260930"));
+    assert.ok(requests.assets.includes("/assets/protocol_adapter.js?v=trial-upstream-20260930"));
+    assert.ok(requests.assets.includes("/assets/styles.css?v=trial-upstream-20260930"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);
     assert.equal(requests.assets.includes("/assets/styles.css"), false);
   } finally {
@@ -615,7 +624,7 @@ test("multi-device console restores only the selected device session", { timeout
   });
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#goalSummary").getByText("会话 · session-phone-01", { exact: true }).waitFor({ timeout: 5000 });
+    await page.locator("#goalSummary").getByText("会话 · session-phone-01", { exact: true }).waitFor({ state: "attached", timeout: 5000 });
     await page.locator("#taskRunStatusLabel").getByText("进行中", { exact: true }).waitFor({ timeout: 5000 });
     assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "running");
     assert.deepEqual(requests.restore, ["session-phone-01"]);
@@ -635,9 +644,9 @@ test("multi-device console restores only the selected device session", { timeout
 
     await page.waitForTimeout(500);
     assert.deepEqual(requests.restore, ["session-phone-01", "session-phone-02"]);
-    assert.match(await page.locator("#goalSummary").innerText(), /会话 · session-phone-02/);
+    assert.match(await page.locator("#goalSummary").textContent(), /会话 · session-phone-02/);
     assert.equal(await page.locator("#deviceId").inputValue(), "phone-02");
-    assert.match(await page.locator("#goalSummary").innerText(), /phone-02/);
+    assert.match(await page.locator("#goalSummary").textContent(), /phone-02/);
     assert.equal(requests.previewDevices.at(-1), "phone-02");
   } finally {
     await browser.close();
@@ -651,7 +660,7 @@ test("ordinary task status stays explicit through running success failure and re
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#taskRunStatusLabel").getByText("未开始", { exact: true }).waitFor({ timeout: 5000 });
+    await page.locator("#taskRunStatusLabel").getByText("当前没有任务", { exact: true }).waitFor({ timeout: 5000 });
     assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "not-started");
 
     await page.locator("#agentText").fill("slow succeeded");
@@ -687,7 +696,7 @@ test("read-only recovered capability history is not restored into the current pa
   });
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#capabilityBadge").getByText("未开始").waitFor({ timeout: 5000 });
+    await page.locator("#capabilityBadge").getByText("未开始").waitFor({ state: "attached", timeout: 5000 });
     assert.equal(await page.locator("#resetCapabilityTrial").count(), 0);
     assert.equal(await page.locator("#startSupervisedAgent").isEnabled(), true);
     assert.equal(await page.locator("#deviceId").isEnabled(), true);
@@ -711,7 +720,7 @@ test("an active capability trial still blocks the ordinary agent", { timeout: 30
   });
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#capabilityBadge").getByText("等待单步确认").waitFor({ timeout: 5000 });
+    await page.locator("#capabilityBadge").getByText("等待单步确认").waitFor({ state: "attached", timeout: 5000 });
     assert.equal(await page.locator("#startSupervisedAgent").isDisabled(), true);
     assert.equal(await page.locator("#deviceId").isDisabled(), true);
     assert.equal(requests.start.length, 0);
@@ -722,126 +731,45 @@ test("an active capability trial still blocks the ordinary agent", { timeout: 30
   }
 });
 
-test("browser renders controller evidence and confirms one exact observation", { timeout: 30000 }, async () => {
+test("chat displays only user and Qwen replies and preserves pause resume stop device scope", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
-  const pageErrors = [];
-  page.on("pageerror", error => pageErrors.push(error.message));
-
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
   try {
     await page.locator("#agentText").fill("运行真实协议快照");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#goalSummary").getByText(/目标 · task-map-001/).waitFor({ timeout: 5000 });
-
-    const goalText = await page.locator("#goalSummary").innerText();
-    assert.match(goalText, /在支付演示页核对订单并付款/);
-    assert.doesNotMatch(goalText, /未命名目标/);
-    assert.match(goalText, /2026-09-06-single-visual-task-v1/);
-    assert.match(goalText, /revision 1/);
-    assert.match(goalText, /会话 · session-browser-action/);
-    assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
-    assert.match(goalText, /phone-01/);
-    assert.match(goalText, /required=true/);
-
-    assert.equal(await page.locator("#planList .plan-step.current").count(), 1);
-    assert.match(await page.locator("#planList .plan-step.current").innerText(), /在支付演示页核对订单并付款/);
-
-    const actionText = await page.locator("#actionContent").innerText();
-    assert.match(actionText, /点击语义控件/);
-    assert.match(actionText, /设置/);
-    assert.match(actionText, /element_id settings_icon/);
-    assert.doesNotMatch(actionText, /目标区域|kind=direct_point/);
-    assert.doesNotMatch(actionText, /bounds=|0\.68|0\.2|0\.86|0\.35/);
-    assert.doesNotMatch(actionText, /scene_changed/);
-    assert.doesNotMatch(actionText, /动作置信度|92%/);
-    assert.match(actionText, /可信候选唯一且清晰/);
-    assert.match(actionText, /2026-09-06-qwen-whole-task-v19/);
-    assert.match(actionText, /status action/);
-    assert.match(actionText, /session session-browser-action/);
-    assert.match(actionText, /task task-map-001/);
-    assert.match(actionText, /revision 1/);
-    assert.match(actionText, /obs_0123456789abcdef0123456789abcdef/);
-    assert.match(actionText, /51277d0d9e6f986b00dc/);
-    assert.match(actionText, /本地策略/);
-    assert.match(actionText, /同响应动作已绑定当前截图/);
-    assert.match(await page.locator("#sessionBadge").innerText(), /等待当前动作确认/);
-    assert.match(await page.locator("#safetyText").innerText(), /等待当前动作确认/);
-    assert.match(actionText, /需要当前动作确认/);
-    assert.equal(await page.locator("#reviewAction").innerText(), "确认当前动作");
-    assert.doesNotMatch(actionText, /需要风险范围确认/);
-
-    await page.locator("#reviewAction").click();
-    const warning = await page.locator("#riskWarning").innerText();
-    assert.match(warning, /后端动作 scope 与当前权威任务、观察和动作字段一致/);
-    assert.doesNotMatch(warning, /action_digest|fingerprint=/);
-    const confirmResponse = page.waitForResponse(
-      response => response.url().endsWith("/confirm"),
-      { timeout: 5000 },
-    );
-    await page.locator("#confirmRiskAction").click();
-    await confirmResponse;
-    await page.locator("#sceneMeta").getByText("1 / —", { exact: true }).waitFor({ timeout: 5000 });
-
-    assert.deepEqual(requests.confirm[0], {
-      confirmed: true,
-      confirmation: {
-        session_id: "session-browser-action",
-        task_id: "task-map-001",
-        device_id: "phone-01",
-        revision: 1,
-        step_id: "step_1",
-        effect_ids: [],
-        observation_id: "obs_0123456789abcdef0123456789abcdef",
-        fingerprint: "51277d0d9e6f986b00dc",
-        decision_node_id: "qwen_visual_revision_1",
-        action_digest: "a".repeat(64),
-      },
-    });
-    assert.match(await page.locator("#sceneMeta").innerText(), /累计动作\s*1/);
-    const traceText = await page.locator("#traceList").innerText();
-    assert.match(traceText, /已保存 5 项本地证据（路径不在控制台显示）/);
-    assert.doesNotMatch(traceText, /after-1\.jpg|after-2\.jpg|after-3\.jpg|after-4\.jpg/);
-    assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
+    await page.locator("#chatMessages .conversation-qwen").waitFor();
+    assert.equal(await page.locator("#chatMessages .conversation-user").count(), 1);
+    assert.equal(await page.locator("#chatMessages .conversation-qwen").count(), 1);
+    assert.match(await page.locator("#chatMessages").innerText(), /已收到，我会根据当前画面处理/);
+    assert.doesNotMatch(await page.locator("#chatMessages").innerText(), /element_id|fingerprint|可信候选唯一|2026-09/);
+    assert.equal(await page.locator("#goalSummary").isHidden(), true);
+    assert.equal(await page.locator("#actionContent").isHidden(), true);
+    assert.equal(requests.confirm.length, 0);
     assert.equal(requests.auto.length, 0);
-
-    await page.locator("#deviceId").evaluate(select => {
-      select.disabled = false;
-      select.add(new Option("phone-02", "phone-02"));
-      select.value = "phone-02";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    await page.locator("#nextSupervisedAgent").click();
-    await page.locator("#reviewAction").waitFor({ timeout: 5000 });
-    assert.equal(requests.next.length, 1);
-    assert.equal(requests.next[0].device_id, "phone-01");
+    const pauseResponse = page.waitForResponse(r => r.url().endsWith("/pause"));
     await page.locator("#pauseButton").click();
-    await page.waitForTimeout(100);
-    assert.equal(requests.auto.length, 0);
-    assert.equal(await page.locator("#pauseNotice").isVisible(), true);
-    assert.equal(requests.pause.length, 1);
-    assert.deepEqual(requests.pause[0], { device_id: "phone-01" });
-
-    const resumeResponse = page.waitForResponse(response => response.url().endsWith("/auto"));
-    await page.locator("#pauseButton").click();
+    await pauseResponse;
+    await page.locator("#continueTaskButton").waitFor();
+    assert.deepEqual(requests.pause[0], {device_id: "phone-01"});
+    assert.equal(await page.locator("#pauseButton").isHidden(), true);
+    const resumeResponse = page.waitForResponse(r => r.url().endsWith("/auto"));
+    await page.locator("#continueTaskButton").click();
     await resumeResponse;
     assert.equal(requests.auto.length, 1);
-    const cancelResponse = page.waitForResponse(
-      response => response.url().endsWith("/cancel"),
-      { timeout: 5000 },
-    );
-    await page.locator("#cancelSupervisedAgent").click();
-    await cancelResponse;
-    await page.locator("#sessionBadge").getByText("已停止").waitFor({ timeout: 5000 });
-    assert.equal(requests.cancel[0].device_id, "phone-01");
-
+    assert.equal(requests.auto[0].device_id, "phone-01");
+    const cancelResponse = page.waitForResponse(r => r.url().endsWith("/cancel"));
     await page.locator("#stopButton").click();
-    await page.waitForTimeout(50);
+    await cancelResponse;
+    await page.locator("#sessionBadge").getByText("已停止", {exact: true}).waitFor();
+    assert.equal(requests.stop.length, 1);
+    assert.equal(requests.cancel.length, 1);
     assert.equal(requests.stop[0].device_id, "phone-01");
-    assert.equal(await page.locator("#pauseNotice").isVisible(), false);
-    assert.equal(await page.locator("#startSupervisedAgent").isDisabled(), false);
-    assert.deepEqual(pageErrors, []);
+    assert.equal(requests.cancel[0].device_id, "phone-01");
+    assert.equal(await page.locator("#stopButton").isHidden(), true);
+    assert.deepEqual(errors, []);
   } finally {
     await browser.close();
     server.closeAllConnections();
@@ -862,12 +790,12 @@ test("current action approval executes exactly one bound login or payment action
     assert.equal(await page.locator("#reviewAction").count(), 1);
     assert.equal(await page.locator("#reviewAction").innerText(), "查看效果并确认");
     assert.equal(requests.auto.length, 0);
-    const goalText = await page.locator("#goalSummary").innerText();
+    const goalText = await page.locator("#goalSummary").textContent();
     assert.match(goalText, /确认门 · awaiting_effect_confirmation/);
     assert.match(goalText, /required=true/);
     assert.match(goalText, /效果 financial_transaction · financial_transaction/);
     assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
-    assert.match(await page.locator("#actionContent").innerText(), /点击语义控件/);
+    assert.match(await page.locator("#actionContent").textContent(), /点击语义控件/);
     await page.locator("#reviewAction").click();
     assert.equal(await page.locator("#riskTitle").innerText(), "确认当前登录或付款范围");
     assert.equal(await page.locator("#riskLevel").innerText(), "需要确认 · 仅限登录或付款");
@@ -910,12 +838,12 @@ test("browser never offers one-confirmation multi-action execution", { timeout: 
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#agentText").fill("连续查看安全页面");
+    await page.locator("#agentText").fill("需要本地确认的付款演示任务");
     await page.locator("#startSupervisedAgent").click();
     await page.locator("#reviewAction").click();
     await page.locator("#riskDialog").waitFor({ state: "visible" });
     assert.equal(await page.locator("#confirmSafeLoop").count(), 0);
-    assert.match(await page.locator("#riskWarning").innerText(), /一个动作/);
+    assert.match(await page.locator("#riskWarning").innerText(), /观察绑定的一次动作/);
     await page.keyboard.press("Escape");
     assert.equal(requests.auto.length, 0);
     assert.equal(requests.confirm.length, 0);
@@ -933,6 +861,9 @@ test("capability panel performs one confirmed action then a separate zero-action
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   try {
+    assert.equal(await page.locator("#capabilityAcceptancePanel").isHidden(), true);
+    await page.locator("details.utility-capability").evaluate(panel => { panel.hidden = false; panel.open = true; });
+
     await page.locator("#capabilityAction").selectOption("drag");
     await page.locator("#capabilityGoal").fill("拖动安全测试滑块");
     await page.locator("#startCapabilityTrial").click();
@@ -993,6 +924,9 @@ test("failed capability evidence never exposes a promotion button or retries", {
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
   try {
+    assert.equal(await page.locator("#capabilityAcceptancePanel").isHidden(), true);
+    await page.locator("details.utility-capability").evaluate(panel => { panel.hidden = false; panel.open = true; });
+
     await page.locator("#capabilityAction").selectOption("drag");
     await page.locator("#capabilityGoal").fill("失败验收样本");
     await page.locator("#startCapabilityTrial").click();
@@ -1030,10 +964,10 @@ for (const mode of ["paused", "budget_paused"]) {
     const {browser, page} = await launchFixturePage(server, {deviceId: session.device_id});
     try {
       await page.locator("#sessionBadge").getByText(
-        mode === "paused" ? "已暂停，进度已保留" : "整任务预算已用尽", {exact: true}).waitFor();
+        "已暂停，进度已保留", {exact: true}).waitFor();
       assert.equal(await page.locator("#reviewAction").count(), 0);
       const response = page.waitForResponse(response => response.url().endsWith("/auto"));
-      await page.locator(mode === "paused" ? "#pauseButton" : "#continueBudgetAgent").click();
+      await page.locator("#continueTaskButton").click();
       await response;
       assert.equal(requests.auto.length, 1);
       await page.locator("#sessionBadge").getByText("目标完成", {exact: true}).waitFor();

@@ -5,6 +5,7 @@ from agent.domain.execution_budget import DEFAULT_DEVICE_ACTION_BUDGET, DEFAULT_
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Any, Callable, Mapping, Protocol
 
 from agent.domain import (
@@ -63,6 +64,8 @@ class StartUniversalAgentSessionCommand:
     device_id: str
     run_dir: Path
     auto_advance: bool
+    visual_reference_paths: tuple[Path, ...] = ()
+    conversation: tuple[dict[str, str], ...] = ()
     max_physical_actions: int = DEFAULT_DEVICE_ACTION_BUDGET
     max_observations: int = DEFAULT_OBSERVATION_BUDGET
 
@@ -92,6 +95,11 @@ class UniversalAgentSessionApplicationService:
         self._ensure_device_ready = ensure_device_ready
         self._exclusive_device_session = exclusive_device_session
         self._begin_new_task = begin_new_task
+        # A session is registered only after the first observation succeeds.
+        # Guard the gap so concurrent HTTP starts cannot both pass the active
+        # session check and then race for the same device.
+        self._start_guard = threading.RLock()
+        self._starting_devices: set[str] = set()
 
     def _orchestrator(self) -> UniversalAgentOrchestratorPort:
         return self._orchestrator_provider()
@@ -126,28 +134,62 @@ class UniversalAgentSessionApplicationService:
             physical_actions=max(0, session.physical_actions - before_actions))
 
     def start(self, command: StartUniversalAgentSessionCommand) -> StartUniversalAgentSessionResult:
-        orchestrator = self._orchestrator()
-        self._require_start_available(orchestrator, command.device_id)
-        self._ensure_device_ready(command.device_id)
-        command.run_dir.mkdir(parents=True, exist_ok=True)
-        with self._exclusive_device_session(command.device_id):
+        with self._start_guard:
+            if command.device_id in self._starting_devices:
+                raise AgentSessionConflictError(
+                    f'设备 {command.device_id} 已有待启动任务。'
+                )
+            self._starting_devices.add(command.device_id)
+        try:
+            orchestrator = self._orchestrator()
             self._require_start_available(orchestrator, command.device_id)
-            self._begin_new_task(command.device_id)
-            session = orchestrator.start(session_id=command.session_id, raw_goal=command.raw_goal,
-                exact_input_text=command.exact_input_text, exact_action_kind=command.exact_action_kind,
-                exact_target_label=command.exact_target_label, device_id=command.device_id, run_dir=command.run_dir,
-                max_physical_actions=command.max_physical_actions, max_observations=command.max_observations)
-        self._sessions.add(session)
-        automatic_progress = {'physical_actions': 0, 'iterations': 0, 'status': session.status,
-            'pause_reason': '当前没有可自动推进的安全动作。'}
-        # The initial observation may leave the session in another transient
-        # state (for example while the first decision is being persisted).  An
-        # enabled automatic run must still enter the loop; it already handles
-        # awaiting confirmations and terminal states safely.
-        if command.auto_advance and session.status not in orchestrator.TERMINAL_STATUSES:
-            with self._exclusive_device_session(command.device_id):
-                automatic_progress = orchestrator.run_autonomous_safe_loop(session)
-        return StartUniversalAgentSessionResult(session=session, automatic_progress=automatic_progress)
+            self._ensure_device_ready(command.device_id)
+            command.run_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with self._exclusive_device_session(command.device_id):
+                    self._require_start_available(orchestrator, command.device_id)
+                    self._begin_new_task(command.device_id)
+                    session = orchestrator.start(
+                        session_id=command.session_id,
+                        raw_goal=command.raw_goal,
+                        exact_input_text=command.exact_input_text,
+                        exact_action_kind=command.exact_action_kind,
+                        exact_target_label=command.exact_target_label,
+                        device_id=command.device_id,
+                        run_dir=command.run_dir,
+                        visual_reference_paths=command.visual_reference_paths,
+                        conversation=command.conversation,
+                        max_physical_actions=command.max_physical_actions,
+                        max_observations=command.max_observations,
+                    )
+            except Exception as exc:
+                # The orchestrator attaches a session when initial observation or
+                # Qwen binding fails after the session has been created. Keep it in
+                # the repository so the HTTP layer can return evidence instead of
+                # losing the whole attempt.
+                failed_session = getattr(exc, 'session', None)
+                if failed_session is not None:
+                    try:
+                        self._sessions.add(failed_session)
+                    except Exception:
+                        pass
+                raise
+            self._sessions.add(session)
+            automatic_progress = {
+                'physical_actions': 0,
+                'iterations': 0,
+                'status': session.status,
+                'pause_reason': '当前没有可自动推进的安全动作。',
+            }
+            # The initial observation may leave the session in another transient
+            # state. The loop handles awaiting confirmations and terminal states.
+            if command.auto_advance and session.status not in orchestrator.TERMINAL_STATUSES:
+                with self._exclusive_device_session(command.device_id):
+                    automatic_progress = orchestrator.run_autonomous_safe_loop(session)
+            return StartUniversalAgentSessionResult(session=session, automatic_progress=automatic_progress)
+        finally:
+            with self._start_guard:
+                self._starting_devices.discard(command.device_id)
 
     def approve_effects(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
         Any] | None) -> AgentSessionOperationResult:

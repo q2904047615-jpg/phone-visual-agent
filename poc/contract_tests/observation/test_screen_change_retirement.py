@@ -63,6 +63,7 @@ class ScreenChangeRetirementTests(unittest.TestCase):
                     scene, choice = observer.observe_with_decision(frames=frames,
                         goal_context={'objective': context.raw_goal}, device_id=context.device_id,
                         available_action_kinds=allowed)
+                    choice.pop("_qwen_reply")  # Recorded separately by the production orchestrator.
                     trusted = build_trusted_observation(frames=frames, device_id=context.device_id, scene=scene)
                     result = QwenVisualDecisionObserver(StatusOnlyProvider(),
                         trusted_observation_frame_validator=validate_trusted_observation_against_frames).decide(

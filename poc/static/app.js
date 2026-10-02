@@ -7,6 +7,7 @@ const state = {
   device: {},
   deviceId: localStorage.getItem("visual-agent-device-id") || "device-local-01",
   sessionDeviceId: "",
+  chatConversation: [],
   supervisedSession: null,
   visionStage: "",
   paused: false,
@@ -18,13 +19,18 @@ const state = {
   pendingPromotionGrant: null,
   capabilityEvidenceUrls: [],
   taskAttemptStatus: null,
+  pendingStartTicket: null,
   lastTaskOutcome: null,
   luckyBagProfile: null,
   luckyBagMonitorId: "",
   luckyBagMonitorTimer: null,
+  luckyBagMonitorStatus: "",
+  luckyBagMonitorDetail: "",
 };
 
 const taskOutcomeStoragePrefix = "visual-agent-task-outcome:";
+const pageExitPauseMarkerKey = "visual-agent-page-exit-pause";
+let pageExitPauseSent = false;
 
 const statusNames = {
   idle: "等待目标",
@@ -80,16 +86,31 @@ async function api(path, options = {}, timeoutMs = 0) {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       const detail = data.detail;
-      const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
+      const parsedDetail = parseStructuredError(detail);
+      const message = typeof parsedDetail === "string"
+        ? parsedDetail
+        : (parsedDetail?.error || parsedDetail?.message || JSON.stringify(parsedDetail || {}));
       const error = new Error(message || `请求失败（${response.status}）`);
-      error.detail = detail;
+      error.detail = parsedDetail;
       error.status = response.status;
+      error.code = parsedDetail && typeof parsedDetail === "object"
+        ? String(parsedDetail.error_code || parsedDetail.code || `HTTP_${response.status}`)
+        : `HTTP_${response.status}`;
+      error.phase = parsedDetail && typeof parsedDetail === "object"
+        ? String(parsedDetail.phase || "request") : "request";
+      error.recoverable = parsedDetail && typeof parsedDetail === "object"
+        && parsedDetail.recoverable !== undefined ? Boolean(parsedDetail.recoverable) : response.status >= 500 || response.status === 409;
       throw error;
     }
     return data;
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error("启动任务超过10秒仍未完成首轮视觉观察，请检查Qwen服务或网络状态。" );
+      const aborted = new Error("请求已取消。" );
+      aborted.name = "AbortError";
+      aborted.code = "REQUEST_ABORTED";
+      aborted.phase = "request";
+      aborted.recoverable = true;
+      throw aborted;
     }
     throw error;
   } finally {
@@ -97,6 +118,96 @@ async function api(path, options = {}, timeoutMs = 0) {
   }
 }
 
+function pagePauseRequest(path, body) {
+  if (!state.token) return;
+  void fetch(path, {
+    method: "POST",
+    keepalive: true,
+    headers: {
+      "X-Control-Token": state.token,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function activePagePauseSnapshot() {
+  const view = sessionView();
+  const generic = view && !view.isTerminal
+    ? { sessionId: String(view.sessionId || ""), deviceId: String(view.deviceId || state.deviceId) }
+    : null;
+  const monitorStatus = String(state.luckyBagMonitorStatus || "");
+  const monitorActive = Boolean(
+    state.luckyBagMonitorId
+    && state.luckyBagProfile?.device_id
+    && ["starting", "running", "waiting_confirmation", "paused", "recovery_required"].includes(monitorStatus)
+  );
+  if (!generic?.sessionId && !monitorActive) return null;
+  return {
+    sessionId: generic?.sessionId || "",
+    deviceId: generic?.deviceId || state.deviceId,
+    monitorId: monitorActive ? state.luckyBagMonitorId : "",
+    monitorDeviceId: monitorActive ? String(state.luckyBagProfile.device_id) : "",
+  };
+}
+
+function pauseActiveTasksForPageExit() {
+  if (pageExitPauseSent) return;
+  const snapshot = activePagePauseSnapshot();
+  if (!snapshot) return;
+  pageExitPauseSent = true;
+  try {
+    sessionStorage.setItem(pageExitPauseMarkerKey, JSON.stringify(snapshot));
+  } catch (_error) {
+    // Keepalive requests remain the best available unload path.
+  }
+  if (snapshot.sessionId) {
+    pagePauseRequest(
+      "/api/agent/generic-supervised/" + encodeURIComponent(snapshot.sessionId) + "/pause",
+      { device_id: snapshot.deviceId },
+    );
+  }
+  if (snapshot.monitorId) {
+    pagePauseRequest(
+      "/api/features/lucky-bag/" + encodeURIComponent(snapshot.monitorId) + "/pause",
+      { device_id: snapshot.monitorDeviceId },
+    );
+  }
+}
+
+async function settlePageExitPause() {
+  let snapshot = null;
+  try {
+    snapshot = JSON.parse(sessionStorage.getItem(pageExitPauseMarkerKey) || "null");
+  } catch (_error) {
+    snapshot = null;
+  }
+  if (!snapshot || typeof snapshot !== "object") return;
+  let settled = true;
+  if (snapshot.sessionId) {
+    try {
+      await api(
+        "/api/agent/generic-supervised/" + encodeURIComponent(snapshot.sessionId) + "/pause",
+        { method: "POST", body: JSON.stringify({ device_id: snapshot.deviceId || state.deviceId }) },
+      );
+    } catch (error) {
+      if (Number(error?.status) !== 404) settled = false;
+    }
+  }
+  if (snapshot.monitorId) {
+    try {
+      await api(
+        "/api/features/lucky-bag/" + encodeURIComponent(snapshot.monitorId) + "/pause",
+        { method: "POST", body: JSON.stringify({ device_id: snapshot.monitorDeviceId || state.deviceId }) },
+      );
+    } catch (error) {
+      if (Number(error?.status) !== 404) settled = false;
+    }
+  }
+  if (settled) {
+    try { sessionStorage.removeItem(pageExitPauseMarkerKey); } catch (_error) {}
+  }
+}
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -105,6 +216,62 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+
+function conversationMessageHtml(role, text, meta = "", variant = "") {
+  const normalized = String(text || "").trim();
+  if (!normalized) return "";
+  const isUser = role === "user";
+  return `<article class="conversation-message ${isUser ? "conversation-user" : "conversation-qwen"} ${escapeHtml(variant)}">
+    ${isUser ? "" : '<div class="conversation-avatar">Q</div>'}
+    <div class="conversation-bubble">
+      <div class="conversation-label">${isUser ? "你" : "Qwen"}</div>
+      <p>${escapeHtml(normalized)}</p>
+      ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+    </div>
+  </article>`;
+}
+
+function cleanConversationForQwen(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(item => {
+    if (!item || !["user", "assistant"].includes(item.role)) return false;
+    if (item.role !== "assistant") return true;
+    const content = String(item.content || "").trim();
+    return content && !/^发送(?:给 Qwen)?失败[：:]/.test(content);
+  }).map(item => ({ role: item.role, content: String(item.content || "") }));
+}
+
+function renderConversation() {
+  const container = document.querySelector("#chatMessages");
+  if (!container) return;
+  const view = sessionView();
+  const raw = view?.raw || state.supervisedSession || {};
+  const messages = [];
+  const conversation = cleanConversationForQwen(view
+    ? (Array.isArray(raw.conversation) ? raw.conversation : [])
+    : state.chatConversation);
+
+  // The chat contains only the user message and Qwen's natural-language reply.
+  // decision.reason, action receipts and scene summaries belong in the task
+  // status panel, never as extra assistant bubbles.
+  if (!conversation.length) {
+    const fallbackGoal = String(raw.raw_goal || raw.goal?.objective || "").trim();
+    if (fallbackGoal) messages.push(conversationMessageHtml("user", fallbackGoal));
+  }
+  conversation.forEach((item) => {
+    if (item?.role === "user") messages.push(conversationMessageHtml("user", item.content));
+    if (item?.role === "assistant") messages.push(conversationMessageHtml("qwen", item.content));
+  });
+
+  if (!messages.length) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = messages.join("");
+  container.scrollTop = container.scrollHeight;
+}
+
 
 function toast(message, isError = false) {
   const element = document.querySelector("#toast");
@@ -139,6 +306,9 @@ function readLastTaskOutcome(deviceId) {
       detail: String(parsed.detail || ""),
       sessionId: String(parsed.sessionId || ""),
       updatedAt: String(parsed.updatedAt || ""),
+      code: String(parsed.code || ""),
+      phase: String(parsed.phase || ""),
+      recoverable: parsed.recoverable !== false,
     };
   } catch (_error) {
     return null;
@@ -151,6 +321,9 @@ function saveLastTaskOutcome(outcome) {
     detail: String(outcome.detail || ""),
     sessionId: String(outcome.sessionId || ""),
     updatedAt: String(outcome.updatedAt || new Date().toISOString()),
+    code: String(outcome.code || ""),
+    phase: String(outcome.phase || ""),
+    recoverable: outcome.recoverable !== false,
   };
   state.lastTaskOutcome = normalized;
   try {
@@ -161,14 +334,6 @@ function saveLastTaskOutcome(outcome) {
   return normalized;
 }
 
-function clearLastTaskOutcome() {
-  state.lastTaskOutcome = null;
-  try {
-    sessionStorage.removeItem(taskOutcomeStorageKey(state.deviceId));
-  } catch (_error) {
-    // Browser storage is optional; current in-memory status remains authoritative.
-  }
-}
 
 function rememberTerminalTaskOutcome(view, stateName, detail) {
   const existing = state.lastTaskOutcome;
@@ -194,26 +359,76 @@ function formatTaskStatusTime(value) {
 }
 
 function taskRunPresentation() {
+  const luckyStatus = String(state.luckyBagMonitorStatus || "");
+  if (["starting", "running", "waiting_confirmation", "paused", "recovery_required"].includes(luckyStatus)) {
+    const luckyLabels = {
+      starting: "福袋监控启动中",
+      running: "福袋监控进行中",
+      waiting_confirmation: "福袋监控等待确认",
+      paused: "福袋监控已暂停",
+      recovery_required: "福袋监控等待恢复",
+    };
+    return {
+      state: luckyStatus === "paused" || luckyStatus === "recovery_required" ? "paused" : "running",
+      label: luckyLabels[luckyStatus],
+      detail: state.luckyBagMonitorDetail || (luckyStatus === "paused"
+        ? "福袋监控已暂停，不会继续观察或操作手机。点击“继续任务”后恢复。"
+        : luckyStatus === "recovery_required"
+          ? "服务重载后需要你点击“继续任务”，才会重新观察当前直播间。"
+          : "福袋监控正在使用当前手机画面判断是否有福袋，由福袋专用流程决定下一步。"),
+      sessionId: state.luckyBagMonitorId || "监控会话启动中",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   if (state.taskAttemptStatus?.state === "running") {
     return {
       state: "running",
       label: "进行中",
-      detail: state.visionStage || state.taskAttemptStatus.detail || "正在理解目标并观察当前画面。",
+      detail: state.taskAttemptStatus.detail || state.visionStage || "正在理解目标并观察当前画面。",
       sessionId: "",
       updatedAt: state.taskAttemptStatus.updatedAt,
+      phase: state.taskAttemptStatus.phase || "",
+      code: state.taskAttemptStatus.code || "",
+      recoverable: state.taskAttemptStatus.recoverable,
     };
   }
   if (state.taskAttemptStatus?.state === "failure") {
     return {
       state: "failure",
       label: "失败",
-      detail: state.taskAttemptStatus.detail || "任务未能启动。",
+      detail: taskErrorDetail(state.taskAttemptStatus),
+      sessionId: "",
+      updatedAt: state.taskAttemptStatus.updatedAt,
+      phase: state.taskAttemptStatus.phase || "",
+      code: state.taskAttemptStatus.code || "TASK_FAILED",
+      recoverable: state.taskAttemptStatus.recoverable !== false,
+    };
+  }
+  if (state.taskAttemptStatus?.state === "cancelled") {
+    return {
+      state: "failure",
+      label: "已取消",
+      detail: state.taskAttemptStatus.detail || "已停止等待启动结果；后台任务是否已停止需要服务端状态确认。",
+      sessionId: "",
+      updatedAt: state.taskAttemptStatus.updatedAt,
+      phase: state.taskAttemptStatus.phase || "start_ticket",
+      code: state.taskAttemptStatus.code || "START_TICKET_CANCELLED",
+      recoverable: true,
+    };
+  }
+  if (state.taskAttemptStatus?.state === "success") {
+    return {
+      state: "success",
+      label: "已完成",
+      detail: state.taskAttemptStatus.detail,
       sessionId: "",
       updatedAt: state.taskAttemptStatus.updatedAt,
     };
   }
 
   const view = sessionView();
+
   if (view) {
     if (["succeeded", "completed"].includes(view.status)) {
       const detail = `目标已完成；共执行 ${view.physicalActions} 个物理动作。`;
@@ -229,14 +444,38 @@ function taskRunPresentation() {
       return { ...outcome, label: "失败" };
     }
     const step = view.currentStep?.label;
+    const decision = view.raw?.qwen_decision || {};
+    const nextAction = decision.next_action || {};
+    if (nextAction.action === "wait_for_change") {
+      const seconds = nextAction.params?.wait_seconds;
+      const waitLabel = seconds == null
+        ? "等待下一次画面"
+        : "等待下一次画面（" + Number(seconds) + " 秒）";
+      return {
+        state: "running",
+        label: "等待画面变化",
+        detail: decision.reason ? waitLabel + "：" + decision.reason : waitLabel,
+        sessionId: view.sessionId,
+        updatedAt: String(view.raw?.updated_at || view.raw?.created_at || ""),
+      };
+    }
+    if (view.status === "observing") {
+      return {
+        state: "running",
+        label: "观察中",
+        detail: decision.reason || "正在获取新的 Android 画面并等待 Qwen 判断。",
+        sessionId: view.sessionId,
+        updatedAt: String(view.raw?.updated_at || view.raw?.created_at || ""),
+      };
+    }
     return {
       state: "running",
       label: "进行中",
       detail: step
-        ? `当前步骤：${step}（${statusNames[view.status] || view.status}）`
+        ? "当前步骤：" + step + "（" + (statusNames[view.status] || view.status) + "）"
         : (statusNames[view.status] || "任务正在处理。"),
       sessionId: view.sessionId,
-      updatedAt: String(view.raw?.created_at || ""),
+      updatedAt: String(view.raw?.updated_at || view.raw?.created_at || ""),
     };
   }
 
@@ -245,12 +484,15 @@ function taskRunPresentation() {
       ...state.lastTaskOutcome,
       label: state.lastTaskOutcome.state === "success" ? "成功" : "失败",
       detail: `最近一次任务：${state.lastTaskOutcome.detail}`,
+      phase: state.lastTaskOutcome.phase || "",
+      code: state.lastTaskOutcome.code || "",
+      recoverable: state.lastTaskOutcome.recoverable,
     };
   }
   return {
     state: "not-started",
-    label: "未开始",
-    detail: "还没有提交普通 Agent 任务。输入目标后点击“开始观察并执行”。",
+    label: "当前没有任务",
+    detail: "当前没有正在控制手机的任务。发送消息后，Qwen 会自行判断是否需要读取画面或执行动作。",
     sessionId: "",
     updatedAt: "",
   };
@@ -265,6 +507,14 @@ function renderTaskRunStatus() {
   document.querySelector("#taskRunStatusDetail").textContent = presentation.detail;
   document.querySelector("#taskRunSessionId").textContent = presentation.sessionId || "未创建";
   document.querySelector("#taskRunUpdatedAt").textContent = formatTaskStatusTime(presentation.updatedAt);
+  const phase = document.querySelector("#taskRunPhase");
+  const code = document.querySelector("#taskRunErrorCode");
+  const recoverability = document.querySelector("#taskRunRecoverability");
+  if (phase) phase.textContent = presentation.phase || "—";
+  if (code) code.textContent = presentation.code || "—";
+  if (recoverability) recoverability.textContent = presentation.code
+    ? (presentation.recoverable === false ? "需重新发送" : "可恢复/可重试")
+    : "—";
 }
 
 function restoreSupervisedSessionFromError(error) {
@@ -376,8 +626,6 @@ function renderGoalAndPlan() {
     </div>
     <div class="goal-chips">
       <span>会话 · ${escapeHtml(view.sessionId || "—")}</span>
-      ${view.protocolVersion ? `<span>协议 · ${escapeHtml(view.protocolVersion)}</span>` : ""}
-      ${view.compatibilityFallback ? `<span>历史协议数据 · 不可用于当前执行</span>` : ""}
       ${view.targetApps.map(app => `<span>目标应用 · ${escapeHtml(app.name)}${app.id ? ` (${escapeHtml(app.id)})` : ""}</span>`).join("")}
       ${!view.targetApps.length && view.appName ? `<span>目标应用 · ${escapeHtml(view.appName)}</span>` : ""}
       ${view.constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
@@ -544,35 +792,43 @@ function renderAction() {
     && view.scopeState.state !== "active";
   const highAttention = view.effectPolicy.requiresConfirmation;
   const riskSummary = view.effectPolicy.currentActions.map(item => `${item.id}：${item.kind}`).join("；");
+  const rawDecision = view.raw?.qwen_decision || {};
+  const rawNextAction = rawDecision.next_action || {};
+  const waitingForChange = rawNextAction.action === "wait_for_change";
+  const publicTitle = waitingForChange
+    ? "等待画面变化"
+    : (action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待 Qwen 判断");
+  const publicReason = rawDecision.reason || action.reason || riskSummary || "正在根据当前画面判断下一步。";
   const actionMetadata = action.protocol === "qwen-same-response-action-finish-v9"
-    ? `<div class="action-metadata">
-         <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
-         <span>status ${escapeHtml(action.status)}</span>
-         <span>session ${escapeHtml(view.sessionId || "—")}</span>
-         <span>task ${escapeHtml(action.taskId || "—")}</span>
-         <span>revision ${escapeHtml(action.revision ?? "—")}</span>
-         <span>observation ${escapeHtml(action.observationId || "—")}</span>
-         <span>fingerprint ${escapeHtml(action.fingerprint || "—")}</span>
-       </div>`
-    : action.actionType
-      ? `<div class="compatibility-note">兼容回退 · ${escapeHtml(action.protocol)}</div>`
-      : `<div class="compatibility-note">Qwen 唯一动作尚未产生</div>`;
+    ? '<div class="technical-line">'
+      + "Qwen 已返回当前一步"
+      + " · status " + escapeHtml(action.status)
+      + " · session " + escapeHtml(view.sessionId || "—")
+      + " · revision " + escapeHtml(action.revision ?? "—")
+      + " · observation " + escapeHtml(action.observationId || "—")
+      + " · fingerprint " + escapeHtml(action.fingerprint || "—")
+      + "</div>"
+    : '<div class="technical-line">Qwen 唯一动作尚未产生</div>';
+  const technicalDetails = '<details class="technical-details">'
+    + "<summary>查看技术详情</summary>"
+    + '<div class="technical-grid">'
+    + "<span>完整任务目标</span><p>" + escapeHtml(view.objective || view.currentStep?.label || "—") + "</p>"
+    + "<span>语义目标</span><p>" + escapeHtml(action.semanticTarget || "—") + "</p>"
+    + "<span>预期变化</span><p>" + escapeHtml(Protocol.displayValue(action.expectedChange)) + "</p>"
+    + "<span>本地策略</span><p>" + escapeHtml(controllerGateLabel(view.controllerGate)) + "</p>"
+    + "</div>" + actionMetadata + "</details>";
   content.className = "action-content";
-  content.innerHTML = view.isTerminal
-    ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(view.failedReason || action.reason || "会话已经结束。")}</p>`
-    : (view.status === "paused_after_action"
-      ? `<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>`
-      : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${staleScope ? '<b class="risk-tag">旧确认已失效</b>' : effectPhase ? '<b class="risk-tag">需要效果确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
-         <h3>${escapeHtml(view.currentStep.label)}</h3>
-         <div class="action-target">语义目标 · ${escapeHtml(action.semanticTarget)}${action.elementId ? ` · element_id ${escapeHtml(action.elementId)}` : ""}</div>
-         <div class="action-facts">
-           <span><b>预期变化</b>${escapeHtml(Protocol.displayValue(action.expectedChange))}</span>
-           <span><b>本地策略</b>${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
-         </div>
-         <p>${escapeHtml(action.reason || riskSummary || "等待 Qwen 生成唯一下一视觉动作。")}</p>
-         ${riskSummary ? `<small>当前效果：${escapeHtml(riskSummary)}</small>` : ""}
-         ${actionMetadata}
-          <small>${staleScope ? `当前作用域不可执行：${escapeHtml(view.scopeState.reason || "任务或画面已变化")}；必须重新观察。` : "后端 scope 与当前权威任务、观察和动作字段一致；本次只允许一个动作，之后必须重新观察。"}</small>`);
+  if (view.isTerminal) {
+    content.innerHTML = "<h3>" + escapeHtml(statusNames[view.status] || view.status)
+      + "</h3><p>" + escapeHtml(view.failedReason || action.reason || "会话已经结束。") + "</p>";
+  } else if (view.status === "paused_after_action") {
+    content.innerHTML = "<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>" + technicalDetails;
+  } else {
+    content.innerHTML = '<div class="next-action-title"><span>' + escapeHtml(publicTitle)
+      + "</span>" + (staleScope ? '<b class="risk-tag">旧确认已失效</b>' : effectPhase ? '<b class="risk-tag">需要效果确认</b>' : view.status === "awaiting_confirmation" ? '<b class="' + (highAttention ? "risk-tag" : "safe-tag") + '">需要当前动作确认</b>' : '<b class="safe-tag">受限单步</b>')
+      + "</div><h3>" + escapeHtml(waitingForChange ? publicTitle : (view.currentStep?.label || publicTitle))
+      + "</h3><p>" + escapeHtml(publicReason) + "</p>" + technicalDetails;
+  }
 
   const disabled = state.busy || state.paused ? "disabled" : "";
   if (view.isTerminal) {
@@ -599,8 +855,9 @@ function renderAction() {
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   }
   badge.className = `pill ${view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : (effectPhase || highAttention ? "risk" : "active")}`;
-  badge.textContent = view.isTerminal
-    ? (statusNames[view.status] || view.status)
+  const badgeAction = view.raw?.qwen_decision?.next_action || {};
+  badge.textContent = !view.isTerminal && badgeAction.action === "wait_for_change"
+    ? "等待画面变化"
     : (statusNames[view.status] || view.status);
   bindActionEvents();
 }
@@ -615,6 +872,64 @@ function bindActionEvents() {
 function currentDeviceDescriptor() {
   const devices = Array.isArray(state.device?.devices) ? state.device.devices : [];
   return devices.find(item => String(item.device_id || "") === state.deviceId) || null;
+}
+
+function currentAdbSerial() {
+  const transport = state.device?.execution_architecture?.universal_agent?.text_transport;
+  return String(transport?.adb_serial || currentDeviceDescriptor()?.adb_serial || "");
+}
+
+function renderPairingPanel() {
+  const serialElement = document.querySelector("#pairingSerial");
+  const button = document.querySelector("#pairDeviceButton");
+  const status = document.querySelector("#pairingStatus");
+  if (!serialElement || !button || !status) return;
+  const serial = currentAdbSerial();
+  serialElement.textContent = serial || "未配置";
+  const configuredHost = serial.includes(":") ? serial.slice(0, serial.lastIndexOf(":")) : "";
+  const hostInput = document.querySelector("#pairingHost");
+  if (hostInput && configuredHost && !hostInput.value) hostInput.value = configuredHost;
+  const activeSession = Boolean(sessionView() && !sessionView().isTerminal);
+  button.disabled = state.busy || activeSession || !serial;
+  if (!state.busy && !status.dataset.result) {
+    status.textContent = serial ? "等待配对信息" : "当前设备没有 ADB 连接配置";
+  }
+}
+
+async function pairDevice() {
+  if (state.busy) return;
+  const host = String(document.querySelector("#pairingHost")?.value || "").trim();
+  const port = Number(document.querySelector("#pairingPort")?.value);
+  const code = String(document.querySelector("#pairingCode")?.value || "").trim();
+  const status = document.querySelector("#pairingStatus");
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535 || !/^\d{6}$/.test(code)) {
+    status.dataset.result = "error";
+    status.textContent = "请填写手机 IP、配对端口和 6 位配对码。";
+    toast("配对信息不完整。", true);
+    return;
+  }
+  state.busy = true;
+  status.dataset.result = "running";
+  status.textContent = "正在配对并连接手机……";
+  render();
+  try {
+    await api(`/api/device/${encodeURIComponent(state.deviceId)}/pair`, {
+      method: "POST",
+      body: JSON.stringify({ pairing_host: host, pairing_port: port, pairing_code: code }),
+    });
+    state.device = await api("/api/device");
+    status.dataset.result = "success";
+    status.textContent = "配对并连接成功，正在复核设备状态。";
+    toast("手机已自动配对并连接。 ");
+    document.querySelector("#pairingCode").value = "";
+  } catch (error) {
+    status.dataset.result = "error";
+    status.textContent = `配对失败：${error.message}`;
+    toast(`手机配对失败：${error.message}`, true);
+  } finally {
+    state.busy = false;
+    render();
+  }
 }
 
 function currentMachinePosition() {
@@ -790,10 +1105,23 @@ function render() {
     || state.paused
     || acceptanceBlocksOrdinaryAgent;
   document.querySelector("#agentText").disabled = state.busy;
-  document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
-  document.querySelector("#pauseButton").classList.toggle("active", state.paused);
+  const luckyBagActive = ["starting", "running", "waiting_confirmation", "paused", "recovery_required"].includes(state.luckyBagMonitorStatus);
+  const luckyBagNeedsResume = ["paused", "recovery_required"].includes(state.luckyBagMonitorStatus);
+  const needsResume = Boolean((view && !view.isTerminal && (state.paused || view.status === "paused")) || luckyBagNeedsResume);
+  const taskIsActive = Boolean(state.busy || state.taskAttemptStatus?.state === "running"
+    || (view && !view.isTerminal) || luckyBagActive);
+  const pauseButton = document.querySelector("#pauseButton");
+  const continueButton = document.querySelector("#continueTaskButton");
+  const stopButton = document.querySelector("#stopButton");
+  pauseButton.hidden = !taskIsActive || needsResume;
+  pauseButton.textContent = "Ⅱ 暂停推进";
+  pauseButton.classList.toggle("active", state.paused);
+  if (continueButton) continueButton.hidden = !needsResume;
+  if (stopButton) stopButton.hidden = !taskIsActive;
   renderMachinePositions();
+  renderPairingPanel();
   renderTaskRunStatus();
+  renderConversation();
   renderStatus();
   renderGoalAndPlan();
   renderTrace();
@@ -813,6 +1141,7 @@ async function refreshDevice() {
   await reconcileSupervisedSession();
   renderTaskRunStatus();
   renderStatus();
+  renderPairingPanel();
 }
 
 let sessionReconcileInFlight = false;
@@ -848,6 +1177,8 @@ async function reconcileSupervisedSession() {
     state.supervisedSession = null;
     state.sessionDeviceId = "";
     state.pendingConfirmationGrant = null;
+    state.paused = false;
+    render();
   } finally {
     sessionReconcileInFlight = false;
   }
@@ -911,6 +1242,7 @@ async function continueBudgetAgent() {
         method: "POST", body: JSON.stringify(payload),
       }));
     state.supervisedSession = response.session;
+    state.chatConversation = [];
     await finalizeStopIfRequested();
     render();
   } catch (error) {
@@ -924,61 +1256,346 @@ async function continueBudgetAgent() {
   }
 }
 
-async function startAsyncAndWait(payload) {
-  const ticket = await api("/api/agent/generic-supervised/start-async", {method: "POST", body: JSON.stringify(payload)}, 10000);
+const START_TICKET_TIMEOUT_MS = 5 * 60 * 1000;
+
+function cancelPendingStart(reason = "已停止等待任务启动结果。") {
+  const pending = state.pendingStartTicket;
+  if (!pending) return false;
+  pending.cancelled = true;
+  try { pending.controller?.abort(); } catch (_error) {}
+  state.pendingStartTicket = null;
+  state.taskAttemptStatus = {
+    state: "cancelled",
+    detail: reason,
+    code: "START_TICKET_CANCELLED",
+    phase: "start_ticket",
+    recoverable: true,
+    updatedAt: new Date().toISOString(),
+  };
+  return true;
+}
+
+async function waitForStartTicket(taskId) {
   const startedAt = Date.now();
   let nextProgressNoticeAt = startedAt + 120000;
-  while (true) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const status = await api(`/api/agent/generic-supervised/start-async/${encodeURIComponent(ticket.task_id)}`);
-    if (status.status === "completed") return status.result;
-    if (status.status === "failed") throw new Error(status.error || "任务启动失败。");
-    if (Date.now() >= nextProgressNoticeAt) {
-      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
-      if (state.taskAttemptStatus?.state === "running" && !state.stopRequested) {
-        state.taskAttemptStatus = {
-          ...state.taskAttemptStatus,
-          detail: `后台任务仍在执行，已等待 ${elapsedSeconds} 秒；请勿重复提交。`,
-          updatedAt: new Date().toISOString(),
-        };
-        renderTaskRunStatus();
+  const controller = new AbortController();
+  const pending = { taskId: String(taskId), controller, startedAt, cancelled: false };
+  state.pendingStartTicket = pending;
+  try {
+    while (true) {
+      if (pending.cancelled || controller.signal.aborted) {
+        const cancelled = new Error("已停止等待任务启动结果。后台票据是否已停止需要服务端状态确认。");
+        cancelled.code = "START_TICKET_CANCELLED";
+        cancelled.phase = "start_ticket";
+        cancelled.recoverable = true;
+        throw cancelled;
       }
-      nextProgressNoticeAt += 30000;
+      if (Date.now() - startedAt >= START_TICKET_TIMEOUT_MS) {
+        const timeout = new Error("启动任务超过5分钟仍未返回首轮结果；已停止继续轮询。可重新发送，但服务端票据可能仍需单独清理。");
+        timeout.code = "START_TICKET_TIMEOUT";
+        timeout.phase = "start_ticket_polling";
+        timeout.recoverable = true;
+        throw timeout;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const status = await api(`/api/agent/generic-supervised/start-async/${encodeURIComponent(taskId)}`, {
+        signal: controller.signal,
+      });
+      if (status.status === "completed") return status.result;
+      if (status.status === "failed") {
+        const info = taskErrorInfo({
+          message: status.error,
+          detail: status.detail || status.error,
+          code: status.error_code || status.code || "START_TASK_FAILED",
+          phase: status.phase || "start_task",
+          recoverable: status.recoverable,
+        }, "任务启动失败。", "start_task");
+        const failure = new Error(info.message);
+        Object.assign(failure, info);
+        failure.detail = status.detail || status.error;
+        throw failure;
+      }
+      if (status.status === "cancelled") {
+        const cancelled = new Error(
+          status.detail?.message || status.detail || status.error || "启动任务已取消。",
+        );
+        cancelled.code = status.error_code || status.code || "START_TICKET_CANCELLED";
+        cancelled.phase = status.phase || "start_ticket";
+        cancelled.recoverable = status.recoverable !== false;
+        cancelled.detail = status.detail || status.error;
+        throw cancelled;
+      }
+      if (Date.now() >= nextProgressNoticeAt) {
+        const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+        if (state.taskAttemptStatus?.state === "running" && !state.stopRequested) {
+          state.taskAttemptStatus = {
+            ...state.taskAttemptStatus,
+            phase: "start_ticket_polling",
+            detail: `正在等待首轮结果，已等待 ${elapsedSeconds} 秒；可以点击“停止”取消继续轮询。`,
+            updatedAt: new Date().toISOString(),
+          };
+          renderTaskRunStatus();
+        }
+        nextProgressNoticeAt += 30000;
+      }
     }
+  } catch (error) {
+    if (pending.cancelled || controller.signal.aborted) {
+      const cancelled = new Error("已停止等待任务启动结果。后台票据是否已停止需要服务端状态确认。");
+      cancelled.code = "START_TICKET_CANCELLED";
+      cancelled.phase = "start_ticket";
+      cancelled.recoverable = true;
+      throw cancelled;
+    }
+    throw error;
+  } finally {
+    if (state.pendingStartTicket === pending) state.pendingStartTicket = null;
   }
 }
 
-async function useLuckyBagPreset() {
+
+const CLEAR_CARDS_GOAL = "打开 Android 最近任务，并清理全部后台卡片。由 Qwen 根据当前实时画面识别后台页面和唯一可见的系统一键清理按钮；不要使用固定坐标或逐张滑动卡片。清理后根据新的画面判断是否完成。";
+
+const DIRECTIONAL_SWIPE_LABELS = {
+  left: "左滑",
+  right: "右滑",
+  up: "上滑",
+  down: "下滑",
+};
+
+async function startDirectionalSwipe(direction) {
+  if (state.busy) return;
+  const current = sessionView();
+  if (current && !current.isTerminal) {
+    return toast("设备已有进行中的会话，请继续或停止当前任务后再滑动。", true);
+  }
+  const label = DIRECTIONAL_SWIPE_LABELS[direction];
+  if (!label) return toast("未识别的滑动方向。", true);
+  state.busy = true;
+  state.taskAttemptStatus = {
+    state: "running",
+    detail: `本地执行器正在执行一次${label}，不调用 Qwen。`,
+    updatedAt: new Date().toISOString(),
+  };
+  render();
   try {
-    const feature = await api("/api/features/lucky-bag");
-    state.luckyBagProfile = feature.profile || null;
-    document.querySelector("#agentText").value = String(feature.goal || "");
-    const notice = document.querySelector("#luckyBagFeatureNotice");
-    if (notice && feature.notice) notice.textContent = feature.notice;
-    toast("已填充福袋监控目标；确认直播间已打开后可启动长期监控。");
+    const response = await api(`/api/device/${encodeURIComponent(state.deviceId)}/directional-swipe`, {
+      method: "POST",
+      body: JSON.stringify({ direction }),
+    });
+    const execution = response.execution || {};
+    const start = Array.isArray(execution.grid_start) ? execution.grid_start.join(", ") : "—";
+    const end = Array.isArray(execution.grid_end) ? execution.grid_end.join(", ") : "—";
+    state.taskAttemptStatus = {
+      state: "success",
+      detail: `${label}已由本地执行器完成 1 次（固定网格 ${start} → ${end}），未调用 Qwen。`,
+      updatedAt: new Date().toISOString(),
+    };
+    toast(`${label}已执行一次。`);
+    state.device = await api("/api/device").catch(() => state.device);
+    refreshPreview();
   } catch (error) {
-    toast("加载福袋功能失败：" + error.message, true);
+    state.taskAttemptStatus = {
+      state: "failure",
+      detail: `${label}执行失败：${error.message || "未知错误"}`,
+      updatedAt: new Date().toISOString(),
+    };
+    toast(`${label}执行失败：${error.message}`, true);
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+async function startClearCardsModule() {
+  if (state.busy) return;
+  const current = sessionView();
+  if (current && !current.isTerminal) {
+    return toast("设备已有进行中的会话，请继续或停止当前任务后再清理卡片。", true);
+  }
+  const input = document.querySelector("#agentText");
+  if (input) input.value = CLEAR_CARDS_GOAL;
+  await startSupervisedAgent();
+}
+async function startLuckyBagModule() {
+  const activeMonitor = ["starting", "running", "waiting_confirmation", "paused", "recovery_required"].includes(state.luckyBagMonitorStatus);
+  if (activeMonitor) {
+    if (["paused", "recovery_required"].includes(state.luckyBagMonitorStatus)) {
+      await resumeLuckyBagMonitor();
+    } else {
+      toast("福袋模块已经在运行，不会重复创建任务。");
+    }
+    return;
+  }
+  const current = sessionView();
+  if (current && !current.isTerminal) {
+    toast("设备已有进行中的任务，请先继续或停止当前任务。", true);
+    return;
+  }
+  await startLuckyBagMonitor();
+}
+function luckyBagStartPayload(profile) {
+  const value = profile && typeof profile === "object" ? profile : {};
+  return {
+    device_id: String(value.device_id || "device-local-01"),
+    recipient: String(value.recipient || "q2904047615@gmail.com"),
+    duration_seconds: Number(value.duration_seconds || 24 * 60 * 60),
+  };
+}
+
+function luckyBagActionLabel(action, params = {}) {
+  const labels = {
+    tap_semantic: "点击语义控件", dismiss_overlay: "关闭当前弹层", scroll: "滚动当前页面",
+    swipe_element: "滑动目标元素", back: "返回上一页", home: "返回系统桌面",
+    open_recent_apps: "打开最近任务", reveal_system_navigation: "唤出系统导航栏",
+    double_tap: "双击目标控件", long_press: "长按目标控件", drag: "拖动目标控件",
+    input_verified_text: "输入并核对文字", press_enter: "发送换行",
+    wait_for_change: "等待页面变化", finish: "完成本次任务",
+  };
+  const label = labels[action] || action || "尚未返回下一动作";
+  if (action === "wait_for_change" && params.wait_seconds != null) {
+    return label + "（" + Number(params.wait_seconds) + " 秒）";
+  }
+  return label;
+}
+
+function luckyBagSessionObject(response) {
+  return response?.session || response || {};
+}
+
+async function getLuckyBagSession(sessionId) {
+  return api("/api/agent/generic-supervised/" + encodeURIComponent(sessionId));
+}
+
+function luckyBagSceneObject(session) {
+  return session?.current_scene || session?.trusted_observation?.scene ||
+    session?.trusted_observation || {};
+}
+
+function luckyBagStatusLabel(status) {
+  const labels = {
+    starting: "启动中", running: "运行中", executing_one_action: "执行动作中",
+    waiting_for_change: "等待画面变化", paused: "已暂停", waiting_confirmation: "等待确认",
+    succeeded: "疑似中奖，已记录通知", completed: "已完成", expired: "已到时限",
+    failed: "失败", blocked: "已阻止", cancelled: "已停止", recovery_required: "等待恢复",
+  };
+  return labels[status] || status || "未知状态";
+}
+
+function luckyBagHistoryRows(session) {
+  const history = Array.isArray(session?.history) ? session.history : [];
+  return history.slice(-8).reverse().map((item, index) => {
+    const decision = item?.qwen_decision || item?.decision || {};
+    const next = decision?.next_action || item?.next_action || {};
+    const action = next?.action || item?.action || "";
+    const reason = decision?.reason || item?.reason || item?.visual_outcome || "未提供结果摘要";
+    const result = item?.execution_result || item?.result || item?.transition || {};
+    const resultText = result?.status || result?.outcome || result?.state || "";
+    return '<div class="lucky-feedback-event">'
+      + '<strong>' + escapeHtml(index === 0 ? "最近一轮" : "历史 " + index) + '</strong>'
+      + '<span>' + escapeHtml(luckyBagActionLabel(action, next?.params || {})) + '</span>'
+      + '<p>' + escapeHtml(reason) + '</p>'
+      + (resultText ? '<small>执行结果：' + escapeHtml(resultText) + '</small>' : "")
+      + '</div>';
+  }).join("");
+}
+
+function renderLuckyBagAgentFeedback(monitor, rawSession, readError = "") {
+  const panel = document.querySelector("#luckyBagFeedback");
+  const session = luckyBagSessionObject(rawSession);
+  if (!panel) {
+    const decision = session.qwen_decision || session.decision || {};
+    const next = decision.next_action || session.next_action || {};
+    const actionText = luckyBagActionLabel(next.action || "", next.params || {});
+    const reasonText = readError || decision.reason || session.failed_reason || session.auto_pause_reason || "正在等待 Qwen 返回下一步判断。";
+    const content = document.querySelector("#actionContent");
+    const badge = document.querySelector("#sessionBadge");
+    if (content) {
+      content.className = "qwen-reply-content";
+      content.textContent = actionText + "： " + reasonText;
+    }
+    if (badge) {
+      badge.className = "pill " + (readError ? "danger" : "active");
+      badge.textContent = luckyBagStatusLabel(session.status || monitor?.status || "running");
+    }
+    return;
+  }
+  panel.hidden = false;
+  const status = session.status || monitor?.status || "unknown";
+  const phase = document.querySelector("#luckyBagFeedbackPhase");
+  const phaseClass = ["failed", "blocked", "cancelled"].includes(status) || readError
+    ? "danger" : (["succeeded", "completed"].includes(status) ? "success" : "active");
+  if (phase) {
+    phase.className = "pill " + phaseClass;
+    phase.textContent = luckyBagStatusLabel(status);
+  }
+
+  const decision = session.qwen_decision || session.decision || {};
+  const next = decision.next_action || session.next_action || {};
+  const action = next.action || "";
+  const params = next.params || {};
+  const budget = session.execution_budget || {};
+  const scene = luckyBagSceneObject(session);
+  const appId = scene.foreground_app_id || scene.foreground_app || scene.app_id || "未识别";
+  const stats = document.querySelector("#luckyBagFeedbackStats");
+  if (stats) {
+    stats.innerHTML = [
+      "状态 · " + luckyBagStatusLabel(status),
+      "物理动作 · " + (session.physical_actions ?? budget.physical_actions ?? "—"),
+      "观察次数 · " + (session.observation_attempts ?? budget.observation_attempts ?? "—"),
+      "当前应用 · " + appId,
+      "会话 · " + (monitor?.session_id || "—"),
+    ].map(item => "<span>" + escapeHtml(item) + "</span>").join("");
+  }
+
+  const actionElement = document.querySelector("#luckyBagQwenAction");
+  if (actionElement) actionElement.textContent = luckyBagActionLabel(action, params);
+  const reasonElement = document.querySelector("#luckyBagQwenReason");
+  if (reasonElement) reasonElement.textContent = decision.reason || "Qwen 尚未返回可展示的判断摘要。";
+  const sceneElement = document.querySelector("#luckyBagSceneSummary");
+  if (sceneElement) sceneElement.textContent = scene.summary || scene.description || "当前画面摘要未提供。";
+  const appElement = document.querySelector("#luckyBagSceneApp");
+  if (appElement) appElement.textContent = "前台应用：" + appId;
+
+  const errorElement = document.querySelector("#luckyBagFeedbackError");
+  const errorText = readError || session.failed_reason || session.auto_pause_reason ||
+    (["failed", "blocked", "cancelled"].includes(status) ? "任务状态为 " + status : "");
+  if (errorElement) {
+    errorElement.hidden = !errorText;
+    errorElement.textContent = errorText ? "错误或暂停原因：" + errorText : "";
+  }
+
+  const timeline = document.querySelector("#luckyBagFeedbackTimeline");
+  if (timeline) {
+    const rows = luckyBagHistoryRows(session);
+    timeline.innerHTML = rows || '<div class="lucky-feedback-event"><span>当前轮次：'
+      + escapeHtml(luckyBagActionLabel(action, params)) + '</span><p>'
+      + escapeHtml(decision.reason || "等待第一条执行记录。") + '</p></div>';
   }
 }
 
 function renderLuckyBagMonitorStatus(monitor) {
+  if (!monitor) return;
+  state.luckyBagMonitorStatus = String(monitor.status || "");
+  const phase = String(monitor.current_phase || "").trim();
+  const action = String(monitor.last_action || "").trim();
+  const reply = String(monitor.last_qwen_reply || "").trim();
+  const reason = String(monitor.last_decision_reason || "").trim();
+  const feedback = [
+    phase ? "阶段：" + phase : "",
+    action ? "本地动作：" + action : "",
+    monitor.detail || reason,
+    "动作 " + (monitor.physical_actions ?? 0) + " 次 / 观察 " + (monitor.observations ?? 0) + " 次",
+    monitor.next_observation_epoch && monitor.status === "running" ? "下次观察：" + new Date(monitor.next_observation_epoch*1000).toLocaleTimeString("zh-CN") : "",
+    monitor.notification_status === "local_queue_only" ? "通知只在本地，Gmail 未配置" : "",
+  ].filter(Boolean).join("；");
+  state.luckyBagMonitorDetail = feedback;
   const element = document.querySelector("#luckyBagMonitorStatus");
   if (!element || !monitor) return;
-  const labels = {
-    starting: "启动中",
-    running: "运行中",
-    paused: "已暂停",
-    waiting_confirmation: "等待确认",
-    succeeded: "疑似中奖，已记录通知",
-    expired: "已到时限",
-    failed: "失败",
-    blocked: "已阻止",
-    cancelled: "已停止",
-    recovery_required: "等待恢复",
-  };
-  element.textContent = labels[monitor.status] || monitor.status || "未知状态";
+  element.textContent = luckyBagStatusLabel(monitor.status);
   const resume = document.querySelector("#resumeLuckyBagMonitor");
   if (resume) resume.hidden = monitor.status !== "recovery_required";
+  const cancel = document.querySelector("#cancelLuckyBagMonitor");
+  if (cancel) cancel.hidden = !["starting", "running", "paused", "waiting_confirmation", "recovery_required"].includes(monitor.status);
 }
 
 async function restoreLuckyBagMonitor() {
@@ -991,11 +1608,42 @@ async function restoreLuckyBagMonitor() {
     if (!active) return;
     state.luckyBagMonitorId = String(active.monitor?.monitor_id || "");
     state.luckyBagProfile = active.profile || null;
-    renderLuckyBagMonitorStatus(active.monitor);
+    let monitor = active.monitor;
+    if (monitor && ["starting", "running", "waiting_confirmation"].includes(monitor.status) && state.luckyBagMonitorId && state.luckyBagProfile?.device_id) {
+      try {
+        const paused = await api(
+          "/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId) + "/pause",
+          { method: "POST", body: JSON.stringify({ device_id: state.luckyBagProfile.device_id }) },
+        );
+        monitor = paused.monitor || monitor;
+      } catch (_error) {
+        // page-exit keepalive or the next refresh can retry the pause.
+      }
+    }
+    renderLuckyBagMonitorStatus(monitor);
+    await pollLuckyBagMonitor();
     clearInterval(state.luckyBagMonitorTimer);
     state.luckyBagMonitorTimer = setInterval(pollLuckyBagMonitor, 5000);
-  } catch (_error) {
-    // The ordinary Agent page remains usable when the optional feature is unavailable.
+  } catch (error) {
+    renderLuckyBagAgentFeedback({status: "failed"}, {}, error.message);
+  }
+}
+
+async function cancelLuckyBagMonitor() {
+  if (!state.luckyBagMonitorId || !state.luckyBagProfile) return;
+  try {
+    const response = await api(
+      "/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId) + "/cancel",
+      { method: "POST", body: JSON.stringify({ device_id: state.luckyBagProfile.device_id }) },
+    );
+    clearInterval(state.luckyBagMonitorTimer);
+    state.luckyBagMonitorTimer = null;
+    renderLuckyBagMonitorStatus(response.monitor);
+    await pollLuckyBagMonitor();
+    toast("福袋监控已停止，不会再继续观察或操作手机。");
+  } catch (error) {
+    renderLuckyBagAgentFeedback({status: "failed"}, {}, error.message);
+    toast("停止福袋监控失败：" + error.message, true);
   }
 }
 
@@ -1004,16 +1652,16 @@ async function resumeLuckyBagMonitor() {
   try {
     const response = await api(
       "/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId) + "/resume",
-      {
-        method: "POST",
-        body: JSON.stringify({ device_id: state.luckyBagProfile.device_id }),
-      },
+      { method: "POST", body: JSON.stringify({ device_id: state.luckyBagProfile.device_id }) },
     );
     renderLuckyBagMonitorStatus(response.monitor);
+    await pollLuckyBagMonitor();
     clearInterval(state.luckyBagMonitorTimer);
     state.luckyBagMonitorTimer = setInterval(pollLuckyBagMonitor, 5000);
     toast("监控已恢复，将重新观察当前 Android 画面。");
+    render();
   } catch (error) {
+    renderLuckyBagAgentFeedback({status: "failed"}, {}, error.message);
     toast("恢复福袋监控失败：" + error.message, true);
   }
 }
@@ -1022,76 +1670,234 @@ async function pollLuckyBagMonitor() {
   if (!state.luckyBagMonitorId) return;
   try {
     const response = await api("/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId));
-    renderLuckyBagMonitorStatus(response.monitor);
-    if (["succeeded", "expired", "failed", "blocked", "cancelled"].includes(response.monitor?.status)) {
+    const monitor = response.monitor || {};
+    renderLuckyBagMonitorStatus(monitor);
+    if (!monitor.session_id) {
+      if (["succeeded", "expired", "failed", "cancelled"].includes(monitor.status)) {
+        state.taskAttemptStatus = {state: monitor.status === "succeeded" ? "success" : monitor.status === "failed" ? "failure" : "cancelled", detail: monitor.detail || "福袋监控已结束", updatedAt: monitor.updated_at};
+        clearInterval(state.luckyBagMonitorTimer);
+        state.luckyBagMonitorTimer = null;
+      }
+      render();
+      return;
+    }
+    if (monitor.session_id) {
+      try {
+        const sessionResponse = await getLuckyBagSession(monitor.session_id);
+        renderLuckyBagAgentFeedback(monitor, sessionResponse);
+      } catch (sessionError) {
+        renderLuckyBagAgentFeedback(monitor, {}, sessionError.message);
+      }
+    } else {
+      renderLuckyBagAgentFeedback(monitor, { status: monitor.status, qwen_decision: { reason: monitor.detail || "会话尚未创建，等待首轮观察。" } });
+    }
+    if (["succeeded", "expired", "failed", "blocked", "cancelled"].includes(monitor.status)) {
       clearInterval(state.luckyBagMonitorTimer);
       state.luckyBagMonitorTimer = null;
     }
   } catch (error) {
-    renderLuckyBagMonitorStatus({ status: "状态读取失败：" + error.message });
+    renderLuckyBagMonitorStatus({status: "状态读取失败"});
+    renderLuckyBagAgentFeedback({status: "failed"}, {}, "监控状态读取失败：" + error.message);
   }
 }
 
 async function startLuckyBagMonitor() {
+  if (state.busy) return;
+  state.busy = true;
+  render();
   try {
     if (!state.luckyBagProfile) {
       const feature = await api("/api/features/lucky-bag");
       state.luckyBagProfile = feature.profile || null;
-      document.querySelector("#agentText").value = String(feature.goal || "");
     }
     const response = await api("/api/features/lucky-bag/start", {
       method: "POST",
-      body: JSON.stringify(state.luckyBagProfile || {}),
+      body: JSON.stringify(luckyBagStartPayload(state.luckyBagProfile)),
     });
     state.luckyBagMonitorId = String(response.monitor?.monitor_id || "");
     renderLuckyBagMonitorStatus(response.monitor);
+    await pollLuckyBagMonitor();
     clearInterval(state.luckyBagMonitorTimer);
     state.luckyBagMonitorTimer = setInterval(pollLuckyBagMonitor, 5000);
     toast("长期监控已启动；请保持用户手动打开的直播间。");
   } catch (error) {
+    renderLuckyBagAgentFeedback({status: "failed"}, {}, error.message);
     toast("启动福袋监控失败：" + error.message, true);
+  } finally {
+    state.busy = false;
+    render();
   }
 }
-async function startSupervisedAgent() {
-  const text = document.querySelector("#agentText").value.trim();
-  const current = sessionView();
-  if (!text) return toast("请先输入希望手机完成的目标。", true);
-  if (current && !current.isTerminal) return toast("已有进行中的会话，请继续或停止后再创建新目标。", true);
-  state.sessionDeviceId = state.deviceId;
-  state.pendingConfirmationGrant = null;
-  state.supervisedSession = null;
-  clearLastTaskOutcome();
+function luckyBagMonitorIsActive() {
+  return ["starting", "running", "waiting_confirmation", "paused", "recovery_required"]
+    .includes(String(state.luckyBagMonitorStatus || ""));
+}
+
+function parseStructuredError(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text) return value;
+  try { return JSON.parse(text); } catch (_error) { return value; }
+}
+
+function taskErrorInfo(error, fallbackMessage = "任务失败。", fallbackPhase = "request") {
+  const detail = parseStructuredError(error?.detail);
+  const payload = detail && typeof detail === "object" ? detail : {};
+  const message = String(error?.message || payload.error || payload.message || detail || fallbackMessage);
+  const code = String(error?.code || payload.error_code || payload.code || (error?.status ? `HTTP_${error.status}` : "TASK_FAILED"));
+  const phase = String(error?.phase || payload.phase || fallbackPhase);
+  const recoverable = error?.recoverable !== undefined
+    ? Boolean(error.recoverable)
+    : payload.recoverable !== undefined ? Boolean(payload.recoverable) : true;
+  return { message, code, phase, recoverable };
+}
+
+function taskErrorDetail(info) {
+  const value = info || {};
+  const recovery = value.recoverable === false ? "需要重新发送任务" : "可以重新观察或重试";
+  return `${value.message || value.detail || "任务失败。"} · 阶段：${value.phase || "未知"} · 错误码：${value.code || "TASK_FAILED"} · ${recovery}`;
+}
+
+function isDeviceBusyConflict(error) {
+  const message = String(error?.message || error?.detail || "");
+  return Number(error?.status) === 409 || /已有活动任务|活动任务/.test(message);
+}
+async function sendUnifiedQwenMessage(text) {
+  const message = String(text || "").trim();
+  if (!message || state.busy) return false;
+  const active = sessionView();
+  if (!active && luckyBagMonitorIsActive()) {
+    toast("消息未发送：福袋监控正在占用当前手机。请先暂停或停止福袋监控，再发送普通 Qwen 任务。", true);
+    return false;
+  }
+  const previousConversation = cleanConversationForQwen(active
+    ? (Array.isArray(active.raw?.conversation) ? active.raw.conversation : [])
+    : state.chatConversation);
+  const optimisticConversation = [
+    ...previousConversation,
+    { role: "user", content: message },
+  ];
+  if (active) {
+    state.supervisedSession = { ...state.supervisedSession, conversation: optimisticConversation };
+  } else {
+    state.chatConversation = optimisticConversation;
+  }
+  render();
+
+  if (active && !active.isTerminal) {
+    try {
+      const response = await withVisionProgress("和 Qwen 对话并等待它判断是否继续操作", () =>
+        api(`/api/agent/generic-supervised/${encodeURIComponent(active.sessionId)}/chat`, {
+          method: "POST",
+          body: JSON.stringify({ device_id: state.sessionDeviceId || state.deviceId, text: message }),
+        })
+      );
+      state.supervisedSession = response.session;
+      toast("Qwen 已结合当前手机画面返回回复并决定下一步。");
+      render();
+      return true;
+    } catch (error) {
+      if (isDeviceBusyConflict(error)) {
+        toast("消息未发送：设备已有活动任务，请先暂停或停止当前手机任务。", true);
+        render();
+        return false;
+      }
+      const info = taskErrorInfo(error, "统一 Qwen 对话失败。", "conversation");
+      state.taskAttemptStatus = {
+        state: info.code === "START_TICKET_CANCELLED" ? "cancelled" : "failure",
+        detail: info.message,
+        code: info.code,
+        phase: info.phase,
+        recoverable: info.recoverable,
+        updatedAt: new Date().toISOString(),
+      };
+      render();
+      toast(taskErrorDetail(info), true);
+      return false;
+    }
+  }
+
   state.taskAttemptStatus = {
     state: "running",
-    detail: "正在理解目标并观察当前画面。",
+    detail: "正在发送消息并等待 Qwen 决定是否需要读取画面或控制手机。",
+    phase: "conversation",
+    code: "",
+    recoverable: true,
     updatedAt: new Date().toISOString(),
   };
   try {
-    const payload = Protocol.buildRequestPayload(state.sessionDeviceId, { text, ...taskBudgetPayload() });
-    const response = await withVisionProgress("理解目标并观察当前画面", () =>
-      startAsyncAndWait(payload)
+    const response = await withVisionProgress("和 Qwen 对话并判断是否需要操作手机", () =>
+      api("/api/qwen/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          text: message,
+          device_id: state.deviceId,
+          conversation: previousConversation,
+          ...taskBudgetPayload(),
+        }),
+      })
     );
-    state.taskAttemptStatus = null;
-    state.supervisedSession = response.session;
-    await finalizeStopIfRequested();
-    const actions = Number(response.physical_actions || 0);
-    toast(actions
-      ? `安全任务已自动推进 ${actions} 个物理动作，并在每步后重新观察。`
-      : "计划与只读观察已完成；当前没有可自动执行的安全动作。");
-    render();
-  } catch (error) {
-    if (!restoreSupervisedSessionFromError(error)) {
-      const failure = saveLastTaskOutcome({
-        state: "failure",
-        detail: error.message || "任务未能启动。",
-        sessionId: "",
-        updatedAt: new Date().toISOString(),
-      });
-      state.taskAttemptStatus = failure;
+    if (Array.isArray(response.conversation)) state.chatConversation = response.conversation;
+    if (response?.route === "chat_only" || response?.phone_task_started === false) {
+      state.taskAttemptStatus = null;
+      toast("Qwen 已回复，没有启动手机任务。");
+      render();
+      return true;
     }
+    if (!response?.task_id) {
+      const routeError = new Error("Qwen 已决定需要手机任务，但服务没有返回启动票据。\n");
+      routeError.code = "MISSING_START_TICKET";
+      routeError.phase = "start_ticket";
+      routeError.recoverable = true;
+      throw routeError;
+    }
+    const result = await waitForStartTicket(response.task_id);
+    state.supervisedSession = result.session;
+    state.sessionDeviceId = state.deviceId;
+    state.taskAttemptStatus = null;
+    toast("Qwen 已读取当前手机画面并返回回复；是否操作由它在同一响应中决定。");
     render();
-    toast(error.message, true);
+    return true;
+  } catch (error) {
+      if (isDeviceBusyConflict(error)) {
+        toast("消息未发送：设备已有活动任务，请先暂停或停止当前手机任务。", true);
+        render();
+        return false;
+      }
+    const info = taskErrorInfo(error, "统一 Qwen 对话失败。", "conversation");
+    if (restoreSupervisedSessionFromError(error)) {
+      state.taskAttemptStatus = null;
+      render();
+      toast("Qwen 首轮观察失败，但会话已保留；可点击继续任务重新观察。", true);
+      return false;
+    }
+    const failureState = info.code === "START_TICKET_CANCELLED" ? "cancelled" : "failure";
+    state.taskAttemptStatus = saveLastTaskOutcome({
+      state: "failure",
+      detail: info.message,
+      sessionId: "",
+      code: info.code,
+      phase: info.phase,
+      recoverable: info.recoverable,
+      updatedAt: new Date().toISOString(),
+    });
+    if (failureState === "cancelled") state.taskAttemptStatus = {
+      ...state.taskAttemptStatus,
+      state: "cancelled",
+    };
+    render();
+    toast(taskErrorDetail(info), true);
+    return false;
   }
+}
+
+async function startSupervisedAgent() {
+  const input = document.querySelector("#agentText");
+  const text = String(input?.value || "").trim();
+  if (!text) return toast("请输入要发送给 Qwen 的内容。", true);
+  if (input) input.value = "";
+  return sendUnifiedQwenMessage(text);
 }
 
 async function startCapabilityTrial() {
@@ -1421,6 +2227,16 @@ async function finalizeStopIfRequested() {
 }
 
 async function togglePause() {
+  if (["starting", "running"].includes(state.luckyBagMonitorStatus) && state.luckyBagMonitorId) {
+    try {
+      const response = await api("/api/features/lucky-bag/" + encodeURIComponent(state.luckyBagMonitorId) + "/pause", {
+        method: "POST", body: JSON.stringify({device_id: state.luckyBagProfile.device_id}),
+      });
+      renderLuckyBagMonitorStatus(response.monitor);
+      render();
+    } catch (error) { toast("福袋暂停失败：" + error.message, true); }
+    return;
+  }
   if (state.paused || sessionView()?.status === "paused") {
     if (state.busy) return;
     state.paused = false;
@@ -1446,7 +2262,24 @@ async function togglePause() {
   render();
 }
 
+async function continueTask() {
+  const view = sessionView();
+  if (view && !view.isTerminal && (state.paused || view.status === "paused")) {
+    state.paused = false;
+    await continueBudgetAgent();
+    return;
+  }
+  if (["paused", "recovery_required"].includes(state.luckyBagMonitorStatus)) {
+    await resumeLuckyBagMonitor();
+  }
+}
 async function stopTasks() {
+  if (["starting", "running", "paused", "recovery_required"].includes(state.luckyBagMonitorStatus) && state.luckyBagMonitorId) {
+    await cancelLuckyBagMonitor();
+    render();
+    return;
+  }
+  const cancelledStart = cancelPendingStart();
   const requestWasRunning = state.busy;
   state.paused = false;
   state.stopRequested = true;
@@ -1457,7 +2290,9 @@ async function stopTasks() {
     const result = await api("/api/stop", { method: "POST", body: JSON.stringify(payload) });
     if (!requestWasRunning) await finalizeStopIfRequested();
     if (capabilityView() && !capabilityView().report) await cancelCapabilityTrial();
-    toast(result.note || "停止请求已发送。");
+    toast(cancelledStart
+      ? "已停止继续轮询启动票据；服务端是否已停止该票据需要状态确认。"
+      : (result.note || "停止请求已发送。"));
     await refreshDevice();
     render();
   } catch (error) {
@@ -1477,7 +2312,19 @@ async function restoreActiveSession() {
     state.taskAttemptStatus = null;
     const restored = Protocol.adaptSession(response.session, { fallbackDeviceId: state.deviceId });
     state.sessionDeviceId = restored.deviceId || state.deviceId;
-    state.paused = restored.status === "paused" || Boolean(response.session?.pause_requested);
+    if (!restored.isTerminal && restored.status !== "paused" && !response.session?.pause_requested) {
+      try {
+        const paused = await api(`/api/agent/generic-supervised/${encodeURIComponent(restored.sessionId)}/pause`, {
+          method: "POST",
+          body: JSON.stringify({ device_id: restored.deviceId || state.deviceId }),
+        });
+        if (paused?.session) state.supervisedSession = paused.session;
+      } catch (_error) {
+        // page-exit keepalive or the next refresh can retry the pause.
+      }
+    }
+    const pausedView = Protocol.adaptSession(state.supervisedSession, { fallbackDeviceId: state.deviceId });
+    state.paused = pausedView.status === "paused" || Boolean(state.supervisedSession?.pause_requested);
     if (restored.executionBudget?.max_physical_actions) {
       document.querySelector("#agentActionBudget").value = restored.executionBudget.max_physical_actions;
       document.querySelector("#agentObservationBudget").value = restored.executionBudget.max_observations;
@@ -1511,13 +2358,14 @@ async function init() {
     const session = await api("/api/session");
     state.token = session.token;
     state.mock = session.mock;
+    await settlePageExitPause();
     const mode = document.querySelector("#modeBadge");
     mode.textContent = session.mock ? "模拟模式 · 无实机动作" : "实机接口已连接";
     mode.classList.toggle("live-mode", !session.mock);
     await refreshDevice();
-    await restoreActiveSession();
     await restoreLuckyBagMonitor();
-    if (!state.supervisedSession) await restoreCapabilityTrial();
+    if (!state.luckyBagMonitorId) await restoreActiveSession();
+    if (!state.supervisedSession && !state.luckyBagMonitorId) await restoreCapabilityTrial();
     render();
     refreshPreview();
     setInterval(refreshPreview, 700);
@@ -1527,12 +2375,28 @@ async function init() {
   }
 }
 
-document.querySelector("#startSupervisedAgent").addEventListener("click", startSupervisedAgent);
-document.querySelector("#useLuckyBagPreset")?.addEventListener("click", useLuckyBagPreset);
+async function handleComposerSend() {
+  const text = document.querySelector("#agentText").value.trim();
+  if (!text) return toast("请输入要发送给 Qwen 的内容。", true);
+  document.querySelector("#agentText").value = "";
+  await sendUnifiedQwenMessage(text);
+}
+
+document.querySelector("#startSupervisedAgent").addEventListener("click", handleComposerSend);
+document.querySelector("#pairDeviceButton")?.addEventListener("click", pairDevice);
+document.querySelector("#useLuckyBagPreset")?.addEventListener("click", startLuckyBagModule);
+document.querySelector("#useClearCardsPreset")?.addEventListener("click", startClearCardsModule);
+document.querySelector("#swipeLeftPreset")?.addEventListener("click", () => startDirectionalSwipe("left"));
+document.querySelector("#swipeRightPreset")?.addEventListener("click", () => startDirectionalSwipe("right"));
+document.querySelector("#swipeUpPreset")?.addEventListener("click", () => startDirectionalSwipe("up"));
+document.querySelector("#swipeDownPreset")?.addEventListener("click", () => startDirectionalSwipe("down"));
 document.querySelector("#startLuckyBagMonitor")?.addEventListener("click", startLuckyBagMonitor);
 document.querySelector("#resumeLuckyBagMonitor")?.addEventListener("click", resumeLuckyBagMonitor);
+document.querySelector("#cancelLuckyBagMonitor")?.addEventListener("click", cancelLuckyBagMonitor);
 document.querySelector("#startCapabilityTrial").addEventListener("click", startCapabilityTrial);
 document.querySelector("#pauseButton").addEventListener("click", togglePause);
+document.querySelector("#continueTaskButton")?.addEventListener("click", continueTask);
+window.addEventListener("pagehide", pauseActiveTasksForPageExit);
 document.querySelector("#stopButton").addEventListener("click", stopTasks);
 document.querySelector("#deviceId").addEventListener("change", async event => {
   const requestedDeviceId = String(event.target.value || "");
@@ -1561,7 +2425,7 @@ document.querySelector("#deviceId").addEventListener("change", async event => {
   refreshPreview();
 });
 document.querySelector("#agentText").addEventListener("keydown", event => {
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startSupervisedAgent();
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") handleComposerSend();
 });
 document.querySelector("#riskDialog").addEventListener("close", event => {
   const grant = state.pendingConfirmationGrant;

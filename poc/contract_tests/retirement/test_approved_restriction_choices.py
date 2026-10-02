@@ -65,19 +65,7 @@ class UncappedTextTests(unittest.TestCase):
             bounds=(.1, .4, .9, .6), confidence=.99, states={"value": value}).validate()
 
     def test_natural_web_request_has_no_literal_capacity_limit(self):
-        from pydantic import StrictInt
-        from agent.domain.execution_budget import DEFAULT_DEVICE_ACTION_BUDGET, DEFAULT_OBSERVATION_BUDGET
-        source_path = Path(__file__).resolve().parents[2] / "agent" / "interfaces" / "http_models.py"
-        source = source_path.read_text(encoding="utf-8")
-        names = {"StrictAgentRequest", "GenericSupervisedStartRequest"}
-        nodes = [node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name in names]
-        namespace = dict(BaseModel=BaseModel, ConfigDict=ConfigDict, Field=Field,
-            StrictBool=StrictBool, StrictStr=StrictStr, StrictInt=StrictInt,
-            DEFAULT_DEVICE_ACTION_BUDGET=DEFAULT_DEVICE_ACTION_BUDGET,
-            DEFAULT_OBSERVATION_BUDGET=DEFAULT_OBSERVATION_BUDGET, __name__="offline_request")
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), "offline_request", "exec"), namespace)
-        request = namespace["GenericSupervisedStartRequest"]
-        request.model_rebuild(_types_namespace=namespace)
+        from agent.interfaces.http_models import GenericSupervisedStartRequest as request
         value = "自然任务" * 2000
         self.assertEqual(value, request(text=value, device_id="device-1").text)
 
@@ -109,11 +97,14 @@ class UncappedGeometryAndObservationTests(unittest.TestCase):
     def test_target_evidence_and_label_are_not_truncated(self):
         label = "按钮" * 500
         evidence = [f"证据{i}" + "界面" * 300 for i in range(30)]
-        result = normalize_model_step_decision({"status": "action", "action": "tap_semantic",
-            "target": {"role": "button", "meaning": "activate", "label": label,
-                "evidence": evidence}, "tap_point": [.5, .5]})
-        self.assertEqual(label, result["target"]["label"])
-        self.assertEqual(evidence, result["target"]["evidence"])
+        from contract_tests.observation.test_point_scene_projection import observe, wire, decision
+        payload = wire(decision(point=[500, 500]))
+        payload["scene"]["elements"][0].update(label=label, evidence=evidence)
+        scene, result, resolved, _ = observe(payload)
+        self.assertEqual(label, scene.elements[0].label)
+        self.assertEqual(tuple(evidence), scene.elements[0].evidence)
+        self.assertEqual((.5, .5), resolved.normalized_point)
+        self.assertNotIn("target", result.proposal.action.params)
 
     def test_observation_contract_has_no_element_count_or_fixed_wording(self):
         from agent.infrastructure import generic_scene_observer as observer

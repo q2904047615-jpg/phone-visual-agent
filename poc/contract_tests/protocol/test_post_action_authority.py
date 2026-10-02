@@ -58,6 +58,13 @@ class PostActionAuthorityTests(unittest.TestCase):
                     self.assertEqual(decision_status, result.after_model_decision["status"])
                     self.assertEqual([("reveal_system_navigation",)], robot.actions)
 
+    def test_wait_for_change_preserves_model_wait_duration(self):
+        before = fixtures.scene("before")
+        action = fixtures.SemanticAction(node_id="wait-300", action="wait_for_change",
+            params={"wait_seconds": 300})
+        resolved = UniversalActionController().resolve_one(action, before, confirmed=True)
+        self.assertEqual(300.0, resolved.wait_seconds)
+
     def test_execution_identity_remains_but_changing_scene_can_proceed(self):
         before, action = launches.LaunchAppVerificationTests._candidate_action()
         controller = UniversalActionController()

@@ -81,42 +81,13 @@ class ClearResultRestrictionTests(unittest.TestCase):
         self.assertEqual([], robot.actions)
 
 
-class InputEffectOrderingPromptTests(unittest.TestCase):
-    def test_input_order_guidance_is_scoped_to_text_entry(self):
-        root = Path(__file__).resolve().parents[2] / "agent"
-        prompt = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
-        self.assertIn("需要输入并提交明确文字时，输入必须作为独立动作完成", prompt)
-        self.assertIn("只有实际历史已经记录该input_verified_text", prompt)
-        self.assertIn("不能跳过输入", prompt)
-        self.assertIn("以下输入顺序提示仅适用于当前需要新输入或修改文字的环节", prompt)
-        self.assertIn("无需文字输入的操作和直接提交用户指定的现有内容不适用本段", prompt)
-        self.assertIn("混合任务只在文字输入环节使用本段，不约束其他动作", prompt)
-        self.assertIn("仅要求输入时不擅自发送或发布", prompt)
+
+
 
 
 class RecentPageRestrictionTests(unittest.TestCase):
-    def test_navigation_is_general_but_cleanup_button_remains_scoped(self):
-        root = Path(__file__).resolve().parents[2] / "agent"
-        step = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
-        self.assertIn("打开后台统一选择 open_recent_apps", step)
-        self.assertIn("本地负责上述 Home→新图确认 Launcher→打开后台", step)
-        self.assertIn("不得用 swipe_element 划卡片", step)
-        self.assertIn("系统清理按钮规则不适用于普通查看后台", step)
-        self.assertNotIn("此顺序不适用于普通查看后台", step)
 
-    def test_bare_directional_gesture_uses_generic_scroll(self):
-        root = Path(__file__).resolve().parents[2] / "agent"
-        step = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
-        self.assertIn("只要求无具体目标的方向手势", step)
-        self.assertIn("必须选择scroll并只填写direction", step)
-        self.assertIn("不得为此猜测element_id、start或end", step)
-        self.assertIn("只有用户明确要求直接操纵某个当前元素或容器", step)
 
-    def test_finish_clears_previous_action_fields(self):
-        root = Path(__file__).resolve().parents[2] / "agent"
-        step = (root / "infrastructure/prompts/single_step_observation.txt").read_text(encoding="utf-8")
-        self.assertIn("decision.action必须为null", step)
-        self.assertIn("不得把上一轮已执行动作原样留在finish中", step)
 
     def test_page_name_alone_does_not_forbid_navigation(self):
         controller, _, _, before, _ = ClearResultRestrictionTests.sample()

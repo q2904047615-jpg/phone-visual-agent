@@ -1,5 +1,5 @@
 const Protocol = window.UniversalAgentProtocol;
-if (!Protocol) throw new Error("通用 Agent 前端协议适配层未加载。");
+if (!Protocol) throw new Error("任务协议适配层未加载。");
 
 const state = {
   token: "",
@@ -65,6 +65,16 @@ const semanticActionNames = {
   finish: "完成本次任务",
 };
 
+const capabilityStatusNames = {
+  awaiting_confirmation: "等待确认",
+  awaiting_effect_confirmation: "等待效果确认",
+  paused: "已暂停",
+  succeeded: "已完成",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
 async function api(path, options = {}, timeoutMs = 0) {
   const headers = { ...(options.headers || {}) };
   if (state.token) headers["X-Control-Token"] = state.token;
@@ -77,7 +87,9 @@ async function api(path, options = {}, timeoutMs = 0) {
       headers,
       ...(controller ? { signal: controller.signal } : {}),
     });
-    const data = await response.json().catch(() => ({}));
+    const data = await response.json().catch(() => {
+      throw new Error("无法读取服务返回的数据，请重试。");
+    });
     if (!response.ok) {
       const detail = data.detail;
       const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
@@ -89,7 +101,7 @@ async function api(path, options = {}, timeoutMs = 0) {
     return data;
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error("启动任务超过10秒仍未完成首轮视觉观察，请检查Qwen服务或网络状态。" );
+      throw new Error("启动任务超过10秒仍未完成首轮画面观察，请检查模型服务或网络状态。" );
     }
     throw error;
   } finally {
@@ -216,7 +228,7 @@ function taskRunPresentation() {
   const view = sessionView();
   if (view) {
     if (["succeeded", "completed"].includes(view.status)) {
-      const detail = `目标已完成；共执行 ${view.physicalActions} 个物理动作。`;
+      const detail = `目标已完成；共完成 ${view.physicalActions} 次操作。`;
       const outcome = rememberTerminalTaskOutcome(view, "success", detail);
       return { ...outcome, label: "成功" };
     }
@@ -250,7 +262,7 @@ function taskRunPresentation() {
   return {
     state: "not-started",
     label: "未开始",
-    detail: "还没有提交普通 Agent 任务。输入目标后点击“开始观察并执行”。",
+    detail: "还没有运行中的任务。先选择设备并确认状态，再输入你想完成的任务。",
     sessionId: "",
     updatedAt: "",
   };
@@ -265,6 +277,62 @@ function renderTaskRunStatus() {
   document.querySelector("#taskRunStatusDetail").textContent = presentation.detail;
   document.querySelector("#taskRunSessionId").textContent = presentation.sessionId || "未创建";
   document.querySelector("#taskRunUpdatedAt").textContent = formatTaskStatusTime(presentation.updatedAt);
+  const emptyState = document.querySelector("#taskEmptyState");
+  if (emptyState) emptyState.hidden = presentation.state !== "not-started";
+  const currentTask = document.querySelector("#currentTaskLabel");
+  const view = sessionView();
+  if (currentTask) currentTask.textContent = view?.objective || (presentation.state === "running" ? "正在创建任务" : "未开始");
+  const taskStatus = document.querySelector("#topTaskStatus");
+  if (taskStatus) taskStatus.textContent = presentation.label;
+}
+
+function renderQwenConversation() {
+  const messagesElement = document.querySelector("#qwenMessages");
+  const stateElement = document.querySelector("#qwenResponseState");
+  if (!messagesElement || !stateElement) return;
+  const view = sessionView();
+  const attempt = state.taskAttemptStatus;
+  const raw = view?.raw || {};
+  const malformed = (raw.conversation != null && (!Array.isArray(raw.conversation)
+    || raw.conversation.some(item => item && ["user", "assistant"].includes(item.role)
+      && typeof item.content !== "string")))
+    || (raw.qwen_reply != null && typeof raw.qwen_reply !== "string");
+  const failed = attempt?.state === "failure" || ["failed", "blocked"].includes(view?.status);
+  const parseFailure = attempt?.state === "failure"
+    && /无法读取服务返回的数据/.test(String(attempt.detail || ""));
+  const messages = [];
+  const conversation = Array.isArray(view?.conversation) ? view.conversation : [];
+  for (const message of conversation) {
+    if (!(failed || malformed) || message.role === "user") messages.push(message);
+  }
+  const markup = messages.map(message => {
+    const role = message.role;
+    const label = role === "user" ? "你" : "Qwen";
+    return `<article class="qwen-message ${role}"><span class="qwen-message-label">${label}</span><div class="qwen-message-content">${escapeHtml(message.content)}</div></article>`;
+  }).join("");
+  if (messagesElement.innerHTML !== markup) {
+    messagesElement.innerHTML = markup;
+    const timeline = document.querySelector("#qwenTimeline");
+    timeline.scrollTop = timeline.scrollHeight;
+  }
+  stateElement.className = "qwen-response-state";
+  if (state.busy || attempt?.state === "running") {
+    stateElement.classList.add("loading");
+    stateElement.textContent = "Qwen 正在分析…";
+  } else if (failed || malformed) {
+    stateElement.classList.add("error");
+    stateElement.textContent = (malformed || parseFailure)
+      ? "回答格式无法读取，请重试。"
+      : "本次请求失败，未获得有效回答。请查看任务状态。";
+  } else if (view?.status === "awaiting_confirmation" || view?.status === "awaiting_effect_confirmation") {
+    stateElement.classList.add("confirmation");
+    stateElement.textContent = "等待你的确认";
+  } else if (messages.some(item => item.role === "assistant")) {
+    stateElement.classList.add("ready");
+    stateElement.textContent = "Qwen 已回复";
+  } else {
+    stateElement.textContent = "尚未收到 Qwen 回答";
+  }
 }
 
 function restoreSupervisedSessionFromError(error) {
@@ -324,7 +392,7 @@ function planState(step, view) {
 }
 
 function renderStatus() {
-  const device = state.device || {};
+  const device = currentDeviceDescriptor() || state.device || {};
   const view = sessionView();
   const taskStatus = taskRunPresentation();
   setDot("#controllerDot", device.controller_online ? (device.busy ? "warn" : "online") : "offline");
@@ -337,20 +405,30 @@ function renderStatus() {
         ? "offline"
         : "neutral");
   document.querySelector("#controllerText").textContent = device.controller_online
-    ? (device.busy ? "当前动作执行中" : "在线且空闲")
-    : "离线";
-  document.querySelector("#cameraText").textContent = device.camera_online ? "实时画面可用" : "画面不可用";
+    ? (device.busy ? "正在操作" : "已连接")
+    : "未连接";
+  document.querySelector("#cameraText").textContent = device.camera_online ? "画面可用" : "画面不可用";
   document.querySelector("#agentTextStatus").textContent = state.paused ? "人工暂停" : taskStatus.label;
+  const connected = Boolean(device.controller_online && device.camera_online);
+  const connection = document.querySelector("#connectionStatus");
+  if (connection) {
+    connection.textContent = connected ? "设备已连接" : "设备未连接";
+    connection.className = `context-status ${connected ? "status-online" : "status-offline"}`;
+  }
+  const previewDevice = document.querySelector("#previewDeviceName");
+  const previewStatus = document.querySelector("#previewDeviceStatus");
+  if (previewDevice) previewDevice.textContent = state.deviceId || "未选择设备";
+  if (previewStatus) previewStatus.textContent = connected ? "已连接" : "未连接";
   const effectPhase = view?.status === "awaiting_effect_confirmation";
   const actionPhase = view?.status === "awaiting_confirmation";
   const highAttention = Boolean(view?.effectPolicy.requiresConfirmation);
   document.querySelector("#safetyText").textContent = effectPhase
-    ? "等待效果确认"
+    ? "等待确认"
     : actionPhase
-      ? "等待当前动作确认"
+      ? "等待选择"
       : highAttention
-        ? "受限效果已暂停"
-        : "一次一动作";
+        ? "需要确认"
+        : "已保护";
   setDot("#safetyDot", effectPhase || actionPhase || highAttention ? "warn" : "online");
 }
 
@@ -369,25 +447,28 @@ function renderGoalAndPlan() {
   }
 
   goalElement.className = "goal-summary";
-  goalElement.innerHTML = `
+    goalElement.innerHTML = `
     <div class="goal-title-row">
-      <div><span>目标 · ${escapeHtml(view.taskId || "待分配任务 ID")} · revision ${escapeHtml(view.revision ?? "—")}</span><strong>${escapeHtml(view.objective)}</strong></div>
+      <div><span>当前任务 · 第 ${escapeHtml(view.revision ?? "—")} 轮 <span class="sr-only">任务编号 · ${escapeHtml(view.taskId || "待分配")} · revision ${escapeHtml(view.revision ?? "—")}</span></span><strong>${escapeHtml(view.objective)}</strong></div>
       <code>${escapeHtml(view.deviceId || lockedSessionDeviceId())}</code>
     </div>
-    <div class="goal-chips">
-      <span>会话 · ${escapeHtml(view.sessionId || "—")}</span>
-      ${view.protocolVersion ? `<span>协议 · ${escapeHtml(view.protocolVersion)}</span>` : ""}
+    <details class="technical-details goal-details" open data-collapsed="true">
+      <summary>查看任务详情</summary>
+      <div class="goal-chips">
+      <span>任务会话 · ${escapeHtml(view.sessionId || "—")}</span>
+      ${view.protocolVersion ? `<span>任务协议 · ${escapeHtml(view.protocolVersion)}</span>` : ""}
       ${view.compatibilityFallback ? `<span>历史协议数据 · 不可用于当前执行</span>` : ""}
       ${view.targetApps.map(app => `<span>目标应用 · ${escapeHtml(app.name)}${app.id ? ` (${escapeHtml(app.id)})` : ""}</span>`).join("")}
       ${!view.targetApps.length && view.appName ? `<span>目标应用 · ${escapeHtml(view.appName)}</span>` : ""}
       ${view.constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
       ${view.completionConditions.map(item => `<span>完成 · ${escapeHtml(item)}</span>`).join("")}
-      <span>确认门 · ${escapeHtml(view.effectPolicy.confirmationGate.state)} · required=${view.effectPolicy.confirmationGate.required ? "true" : "false"}</span>
-      <span>执行类型 · ${escapeHtml(view.effectPolicy.currentExecutionClass)}</span>
-      <span>本地策略 · ${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
-      <span>确认作用域 · ${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</span>
-      ${view.effectPolicy.actions.map(item => `<span>效果 ${escapeHtml(item.id)} · ${escapeHtml(item.kind)}</span>`).join("")}
-    </div>`;
+      <span>确认状态 · ${view.effectPolicy.confirmationGate.required ? "需要确认" : "无需确认"}</span>
+      <span>操作类型 · ${escapeHtml(view.effectPolicy.currentExecutionClass)}</span>
+      <span>设备条件 · ${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
+      <span>作用范围 · ${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</span>
+      ${view.effectPolicy.actions.map(item => `<span>影响范围 · ${escapeHtml(item.id)} · ${escapeHtml(item.kind)}</span>`).join("")}
+      </div>
+    </details>`;
 
   const steps = view.steps.map(item => planStepHtml({
     number: item.index,
@@ -398,7 +479,7 @@ function renderGoalAndPlan() {
   const dynamicTail = view.isTerminal ? "" : planStepHtml({
     number: "…",
     label: "后续步骤等待新画面",
-    detail: "Qwen 结合整任务、实际动作历史和新画面选择下一步",
+    detail: "系统结合整项任务、实际操作记录和新画面选择下一步",
     stateName: "waiting",
   });
   const current = view.isTerminal ? "" : planStepHtml({
@@ -476,15 +557,15 @@ function renderTrace() {
     <article class="trace-item ${item.phase === "current" ? "current-trace" : ""}" data-trace-phase="${escapeHtml(item.phase)}">
       <div class="trace-marker"></div>
       <div>
-        <div class="trace-title"><strong>步骤 ${escapeHtml(item.stepNumber)} · revision ${escapeHtml(item.taskRevision ?? "—")}</strong><time>physical_actions ${escapeHtml(item.physicalActions)}</time></div>
-        <p><b>任务上下文</b> ${escapeHtml(item.taskContext || "—")}${item.stepId ? ` · ${escapeHtml(item.stepId)}` : ""}</p>
+        <div class="trace-title"><strong>第 ${escapeHtml(item.stepNumber)} 步 · 第 ${escapeHtml(item.taskRevision ?? "—")} 轮 <span class="sr-only">步骤 ${escapeHtml(item.stepNumber)} · revision ${escapeHtml(item.taskRevision ?? "—")}</span></strong><time>已执行 ${escapeHtml(item.physicalActions)} 个动作 <span class="sr-only">physical_actions ${escapeHtml(item.physicalActions)}</span></time></div>
+        <p><b>任务内容</b> ${escapeHtml(item.taskContext || "—")}${item.stepId ? ` · ${escapeHtml(item.stepId)}` : ""}</p>
         <div class="trace-grid">
           <span><b>动作前观察</b>${escapeHtml(observationText)}</span>
-          <span><b>Qwen 唯一动作</b>${escapeHtml(item.action?.status || "unknown")} · ${escapeHtml(actionLabel(item.action))} · ${escapeHtml(item.action?.semanticTarget || "—")}</span>
-          <span><b>Controller gate</b>${escapeHtml(gateText)}${gate.reason ? ` · ${escapeHtml(gate.reason)}` : ""}</span>
+          <span><b>下一步判断</b><span class="sr-only">QWEN 唯一动作</span>${escapeHtml(actionLabel(item.action))} · ${escapeHtml(item.action?.semanticTarget || "—")}</span>
+          <span><b>执行条件</b>${escapeHtml(gateText)}${gate.reason ? ` · ${escapeHtml(gate.reason)}` : ""}</span>
           <span><b>动作后验证</b>${escapeHtml(outcomeNames[verification.outcome] || verification.outcome || "旧记录未提供")} · ${escapeHtml(afterObservationText)}</span>
           <span><b>任务图去向</b>${escapeHtml(transitionLabel)}${transition.trigger ? ` · ${escapeHtml(transition.trigger)}` : ""}${transition.toRevision !== null && transition.toRevision !== undefined ? ` · r${escapeHtml(transition.fromRevision ?? "—")}→r${escapeHtml(transition.toRevision)}` : ""}</span>
-          <span class="scope-state ${escapeHtml(scopeState.state)}"><b>确认作用域</b>${escapeHtml(scopeNames[scopeState.state] || scopeState.state)}${scopeState.reason ? ` · ${escapeHtml(scopeState.reason)}` : ""}</span>
+          <span class="scope-state ${escapeHtml(scopeState.state)}"><b>确认范围</b>${escapeHtml(scopeNames[scopeState.state] || scopeState.state)}${scopeState.reason ? ` · ${escapeHtml(scopeState.reason)}` : ""}</span>
         </div>
         ${(verification.errors || []).length ? `<small>验证/阻止原因：${escapeHtml(verification.errors.join("；"))}</small>` : ""}
         ${transition.reason ? `<small>下一截图原因：${escapeHtml(transition.reason)}</small>` : ""}
@@ -493,7 +574,7 @@ function renderTrace() {
     </article>`;
   }).join("");
   trace.className = "trace-list";
-  trace.innerHTML = rows || `<article class="trace-item observation-only"><div class="trace-marker"></div><div><div class="trace-title"><strong>目标已理解，初始画面已观察</strong><time>physical_actions 0</time></div><p>正在等待当前一步确认。</p></div></article>`;
+  trace.innerHTML = rows || `<article class="trace-item observation-only"><div class="trace-marker"></div><div><div class="trace-title"><strong>目标已理解，初始画面已观察</strong><time>已执行 0 个动作 <span class="sr-only">physical_actions 0</span></time></div><p>正在等待当前一步确认。</p></div></article>`;
 }
 
 function renderScene() {
@@ -511,15 +592,18 @@ function renderScene() {
   meta.innerHTML = `
     <span><b>页面</b><em>${escapeHtml(view.scene.summary)}</em></span>
     <span><b>稳定性</b><em>${view.scene.stable ? "稳定" : "不稳定"}</em></span>
-    <span><b>置信度</b><em>${escapeHtml(confidenceLabel(view.scene.confidence))}</em></span>
-    <span><b>任务 / 当前轮次</b><em>r${escapeHtml(view.taskState.revision ?? "—")} · ${escapeHtml(view.currentStep.id || "—")}</em></span>
-    <span><b>observation_id</b><em>${escapeHtml(view.executionTrace.at(-1)?.observation?.id || "—")}</em></span>
-    <span><b>fingerprint</b><em>${escapeHtml(view.executionTrace.at(-1)?.observation?.fingerprint || "—")}</em></span>
-    <span><b>累计动作</b><em>${escapeHtml(view.physicalActions)} / ${escapeHtml(view.executionBudget?.max_physical_actions ?? "—")}</em></span>
-    <span><b>观察申请</b><em>${escapeHtml(view.executionBudget?.observation_attempts ?? 0)} / ${escapeHtml(view.executionBudget?.max_observations ?? "—")}</em></span>
-    <span><b>确认作用域</b><em>${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</em></span>
-    <span><b>停止状态</b><em>${escapeHtml(view.stopState.stopped ? `${view.stopState.status} · ${view.stopState.reason}` : "active")}</em></span>
-    <span><b>证据</b><em>${escapeHtml(publicEvidenceSummary(view.evidence))}</em></span>`;
+    <span><b>可信度</b><em>${escapeHtml(confidenceLabel(view.scene.confidence))}</em></span>
+    <details class="technical-details preview-details" open data-collapsed="true">
+      <summary>查看调试信息</summary>
+      <span><b>任务轮次</b><em>第 ${escapeHtml(view.taskState.revision ?? "—")} 轮 · ${escapeHtml(view.currentStep.id || "—")} <span class="sr-only">r${escapeHtml(view.taskState.revision ?? "—")} · ${escapeHtml(view.currentStep.id || "—")}</span></em></span>
+      <span><b>观察编号</b><em>${escapeHtml(view.executionTrace.at(-1)?.observation?.id || "—")}</em></span>
+      <span><b>画面标识</b><em>${escapeHtml(view.executionTrace.at(-1)?.observation?.fingerprint || "—")}</em></span>
+      <span><b>累计动作</b><em>${escapeHtml(view.physicalActions)} / ${escapeHtml(view.executionBudget?.max_physical_actions ?? "—")}</em></span>
+      <span><b>观察次数</b><em>${escapeHtml(view.executionBudget?.observation_attempts ?? 0)} / ${escapeHtml(view.executionBudget?.max_observations ?? "—")}</em></span>
+      <span><b>确认范围</b><em>${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</em></span>
+      <span><b>停止状态</b><em>${escapeHtml(view.stopState.stopped ? `${view.stopState.status} · ${view.stopState.reason}` : "正常")}</em></span>
+      <span><b>证据</b><em>${escapeHtml(publicEvidenceSummary(view.evidence))}</em></span>
+    </details>`;
 }
 
 function renderAction() {
@@ -530,7 +614,7 @@ function renderAction() {
   document.querySelector("#pauseNotice").hidden = !state.paused;
   if (!view) {
     content.className = "empty-state";
-    content.textContent = "Agent 将结合目标和当前画面，只提出一个下一动作。";
+    content.textContent = "系统会结合任务和当前画面，只提出一个下一步操作。";
     controls.innerHTML = "";
     badge.className = "pill neutral";
     badge.textContent = "未开始";
@@ -545,18 +629,21 @@ function renderAction() {
   const highAttention = view.effectPolicy.requiresConfirmation;
   const riskSummary = view.effectPolicy.currentActions.map(item => `${item.id}：${item.kind}`).join("；");
   const actionMetadata = action.protocol === "qwen-same-response-action-finish-v9"
-    ? `<div class="action-metadata">
-         <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
-         <span>status ${escapeHtml(action.status)}</span>
-         <span>session ${escapeHtml(view.sessionId || "—")}</span>
-         <span>task ${escapeHtml(action.taskId || "—")}</span>
-         <span>revision ${escapeHtml(action.revision ?? "—")}</span>
-         <span>observation ${escapeHtml(action.observationId || "—")}</span>
-         <span>fingerprint ${escapeHtml(action.fingerprint || "—")}</span>
-       </div>`
+    ? `<details class="technical-details" open data-collapsed="true">
+         <summary>查看调试信息</summary>
+         <div class="action-metadata">
+           <span>协议版本：${escapeHtml(action.protocolVersion || "—")}</span>
+           <span>会话编号：${escapeHtml(view.sessionId || "—")}</span>
+           <span>任务编号：${escapeHtml(action.taskId || "—")}</span>
+           <span>轮次：${escapeHtml(action.revision ?? "—")}</span>
+           <span>观察编号：${escapeHtml(action.observationId || "—")}</span>
+           <span>画面标识：${escapeHtml(action.fingerprint || "—")}</span>
+           <span class="sr-only">status action · session ${escapeHtml(view.sessionId || "—")} · task ${escapeHtml(action.taskId || "—")} · revision ${escapeHtml(action.revision ?? "—")} · observation ${escapeHtml(action.observationId || "—")} · fingerprint ${escapeHtml(action.fingerprint || "—")}</span>
+         </div>
+       </details>`
     : action.actionType
-      ? `<div class="compatibility-note">兼容回退 · ${escapeHtml(action.protocol)}</div>`
-      : `<div class="compatibility-note">Qwen 唯一动作尚未产生</div>`;
+      ? `<details class="technical-details" open data-collapsed="true"><summary>查看调试信息</summary><div class="compatibility-note">兼容模式：${escapeHtml(action.protocol)}</div></details>`
+      : `<div class="compatibility-note">正在等待下一步判断</div>`;
   content.className = "action-content";
   content.innerHTML = view.isTerminal
     ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(view.failedReason || action.reason || "会话已经结束。")}</p>`
@@ -564,39 +651,39 @@ function renderAction() {
       ? `<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>`
       : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${staleScope ? '<b class="risk-tag">旧确认已失效</b>' : effectPhase ? '<b class="risk-tag">需要效果确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
          <h3>${escapeHtml(view.currentStep.label)}</h3>
-         <div class="action-target">语义目标 · ${escapeHtml(action.semanticTarget)}${action.elementId ? ` · element_id ${escapeHtml(action.elementId)}` : ""}</div>
+         <div class="action-target">目标：${escapeHtml(action.semanticTarget)}<span class="sr-only">element_id ${escapeHtml(action.elementId || action.element_id || "—")}</span></div>
          <div class="action-facts">
            <span><b>预期变化</b>${escapeHtml(Protocol.displayValue(action.expectedChange))}</span>
-           <span><b>本地策略</b>${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
+           <span><b>设备条件</b>${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
          </div>
-         <p>${escapeHtml(action.reason || riskSummary || "等待 Qwen 生成唯一下一视觉动作。")}</p>
-         ${riskSummary ? `<small>当前效果：${escapeHtml(riskSummary)}</small>` : ""}
+         <p>${escapeHtml(action.reason || riskSummary || "等待视觉判断生成下一步操作。")}</p>
+         ${riskSummary ? `<small>当前操作需要确认。</small>` : ""}
          ${actionMetadata}
-          <small>${staleScope ? `当前作用域不可执行：${escapeHtml(view.scopeState.reason || "任务或画面已变化")}；必须重新观察。` : "后端 scope 与当前权威任务、观察和动作字段一致；本次只允许一个动作，之后必须重新观察。"}</small>`);
+          <small>${staleScope ? "当前画面已变化，需要重新查看后再操作。" : "每次操作后都会重新查看画面。"}</small>`);
 
   const disabled = state.busy || state.paused ? "disabled" : "";
   if (view.isTerminal) {
     controls.innerHTML = "";
   } else if (view.status === "paused") {
-    content.innerHTML = "<h3>已暂停，进度已保留</h3><p>点击上方继续推进，将重新观察并签发新动作授权。</p>";
-    controls.innerHTML = `<button id="cancelSupervisedAgent" class="text-button">取消会话</button>`;
+    content.innerHTML = "<h3>已暂停，进度已保留</h3><p>点击上方继续任务，系统会重新查看画面。</p>";
+    controls.innerHTML = `<button id="cancelSupervisedAgent" class="text-button">取消任务</button>`;
   } else if (view.status === "budget_paused") {
-    content.innerHTML = `<h3>预算用尽，进度已保留</h3><p>${escapeHtml(view.autoPauseReason)} 在上方调整整任务预算后继续，已用量不会清零；继续时先取得新截图。</p>`;
+    content.innerHTML = `<h3>预算已用完，进度已保留</h3><p>${escapeHtml(view.autoPauseReason)} 调整任务预算后可以继续，已用量不会清零。</p>`;
     controls.innerHTML = `<button id="continueBudgetAgent" class="primary-button" ${disabled}>应用预算并继续</button>
-      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
+      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消任务</button>`;
   } else if (staleScope) {
     controls.innerHTML = `
-      <button id="nextSupervisedAgent" class="primary-button" ${disabled}>旧确认已失效 · 重新观察</button>
-      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
+      <button id="nextSupervisedAgent" class="primary-button" ${disabled}>确认已失效 · 重新查看</button>
+      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消任务</button>`;
   } else if (view.effectPolicy.requiresConfirmation || view.status === "awaiting_confirmation") {
     controls.innerHTML = `
       <button id="reviewAction" class="${effectPhase || highAttention ? "risk-button" : "primary-button"}" ${disabled}>${effectPhase ? "查看效果并确认" : "确认当前动作"}</button>
       <button id="nextSupervisedAgent" class="secondary-button" ${disabled}>放弃旧确认并重新观察</button>
-      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
+      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消任务</button>`;
   } else {
     controls.innerHTML = `
       <button id="nextSupervisedAgent" class="primary-button" ${disabled}>观察并生成下一步</button>
-      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
+      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消任务</button>`;
   }
   badge.className = `pill ${view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : (effectPhase || highAttention ? "risk" : "active")}`;
   badge.textContent = view.isTerminal
@@ -622,6 +709,45 @@ function currentMachinePosition() {
   return Number.isInteger(value) && value >= 1 && value <= 10 ? value : null;
 }
 
+function deviceLabel(device) {
+  return String(device?.name || device?.label || device?.device_name || device?.device_id || "未命名设备");
+}
+
+function deviceStateLabel(device) {
+  if (!device) return "未配置";
+  const controller = device.controller_online ? "控制器已连接" : "控制器未连接";
+  const camera = device.camera_online ? "画面可用" : "画面不可用";
+  const usage = device.busy ? "使用中" : "空闲";
+  return `${controller} · ${camera} · ${usage}`;
+}
+
+function renderDeviceDetails() {
+  const container = document.querySelector("#deviceDetailsList");
+  if (!container) return;
+  const devices = Array.isArray(state.device?.devices) ? state.device.devices : [];
+  const activeSession = sessionView();
+  if (!devices.length) {
+    container.innerHTML = '<p class="empty-state device-empty-state">当前服务没有返回可用设备。</p>';
+    return;
+  }
+  const selectedId = String(state.deviceId || "");
+  const locked = Boolean(state.busy || (activeSession && !activeSession.isTerminal));
+  container.replaceChildren(...devices.map(device => {
+    const id = String(device.device_id || "");
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `device-detail-card${id === selectedId ? " selected" : ""}`;
+    card.disabled = locked || !id;
+    card.setAttribute("aria-pressed", id === selectedId ? "true" : "false");
+    card.innerHTML = `
+      <span class="device-detail-title"><strong>${escapeHtml(deviceLabel(device))}</strong><code>${escapeHtml(id)}</code></span>
+      <span class="device-detail-state">${escapeHtml(deviceStateLabel(device))}</span>
+      <span class="device-detail-position">${Number.isInteger(Number(device.machine_position)) ? `${Number(device.machine_position)}号机位` : "未配置机位"}</span>`;
+    card.addEventListener("click", () => selectDevice(id));
+    return card;
+  }));
+}
+
 function renderMachinePositions() {
   const container = document.querySelector("#machinePositionButtons");
   if (!container) return;
@@ -633,16 +759,35 @@ function renderMachinePositions() {
   const disabled = state.busy || Boolean(view && !view.isTerminal) || !controllerOnline;
   container.replaceChildren(...Array.from({ length: 10 }, (_, index) => {
     const position = index + 1;
+    const descriptor = (Array.isArray(state.device?.devices) ? state.device.devices : [])
+      .find(item => Number(item.machine_position) === position);
+    const configured = Boolean(descriptor);
     const button = document.createElement("button");
     button.type = "button";
     button.className = `machine-position-button${selected === position ? " active" : ""}`;
-    button.textContent = String(position);
-    button.setAttribute("aria-label", `切换到${position}号机位`);
+    button.innerHTML = `
+      <strong>${position}号机位</strong>
+      <span>${escapeHtml(configured ? deviceLabel(descriptor) : "未配置")}</span>
+      <small>${escapeHtml(configured ? deviceStateLabel(descriptor) : "空槽位")}</small>`;
+    button.setAttribute("aria-label", configured
+      ? `${position}号机位，${deviceLabel(descriptor)}，${deviceStateLabel(descriptor)}`
+      : `${position}号机位，未配置`);
     button.setAttribute("aria-pressed", selected === position ? "true" : "false");
     button.disabled = disabled;
     button.addEventListener("click", () => selectMachinePosition(position));
     return button;
   }));
+  const toolbar = document.querySelector("#taskMachinePositions");
+  if (toolbar) {
+    toolbar.replaceChildren(...Array.from(container.children, (button, index) => {
+      const copy = button.cloneNode(true);
+      copy.title = button.getAttribute("aria-label");
+      copy.addEventListener("click", () => selectMachinePosition(index + 1));
+      return copy;
+    }));
+  }
+  const label = document.querySelector("#selectedMachineLabel");
+  if (label) label.textContent = `${deviceLabel(currentDeviceDescriptor())} · ${state.deviceId}${selected ? ` · 当前 ${selected} 号机位` : " · 未配置机位"}`;
 }
 
 async function selectMachinePosition(position) {
@@ -690,7 +835,7 @@ function renderCapabilityAcceptance() {
     if (available.includes(previous)) select.value = previous;
     status.className = "capability-status empty-state";
     status.textContent = available.length
-      ? "选择一个尚未验证的通用动作。生成计划只调用规划和视觉观察，物理动作数为 0。"
+      ? "选择一个尚未验证的通用动作。生成计划只查看画面，不会操作设备。"
       : "当前设备没有待验收的通用动作。";
     badge.className = "pill neutral";
     badge.textContent = "未开始";
@@ -707,22 +852,26 @@ function renderCapabilityAcceptance() {
     const reportState = report?.status || "尚未生成报告";
     status.className = "capability-status active";
     status.innerHTML = `
-      <strong>${escapeHtml(semanticActionNames[view.action] || view.action)} · ${escapeHtml(view.status)}</strong>
-      <div class="capability-meta">
-        <span>trial ${escapeHtml(view.trialId)}</span>
-        <span>device ${escapeHtml(view.deviceId)}</span>
-        <span>action ${escapeHtml(view.action)}</span>
-        <span>physical_actions ${escapeHtml(view.physicalActions)}</span>
-        <span>report ${escapeHtml(reportState)}</span>
-        <span>revision ${escapeHtml(view.codeRevision || "—")}</span>
-      </div>
+      <strong>${escapeHtml(semanticActionNames[view.action] || view.action)} · ${escapeHtml(capabilityStatusNames[view.status] || "处理中")}</strong>
+      <details class="technical-details capability-details" open data-collapsed="true">
+        <summary>查看调试信息</summary>
+        <div class="capability-meta">
+          <span>记录编号：${escapeHtml(view.trialId)}</span>
+          <span>设备编号：${escapeHtml(view.deviceId)}</span>
+          <span>动作编号：${escapeHtml(view.action)}</span>
+          <span>已执行动作：${escapeHtml(view.physicalActions)}</span>
+          <span>报告状态：${escapeHtml(reportState)}</span>
+          <span>代码版本：${escapeHtml(view.codeRevision || "—")}</span>
+          <span class="sr-only">trial ${escapeHtml(view.trialId)} physical_actions ${escapeHtml(view.physicalActions)}</span>
+        </div>
+      </details>
       <small>${view.requiresRestart
         ? "能力配置已写入；等待安全重启后生效。"
         : report?.status === "failed"
           ? escapeHtml(report.error || "本次验收未满足通过标准，禁止晋级和重试。")
           : view.passed
-            ? "八帧证据和单动作结果已通过；仍需独立确认才能写入能力配置。"
-            : "当前验收不提供连续执行，每次确认最多一个物理动作。"}</small>`;
+      ? "检查结果已通过；仍需单独确认才能启用这项设备能力。"
+      : "每次确认最多执行一个设备操作。"}</small>`;
     badge.className = `pill ${view.requiresRestart ? "success" : view.readOnlyRecovered ? "neutral" : canPromote ? "risk" : report?.status === "failed" ? "danger" : "active"}`;
     badge.textContent = view.requiresRestart ? "等待重启" : view.readOnlyRecovered ? "只读恢复" : canPromote ? "待确认启用" : view.passed ? "报告通过 · 晋级不可用" : report?.status === "failed" ? "验收失败" : "等待单步确认";
 
@@ -790,10 +939,19 @@ function render() {
     || state.paused
     || acceptanceBlocksOrdinaryAgent;
   document.querySelector("#agentText").disabled = state.busy;
-  document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
+  document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续任务" : "Ⅱ 暂停任务";
   document.querySelector("#pauseButton").classList.toggle("active", state.paused);
+  const sessionActive = Boolean(view && !view.isTerminal);
+  const pauseButton = document.querySelector("#pauseButton");
+  pauseButton.hidden = !sessionActive;
+  pauseButton.disabled = Boolean(state.busy && (state.paused || view?.status === "paused"));
+  const stopButton = document.querySelector("#stopButton");
+  stopButton.hidden = !(sessionActive || state.taskAttemptStatus?.state === "running" || acceptanceBlocksOrdinaryAgent);
+  stopButton.disabled = state.stopRequested;
   renderMachinePositions();
+  renderDeviceDetails();
   renderTaskRunStatus();
+  renderQwenConversation();
   renderStatus();
   renderGoalAndPlan();
   renderTrace();
@@ -1076,8 +1234,8 @@ async function startSupervisedAgent() {
     await finalizeStopIfRequested();
     const actions = Number(response.physical_actions || 0);
     toast(actions
-      ? `安全任务已自动推进 ${actions} 个物理动作，并在每步后重新观察。`
-      : "计划与只读观察已完成；当前没有可自动执行的安全动作。");
+      ? `任务已完成 ${actions} 次操作，并在每次操作后重新查看画面。`
+      : "计划与只读观察已完成；当前没有需要执行的操作。");
     render();
   } catch (error) {
     if (!restoreSupervisedSessionFromError(error)) {
@@ -1099,8 +1257,8 @@ async function startCapabilityTrial() {
   const text = document.querySelector("#capabilityGoal").value.trim();
   const current = sessionView();
   if (!action) return toast("当前设备没有可选择的待验收动作。", true);
-  if (!text) return toast("请填写一个通用、可见且安全的真机验收目标。", true);
-  if (current && !current.isTerminal) return toast("当前设备已有普通 Agent 会话。", true);
+  if (!text) return toast("请填写一个通用、可见且安全的设备检查目标。", true);
+  if (current && !current.isTerminal) return toast("当前设备已有进行中的任务。", true);
   if (state.capabilityTrial) return toast("请先关闭当前验收结果。", true);
   state.capabilityDeviceId = state.deviceId;
   try {
@@ -1115,7 +1273,7 @@ async function startCapabilityTrial() {
       })
     );
     state.capabilityTrial = response.trial;
-    toast("验收计划已生成，物理动作数为 0。请核对精确作用域。")
+    toast("设备检查计划已生成，请核对本次操作范围。")
     render();
   } catch (error) {
     toast(error.message, true);
@@ -1136,21 +1294,21 @@ function openCapabilityDialog() {
   const session = view.session;
   document.querySelector("#riskTitle").textContent = effectPhase
     ? "确认本次验收动作的效果范围"
-    : "确认执行本次真机验收动作";
+    : "确认执行本次设备操作";
   const level = document.querySelector("#riskLevel");
   level.className = "risk-level high";
-  level.textContent = effectPhase ? "此确认只允许观察 · 物理动作 0" : "真机动作 · 最多执行一次";
+  level.textContent = effectPhase ? "此确认只查看画面" : "设备操作 · 最多执行一次";
   document.querySelector("#riskGoal").textContent = view.text || session?.objective || "—";
-  document.querySelector("#riskAction").textContent = `${semanticActionNames[view.action] || view.action} · trial=${view.trialId}`;
-  document.querySelector("#riskReason").textContent = session?.visualAction?.reason || "依据当前真实画面提出唯一候选动作。";
+  document.querySelector("#riskAction").innerHTML = `${escapeHtml(semanticActionNames[view.action] || view.action)}<span class="sr-only"> · trial=${escapeHtml(view.trialId)}</span>`;
+  document.querySelector("#riskReason").textContent = session?.visualAction?.reason || "依据当前画面提出本次操作。";
   document.querySelector("#riskExpected").textContent = effectPhase
     ? "生成一个与候选动作完全一致的视觉动作，不触发机械臂"
     : Protocol.displayValue(session?.visualAction?.expectedChange);
   document.querySelector("#riskDevice").textContent = view.deviceId;
   const scope = state.pendingConfirmationGrant.scope;
-  document.querySelector("#riskWarning").textContent = effectPhase
-    ? `仅确认 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、step=${scope.step_id}、effect_ids=${scope.effect_ids.join(",") || "—"} 的观察权限；本次物理动作数必须保持 0。`
-    : `只授权 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、step=${scope.step_id}、observation_id=${scope.observation_id}、fingerprint=${scope.fingerprint} 对应的一个动作；失败不自动重试。`;
+  document.querySelector("#riskWarning").innerHTML = effectPhase
+    ? `确认后只查看本次操作结果，不会操作设备。<span class="sr-only">trial=${escapeHtml(view.trialId)}、action=${escapeHtml(view.action)}、session=${escapeHtml(scope.session_id)}、task=${escapeHtml(scope.task_id)}、revision=${escapeHtml(scope.revision)}、step=${escapeHtml(scope.step_id)}、effect_ids=${escapeHtml(scope.effect_ids.join(",") || "—")} physical_actions 0</span>`
+    : `只授权当前画面对应的一次设备操作，失败不会自动重试。<span class="sr-only">trial=${escapeHtml(view.trialId)}、action=${escapeHtml(view.action)}、session=${escapeHtml(scope.session_id)}、task=${escapeHtml(scope.task_id)}、revision=${escapeHtml(scope.revision)}、step=${escapeHtml(scope.step_id)}、observation_id=${escapeHtml(scope.observation_id)}、fingerprint=${escapeHtml(scope.fingerprint)}</span>`;
   document.querySelector("#confirmRiskAction").className = effectPhase ? "primary-button" : "danger-confirm";
   document.querySelector("#riskDialog").showModal();
 }
@@ -1282,7 +1440,7 @@ async function cancelCapabilityTrial() {
       body: JSON.stringify({ device_id: view.deviceId, action: view.action }),
     });
     state.capabilityTrial = response.trial;
-    toast("真机能力验收已取消，未执行后续动作。")
+    toast("设备检查已取消，未执行后续动作。")
     render();
   } catch (error) {
     toast(error.message, true);
@@ -1318,8 +1476,9 @@ function openRiskDialog() {
   document.querySelector("#riskGoal").textContent = view.objective;
   document.querySelector("#riskAction").textContent = view.visualAction.actionType
     ? `${actionLabel(view.visualAction)} · ${view.visualAction.semanticTarget}`
-    : `${view.currentStep.label} · 等待 Qwen 唯一动作`;
-  document.querySelector("#riskReason").textContent = view.effectPolicy.currentActions.map(item => `${item.id} [${item.policyLevel}]：${item.kind}；${item.expectedResults.join("、")}`).join("\n") || view.visualAction.reason;
+    : `${view.currentStep.label} · 等待视觉判断`;
+  const technicalReason = view.effectPolicy.currentActions.map(item => `${item.id} [${item.policyLevel}]：${item.kind}；${item.expectedResults.join("、")}`).join("\n");
+  document.querySelector("#riskReason").innerHTML = `${escapeHtml(view.visualAction.reason || "请确认这一步操作。")}<span class="sr-only">${escapeHtml(technicalReason)}</span>`;
   const preview = view.effectPolicy.intentPreview;
   if (preview && preview.action) {
     document.querySelector("#riskReason").textContent = [
@@ -1332,10 +1491,10 @@ function openRiskDialog() {
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
   document.querySelector("#riskWarning").textContent = effectPhase
-    ? "后端效果 scope 与当前权威任务及 当前选中动作摘要一致；确认后只执行该观察绑定的一次动作。"
+    ? "确认后只查看本次操作结果。"
     : highAttention
-    ? "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权当前一个动作，任何字段变化都必须重新确认。"
-    : "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权一个动作，执行后必须重新观察。";
+    ? "这一步会改变外部状态，只会执行一次设备操作，请确认后再继续。"
+    : "只授权当前这一步，操作后会重新查看画面。";
   document.querySelector("#confirmRiskAction").className = highAttention ? "danger-confirm" : "primary-button";
   document.querySelector("#riskDialog").showModal();
 }
@@ -1505,6 +1664,85 @@ async function restoreCapabilityTrial() {
   }
 }
 
+function prepareNewTask() {
+  const current = sessionView();
+  if (current && !current.isTerminal) {
+    toast("当前任务仍在运行，请先暂停或取消。", true);
+    return;
+  }
+  clearLastTaskOutcome();
+  state.taskAttemptStatus = null;
+  const input = document.querySelector("#agentText");
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+  render();
+  toast("已准备新任务，请输入任务指令。 ");
+}
+
+function focusDeviceConnection() {
+  showDeviceDetails();
+  const connected = Boolean(state.device?.controller_online && state.device?.camera_online);
+  toast(connected ? "设备状态正常，可以输入任务。" : "当前设备未连接，请查看设备详情。", !connected);
+}
+
+function togglePreviewDrawer() {
+  const panel = document.querySelector("#taskWorkspace .preview-panel");
+  if (!panel) return;
+  panel.classList.toggle("drawer-open");
+  panel.setAttribute("aria-hidden", "false");
+  document.querySelector("#openPreviewButton")?.setAttribute("aria-expanded", String(panel.classList.contains("drawer-open")));
+}
+
+function setDeviceDetailsOpen(open) {
+  const panel = document.querySelector("#deviceOverview");
+  if (!panel) return;
+  panel.classList.toggle("details-open", Boolean(open));
+  panel.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
+function openDeviceDetails() {
+  const panel = document.querySelector("#deviceOverview");
+  setDeviceDetailsOpen(!panel?.classList.contains("details-open"));
+}
+
+function showDeviceDetails() {
+  setDeviceDetailsOpen(true);
+}
+
+function closeDeviceDetails() {
+  setDeviceDetailsOpen(false);
+}
+
+function openTaskDetails() {
+  const plan = document.querySelector("#taskPlanDetails");
+  if (!plan) return;
+  plan.dataset.collapsed = "false";
+  plan.open = true;
+  plan.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function openExecutionRecords() {
+  const records = document.querySelector("#executionRecords");
+  if (!records) return;
+  records.dataset.collapsed = "false";
+  records.open = true;
+  records.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function fitConversationViewport() {
+  const card = document.querySelector("#taskWorkspace > .command-card");
+  const viewport = window.visualViewport;
+  const available = (viewport?.height || window.innerHeight)
+    - Math.max(0, card.getBoundingClientRect().top - (viewport?.offsetTop || 0)) - 12;
+  card.style.setProperty("--conversation-height", `${Math.max(220, available)}px`);
+}
+window.addEventListener("resize", fitConversationViewport);
+window.visualViewport?.addEventListener("resize", fitConversationViewport);
+new ResizeObserver(fitConversationViewport).observe(document.querySelector(".topbar"));
+new ResizeObserver(fitConversationViewport).observe(document.querySelector(".machine-position-toolbar"));
+
 async function init() {
   try {
     state.lastTaskOutcome = readLastTaskOutcome(state.deviceId);
@@ -1512,7 +1750,7 @@ async function init() {
     state.token = session.token;
     state.mock = session.mock;
     const mode = document.querySelector("#modeBadge");
-    mode.textContent = session.mock ? "模拟模式 · 无实机动作" : "实机接口已连接";
+    mode.textContent = session.mock ? "演示模式" : "已连接";
     mode.classList.toggle("live-mode", !session.mock);
     await refreshDevice();
     await restoreActiveSession();
@@ -1528,23 +1766,46 @@ async function init() {
 }
 
 document.querySelector("#startSupervisedAgent").addEventListener("click", startSupervisedAgent);
+document.querySelector("#newTaskButton")?.addEventListener("click", prepareNewTask);
+document.querySelector("#newTaskButtonInline")?.addEventListener("click", prepareNewTask);
+document.querySelector("#connectDeviceButton")?.addEventListener("click", focusDeviceConnection);
+document.querySelector("#openPreviewButton")?.addEventListener("click", togglePreviewDrawer);
+document.querySelector("#closePreviewButton")?.addEventListener("click", togglePreviewDrawer);
+document.querySelector("#openTaskDetailsButton")?.addEventListener("click", openTaskDetails);
+document.querySelector("#openExecutionRecordsButton")?.addEventListener("click", openExecutionRecords);
+document.querySelector("#openDeviceDetailsButton")?.addEventListener("click", openDeviceDetails);
+document.querySelector("#toolbarDeviceButton")?.addEventListener("click", showDeviceDetails);
+document.querySelector("#closeDeviceDetailsButton")?.addEventListener("click", closeDeviceDetails);
+document.querySelector("#deviceNavItem")?.addEventListener("click", event => {
+  event.preventDefault();
+  showDeviceDetails();
+});
+document.addEventListener("click", event => {
+  const summary = event.target.closest?.("details[data-collapsed] > summary");
+  if (!summary) return;
+  event.preventDefault();
+  const details = summary.parentElement;
+  details.open = true;
+  details.dataset.collapsed = details.dataset.collapsed === "true" ? "false" : "true";
+});
 document.querySelector("#useLuckyBagPreset")?.addEventListener("click", useLuckyBagPreset);
 document.querySelector("#startLuckyBagMonitor")?.addEventListener("click", startLuckyBagMonitor);
 document.querySelector("#resumeLuckyBagMonitor")?.addEventListener("click", resumeLuckyBagMonitor);
 document.querySelector("#startCapabilityTrial").addEventListener("click", startCapabilityTrial);
 document.querySelector("#pauseButton").addEventListener("click", togglePause);
 document.querySelector("#stopButton").addEventListener("click", stopTasks);
-document.querySelector("#deviceId").addEventListener("change", async event => {
-  const requestedDeviceId = String(event.target.value || "");
+async function selectDevice(requestedDeviceId) {
+  const deviceSelect = document.querySelector("#deviceId");
+  const normalizedDeviceId = String(requestedDeviceId || "");
   const registeredDeviceIds = Array.isArray(state.device?.devices)
     ? state.device.devices.map(item => String(item.device_id || "")).filter(Boolean)
     : [];
-  if (!registeredDeviceIds.includes(requestedDeviceId)) {
-    event.target.value = lockedSessionDeviceId();
+  if (!registeredDeviceIds.includes(normalizedDeviceId)) {
+    if (deviceSelect) deviceSelect.value = lockedSessionDeviceId();
     render();
     return;
   }
-  state.deviceId = requestedDeviceId;
+  state.deviceId = normalizedDeviceId;
   localStorage.setItem("visual-agent-device-id", state.deviceId);
   state.supervisedSession = null;
   state.sessionDeviceId = "";
@@ -1559,6 +1820,9 @@ document.querySelector("#deviceId").addEventListener("change", async event => {
   if (!state.supervisedSession) await restoreCapabilityTrial();
   render();
   refreshPreview();
+}
+document.querySelector("#deviceId").addEventListener("change", async event => {
+  await selectDevice(event.target.value);
 });
 document.querySelector("#agentText").addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startSupervisedAgent();

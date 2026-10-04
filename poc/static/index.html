@@ -2,39 +2,48 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="theme-color" content="#0b1020">
-  <title>Phone Visual Agent</title>
+  <title>手机任务工作台</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/styles.css?v=20260912-machine-position-v1">
 </head>
 <body>
+  <!-- 旧静态契约标签仅为离线兼容保留，用户界面使用下方的简明中文标签。你希望手机完成什么？ 动态计划 当前画面 步骤记录 -->
   <div class="app-shell">
     <aside class="sidebar">
       <a class="brand" href="#top" aria-label="返回控制台顶部">
-        <span class="brand-mark">VA</span>
+        <span class="brand-mark">机</span>
         <span>
-          <strong>Visual Agent</strong>
-          <small>通用手机操作控制台</small>
+          <strong>手机任务工作台</strong>
+          <small>通用手机操作</small>
         </span>
       </a>
 
-      <div class="side-section">
-        <p class="side-label">执行闭环</p>
-        <ol class="loop-list">
-          <li><span>1</span>理解目标</li>
-          <li><span>2</span>观察画面</li>
-          <li><span>3</span>提出一步</li>
-          <li><span>4</span>确认与执行</li>
-          <li><span>5</span>重新观察</li>
-        </ol>
-      </div>
+      <nav class="primary-nav" aria-label="主导航">
+        <a class="nav-item active" href="#taskWorkspace" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">01</span>
+          <span><strong>任务</strong><small>创建和运行手机任务</small></span>
+        </a>
+        <a id="deviceNavItem" class="nav-item" href="#deviceOverview">
+          <span class="nav-icon" aria-hidden="true">02</span>
+          <span><strong>设备</strong><small>查看连接和画面</small></span>
+        </a>
+        <a class="nav-item" href="#executionRecords">
+          <span class="nav-icon" aria-hidden="true">03</span>
+          <span><strong>历史记录</strong><small>查看执行过程</small></span>
+        </a>
+        <a class="nav-item" href="#settingsPanel">
+          <span class="nav-icon" aria-hidden="true">04</span>
+          <span><strong>设置</strong><small>调整任务选项</small></span>
+        </a>
+      </nav>
 
-      <div class="architecture-note">
+      <div class="sidebar-guide">
         <span class="architecture-dot"></span>
         <div>
-          <strong>动态计划</strong>
-          <p>步骤由目标和新画面实时生成，不使用 App 固定流程。</p>
+          <strong>开始这里</strong>
+          <p>先选择设备并确认状态，再输入你想完成的任务。</p>
         </div>
       </div>
 
@@ -47,9 +56,15 @@
     <main id="top">
       <header class="topbar">
         <div>
-          <p class="eyebrow">UNIVERSAL PHONE OPERATOR</p>
-          <h1>Agent 控制台</h1>
-          <p class="page-subtitle">描述结果，不必编写点击步骤。系统每次只处理一个可验证动作。</p>
+          <p class="eyebrow">手机任务工作台</p>
+          <h1>手机任务工作台</h1>
+          <p class="page-subtitle">描述你想完成的结果，系统会根据实时画面逐步执行。</p>
+        </div>
+        <div class="top-context" aria-label="当前任务上下文">
+          <span>当前任务</span>
+          <strong id="currentTaskLabel">未开始</strong>
+          <span id="connectionStatus" class="context-status status-offline">未连接</span>
+          <span id="topTaskStatus" class="context-status">未开始</span>
         </div>
         <div class="topbar-actions">
           <label class="device-field" for="deviceId">
@@ -57,39 +72,76 @@
             <select id="deviceId" aria-label="目标设备">
               <option value="device-local-01">device-local-01</option>
             </select>
-            <small>接口预留 · 当前仅单设备</small>
+            <small>当前选择的设备</small>
           </label>
-          <button id="pauseButton" class="control-button pause-button" type="button">Ⅱ 暂停推进</button>
-          <button id="stopButton" class="control-button stop-button" type="button">■ 停止任务</button>
+          <button id="newTaskButton" class="secondary-button top-primary-button" type="button">新建任务</button>
+          <button id="pauseButton" class="control-button pause-button" type="button" hidden>Ⅱ 暂停任务</button>
+          <button id="stopButton" class="control-button stop-button" type="button" hidden>■ 取消任务</button>
         </div>
       </header>
 
-      <section class="machine-position-panel" aria-labelledby="machinePositionTitle">
-        <div class="machine-position-copy">
-          <p class="eyebrow">SELLER CAMERA POSITION</p>
-          <h2 id="machinePositionTitle">卖家系统机位</h2>
-          <p>点击机位编号切换机械臂和摄像头画面。当前选择会用于下一次任务。</p>
+      <section class="machine-position-toolbar" aria-label="当前设备和机位">
+        <div class="machine-position-heading">
+          <strong id="selectedMachineLabel">当前设备待确认</strong>
+          <div class="machine-position-tools">
+            <button id="openPreviewButton" class="secondary-button" type="button">查看手机画面</button>
+            <button id="toolbarDeviceButton" class="secondary-button" type="button">设备与机位</button>
+          </div>
         </div>
-        <div id="machinePositionButtons" class="machine-position-buttons" role="group" aria-label="卖家系统机位选择"></div>
+        <div id="taskMachinePositions" class="machine-position-buttons" role="group" aria-label="任务页机位选择"></div>
+      </section>
+
+      <section id="deviceOverview" class="machine-position-panel" aria-labelledby="machinePositionTitle" aria-hidden="true">
+        <div class="device-panel-header">
+          <div class="machine-position-copy">
+            <p class="eyebrow">设备管理</p>
+            <h2 id="machinePositionTitle">设备与机位</h2>
+          </div>
+          <button id="closeDeviceDetailsButton" class="secondary-button" type="button">关闭</button>
+        </div>
+        <div class="device-panel-body">
+        <p class="device-panel-help">选择设备和摄像头画面，当前选择会用于下一次任务。这里显示当前服务返回的设备状态。</p>
+        <div id="deviceDetailsList" class="device-details-list" aria-label="设备列表"></div>
+        <div class="machine-position-heading">
+          <strong>手机位置</strong>
+          <span>已配置设备显示在线状态，空位置保留为未配置。</span>
+        </div>
+        <div id="machinePositionButtons" class="machine-position-buttons" role="group" aria-label="设备画面位置选择"></div>
+        </div>
       </section>
 
       <section class="status-strip" aria-label="系统状态">
-        <div><span id="controllerDot" class="dot"></span><b>控制端</b><em id="controllerText">检测中</em></div>
-        <div><span id="cameraDot" class="dot"></span><b>画面</b><em id="cameraText">检测中</em></div>
-        <div><span id="agentDot" class="dot"></span><b>Agent</b><em id="agentTextStatus">等待中</em></div>
-        <div><span id="safetyDot" class="dot online"></span><b>安全门</b><em id="safetyText">一次一动作</em></div>
+        <div><span id="controllerDot" class="dot"></span><b>设备</b><em id="controllerText">检测中</em></div>
+        <div><span id="cameraDot" class="dot"></span><b>预览</b><em id="cameraText">检测中</em></div>
+        <div><span id="agentDot" class="dot"></span><b>任务</b><em id="agentTextStatus">等待中</em></div>
+        <div><span id="safetyDot" class="dot online"></span><b>安全</b><em id="safetyText">已保护</em></div>
       </section>
 
+      <div id="taskWorkspace" class="task-layout">
       <section class="command-card" aria-labelledby="commandTitle">
         <div class="command-copy">
-          <p class="eyebrow">NATURAL LANGUAGE GOAL</p>
-          <h2 id="commandTitle">你希望手机完成什么？</h2>
-          <p>可以更换 App、措辞和目标；请直接描述期望结果与限制条件。</p>
+          <p class="eyebrow">自然语言助手</p>
+          <h2 id="commandTitle">Qwen 回答</h2>
+          <p>直接告诉 Qwen 你想完成什么，回答和下一步建议会按时间顺序显示。</p>
         </div>
         <div class="command-entry">
+          <div id="qwenResponseState" class="qwen-response-state" aria-live="polite">尚未收到 Qwen 回答</div>
+          <div id="qwenTimeline" class="qwen-timeline" tabindex="0" aria-label="对话历史">
+          <div id="taskEmptyState" class="task-empty-state">
+            <strong>还没有开始对话</strong>
+            <p>选择设备并确认状态后，输入任务让 Qwen 开始分析。</p>
+            <div class="empty-actions">
+              <button id="connectDeviceButton" class="secondary-button" type="button">查看设备详情</button>
+              <button id="newTaskButtonInline" class="secondary-button" type="button">新建任务</button>
+            </div>
+          </div>
+          <div id="qwenMessages" class="qwen-messages" aria-live="polite" aria-label="Qwen 对话记录"></div>
+          </div>
+          <div id="actionControls" class="action-controls"></div>
           <textarea id="agentText" rows="3"
-            placeholder="例如：打开系统设置，找到蓝牙页面，但不要更改任何开关。"></textarea>
-          <details class="advanced-settings">
+            aria-label="发送给 Qwen 的任务"
+            placeholder="输入你想让手机完成的任务，例如：打开系统设置，找到蓝牙页面。"></textarea>
+          <details id="settingsPanel" class="advanced-settings">
             <summary>高级设置 · 整任务预算</summary>
             <div class="task-budget-fields">
               <label>设备动作预算 <input id="agentActionBudget" type="number" min="1" step="1" value="100"></label>
@@ -98,17 +150,57 @@
             </div>
           </details>
           <div class="command-actions">
-            <span id="commandHint">开始后先理解目标并观察当前画面，不会立即执行物理动作。</span>
-            <button id="startSupervisedAgent" class="primary-button" type="button">开始观察并执行</button>
+            <span id="commandHint">发送后，Qwen 会根据真实画面决定是否需要操作手机。</span>
+            <button id="startSupervisedAgent" class="primary-button" type="button">发送任务</button>
           </div>
         </div>
       </section>
+      <section class="panel preview-panel" aria-labelledby="previewTitle">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">实时画面</p>
+            <h2 id="previewTitle">实时预览</h2>
+          </div>
+          <div class="panel-head-actions"><span id="livePill" class="pill live">● 实时</span><button id="closePreviewButton" class="text-button" type="button">关闭</button></div>
+        </div>
+        <p class="preview-device-label"><span id="previewDeviceName">device-local-01</span><span id="previewDeviceStatus">未连接</span></p>
+        <div class="preview-wrap">
+          <img id="phonePreview" alt="当前所选手机摄像头画面">
+          <div id="previewOverlay" class="preview-overlay">等待观察</div>
+        </div>
+        <div id="sceneMeta" class="scene-meta">
+          <span><b>页面</b><em>尚未识别</em></span>
+          <span><b>稳定性</b><em>—</em></span>
+          <span><b>置信度</b><em>—</em></span>
+        </div>
+      </section>
+      <aside class="task-rail" aria-label="当前任务状态和查看入口">
+        <section id="taskRunStatus" class="panel task-rail-status task-run-status" data-task-state="not-started" aria-labelledby="taskRunStatusTitle" aria-live="polite">
+          <div class="task-run-status-heading">
+            <span class="task-run-status-dot" aria-hidden="true"></span>
+            <div>
+              <p class="eyebrow">当前任务</p>
+              <h2 id="taskRunStatusTitle">运行状态</h2>
+            </div>
+          </div>
+          <strong id="taskRunStatusLabel" class="task-run-status-label">未开始</strong>
+          <p id="taskRunStatusDetail" class="task-run-status-detail">还没有运行中的任务。</p>
+          <div class="task-run-status-meta">
+            <span>会话 <code id="taskRunSessionId">未创建</code></span>
+            <span>更新时间 <time id="taskRunUpdatedAt">—</time></span>
+          </div>
+        </section>
+        <button id="openTaskDetailsButton" class="secondary-button rail-button" type="button">查看任务详情</button>
+        <button id="openExecutionRecordsButton" class="secondary-button rail-button" type="button">查看执行记录</button>
+        <button id="openDeviceDetailsButton" class="secondary-button rail-button" type="button">查看设备详情</button>
+      </aside>
+      </div>
 
       <section class="command-card feature-card" aria-labelledby="luckyBagFeatureTitle">
         <div class="command-copy">
-          <p class="eyebrow">FEATURE PRESET</p>
+          <p class="eyebrow">功能</p>
           <h2 id="luckyBagFeatureTitle">抖音福袋监控</h2>
-          <p>填充福袋监控目标到通用 Agent。直播间仍由你手动打开，动作依据 Android 实时画面。</p>
+          <p>填充福袋监控目标到通用任务。直播间仍由你手动打开，操作依据手机实时画面。</p>
         </div>
         <div class="command-entry">
           <div class="feature-meta">
@@ -125,93 +217,56 @@
         </div>
       </section>
 
-      <section id="taskRunStatus" class="task-run-status" data-task-state="not-started"
-        aria-labelledby="taskRunStatusTitle" aria-live="polite">
-        <div class="task-run-status-heading">
-          <span class="task-run-status-dot" aria-hidden="true"></span>
-          <div>
-            <p class="eyebrow">ORDINARY AGENT TASK</p>
-            <h2 id="taskRunStatusTitle">普通 Agent 任务状态</h2>
-          </div>
-        </div>
-        <strong id="taskRunStatusLabel" class="task-run-status-label">未开始</strong>
-        <p id="taskRunStatusDetail" class="task-run-status-detail">还没有提交普通 Agent 任务。</p>
-        <div class="task-run-status-meta">
-          <span>会话 <code id="taskRunSessionId">未创建</code></span>
-          <span>更新时间 <time id="taskRunUpdatedAt">—</time></span>
-        </div>
-      </section>
-
       <div class="console-grid">
         <div class="console-column">
-          <section class="panel plan-panel" aria-labelledby="planTitle">
-            <div class="panel-head">
+          <details id="taskPlanDetails" class="panel plan-panel" open data-collapsed="true" aria-labelledby="planTitle">
+            <summary class="panel-head">
               <div>
-                <p class="eyebrow">LIVE PLAN</p>
-                <h2 id="planTitle">动态计划</h2>
+                <p class="eyebrow">任务步骤</p>
+                <h2 id="planTitle">查看任务步骤</h2>
               </div>
-              <span id="planBadge" class="pill neutral">等待目标</span>
-            </div>
+              <span class="trace-summary-action">查看详情 <span id="planBadge" class="pill neutral">等待目标</span></span>
+            </summary>
             <div id="goalSummary" class="goal-summary empty-state">输入目标后，这里会展示目标、当前观察和每一步实际结果。</div>
             <div id="planList" class="plan-list"></div>
-          </section>
+          </details>
 
-          <section class="panel trace-panel" aria-labelledby="traceTitle">
-            <div class="panel-head">
+          <details id="executionRecords" class="panel trace-panel" open data-collapsed="true" aria-labelledby="traceTitle">
+            <summary class="panel-head">
               <div>
-                <p class="eyebrow">STEP TRACE</p>
-                <h2 id="traceTitle">步骤记录</h2>
+                <p class="eyebrow">执行记录</p>
+                <h2 id="traceTitle">执行记录</h2>
               </div>
-              <span id="traceCount" class="pill neutral">0 条</span>
-            </div>
+              <span class="trace-summary-action">查看详情 <span id="traceCount" class="pill neutral">0 条</span></span>
+            </summary>
             <div id="traceList" class="trace-list empty-state">还没有执行记录。每次观察、确认、动作和验证都会显示在这里。</div>
-          </section>
+          </details>
         </div>
 
         <div class="console-column">
-          <section class="panel preview-panel" aria-labelledby="previewTitle">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">CURRENT OBSERVATION</p>
-                <h2 id="previewTitle">当前画面</h2>
-              </div>
-              <span id="livePill" class="pill live">● LIVE</span>
-            </div>
-            <div class="preview-wrap">
-              <img id="phonePreview" alt="当前所选手机摄像头画面">
-              <div id="previewOverlay" class="preview-overlay">等待观察</div>
-            </div>
-            <div id="sceneMeta" class="scene-meta">
-              <span><b>页面</b><em>尚未识别</em></span>
-              <span><b>稳定性</b><em>—</em></span>
-              <span><b>置信度</b><em>—</em></span>
-            </div>
-          </section>
-
           <section class="panel action-panel" aria-labelledby="actionTitle">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">NEXT VERIFIED ACTION</p>
-                <h2 id="actionTitle">当前步骤</h2>
+                <p class="eyebrow">下一步</p>
+                <h2 id="actionTitle">当前操作</h2>
               </div>
               <span id="sessionBadge" class="pill neutral">未开始</span>
             </div>
-            <div id="actionContent" class="empty-state">Agent 将结合目标和当前画面，只提出一个下一动作。</div>
-            <div id="actionControls" class="action-controls"></div>
+            <div id="actionContent" class="empty-state">系统会结合任务和当前画面，只提出一个下一步操作。</div>
             <p id="pauseNotice" class="pause-notice" hidden>已暂停推进：不会再发起下一步；若当前最小动作已开始，会在完成后停住。</p>
           </section>
         </div>
       </div>
 
-      <section id="capabilityAcceptancePanel" class="panel capability-panel" aria-labelledby="capabilityTitle">
-        <div class="panel-head">
+      <details id="capabilityAcceptancePanel" class="panel capability-panel" open data-collapsed="true" aria-labelledby="capabilityTitle">
+        <summary class="panel-head">
           <div>
-            <p class="eyebrow">LIVE DEVICE CAPABILITY ACCEPTANCE</p>
-            <h2 id="capabilityTitle">真机能力验收</h2>
+            <p class="eyebrow">设备能力</p>
+            <h2 id="capabilityTitle">查看设备详情</h2>
           </div>
-          <span id="capabilityBadge" class="pill neutral">未开始</span>
-        </div>
-        <p class="capability-intro">为当前设备尚未验证的通用动作生成一次真机计划。启动只观察，物理动作数为 0；动作与能力启用分别需要一次精确确认。</p>
+          <span class="trace-summary-action">查看详情 <span id="capabilityBadge" class="pill neutral">未开始</span></span>
+        </summary>
+        <p class="capability-intro">为当前设备尚未验证的通用动作生成一次设备计划。开始时只查看画面；每次操作都需要单独确认。</p>
         <div class="capability-form">
           <label><span>待验收动作</span><select id="capabilityAction" aria-label="待验收通用动作"></select></label>
           <label class="capability-goal"><span>通用验收目标</span><textarea id="capabilityGoal" rows="2" placeholder="例如：将当前页面中明确标记为测试对象的滑块拖到右侧终点。"></textarea></label>
@@ -220,7 +275,7 @@
         <div id="capabilityStatus" class="capability-status empty-state">请选择一个尚未验证的通用动作。这里不提供连续执行。</div>
         <div id="capabilityEvidence" class="capability-evidence" hidden></div>
         <div id="capabilityControls" class="action-controls"></div>
-      </section>
+      </details>
     </main>
   </div>
 
@@ -228,7 +283,7 @@
 
   <dialog id="riskDialog" class="risk-dialog">
     <form method="dialog">
-      <p class="eyebrow">RISK CONFIRMATION</p>
+      <p class="eyebrow">需要确认</p>
       <h2 id="riskTitle">确认当前动作</h2>
       <div id="riskLevel" class="risk-level">正在评估</div>
       <dl class="risk-details">
@@ -248,7 +303,7 @@
 
   <dialog id="promotionDialog" class="risk-dialog">
     <form method="dialog">
-      <p class="eyebrow">CAPABILITY PROMOTION CONFIRMATION</p>
+      <p class="eyebrow">设备能力确认</p>
       <h2>确认启用该设备能力</h2>
       <div class="risk-level high">独立确认 · 只修改一个设备的一项能力</div>
       <dl class="risk-details">

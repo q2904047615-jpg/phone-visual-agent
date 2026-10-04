@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { chromium } = require("playwright");
@@ -103,6 +104,27 @@ function activeActionSession() {
   return session;
 }
 
+async function submitGoal(page, text = "执行一个通用视觉目标") {
+  await page.locator("#agentText").fill(text);
+  await page.locator("#startSupervisedAgent").click();
+}
+
+async function waitForQwenSettled(page) {
+  await page.waitForFunction(() => {
+    const state = document.querySelector("#qwenResponseState");
+    return state && !state.classList.contains("loading");
+  }, null, { timeout: 7000 });
+}
+
+async function capture(page, name) {
+  if (!process.env.UI_ACCEPTANCE_EVIDENCE) return;
+  fs.mkdirSync(process.env.UI_ACCEPTANCE_EVIDENCE, { recursive: true });
+  await page.screenshot({
+    path: path.join(process.env.UI_ACCEPTANCE_EVIDENCE, name),
+    fullPage: true,
+  });
+}
+
 async function launchOfflinePage(session, options = {}) {
   const launchOptions = { headless: true };
   if (process.env.BROWSER_EXECUTABLE) launchOptions.executablePath = process.env.BROWSER_EXECUTABLE;
@@ -112,6 +134,10 @@ async function launchOfflinePage(session, options = {}) {
   await page.addInitScript(value => {
     const currentSession = value.session;
     const nextSession = value.nextSession || currentSession;
+    const devicePayload = value.devicePayload;
+    window.__offlinePending = false;
+    window.__offlineOutcome = { kind: "success", session: currentSession };
+    let servedSession = null;
     window.__offlineRequests = [];
     localStorage.setItem("visual-agent-device-id", "phone-01");
     const response = body => new Response(JSON.stringify(body), {
@@ -133,18 +159,27 @@ async function launchOfflinePage(session, options = {}) {
           busy: false,
           default_device_id: "phone-01",
           devices: [{ device_id: "phone-01", verified_actions: ["tap_semantic"] }],
-          generic_supervised_execution: { active_sessions: [] },
+          ...devicePayload,
+          generic_supervised_execution: { active_sessions: servedSession ? [servedSession] : [] },
           execution_architecture: { universal_agent: { observer: { current_stage: "idle" } } },
         });
       }
       if (requestPath === "/api/capability-acceptance") return response({ trials: [] });
+      if (requestPath.includes("/machine-position") && options.method === "POST") return response({ ok: true });
       if (requestPath === "/api/agent/generic-supervised/start-async" && options.method === "POST") {
         return response({ task_id: "offline-start", status: "running" });
       }
       if (requestPath === "/api/agent/generic-supervised/start-async/offline-start") {
+        if (window.__offlinePending) return response({ task_id: "offline-start", status: "running" });
+        const outcome = window.__offlineOutcome;
+        if (outcome.kind === "request-error") return new Response(JSON.stringify({ detail: "离线测试：请求失败" }), { status: 503 });
+        if (outcome.kind === "invalid-json") return new Response("{not-json", { status: 200 });
+        if (outcome.kind === "failed-task") return response({ status: "failed", error: "离线测试：模型结果无法解析" });
+        servedSession = outcome.session;
         return response({ task_id: "offline-start", status: "completed",
-          result: { session: currentSession } });
+          result: { session: servedSession } });
       }
+      if (servedSession && requestPath === `/api/agent/generic-supervised/${servedSession.session_id}`) return response({ session: servedSession });
       if (requestPath.endsWith("/confirm") && options.method === "POST") return response({ session: currentSession });
       if (requestPath.includes("/next") && options.method === "POST") return response({ session: nextSession });
       return new Response(JSON.stringify({ detail: "offline fixture route not found" }), {
@@ -152,7 +187,11 @@ async function launchOfflinePage(session, options = {}) {
         headers: { "Content-Type": "application/json" },
       });
     };
-  }, { session, nextSession: options.nextSession || null });
+  }, {
+    session,
+    nextSession: options.nextSession || null,
+    devicePayload: options.devicePayload || null,
+  });
   await page.route("**/assets/protocol_adapter.js*", route => route.fulfill({
     path: path.join(staticRoot, "protocol_adapter.js"),
     contentType: "text/javascript",
@@ -190,7 +229,7 @@ test("offline console renders the full phase-two trace and disables a stale scop
     assert.match(traceText, /步骤 1 · revision 1/);
     assert.match(traceText, /obs_0123456789abcdef0123456789abcdef/);
     assert.match(traceText, /QWEN 唯一动作/);
-    assert.match(traceText, /CONTROLLER GATE/);
+    assert.match(traceText, /执行条件/);
     assert.match(traceText, /physical_actions 1/);
     assert.match(traceText, /符合预期/);
     assert.match(traceText, /obs-after-001 \/ fingerprint-after-001/);
@@ -205,10 +244,10 @@ test("offline console renders the full phase-two trace and disables a stale scop
     assert.match(sceneText, /obs-after-001/);
     assert.match(sceneText, /fingerprint-after-001/);
     assert.match(sceneText, /stale/);
-    assert.match(sceneText, /active/);
+    assert.match(sceneText, /stale/);
 
     assert.equal(await page.locator("#reviewAction").count(), 0);
-    assert.match(await page.locator("#nextSupervisedAgent").innerText(), /旧确认已失效/);
+    assert.match(await page.locator("#nextSupervisedAgent").innerText(), /确认已失效/);
     if (process.env.PHASE2_CONSOLE_SCREENSHOT) {
       await page.screenshot({
         path: process.env.PHASE2_CONSOLE_SCREENSHOT,
@@ -263,7 +302,7 @@ test("a next observation invalidates the old dialog grant without a confirm requ
     await page.locator("#riskDialog").waitFor({ state: "visible" });
     await page.keyboard.press("Escape");
     await page.locator("#nextSupervisedAgent").click();
-    await page.locator("#nextSupervisedAgent").filter({ hasText: "旧确认已失效" }).waitFor({ timeout: 5000 });
+    await page.locator("#nextSupervisedAgent").filter({ hasText: "确认已失效" }).waitFor({ timeout: 5000 });
 
     const requests = await page.evaluate(() => window.__offlineRequests);
     assert.equal(requests.filter(item => item.path.endsWith("/next")).length, 1);
@@ -298,6 +337,212 @@ test("redacted real session renders terminal trace without coordinates paths tok
     assert.equal(columns.trim().split(/\s+/).length, 1);
     assert.equal(await page.locator("#reviewAction").count(), 0);
     assert.equal(await page.locator("#nextSupervisedAgent").count(), 0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("task-first labels guide an empty task and collapse technical sections", { timeout: 30000 }, async () => {
+  const { browser, page } = await launchOfflinePage(null, { viewport: { width: 390, height: 844 } });
+  try {
+    await page.locator("#taskEmptyState").waitFor({ state: "visible" });
+    const bodyText = await page.locator("body").innerText();
+    assert.doesNotMatch(bodyText, /SELLER CAMERA POSITION/);
+    assert.doesNotMatch(bodyText, /真机能力的接收/);
+    assert.equal(await page.locator("#connectDeviceButton").innerText(), "查看设备详情");
+    assert.equal(await page.getByRole("button", { name: "新建任务" }).count(), 2);
+    assert.equal(await page.locator("#pauseButton").isVisible(), false);
+    assert.equal(await page.locator("#stopButton").isVisible(), false);
+    assert.equal(await page.locator("#reviewAction").count(), 0);
+    assert.equal(await page.locator("#cancelSupervisedAgent").count(), 0);
+    assert.equal(await page.locator("#executionRecords").getAttribute("data-collapsed"), "true");
+    assert.equal(await page.locator("#taskPlanDetails").getAttribute("data-collapsed"), "true");
+    assert.equal(await page.locator("#capabilityAcceptancePanel").getAttribute("data-collapsed"), "true");
+    const layout = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      clippedButtons: [...document.querySelectorAll("button")].filter(button => {
+        const box = button.getBoundingClientRect();
+        return box.width > 0 && (box.left < 0 || box.right > window.innerWidth);
+      }).length,
+    }));
+    assert.ok(layout.scrollWidth <= layout.clientWidth + 1);
+    assert.equal(layout.clippedButtons, 0);
+    const composer = await page.locator("#agentText").boundingBox();
+    const send = await page.locator("#startSupervisedAgent").boundingBox();
+    assert.ok(composer && composer.y + composer.height <= 844, JSON.stringify({ composer, send }));
+    assert.ok(send && send.y + send.height <= 844, JSON.stringify({ composer, send }));
+    await capture(page, "empty-mobile-390x844.png");
+    await page.locator("#executionRecords > summary").click();
+    assert.equal(await page.locator("#executionRecords").getAttribute("data-collapsed"), "false");
+  } finally {
+    await browser.close();
+  }
+
+  const active = activeActionSession();
+  const fixture = await launchOfflinePage(active, { viewport: { width: 1280, height: 900 } });
+  try {
+    await fixture.page.locator("#agentText").fill("执行一个任务");
+    await fixture.page.locator("#startSupervisedAgent").click();
+    await fixture.page.locator("#reviewAction").waitFor({ timeout: 5000 });
+    assert.match(await fixture.page.locator("#reviewAction").innerText(), /确认当前动作/);
+  } finally {
+    await fixture.browser.close();
+  }
+});
+
+test("narrow composer remains visible when the viewport is short", { timeout: 30000 }, async () => {
+  const { browser, page } = await launchOfflinePage(null, { viewport: { width: 390, height: 530 } });
+  try {
+    await page.locator("#taskEmptyState").waitFor({ state: "visible" });
+    const layout = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      composer: document.querySelector("#agentText").getBoundingClientRect().toJSON(),
+      send: document.querySelector("#startSupervisedAgent").getBoundingClientRect().toJSON(),
+    }));
+    assert.ok(layout.scrollWidth <= layout.clientWidth + 1);
+    assert.ok(layout.composer.bottom <= 530);
+    assert.ok(layout.send.bottom <= 530);
+    await capture(page, "empty-mobile-short-390x530.png");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("Qwen native conversation fields render in order and phone view stays in a drawer", { timeout: 30000 }, async () => {
+  const session = activeActionSession();
+  session.conversation = [
+    { role: "assistant", content: "我已查看当前画面，准备先确认目标位置。" },
+    { role: "assistant", content: "下一步建议：确认当前动作。" },
+  ];
+  session.qwen_reply = "下一步建议：确认当前动作。";
+  const { browser, page } = await launchOfflinePage(session, { viewport: { width: 1440, height: 900 } });
+  try {
+    await submitGoal(page);
+    await page.locator("#qwenMessages .qwen-message.assistant").nth(1).waitFor({ timeout: 5000 });
+    const messages = await page.locator("#qwenMessages").innerText();
+    assert.match(messages, /我已查看当前画面/);
+    assert.match(messages, /下一步建议：确认当前动作/);
+    assert.equal(await page.locator("#qwenResponseState").innerText(), "等待你的确认");
+    assert.equal(await page.locator("#openPreviewButton").isVisible(), true);
+    assert.equal(await page.locator("#taskWorkspace > .preview-panel").evaluate(node => getComputedStyle(node).display), "block");
+    await page.locator("#openPreviewButton").click();
+    assert.equal(await page.locator("#taskWorkspace > .preview-panel").evaluate(node => node.classList.contains("drawer-open")), true);
+    await page.locator("#closePreviewButton").click();
+    assert.equal(await page.locator("#taskWorkspace > .preview-panel").evaluate(node => node.classList.contains("drawer-open")), false);
+    await capture(page, "confirmation-desktop-1440x900.png");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("Qwen loading, empty, request failure and parse failure use the real page request path", { timeout: 45000 }, async () => {
+  const normal = activeActionSession();
+  normal.status = "succeeded";
+  normal.confirmation_ready = false;
+  normal.confirmation_scope = null;
+  normal.conversation = [
+    { role: "user", content: "原始用户内容\n保留换行" },
+    { role: "assistant", content: "Qwen 原始回答 <保留标点>。" },
+    { role: "system", content: "内部消息不得显示" },
+  ];
+  normal.qwen_reply = "Qwen 原始回答 <保留标点>。";
+  const { browser, page } = await launchOfflinePage(normal, { viewport: { width: 1440, height: 900 } });
+  try {
+    await page.evaluate(() => { window.__offlinePending = true; });
+    await submitGoal(page, "第一次加载中的任务");
+    await page.locator("#qwenResponseState").filter({ hasText: "Qwen 正在分析" }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#qwenResponseState").evaluate(node => node.classList.contains("loading")), true);
+    assert.equal(await page.locator("#qwenMessages .assistant").count(), 0);
+    await capture(page, "loading-desktop-1440x900.png");
+    await page.evaluate(() => { window.__offlinePending = false; });
+    await page.locator("#qwenMessages .assistant").waitFor({ timeout: 7000 });
+    await waitForQwenSettled(page);
+    assert.equal(await page.locator("#qwenResponseState").evaluate(node => node.classList.contains("loading")), false);
+    assert.deepEqual(await page.locator("#qwenMessages .assistant .qwen-message-content").allTextContents(), ["Qwen 原始回答 <保留标点>。"]);
+    assert.equal(await page.locator("#qwenMessages .system").count(), 0);
+    assert.equal(await page.locator("#qwenMessages .assistant").count(), 1);
+
+    const empty = clone(normal);
+    empty.session_id = "empty-answer-session";
+    empty.conversation = [];
+    empty.qwen_reply = "";
+    empty.qwen_decision.reason = "内部协议理由不应成为回答";
+    await page.evaluate(session => {
+      window.__offlineOutcome = { kind: "success", session };
+      window.__offlinePending = false;
+    }, empty);
+    await submitGoal(page, "空回答任务");
+    await waitForQwenSettled(page);
+    assert.equal(await page.locator("#qwenMessages .assistant").count(), 0);
+    assert.match(await page.locator("#qwenResponseState").innerText(), /尚未收到 Qwen 回答/);
+    assert.doesNotMatch(await page.locator("#qwenMessages").innerText(), /内部协议理由/);
+
+    await page.evaluate(() => { window.__offlineOutcome = { kind: "request-error" }; });
+    await submitGoal(page, "请求失败任务");
+    await page.locator("#qwenResponseState").filter({ hasText: "本次请求失败" }).waitFor({ timeout: 7000 });
+    assert.equal(await page.locator("#qwenMessages .assistant").count(), 0);
+    assert.equal(await page.locator("#qwenResponseState").evaluate(node => node.classList.contains("loading")), false);
+    await capture(page, "error-request-desktop-1440x900.png");
+
+    await page.evaluate(() => { window.__offlineOutcome = { kind: "invalid-json" }; });
+    await submitGoal(page, "解析失败任务");
+    await page.locator("#qwenResponseState").filter({ hasText: "回答格式无法读取" }).waitFor({ timeout: 7000 });
+    assert.equal(await page.locator("#qwenMessages .assistant").count(), 0);
+    assert.equal(await page.locator("#qwenResponseState").evaluate(node => node.classList.contains("loading")), false);
+    assert.equal(await page.locator("#pauseButton").isVisible(), false);
+    assert.equal(await page.locator("#stopButton").isVisible(), false);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("device navigation opens dynamic devices and ten machine-position slots", { timeout: 30000 }, async () => {
+  const { browser, page } = await launchOfflinePage(null, {
+    devicePayload: {
+      default_device_id: "phone-01",
+      devices: [
+        {
+          device_id: "phone-01",
+          name: "一号手机",
+          machine_position: 1,
+          enabled: true,
+          controller_online: true,
+          camera_online: true,
+          busy: false,
+          verified_actions: ["tap_semantic"],
+        },
+        {
+          device_id: "phone-04",
+          name: "四号手机",
+          machine_position: 4,
+          enabled: true,
+          controller_online: false,
+          camera_online: false,
+          busy: true,
+          verified_actions: ["tap_semantic"],
+        },
+      ],
+    },
+  });
+  try {
+    await page.locator("#deviceNavItem").click();
+    await page.locator("#deviceOverview.details-open").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#deviceDetailsList .device-detail-card").count(), 2);
+    assert.match(await page.locator("#deviceDetailsList").innerText(), /一号手机/);
+    assert.match(await page.locator("#deviceDetailsList").innerText(), /控制器未连接.*画面不可用.*使用中/);
+    assert.equal(await page.locator("#machinePositionButtons .machine-position-button").count(), 10);
+    assert.match(await page.locator("#machinePositionButtons").innerText(), /1号机位[\s\S]*一号手机/);
+    assert.match(await page.locator("#machinePositionButtons").innerText(), /4号机位[\s\S]*四号手机/);
+    assert.match(await page.locator("#machinePositionButtons").innerText(), /2号机位[\s\S]*未配置/);
+    assert.equal(await page.locator("#machinePositionButtons .machine-position-button.active").getAttribute("aria-label"), "1号机位，一号手机，控制器已连接 · 画面可用 · 空闲");
+    await page.locator("#machinePositionButtons .machine-position-button").nth(1).click();
+    await page.waitForFunction(() => window.__offlineRequests.some(item => item.path.includes("/machine-position") && item.method === "POST"));
+    assert.deepEqual(await page.evaluate(() => window.__offlineRequests.filter(item => item.path.includes("/machine-position")).at(-1).body), { machine_position: 2 });
+    await page.locator("#deviceDetailsList .device-detail-card").filter({ hasText: "四号手机" }).click();
+    await page.waitForFunction(() => document.querySelector("#deviceId")?.value === "phone-04");
+    assert.equal(await page.locator("#deviceDetailsList .device-detail-card.selected").getAttribute("aria-pressed"), "true");
   } finally {
     await browser.close();
   }

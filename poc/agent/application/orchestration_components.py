@@ -11,6 +11,11 @@ import uuid
 from typing import Any
 
 from agent.application.action_adapter import GenericActionAdapterError
+from agent.application.orchestration_support import (
+    UniversalAgentOrchestratorError,
+    _action_digest,
+    _is_zero_action_reobservation_fault,
+)
 from agent.application.runtime_session import POST_ACTION_TRANSITION_PROTOCOL_VERSION, UniversalAgentSessionState
 from agent.application.vision_usage import VisionSessionUsageLedger
 from agent.domain import CANONICAL_SELECTION_RECEIPT_VERSION, ConfirmationAuthority, EffectConfirmationAuthority
@@ -19,12 +24,6 @@ from agent.domain.execution_budget import (
     TaskExecutionBudget,
 )
 from agent.domain.validation import reject_if
-from agent.application.universal_agent_orchestrator import (
-    UniversalAgentOrchestratorError,
-    _action_digest,
-    _is_zero_action_reobservation_fault,
-)
-
 class ObservationDecisionCoordinator:
     def observe_and_decide(self, host, session: UniversalAgentSessionState) -> Any:
         host._clear_action(session)

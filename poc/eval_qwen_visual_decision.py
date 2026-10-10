@@ -188,21 +188,31 @@ def _score(case: dict[str, Any], *, status: str, decision: dict[str, Any] | None
         element_id = str((params or {}).get("element_id") or "") if isinstance(params, dict) else ""
         if status != "action":
             target_reasons.append("目标控件期望只适用于 action，模型没有返回 action")
-        elif not element_id:
-            target_reasons.append("动作没有绑定当前 scene 的 element_id")
-        else:
+        elif isinstance(params, dict) and isinstance(params.get("tap_point"), (list, tuple)):
+            # Offline diagnostic score only: never bind or alter the runtime action.
+            # Optional scene evidence can explain the selected point, but cannot
+            # make a missing/outside/ambiguous point pass this benchmark.
+            point = params["tap_point"]
+            candidates = []
+            if len(point) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in point):
+                for item in elements:
+                    bounds = item.get("bounds") if isinstance(item, dict) else None
+                    if (isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in bounds)
+                            and 0 <= bounds[0] < bounds[2] <= 1 and 0 <= bounds[1] < bounds[3] <= 1
+                            and bounds[0] <= point[0] <= bounds[2] and bounds[1] <= point[1] <= bounds[3]):
+                        candidates.append(item)
+            if len(candidates) == 1:
+                target_element = candidates[0]
+            else:
+                target_reasons.append("坐标缺少唯一的同帧目标说明；该离线样本尚不能证明目标识别")
+        elif element_id:
             target_element = next((item for item in elements
                 if isinstance(item, dict) and str(item.get("element_id") or "") == element_id), None)
-            if target_element is None and isinstance(params, dict) and isinstance(params.get("tap_point"), list):
-                target_element = {
-                    "element_id": element_id,
-                    "role": params.get("role"),
-                    "meaning": params.get("target"),
-                    "label": params.get("label"),
-                    "evidence": params.get("target_evidence") or [],
-                }
             if target_element is None:
-                target_reasons.append(f"当前响应找不到动作绑定目标：{element_id}")
+                target_reasons.append(f"当前响应找不到输入字段：{element_id}")
+        else:
+            target_reasons.append("动作没有可评分的坐标或当前输入字段")
         if target_element is not None:
             labels = target.get("label_any")
             if isinstance(labels, list) and _normalized_text(target_element.get("label")) not in {
@@ -334,6 +344,7 @@ def _evaluate_case(
             goal_context={"objective": context.raw_goal, "entities": {
                 "history": list(context.history), "exact_input_text": context.exact_input_text}},
         )
+        reply = model_decision.pop("_qwen_reply", "")
         observation = build_trusted_observation(
             frames=frames,
             device_id=context.device_id,
@@ -348,6 +359,7 @@ def _evaluate_case(
             model_decision=model_decision,
         )
         value = decision.to_dict()
+        value["reply"] = reply
         status = decision.proposal.status
         decision_diagnostics = dict(decision_observer.last_diagnostics)
         failure = None

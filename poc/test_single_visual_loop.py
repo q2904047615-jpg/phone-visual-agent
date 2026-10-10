@@ -7,6 +7,7 @@ from PIL import Image
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
 from agent.domain.action_catalog import CANONICAL_ACTION_KINDS
+from agent.domain.qwen_task_context import EFFECT_KINDS
 from agent.domain.text_transport import TextTransportProfile
 from agent.domain.ui_scene import UIScene, UIElement
 from agent.domain.universal_action_controller import ResolvedSemanticAction
@@ -24,17 +25,25 @@ def scene(number, *, text=None, focused=True, app='notes'):
 
 
 def decision(kind=None, *, meaning='open_details', role='button', text=None, outcome='matched'):
-    reported_outcome = outcome
-    value = {'status':'finish' if kind is None else 'action', 'action':kind,
-        'reason':'当前新图与本次执行记录证明结果', 'previous_action_outcome':reported_outcome}
-    if True:
-        value['postcondition'] = {'status': {'matched':'confirmed',
-            'unmatched':'not_confirmed', 'uncertain':'unknown'}[reported_outcome],
-            'fact': '测试夹具动作后状态'}
-    if kind in {'tap_semantic','dismiss_overlay','double_tap','long_press'}:
-        value.update(target={'role':role,'meaning':meaning},tap_point=[230,670])
-    if text is not None:
-        value['text'] = text
+    wire_kind = {
+        'tap_semantic': 'tap', 'dismiss_overlay': 'dismiss',
+        'swipe_element': 'swipe', 'input_verified_text': 'input',
+        'clear_verified_text': 'clear_input',
+    }.get(kind, kind)
+    value = {
+        'status': 'finish' if kind is None else 'action',
+        'action': wire_kind,
+        'reason': '当前新图与本次执行记录证明结果',
+        'previous_action_outcome': outcome,
+        'effect': meaning if meaning in EFFECT_KINDS else None,
+        'point': [230, 670] if kind in {'tap_semantic', 'dismiss_overlay', 'double_tap', 'long_press'} else None,
+        'direction': None, 'start': None, 'end': None,
+        'text': text if kind == 'input_verified_text' else None,
+        'app': None, 'wait_seconds': 300 if kind == 'wait_for_change' else None,
+        'state_action_consistent': True,
+        'postcondition': {'status': {'matched':'confirmed', 'unmatched':'not_confirmed', 'uncertain':'unknown'}[outcome],
+            'fact': '测试夹具动作后状态'},
+    }
     return value
 
 
@@ -126,7 +135,8 @@ class WholeTaskLoopTests(LoopHarness):
             (scene(1),decision('tap_semantic',meaning='send_message',outcome='uncertain'))]
         loop,s,a=self.start(rows,goal='发送一条消息')
         loop.run_autonomous_safe_loop(s)
-        self.assertEqual(s.status,'failed')
+        self.assertEqual(s.status,'paused')
+        self.assertIn('不确定',s.auto_pause_reason)
         self.assertEqual(len(a.calls),1)
     def test_uncertain_effect_can_wait_for_delayed_visual_confirmation(self):
         rows=[(scene(0),decision('tap_semantic',meaning='send_message')),

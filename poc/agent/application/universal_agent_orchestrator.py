@@ -11,8 +11,14 @@ import re
 from typing import Any, Callable
 import uuid
 
-from agent.domain.validation import canonical_digest, reject_if
-from agent.application.action_adapter import GenericActionAdapterError, GenericSingleActionAdapterPort
+from agent.domain.validation import reject_if
+from agent.application.action_adapter import GenericSingleActionAdapterPort
+from agent.application.orchestration_support import (
+    UniversalAgentOrchestratorError,
+    _action_digest,
+    _is_zero_action_stale_frame_fault,
+    _is_zero_action_reobservation_fault,
+)
 from agent.application.runtime_session import POST_ACTION_TRANSITION_PROTOCOL_VERSION, UniversalAgentSessionState
 from agent.application.vision_usage import VisionSessionUsageLedger
 from agent.domain import (
@@ -35,39 +41,6 @@ from agent.domain.qwen_task_context import (
     QwenTaskContext, action_effect_kind, CONFIRMATION_EFFECT_KINDS, execution_history_entry,
 )
 from agent.domain.session import TERMINAL_SESSION_STATUSES
-
-
-class UniversalAgentOrchestratorError(RuntimeError):
-    pass
-
-
-_STALE_FRAME_FAILURE_PREFIXES = (
-    '确认时前台 App 已变化',
-    '确认时页面已变化',
-    '当前新截图不再包含 Qwen 已选',
-    '确认时目标区域已明显移动',
-)
-
-def _is_zero_action_stale_frame_fault(exc: GenericActionAdapterError) -> bool:
-    return exc.physical_actions == 0 and str(exc).startswith(_STALE_FRAME_FAILURE_PREFIXES)
-
-
-def _is_zero_action_reobservation_fault(exc: GenericActionAdapterError) -> bool:
-    """Return whether the failed attempt can be retried with a fresh observation.
-
-    A zero-action model/observation failure has not consumed the one-shot action
-    authority.  Keep it resumable so a transient provider response or stale
-    frame cannot turn an otherwise valid task into a terminal failure.  Device
-    execution errors remain terminal when there is no observation evidence.
-    """
-
-    return _is_zero_action_stale_frame_fault(exc) or bool(exc.observation_errors)
-
-
-def _action_digest(action: Any) -> str:
-    reject_if(action is None, UniversalAgentOrchestratorError("动作摘要缺少语义动作。"))
-    payload = action.to_dict() if callable(getattr(action, 'to_dict', None)) else action
-    return canonical_digest(payload)
 
 
 def _model_history(session: UniversalAgentSessionState) -> list[dict[str, Any]]:

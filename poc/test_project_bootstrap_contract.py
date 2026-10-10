@@ -21,8 +21,15 @@ class ProjectBootstrapContractTests(unittest.TestCase):
 
         self.assertIn("agent_api_cli.py", launcher)
         self.assertIn("bootstrap", launcher)
+        self.assertIn("restart_local_api.py", launcher)
+        self.assertIn("fresh=1", launcher)
         self.assertNotIn("Invoke-WebRequest", launcher)
         self.assertNotIn("/api/device", launcher)
+
+        helper = (POC_ROOT / "restart_local_api.py").read_text(encoding="utf-8")
+        self.assertIn("ExecutablePath", helper)
+        self.assertIn("web_app:app", helper)
+        self.assertIn("taskkill", helper)
 
     def test_only_current_launcher_remains(self) -> None:
         self.assertEqual(

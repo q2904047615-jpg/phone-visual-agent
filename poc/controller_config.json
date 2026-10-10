@@ -33,5 +33,47 @@
     "inter_key_wait": 0.12,
     "pre_key_wait": 0.45,
     "first_key_settle": 0.35
+  },
+  "directional_swipes": {
+    "left": {
+      "start": [
+        800,
+        500
+      ],
+      "end": [
+        200,
+        500
+      ]
+    },
+    "right": {
+      "start": [
+        200,
+        500
+      ],
+      "end": [
+        800,
+        500
+      ]
+    },
+    "up": {
+      "start": [
+        500,
+        800
+      ],
+      "end": [
+        500,
+        200
+      ]
+    },
+    "down": {
+      "start": [
+        500,
+        200
+      ],
+      "end": [
+        500,
+        800
+      ]
+    }
   }
 }

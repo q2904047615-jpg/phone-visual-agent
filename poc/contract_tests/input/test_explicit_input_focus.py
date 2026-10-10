@@ -48,7 +48,7 @@ class ExplicitInputFocusTests(unittest.TestCase):
         item['focused'] = focused
         audit = input_audit_payload(application_inputs=[item])
         audit['keyboard']['visible'] = keyboard
-        choice = decision('clear_verified_text', element_id='local_audited_input_1')
+        choice = decision('clear_verified_text')
         result = wire(choice, audit)
         result['scene']['elements'] = []
         return result
@@ -86,10 +86,7 @@ class ExplicitInputFocusTests(unittest.TestCase):
 
     def test_unknown_focus_allows_focus_tap_without_changing_point(self):
         payload = self.payload(None)
-        payload['decision'] = decision('tap_semantic', target={
-            'element_id': 'local_audited_input_1', 'role': 'input',
-            'meaning': 'application_text_input', 'label': '输入框', 'evidence': ['完整可见输入栏']},
-            tap_point=[500,410])
+        payload['decision'] = decision('tap_semantic', point=[500,410])
         scene, result, resolved, _ = observe(payload, task_context('清空当前输入框'))
         self.assertIsNot(True, scene.elements[0].states.get('focused'))
         self.assertEqual('tap_semantic', result.proposal.action.action)
@@ -113,8 +110,7 @@ class ExplicitInputFocusTests(unittest.TestCase):
 
     def test_empty_field_can_finish_without_focus(self):
         payload = self.payload(None, text='')
-        payload['decision'] = decision(None, status='finish',
-            evidence_refs=['element:local_audited_input_1'])
+        payload['decision'] = decision(None, status='finish')
         scene, result, resolved, _ = observe(payload, task_context('清空当前输入框'))
         self.assertEqual('finish', result.proposal.status)
         self.assertIsNone(resolved)
@@ -153,7 +149,7 @@ class ExplicitInputFocusTests(unittest.TestCase):
         payload = wire()
         provider = RawSceneProvider([payload])
         observer = SingleStepGenericSceneObserver(provider)
-        adapter = SimpleNamespace(observer=observer, device_id='device-1',
+        adapter = SimpleNamespace(observer=observer, device_id='device-1', visual_reference_paths=(),
             supported_action_kinds=lambda: frozenset({'tap_semantic'}))
         with tempfile.TemporaryDirectory() as directory:
             GenericSingleActionAdapter._observe_scene(adapter, patterned_frames(), {},

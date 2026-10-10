@@ -26,6 +26,7 @@ from agent.infrastructure import (
     SHARED_DEVICE_LEASE_DIR,
 )
 from agent.infrastructure.adb_keyboard_transport import AdbKeyboardRuntimeRegistry
+from agent.infrastructure.adb_pairing import AdbPairingService
 from agent.infrastructure.adb_package_launcher import AdbPackageLauncher
 from agent.infrastructure.capability_acceptance import CapabilityAcceptanceError
 from agent.infrastructure.capability_acceptance_runtime import CapabilityAcceptanceManager
@@ -99,6 +100,7 @@ class Runtime:
         self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
         self.vision_provider = DashScopeVisionProvider(enable_thinking=True)
         self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(adb_keyboard_registry_path)
+        self._adb_pairing_services: dict[str, AdbPairingService | None] = {}
         self.generic_scene_observer = SingleStepGenericSceneObserver(self.vision_provider)
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider,
@@ -164,6 +166,16 @@ class Runtime:
 
     def text_transport_for_device(self, device_id: str):
         return self.adb_keyboard_runtime.transport_for_device(device_id)
+
+    def adb_pairing_service_for_device(self, device_id: str) -> AdbPairingService | None:
+        resolved = str(device_id or '').strip()
+        if resolved not in self._adb_pairing_services:
+            transport = self.text_transport_for_device(resolved)
+            self._adb_pairing_services[resolved] = (
+                AdbPairingService(transport.adb_executable, transport.profile.adb_serial)
+                if transport is not None else None
+            )
+        return self._adb_pairing_services[resolved]
 
     def capability_code_revision(self) -> str:
         current = self.code_revision_provider()

@@ -15,6 +15,7 @@ function clone(value) {
 
 function traceSession() {
   const priorDecision = clone(qwenFixture.decision);
+  priorDecision.next_action.params = {tap_point: [0.77, 0.275], effect_kind: "financial_transaction"};
   const currentDecision = clone(priorDecision);
   currentDecision.observation_id = "obs-after-001";
   currentDecision.fingerprint = "fingerprint-after-001";
@@ -55,7 +56,7 @@ function traceSession() {
       device_id: "phone-01",
       revision: 1,
       step_id: "step_2",
-      effect_ids: [],
+      effect_ids: ["financial_transaction"],
       observation_id: "obs_0123456789abcdef0123456789abcdef",
       fingerprint: "51277d0d9e6f986b00dc",
       decision_node_id: "qwen_visual_revision_1",
@@ -138,7 +139,7 @@ async function launchOfflinePage(session, options = {}) {
         });
       }
       if (requestPath === "/api/capability-acceptance") return response({ trials: [] });
-      if (requestPath === "/api/agent/generic-supervised/start-async" && options.method === "POST") {
+      if (requestPath === "/api/qwen/chat" && options.method === "POST") {
         return response({ task_id: "offline-start", status: "running" });
       }
       if (requestPath === "/api/agent/generic-supervised/start-async/offline-start") {
@@ -180,17 +181,17 @@ test("offline console renders the full phase-two trace and disables a stale scop
   try {
     await page.locator("#agentText").fill("执行一个通用视觉目标");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#traceList [data-trace-phase='current']").waitFor({ timeout: 5000 });
+    await page.locator("#traceList [data-trace-phase='current']").waitFor({ state: "attached", timeout: 5000 });
 
-    const goalText = await page.locator("#goalSummary").innerText();
+    const goalText = await page.locator("#goalSummary").textContent();
     assert.match(goalText, /revision 1/);
-    assert.match(await page.locator("#planList").innerText(), /在支付演示页核对订单并付款/);
+    assert.match(await page.locator("#planList").textContent(), /在支付演示页核对订单并付款/);
 
-    const traceText = await page.locator("#traceList").innerText();
+    const traceText = await page.locator("#traceList").textContent();
     assert.match(traceText, /步骤 1 · revision 1/);
     assert.match(traceText, /obs_0123456789abcdef0123456789abcdef/);
-    assert.match(traceText, /QWEN 唯一动作/);
-    assert.match(traceText, /CONTROLLER GATE/);
+    assert.match(traceText, /Qwen 唯一动作/);
+    assert.match(traceText, /Controller gate/);
     assert.match(traceText, /physical_actions 1/);
     assert.match(traceText, /符合预期/);
     assert.match(traceText, /obs-after-001 \/ fingerprint-after-001/);
@@ -243,7 +244,7 @@ test("offline confirmation is single-shot even when the dialog button is clicked
       device_id: "phone-01",
       revision: 1,
       step_id: "step_2",
-      effect_ids: [],
+      effect_ids: ["financial_transaction"],
       observation_id: "obs-after-001",
       fingerprint: "fingerprint-after-001",
       decision_node_id: "qwen_visual_revision_1",
@@ -263,7 +264,7 @@ test("a next observation invalidates the old dialog grant without a confirm requ
     await page.locator("#riskDialog").waitFor({ state: "visible" });
     await page.keyboard.press("Escape");
     await page.locator("#nextSupervisedAgent").click();
-    await page.locator("#nextSupervisedAgent").filter({ hasText: "旧确认已失效" }).waitFor({ timeout: 5000 });
+    await page.locator("#nextSupervisedAgent").filter({ hasText: "旧确认已失效" }).waitFor({ state: "attached", timeout: 5000 });
 
     const requests = await page.evaluate(() => window.__offlineRequests);
     assert.equal(requests.filter(item => item.path.endsWith("/next")).length, 1);
@@ -281,9 +282,10 @@ test("redacted real session renders terminal trace without coordinates paths tok
   try {
     await page.locator("#agentText").fill("执行一个通用视觉目标");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#traceList [data-trace-phase='terminal']").waitFor({ timeout: 5000 });
+    await page.locator("#traceList [data-trace-phase='terminal']").waitFor({ state: "attached", timeout: 5000 });
 
-    const bodyText = await page.locator("body").innerText();
+    assert.equal(await page.locator("#traceList").isHidden(), true);
+    const bodyText = await page.locator("#traceList").textContent();
     const bodyHtml = await page.locator("body").innerHTML();
     assert.match(bodyText, /终态检查点/);
     assert.match(bodyText, /旧记录未提供/);

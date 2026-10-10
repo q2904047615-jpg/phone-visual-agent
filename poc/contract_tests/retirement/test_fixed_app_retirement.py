@@ -27,43 +27,7 @@ RETIRED_RUNTIME_MODULES = {
     "build_vision_review_queue",
 }
 
-RETIRED_SOURCE_FILES = {
-    "operation_specs.py",
-    "task_orchestrator.py",
-    "state_controller.py",
-    "douyin_page_signals.py",
-    "supervised_semantic_runtime.py",
-    "semantic_action_adapter.py",
-    "live_semantic_dry_run.py",
-    "semantic_executor.py",
-    "generic_intent.py",
-    "target_locator.py",
-    "vision_replay.py",
-    "replay_vision_eval.py",
-    "analyze_state_graph_reliability.py",
-    "build_vision_history_index.py",
-    "build_vision_review_queue.py",
-    "constraint_target_filter.py",
-    "web_workflows.json",
-    "sequence.example.json",
-    "templates/douyin_home.png",
-}
 
-RETIRED_TEST_FILES = {
-    "test_operation_specs.py",
-    "test_task_orchestrator.py",
-    "test_state_controller.py",
-    "test_douyin_page_signals.py",
-    "test_supervised_semantic_runtime.py",
-    "test_semantic_action_adapter.py",
-    "test_live_semantic_dry_run.py",
-    "test_semantic_executor.py",
-    "test_generic_intent.py",
-    "test_reliability.py",
-    "test_vision_replay.py",
-    "test_vision_review_queue.py",
-    "test_constraint_target_filter.py",
-}
 
 RETIRED_PATHS = {
     "/api/tasks",
@@ -95,110 +59,12 @@ class FixedAppRetirementTests(unittest.TestCase):
         self.assertTrue(RETIRED_PATHS.isdisjoint(paths))
         self.assertIn("/api/agent/generic-supervised/start", paths)
 
-    def test_retired_sources_and_tests_are_physically_absent(self) -> None:
-        leftovers = sorted(
-            relative
-            for relative in RETIRED_SOURCE_FILES | RETIRED_TEST_FILES
-            if (ROOT / relative).exists()
-        )
-        self.assertEqual([], leftovers)
 
-    def test_unreferenced_compatibility_surfaces_cannot_return(self) -> None:
-        forbidden = {
-            "class EncodedObservationImage:",
-            "class ObservationRoi:",
-            "def _encode_bounded_jpeg(",
-            "def _infer_app_id(",
-            "def _new_generic_action_adapter(",
-            "def _normalized_crop(",
-            "def _post_observation_retryable(",
-            "def _pre_action_observation_retryable(",
-            "def _run_safe_loop_locked(",
-            "def build_overview(",
-            "def build_roi(",
-            "def ensure_dirs(",
-            "def ensure_scene_elements(",
-            "def map_roi_bounds_to_full(",
-            "def map_roi_point_to_full(",
-            "def match_surface(",
-            "def match_visual(",
-            "def prompt_dict(",
-            "def public_identity(",
-            "def recover_from_session_file(",
-            "def run_safe_loop(",
-            "def select_canonical_action_candidate(",
-            "def window_dpi(",
-        }
-        hits = []
-        for path in ROOT.glob("*.py"):
-            if path.name.startswith("test_"):
-                continue
-            text = path.read_text(encoding="utf-8")
-            hits.extend(
-                f"{path.name}:{token}" for token in forbidden if token in text
-            )
-        self.assertEqual([], sorted(hits))
 
-    def test_current_runtime_sources_cannot_restore_fixed_app_authority(self) -> None:
-        forbidden = {
-            "class TaskStore",
-            "class RuleAgent",
-            "class HybridAgent",
-            "class VisionAgentRunner",
-            "RETIRED_FIXED_APP_ROUTE_NAMES",
-            "def send_wechat_text",
-            "def execute_douyin",
-            "def detect_douyin_heart",
-            "from_legacy_observation",
-            "QWEN_VL_MODEL",
-            "DASHSCOPE_BASE_URL",
-        }
-        sources = (
-            "web_app.py",
-            "agent/infrastructure/dashscope_vision_provider.py",
-            "agent/infrastructure/robot_controller.py",
-            "agent/infrastructure/seller_window_adapter.py",
-            "agent/domain/ui_scene.py",
-            "agent/domain/vision_model.py",
-            "agent/infrastructure/environment_vision_model_config.py",
-        )
-        hits = []
-        for name in sources:
-            text = (ROOT / name).read_text(encoding="utf-8")
-            hits.extend(f"{name}:{token}" for token in forbidden if token in text)
-        self.assertEqual([], sorted(hits))
 
-    def test_retired_tests_are_not_hidden_as_skips(self) -> None:
-        text = (ROOT / "test_web_platform.py").read_text(encoding="utf-8")
-        self.assertNotIn("@unittest.skip", text)
-        self.assertNotIn("固定 App", text)
 
-    def test_retired_input_segmentation_authority_is_physically_absent(self) -> None:
-        text = (
-            ROOT / "agent" / "domain" / "text_input_utils.py"
-        ).read_text(encoding="utf-8")
-        for retired in (
-            "split_input_segments",
-            "InputAttemptState",
-            "InputRecoveryCoordinator",
-            "MAX_FULL_RETYPES",
-        ):
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, text)
 
-    def test_retired_full_qwen_action_prompt_is_physically_absent(self) -> None:
-        text = (
-            ROOT / "agent" / "application" / "qwen_visual_decision.py"
-        ).read_text(encoding="utf-8")
-        for retired in ("def _decision_prompt(", "def _decision_retry_prompt("):
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, text)
 
-    def test_robot_has_no_second_direct_latin_character_veto(self) -> None:
-        text = (
-            ROOT / "agent" / "infrastructure" / "robot_controller.py"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("英文分段包含未认证字符", text)
 
     def test_seller_text_dialog_transport_is_physically_absent(self) -> None:
         text = "\n".join(

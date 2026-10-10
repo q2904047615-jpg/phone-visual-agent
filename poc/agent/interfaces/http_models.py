@@ -7,7 +7,7 @@ or device logic.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
@@ -25,6 +25,11 @@ class StrictAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class QwenConversationMessage(StrictAgentRequest):
+    role: Literal["user", "assistant"]
+    content: StrictStr = Field(min_length=1)
+
+
 class GenericSupervisedStartRequest(StrictAgentRequest):
     text: StrictStr = Field(min_length=1)
     exact_input_text: StrictStr | None = Field(default=None, min_length=1)
@@ -32,6 +37,7 @@ class GenericSupervisedStartRequest(StrictAgentRequest):
     exact_target_label: StrictStr = Field(default="")
     device_id: StrictStr = Field(min_length=1, max_length=128)
     auto_advance: StrictBool = True
+    conversation: list[QwenConversationMessage] = Field(default_factory=list)
     max_physical_actions: StrictInt = Field(default=DEFAULT_DEVICE_ACTION_BUDGET, ge=1)
     max_observations: StrictInt = Field(default=DEFAULT_OBSERVATION_BUDGET, ge=1)
 
@@ -40,8 +46,64 @@ class GenericSupervisedDeviceRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
 
 
+class QwenChatRequest(StrictAgentRequest):
+    """A natural-language message added to an existing Qwen task session."""
+
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    text: StrictStr = Field(min_length=1)
+
+
+class QwenDraftChatRequest(StrictAgentRequest):
+    """One multimodal Qwen message; Qwen returns natural reply and optional action together."""
+
+    text: StrictStr = Field(min_length=1)
+    device_id: StrictStr = Field(default="device-local-01", min_length=1, max_length=128)
+    conversation: list[QwenConversationMessage] = Field(default_factory=list)
+    max_physical_actions: StrictInt = Field(default=DEFAULT_DEVICE_ACTION_BUDGET, ge=1)
+    max_observations: StrictInt = Field(default=DEFAULT_OBSERVATION_BUDGET, ge=1)
+
+
 class MachinePositionRequest(StrictAgentRequest):
     machine_position: StrictInt = Field(ge=1, le=10)
+
+
+class DirectionalSwipeRequest(StrictAgentRequest):
+    direction: Literal["left", "right", "up", "down"]
+
+
+class ManualMotionStartRequest(StrictAgentRequest):
+    kind: Literal["click_pair", "swipe"]
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    point_a: tuple[int, int]
+    point_b: tuple[int, int]
+    interval_seconds: float = Field(gt=0)
+    duration_seconds: float = Field(gt=0)
+
+    @classmethod
+    def _validate_finite(cls, value: float, name: str) -> float:
+        import math
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} 必须是有限数字。")
+        return float(value)
+
+    def model_post_init(self, __context: object) -> None:
+        from agent.infrastructure.manual_motion import MotionProfile
+        MotionProfile(
+            device_id=self.device_id,
+            kind=self.kind,
+            point_a=self.point_a,
+            point_b=self.point_b,
+            interval_seconds=self._validate_finite(self.interval_seconds, "interval_seconds"),
+            duration_seconds=self._validate_finite(self.duration_seconds, "duration_seconds"),
+        )
+
+
+class DevicePairRequest(StrictAgentRequest):
+    """User-visible Android wireless-debugging pairing form."""
+
+    pairing_host: StrictStr = Field(min_length=1, max_length=255)
+    pairing_port: StrictInt = Field(ge=1, le=65535)
+    pairing_code: StrictStr = Field(pattern=r"^[0-9]{6}$")
 
 
 class BaseActionConfirmationScopeRequest(StrictAgentRequest):
@@ -136,6 +198,8 @@ __all__ = [
     "CapabilityEffectApprovalRequest",
     "CapabilityEffectConfirmationScopeRequest",
     "CapabilityPromotionRequest",
+    "DevicePairRequest",
+    "DirectionalSwipeRequest",
     "GenericConfirmationScopeRequest",
     "GenericEffectApprovalRequest",
     "GenericEffectConfirmationScopeRequest",
@@ -145,4 +209,5 @@ __all__ = [
     "GenericSupervisedStartRequest",
     "GenericSupervisedStepRequest",
     "MachinePositionRequest",
+    "ManualMotionStartRequest",
 ]

@@ -47,9 +47,15 @@ class QwenTaskContext:
         return dataclass_wire(self)
 
 def action_effect_kind(action: Any) -> str:
+    """Read the declared effect class, while allowing finish to have no action."""
+    if action is None:
+        return ""
     if action.action in {"input_verified_text", "clear_verified_text", "press_enter"}:
         return "data_mutation"
-    meaning = str(action.params.get("target") or "")
+    # The current canonical parser stores the wire-level `effect` field as
+    # `effect_kind`; retain the legacy target fallback for older persisted
+    # action records without making it a second protocol authority.
+    meaning = str(action.params.get("effect_kind") or action.params.get("target") or "")
     return meaning if meaning in EFFECT_KINDS else ""
 
 

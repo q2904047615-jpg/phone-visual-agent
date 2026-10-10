@@ -14,12 +14,14 @@ from features.lucky_bag.profile import LuckyBagProfile, build_lucky_bag_goal
 class _Gateway:
     def __init__(self, *, block_start: bool = False) -> None:
         self.calls: list[tuple[str, int, int]] = []
+        self.reference_paths: tuple[Path, ...] = ()
         self.auto_count = 0
         self.start_entered = threading.Event()
         self.release_start = threading.Event()
         self.block_start = block_start
 
-    def start(self, *, goal: str, device_id: str, run_dir: Path):
+    def start(self, *, goal: str, device_id: str, run_dir: Path, visual_reference_paths: tuple[Path, ...] = ()):
+        self.reference_paths = tuple(visual_reference_paths)
         self.start_entered.set()
         if self.block_start:
             self.release_start.wait(timeout=2)
@@ -37,7 +39,12 @@ class _Gateway:
         return {"session": {"session_id": session_id, "status": status,
                             "physical_actions": self.auto_count,
                             "execution_budget": {"observation_attempts": self.auto_count},
-                            "qwen_decision": {"reason": "未看到明确的没抽中结果"}}}
+                            "qwen_reply": "当前画面显示福袋入口，先打开详情。",
+                            "qwen_decision": {"proposal": {
+                                "status": "action",
+                                "action": "tap_semantic",
+                                "reason": "发现福袋入口，先打开详情。",
+                            }}}}
 
     def pause(self, session_id: str):
         return {"session": {"session_id": session_id, "status": "paused"}}
@@ -60,7 +67,13 @@ class LuckyBagMonitorTests(unittest.TestCase):
             while record.status not in {"succeeded", "failed"} and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertEqual(record.status, "succeeded")
-            self.assertEqual(gateway.calls, [("session-1", 2, 3), ("session-1", 3, 4)])
+            self.assertEqual(gateway.calls, [("session-1", 1, 2), ("session-1", 2, 3)])
+            self.assertEqual(len(profile.visual_reference_paths), len(gateway.reference_paths))
+            self.assertTrue(all(path.is_file() for path in gateway.reference_paths))
+            self.assertEqual("action:tap_semantic", record.current_phase)
+            self.assertEqual("tap_semantic", record.last_action)
+            self.assertEqual("发现福袋入口，先打开详情。", record.last_decision_reason)
+            self.assertEqual("当前画面显示福袋入口，先打开详情。", record.last_qwen_reply)
             outbox = Path(tmp) / "lucky_bag_notifications.jsonl"
             rows = [json.loads(line) for line in outbox.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(rows), 1)
@@ -97,6 +110,16 @@ class LuckyBagMonitorTests(unittest.TestCase):
                     "body": "疑似中奖",
                 },
             }]
+            old_run_dir = root / "lucky_bag_persisted"
+            old_run_dir.mkdir()
+            (old_run_dir / "task_screenshots.json").write_text(
+                json.dumps({
+                    "device_id": "device-local-01",
+                    "task_id": "old-session-task",
+                    "captures": [],
+                }),
+                encoding="utf-8",
+            )
             (root / "lucky_bag_monitors.json").write_text(
                 json.dumps(state, ensure_ascii=False), encoding="utf-8"
             )
@@ -107,11 +130,19 @@ class LuckyBagMonitorTests(unittest.TestCase):
             self.assertEqual("recovery_required", restored.status)
             self.assertEqual("", restored.session_id)
             resumed = monitor.resume(monitor_id)
+            self.assertIn("先点击该入口打开", resumed.goal)
+            self.assertNotEqual(resumed.run_dir, old_run_dir)
+            self.assertTrue(resumed.run_dir.exists())
+            self.assertFalse((resumed.run_dir / "task_screenshots.json").exists())
+            self.assertEqual(
+                "old-session-task",
+                json.loads((old_run_dir / "task_screenshots.json").read_text(encoding="utf-8"))["task_id"],
+            )
             deadline = time.monotonic() + 2
             while resumed.status not in {"succeeded", "failed"} and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertEqual("succeeded", resumed.status)
-            self.assertEqual([("session-1", 20, 40), ("session-1", 21, 41)], gateway.calls)
+            self.assertEqual([("session-1", 1, 2), ("session-1", 2, 3)], gateway.calls)
             monitor.shutdown()
 
     def test_pause_prevents_worker_from_advancing(self) -> None:

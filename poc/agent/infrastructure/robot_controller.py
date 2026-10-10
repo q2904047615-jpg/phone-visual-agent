@@ -12,7 +12,10 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from agent.infrastructure import seller_window_adapter as seller_gui
-from agent.infrastructure.orientation_safety import OrientationCredential, PhysicalExecutionGate
+from agent.infrastructure.orientation_safety import (
+    OrientationCredential, PhysicalExecutionGate, _mint_single_step_scene_credential,
+)
+from agent.infrastructure.observation_images import local_frame_fingerprint as frame_fingerprint
 
 
 POC_ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +47,13 @@ def oriented_navigation_ratio(x_ratio: float, y_ratio: float, *, landscape: bool
 DEFAULT_CONTROLLER_CONFIG: dict[str, Any] = {'tap_hold': 0.35, 'android_home_x_ratio': 0.5,
     'android_home_y_ratio': 0.976, 'android_recents_x_ratio': 0.33, 'android_recents_y_ratio': 0.976,
     'android_back_x_ratio': 0.685, 'android_back_y_ratio': 0.976,
-    'swipe_touch_down_seconds': 0.35, 'swipe_movement_seconds': 0.30, 'swipe_steps': 6}
+    'swipe_touch_down_seconds': 0.35, 'swipe_movement_seconds': 0.30, 'swipe_steps': 6,
+    'directional_swipes': {
+        'left': {'start': [800, 500], 'end': [200, 500]},
+        'right': {'start': [200, 500], 'end': [800, 500]},
+        'up': {'start': [500, 800], 'end': [500, 200]},
+        'down': {'start': [500, 200], 'end': [500, 800]},
+    }}
 
 
 class RobotWorkflowError(RuntimeError):
@@ -63,6 +72,34 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         else:
             result[key] = value
     return result
+
+
+def fixed_directional_swipe_points(direction: str) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return one configured, resolution-independent 1000-grid swipe path."""
+
+    resolved = str(direction or "").strip().lower()
+    raw = load_controller_config().get("directional_swipes", {}).get(resolved)
+    reject_if(not isinstance(raw, dict), WorkflowNotReady(f"未配置固定方向滑动：{resolved or 'missing'}。"))
+    start = raw.get("start")
+    end = raw.get("end")
+    reject_if(
+        not isinstance(start, list) or not isinstance(end, list)
+        or len(start) != 2 or len(end) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000
+               for value in [*start, *end])
+        or start == end,
+        WorkflowNotReady(f"固定方向滑动配置无效：{resolved or 'missing'}。"),
+    )
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    direction_matches = {
+        "up": delta_y < 0 and abs(delta_y) > abs(delta_x),
+        "down": delta_y > 0 and abs(delta_y) > abs(delta_x),
+        "left": delta_x < 0 and abs(delta_x) > abs(delta_y),
+        "right": delta_x > 0 and abs(delta_x) > abs(delta_y),
+    }.get(resolved, False)
+    reject_if(not direction_matches, WorkflowNotReady(f"固定方向滑动配置与方向不一致：{resolved or 'missing'}。"))
+    return (int(start[0]), int(start[1])), (int(end[0]), int(end[1]))
 
 
 def load_controller_config() -> dict[str, Any]:
@@ -322,6 +359,37 @@ class RobotController:
         self._last_swipe_receipt = {**receipt, 'requested_direction': str(direction).strip().lower()}
         seller_gui.clear_seller_camera_overlay(hwnd)
         return start, end
+
+    def vision_fixed_directional_swipe(self, direction: str) -> dict[str, Any]:
+        """Execute one local fixed-path directional swipe without Qwen."""
+
+        resolved = str(direction or "").strip().lower()
+        (start_x, start_y), (end_x, end_y) = fixed_directional_swipe_points(resolved)
+        self._require_verified_action("swipe", "固定方向滑动")
+        self.clear_physical_execution_authorization()
+        current_frame = self.vision_capture()
+        scene_fingerprint = frame_fingerprint(current_frame)
+        credential = _mint_single_step_scene_credential(
+            device_id=self.device_id,
+            scene_fingerprint=scene_fingerprint,
+            frame=current_frame,
+        )
+        self.arm_physical_execution(credential, action="swipe", scene_fingerprint=scene_fingerprint)
+        try:
+            client_start, client_end = self.vision_swipe_relative(
+                start_x, start_y, end_x, end_y, resolved
+            )
+        finally:
+            self.clear_physical_execution_authorization()
+        return {
+            "direction": resolved,
+            "grid_start": [start_x, start_y],
+            "grid_end": [end_x, end_y],
+            "client_start": list(client_start),
+            "client_end": list(client_end),
+            "hardware_receipt": self.consume_last_swipe_receipt(),
+        }
+
 
     def _vision_path_relative(self, start_x: int, start_y: int, end_x: int, end_y: int, *, action: str,
         label: str) -> tuple[tuple[int, int], tuple[int, int]]:

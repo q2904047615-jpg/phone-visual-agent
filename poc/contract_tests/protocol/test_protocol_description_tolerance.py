@@ -15,7 +15,7 @@ SYSTEM_ACTIONS = ("home", "back", "open_recent_apps", "reveal_system_navigation"
 
 
 class ProtocolDescriptionToleranceTests(unittest.TestCase):
-    def test_all_system_actions_ignore_only_pure_description(self):
+    def test_all_system_actions_reject_retired_decision_descriptions(self):
         for kind in SYSTEM_ACTIONS:
             baseline = decision(kind, app="便签" if kind == "launch_app" else None)
             expected = normalize_model_step_decision(baseline)
@@ -26,10 +26,9 @@ class ProtocolDescriptionToleranceTests(unittest.TestCase):
                 with self.subTest(kind=kind, target=target):
                     raw = {**baseline, "target": target}
                     snapshot = deepcopy(raw)
-                    actual = normalize_model_step_decision(raw)
-                    self.assertEqual(expected, actual)
+                    with self.assertRaises(CanonicalActionProtocolError):
+                        normalize_model_step_decision(raw)
                     self.assertEqual(snapshot, raw)
-                    self.assertEqual(actual, normalize_model_step_decision(actual))
 
     def test_system_conflicting_execution_payload_still_rejects(self):
         for kind in SYSTEM_ACTIONS:
@@ -52,7 +51,7 @@ class ProtocolDescriptionToleranceTests(unittest.TestCase):
             plain = wire(decision(kind))
             expected = observe(plain, context, allowed=allowed)[2]
             variant = deepcopy(plain)
-            variant["decision"]["target"] = {"role": "input", "meaning": "ignored", "label": "说明"}
+            variant["scene"]["summary"] = "页面输入框的可选说明，不参与动作绑定"
             _, result, actual, observer = observe(variant, context, allowed=allowed)
             self.assertEqual(expected, actual)
             self.assertEqual(kind, result.proposal.action.action)
@@ -63,7 +62,7 @@ class ProtocolDescriptionToleranceTests(unittest.TestCase):
             for foreground in ("app.notes", "app.chat"):
                 payload = saved_response(1)
                 payload["scene"].update(elements=[], foreground_app_id=foreground)
-                payload["decision"].update(action=kind, element_id=None,
+                payload["decision"].update(action={"input_verified_text":"input", "clear_verified_text":"clear_input"}.get(kind,kind),
                     text="新内容" if kind == "input_verified_text" else None)
                 payload["input_structure"]["application_inputs"][0].update(
                     text="" if kind == "input_verified_text" else "旧内容", focused=True,
@@ -72,7 +71,7 @@ class ProtocolDescriptionToleranceTests(unittest.TestCase):
                 for identifier in ("model_extra_id", "missing", 42, {"diagnostic": "unused"}):
                     with self.subTest(kind=kind, app=foreground, identifier=identifier):
                         varied = deepcopy(payload)
-                        varied["decision"]["element_id"] = identifier
+                        varied["input_structure"]["application_inputs"][0]["element_id"] = identifier
                         _, result, actual, observer = observe(varied, task_context("编辑当前输入框"))
                         self.assertEqual(expected, actual)
                         self.assertEqual(kind, result.proposal.action.action)
@@ -85,7 +84,7 @@ class ProtocolDescriptionToleranceTests(unittest.TestCase):
         for focused, multiline in ((False, True), (None, True), (True, False), (True, None)):
             payload = saved_response(1)
             payload["scene"]["elements"] = []
-            payload["decision"].update(action="press_enter", element_id="extra", text=None)
+            payload["decision"].update(action="press_enter", text=None)
             payload["input_structure"]["application_inputs"][0].update(
                 text="旧内容", focused=focused, multiline=multiline, preedit_text="")
             with self.subTest(focused=focused, multiline=multiline), self.assertRaises(VisionAgentError):

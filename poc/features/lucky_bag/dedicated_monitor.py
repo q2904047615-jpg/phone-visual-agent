@@ -273,4 +273,3 @@ class DedicatedLuckyBagMonitor:
 
 
 __all__ = ["DedicatedLuckyBagMonitor", "Record"]
-

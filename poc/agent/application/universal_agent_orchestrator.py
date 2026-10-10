@@ -309,22 +309,14 @@ class UniversalAgentOrchestrator:
             effect_ids = session.history[-1].get('effect_ids') or []
             if isinstance(effect_ids, (list, tuple)) and effect_ids:
                 previous_effect = str(effect_ids[0] or '').strip()
-        unmatched_effect = bool(session.history
-            and session.history[-1].get('effect_ids')
-            and str(session.history[-1].get('visual_outcome') or '') == 'unmatched')
         current_effect = action_effect_kind(decision.proposal.action)
-        if (unmatched_effect or uncertain_history) and decision.proposal.status == 'finish':
-            self._clear_action(session)
-            self._set_status(session, 'failed',
-                '本次外部效果未得到当前截图确认，不能以finish结束任务。')
-            return decision
         if (uncertain_history and previous_effect and current_effect == previous_effect
                 and decision.previous_action_outcome != "matched"):
             self._clear_action(session)
             session.auto_pause_reason = (
                 "上一次外部效果的结果仍不确定，Qwen再次选择相同效果；已暂停，避免重复发送或提交。"
             )
-            self._set_status(session, "failed", session.auto_pause_reason)
+            self._set_status(session, "paused", session.auto_pause_reason)
             return decision
         if ((executed_effect or uncertain_history) and decision.previous_action_outcome != "matched"
                 and (decision.proposal.action is None

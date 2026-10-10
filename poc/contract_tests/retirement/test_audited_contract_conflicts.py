@@ -22,7 +22,7 @@ class AuditedContractConflictTests(LoopHarness):
                 loop.run_autonomous_safe_loop(s)
                 self.assertEqual('succeeded',s.status)
                 self.assertEqual(1,sum(x.action=='input_verified_text' for x in a.calls))
-                self.assertEqual(1,sum(x.params.get('target')=='send_message' for x in a.calls))
+                self.assertEqual(1,sum(x.params.get('effect_kind')=='send_message' for x in a.calls))
                 self.assertEqual('home',a.calls[-1].action)
 
     def test_clear_can_be_followed_by_navigation_without_still_focused_requirement(self):

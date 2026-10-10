@@ -30,7 +30,13 @@ if defined DASHSCOPE_API_KEY (
   echo Qwen vision agent: API key not configured; visual planning is unavailable
 )
 echo Starting local service first. The browser will open after it is ready...
-start "Robot Web Console Server" /D "%CD%" ".venv\Scripts\python.exe" -m uvicorn web_app:app --host 127.0.0.1 --port 8765
+
+rem Restart only an API process whose executable and command line belong to this checkout.
+".venv\Scripts\python.exe" -X utf8 restart_local_api.py
+if errorlevel 1 goto :failed
+
+rem Start the server in the current console's background; do not create a new Terminal window.
+start "Robot Web Console Server" /B /D "%CD%" ".venv\Scripts\python.exe" -m uvicorn web_app:app --host 127.0.0.1 --port 8765
 
 for /L %%I in (1,1,30) do (
   ".venv\Scripts\python.exe" -X utf8 agent_api_cli.py --base-url http://127.0.0.1:8765 bootstrap >nul 2>&1
@@ -46,7 +52,7 @@ goto :end
 
 :ready
 echo Service ready: http://127.0.0.1:8765/
-start "" msedge.exe "http://127.0.0.1:8765/"
+start "" msedge.exe "http://127.0.0.1:8765/?fresh=1"
 goto :end
 
 :failed

@@ -6,19 +6,22 @@ import unittest
 from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION, INPUT_STRUCTURE_AUDIT_VERSION,
 )
-from contract_tests.observation.test_point_scene_projection import observe, task_context
+from contract_tests.observation.test_point_scene_projection import observe, task_context, decision
 
 
 def saved_response(index):
     records = json.loads((Path(__file__).resolve().parents[2] / 'test_fixtures' /
         'input_reference_failures_20260904.json').read_text(encoding='utf-8'))
     payload = deepcopy(records[index]['response'])
-    # Only upgrade explicit version identifiers. Preserve all model facts,
-    # identifiers, action choices and reference strings from the failed response.
+    # Explicitly migrate archived action semantics into the current wire schema.
+    # The archived record remains unchanged and is never accepted by production.
     payload['protocol_version'] = SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
     payload['input_structure']['protocol_version'] = INPUT_STRUCTURE_AUDIT_VERSION
     if payload['decision'].get('action') == 'input_verified_text':
         payload['decision']['text'] = 'aaazjie？你好'  # New wire field, exact legacy task body.
+    old = payload['decision']
+    payload['decision'] = decision(old.get('action'), **{key: value for key, value in old.items()
+        if key in {'status', 'point', 'direction', 'start', 'end', 'text', 'app', 'reason', 'confidence'}})
     return payload
 
 
@@ -41,8 +44,8 @@ class SimpleInputCompletionTests(unittest.TestCase):
     def test_input_and_clear_do_not_require_any_wire_element_id(self):
         for kind, graph in (('input_verified_text', input_graph()), ('clear_verified_text', task_context('清空输入框'))):
             payload = saved_response(1)
-            payload['decision'].update(action=kind, element_id=None, text='aaazjie？你好' if kind == 'input_verified_text' else None)
-            payload['decision'].pop('evidence_refs')
+            payload['decision'].update(action={'input_verified_text':'input','clear_verified_text':'clear_input'}[kind], text='aaazjie？你好' if kind == 'input_verified_text' else None)
+            self.assertNotIn('evidence_refs', payload['decision'])
             payload['input_structure']['application_inputs'][0].pop('element_id')
             payload['input_structure']['application_inputs'][0]['text'] = '草稿' if kind.startswith('clear') else ''
             with self.subTest(kind=kind):
@@ -51,7 +54,7 @@ class SimpleInputCompletionTests(unittest.TestCase):
 
     def test_finish_is_whole_task_model_judgment_not_local_subgoal_checklist(self):
         payload = saved_response(0)
-        payload['decision'].pop('evidence_refs')
+        self.assertNotIn('evidence_refs', payload['decision'])
         self.assertEqual('finish', observe(payload, task_context('检查当前输入框'))[1].proposal.status)
         self.assertNotIn('transition_receipt', task_context().to_dict())
 
@@ -82,8 +85,7 @@ class SimpleInputCompletionTests(unittest.TestCase):
 
     def test_focus_tap_does_not_require_internal_id_or_diagnostic_prose(self):
         payload = saved_response(1)
-        payload['decision'].update(action='tap_semantic', element_id=None, text=None,
-            target={'role': 'input', 'meaning': 'application_text_input'}, tap_point=[400,906])
+        payload['decision'].update(action='tap', text=None, point=[400,906])
         payload['input_structure']['application_inputs'][0].update(focused=None)
         _, result, resolved, _ = observe(payload, input_graph())
         self.assertEqual('tap_semantic', result.proposal.action.action)
@@ -92,8 +94,7 @@ class SimpleInputCompletionTests(unittest.TestCase):
     def test_focus_tap_can_create_input_fact_when_audit_is_empty(self):
         payload = saved_response(1)
         payload['input_structure']['application_inputs'] = []
-        payload['decision'].update(action='tap_semantic', element_id=None, text=None,
-            target={'role': 'input', 'meaning': 'application_text_input'}, tap_point=[400,906])
+        payload['decision'].update(action='tap', text=None, point=[400,906])
         _, result, resolved, _ = observe(payload, input_graph())
         self.assertEqual('tap_semantic', result.proposal.action.action)
         self.assertEqual((.4, .906), resolved.normalized_point)
@@ -107,12 +108,13 @@ class SimpleInputCompletionTests(unittest.TestCase):
             request_height=1280, available_action_kinds={'tap_semantic','input_verified_text'})
         choice = schema['json_schema']['schema']['properties']['decision']['properties']
         self.assertNotIn('evidence_refs', choice)
-        self.assertNotIn('element_id', choice['target']['properties'])
+        self.assertNotIn('target', choice)
+        self.assertNotIn('element_id', choice)
 
     def test_other_app_and_field_names_use_same_contract(self):
         payload = saved_response(1)
         payload['scene'].update(foreground_app_id='browser', screen_id='search', summary='搜索框为空且已聚焦')
-        payload['decision'].update(element_id='search_query', reason='输入到当前已聚焦搜索框')
+        payload['decision'].update(reason='输入到当前已聚焦搜索框')
         payload['input_structure']['application_inputs'][0]['element_id'] = 'search_query'
         self.assertEqual('input_verified_text', observe(payload, input_graph())[1].proposal.action.action)
 

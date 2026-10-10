@@ -101,7 +101,6 @@ class FakeSceneObserver:
         result = self._next_scene(goal_context=goal_context)
         return result, {
             "status": "finish",
-            "evidence_refs": ["scene.summary"],
             "confidence": 1.0,
             "reason": "测试观察器在同一帧返回 scene 与 decision。",
         }

@@ -13,11 +13,11 @@ from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
 
 from features.notifications import JsonlNotificationOutbox, NotificationEvent, NotificationSink, utc_timestamp
-from .profile import LuckyBagProfile
+from .profile import LuckyBagProfile, build_lucky_bag_goal
 
 
 class LuckyBagSessionGateway(Protocol):
-    def start(self, *, goal: str, device_id: str, run_dir: Path) -> Mapping[str, Any]: ...
+    def start(self, *, goal: str, device_id: str, run_dir: Path, visual_reference_paths: tuple[Path, ...] = ()) -> Mapping[str, Any]: ...
     def get(self, session_id: str) -> Mapping[str, Any]: ...
     def auto(self, session_id: str, *, max_physical_actions: int, max_observations: int) -> Mapping[str, Any]: ...
     def pause(self, session_id: str) -> Mapping[str, Any]: ...
@@ -38,6 +38,10 @@ class LuckyBagMonitorRecord:
     deadline_epoch: float = 0.0
     detail: str = ""
     notified: bool = False
+    current_phase: str = "starting"
+    last_qwen_reply: str = ""
+    last_action: str = ""
+    last_decision_reason: str = ""
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -53,6 +57,10 @@ class LuckyBagMonitorRecord:
             "deadline_epoch": self.deadline_epoch,
             "detail": self.detail,
             "notified": self.notified,
+            "current_phase": self.current_phase,
+            "last_qwen_reply": self.last_qwen_reply,
+            "last_action": self.last_action,
+            "last_decision_reason": self.last_decision_reason,
             "run_dir": str(self.run_dir),
         }
 
@@ -84,8 +92,7 @@ class LuckyBagMonitor:
 
     def start(self, *, profile: LuckyBagProfile, goal: str) -> LuckyBagMonitorRecord:
         monitor_id = uuid4().hex
-        run_dir = self.output_root / f"lucky_bag_{monitor_id[:12]}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = self._new_run_dir(monitor_id)
         record = LuckyBagMonitorRecord(
             monitor_id=monitor_id, profile=profile, goal=goal, run_dir=run_dir,
             deadline_monotonic=self.clock() + profile.duration_seconds,
@@ -96,6 +103,12 @@ class LuckyBagMonitor:
             self._persist_locked()
         self._executor.submit(self._run, monitor_id)
         return record
+
+    def _new_run_dir(self, monitor_id: str, *, recovery: bool = False) -> Path:
+        suffix = f"_{uuid4().hex[:8]}" if recovery else ""
+        directory = self.output_root / f"lucky_bag_{monitor_id[:12]}{suffix}"
+        directory.mkdir(parents=True, exist_ok=False)
+        return directory
 
     def get(self, monitor_id: str) -> LuckyBagMonitorRecord | None:
         with self._lock:
@@ -122,8 +135,13 @@ class LuckyBagMonitor:
             raise RuntimeError(f"当前监控状态不能恢复：{record.status}")
         if record.status == "recovery_required":
             # The previous process-owned session cannot be deserialized safely.
-            # Start a fresh observation only after explicit user action.
+            # Start a fresh observation only after explicit user action. A
+            # recovered monitor also needs a new evidence directory: the old
+            # directory's screenshot manifest is bound to the old session task
+            # id and must never be mixed with the new session.
             record.session_id = ""
+            record.goal = build_lucky_bag_goal(record.profile)
+            record.run_dir = self._new_run_dir(record.monitor_id, recovery=True)
         self._set(record, "running", "正在恢复并重新观察。")
         self._executor.submit(
             self._run if not record.session_id else self._advance,
@@ -232,6 +250,10 @@ class LuckyBagMonitor:
                         deadline_epoch=deadline_epoch,
                         detail=detail,
                         notified=bool(item.get("notified")),
+                        current_phase=str(item.get("current_phase") or status),
+                        last_qwen_reply=str(item.get("last_qwen_reply") or ""),
+                        last_action=str(item.get("last_action") or ""),
+                        last_decision_reason=str(item.get("last_decision_reason") or ""),
                     )
                     if record.monitor_id:
                         self._records[record.monitor_id] = record
@@ -246,10 +268,49 @@ class LuckyBagMonitor:
             raise RuntimeError("会话网关没有返回有效状态。")
         return value
 
+    @staticmethod
+    def _session_feedback(session: Mapping[str, Any]) -> tuple[str, str, str, str]:
+        """Project Qwen's latest visible decision into monitor diagnostics only."""
+
+        reply = str(session.get("qwen_reply") or "").strip()
+        decision = session.get("qwen_decision")
+        if not isinstance(decision, Mapping):
+            decision = {}
+        proposal = decision.get("proposal")
+        if not isinstance(proposal, Mapping):
+            proposal = decision
+        action = str(proposal.get("action") or "").strip()
+        status = str(proposal.get("status") or decision.get("status") or "").strip()
+        reason = str(proposal.get("reason") or decision.get("reason") or "").strip()
+        if status == "finish":
+            phase = "finished"
+        elif action == "wait_for_change":
+            phase = "waiting_for_change"
+        elif action:
+            phase = f"action:{action}"
+        else:
+            phase = "observing"
+        return phase, action, reason, reply
+
+    def _record_session_feedback(self, record: LuckyBagMonitorRecord, session: Mapping[str, Any]) -> None:
+        phase, action, reason, reply = self._session_feedback(session)
+        with self._lock:
+            record.current_phase = str(session.get("current_phase") or phase)
+            record.last_action = action
+            record.last_decision_reason = reason
+            if reply:
+                record.last_qwen_reply = reply
+            self._persist_locked()
+
     def _run(self, monitor_id: str) -> None:
         record = self._require(monitor_id)
         try:
-            started = self.gateway.start(goal=record.goal, device_id=record.profile.device_id, run_dir=record.run_dir)
+            started = self.gateway.start(
+                goal=record.goal,
+                device_id=record.profile.device_id,
+                run_dir=record.run_dir,
+                visual_reference_paths=record.profile.visual_reference_paths,
+            )
             session = self._session_snapshot(started)
             record.session_id = str(session.get("session_id") or "")
             if not record.session_id:
@@ -279,13 +340,17 @@ class LuckyBagMonitor:
                     self._set(record, "expired", "已达到福袋监控时限。")
                     return
                 current = self._session_snapshot(self.gateway.get(record.session_id))
+                self._record_session_feedback(record, current)
                 status = str(current.get("status") or "")
+                if bool(current.get("win_detected")) and not record.notified:
+                    self._notify(record, current)
+                    self._set(record, "running", "已记录中奖通知，继续监控。")
                 if status == "succeeded":
                     self._notify(record, current)
                     self._set(record, "succeeded", "Qwen报告任务终态，已记录通知事件。")
                     return
                 if status in {"failed", "blocked", "cancelled"}:
-                    self._set(record, status, str(current.get("failed_reason") or current.get("blocked_reason") or "会话已结束。"))
+                    self._set(record, status, str(current.get("failed_reason") or current.get("blocked_reason") or current.get("detail") or "会话已结束。"))
                     return
                 if status == "paused" and record.status == "paused":
                     return
@@ -295,19 +360,27 @@ class LuckyBagMonitor:
                 budget = current.get("execution_budget") if isinstance(current.get("execution_budget"), Mapping) else {}
                 actions = int(current.get("physical_actions") or 0)
                 observations = int(budget.get("observation_attempts") or 0)
+                # One automatic step at a time keeps a long wait_for_change from
+                # consuming a whole 24-hour chunk before the next fresh screenshot.
+                # The two observations cover the pre-action decision and its
+                # post-action decision; wait_for_change itself has no physical action.
                 result = self.gateway.auto(
                     record.session_id,
-                    max_physical_actions=actions + self.chunk_actions,
-                    max_observations=observations + self.chunk_observations,
+                    max_physical_actions=actions + 1,
+                    max_observations=observations + 2,
                 )
                 updated = self._session_snapshot(result)
+                self._record_session_feedback(record, updated)
                 updated_status = str(updated.get("status") or "")
+                if bool(updated.get("win_detected")) and not record.notified:
+                    self._notify(record, updated)
+                    self._set(record, "running", "已记录中奖通知，继续监控。")
                 if updated_status == "succeeded":
                     self._notify(record, updated)
                     self._set(record, "succeeded", "Qwen报告任务终态，已记录通知事件。")
                     return
                 if updated_status in {"failed", "blocked", "cancelled"}:
-                    self._set(record, updated_status, str(updated.get("failed_reason") or updated.get("blocked_reason") or "会话已结束。"))
+                    self._set(record, updated_status, str(updated.get("failed_reason") or updated.get("blocked_reason") or updated.get("detail") or "会话已结束。"))
                     return
                 if updated_status == "paused":
                     self._set(record, "paused", "用户已暂停福袋监控。")
@@ -315,7 +388,7 @@ class LuckyBagMonitor:
                 if updated_status == "awaiting_effect_confirmation":
                     self._set(record, "waiting_confirmation", "当前会话涉及登录或付款，需要用户确认后才能继续。")
                     return
-                self._set(record, "running", "已续接下一段累计预算。")
+                self._set(record, "running", str(updated.get("detail") or "已续接下一段累计预算。"))
         except Exception as exc:
             self._set(record, "failed", str(exc) or type(exc).__name__)
 

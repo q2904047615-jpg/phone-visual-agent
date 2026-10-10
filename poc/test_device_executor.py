@@ -112,6 +112,23 @@ class FakeAdbKeyboardTransport:
 
 
 class DeviceExecutorTests(unittest.TestCase):
+    def test_all_four_dynamic_scroll_methods_remain_executable(self):
+        from agent.infrastructure.robot_controller import RobotController
+
+        class RecordingRobot(RobotController):
+            def __init__(self):
+                self.calls = []  # No real controller construction or window access.
+
+            def _vision_swipe(self, direction):
+                self.calls.append(direction)
+
+        for direction in ('up', 'down', 'left', 'right'):
+            with self.subTest(direction=direction):
+                robot = RecordingRobot()
+                result = RobotDeviceExecutor(robot).execute(DeviceActionRequest(kind='scroll', direction=direction))
+                self.assertEqual([direction], robot.calls)
+                self.assertEqual(1, result.physical_actions)
+
     def test_relative_swipe_dispatches_once_and_consumes_path_receipt(self):
         robot = FakeRobot()
         executor = RobotDeviceExecutor(robot)

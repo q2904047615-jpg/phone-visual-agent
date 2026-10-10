@@ -507,8 +507,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                             },
                             "scene": scene,
                             "input_structure": audit,
-                            "decision": {"status": "action", "action": "input_verified_text", "text": "sample",
-                                "element_id": "local_audited_input_1"},
+                            "decision": {'status': "action", 'action': 'input', 'text': "sample"},
                         }
                     ]
                 )
@@ -525,7 +524,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertEqual("local_audited_input_1", field.element_id)
                 self.assertEqual("", field.states["value"])
                 self.assertNotIn("same_frame_input_surface_evidence", field.states)
-                self.assertEqual("input_verified_text", decision["action"])
+                self.assertEqual("input", decision["action"])
                 self.assertEqual(1.0, decision["confidence"])
                 self.assertTrue(decision["reason"])
 
@@ -624,8 +623,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                     "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
                     "scene": scene, "input_structure": audit,
-                    "decision": {"status": "action", "action": "tap_semantic",
-                        "element_id": "local_audited_input_1", "tap_point": [500, 900]},
+                    "decision": {'status': "action", 'action': 'tap', 'point': [500, 900]},
                 }])
                 context = {"entities": {"active_subgoal_visual_context": {
                     "subgoal_id": "edit_note", "objective": "修改指定文字", "constraints": [],
@@ -640,10 +638,10 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 field = observed.get_element("local_audited_input_1")
                 self.assertIsNot(field.states.get("focused"), True)
                 self.assertEqual("current_input", field.states["input_field_id"])
-                self.assertEqual("tap_semantic", decision["action"])
+                self.assertEqual("tap", decision["action"])
                 prompt = json.dumps(provider.messages_seen[0], ensure_ascii=False)
-                for text in ("未知或未聚焦时先点该字段再取新图", "不选择Enter键",
-                    "先单独clear_verified_text", "旧聊天气泡", "不能一次清空并输入"):
+                for text in ("Never infer focus from the requested action", "otherwise report null",
+                    "先独立报告scene和input_structure，再选择动作", "旧聊天气泡", "每轮只选择一个action或finish"):
                     self.assertIn(text, prompt)
 
     def test_same_response_input_is_projected_once_without_scene_identity(self) -> None:
@@ -682,8 +680,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "input_structure": input_audit_payload(
                 application_inputs=[{"bounds": [120, 906, 780, 961], "text": ""}],
             ),
-            "decision": {"status": "action", "action": "tap_semantic", "element_id": "e2",
-                "tap_point": [450, 934]},
+            "decision": {'status': "action", 'action': 'tap', 'point': [450, 934]},
         }
         observer = SingleStepGenericSceneObserver(SequenceProvider([envelope]))
 
@@ -697,7 +694,8 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertIsNotNone(field)
         self.assertEqual("", field.states["value"])
         self.assertEqual(1, sum(item.role == 'input' for item in observed.elements))
-        self.assertEqual("e2", model_decision["target"]["element_id"])
+        self.assertEqual([450, 934], model_decision["point"])
+        self.assertNotIn("target", model_decision)
 
     def test_input_audit_uses_current_text_and_ignores_qwen_input_goal_marker(self) -> None:
         context = {"entities": {"active_subgoal_visual_context": {
@@ -754,8 +752,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
                     "scene": scene,
                     "input_structure": audit,
-                    "decision": {"status": "action", "action": "input_verified_text", "text": "sample",
-                        "element_id": "message-input"},
+                    "decision": {'status': "action", 'action': 'input', 'text': "sample"},
                 }]))
 
                 observed = observer.observe(
@@ -809,8 +806,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 "bounds": [90, 300, 910, 400],
                 "text": "",
             }]),
-            "decision": {"status": "action", "action": "tap_semantic", "element_id": "form-note",
-                "tap_point": [500, 350]},
+            "decision": {'status': "action", 'action': 'tap', 'point': [500, 350]},
         }])
         observer = SingleStepGenericSceneObserver(provider)
 
@@ -822,7 +818,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("", field.states["value"])
         self.assertEqual("current_input", field.states["input_field_id"])
         self.assertEqual(1, sum(item.role == 'input' for item in observed.elements))
-        self.assertEqual("form-note", model_decision["target"]["element_id"])
+        self.assertEqual([500, 350], model_decision["point"])
 
     def test_blank_input_with_invalid_bounds_is_still_rejected(self) -> None:
         scene = scene_payload()
@@ -863,11 +859,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                     "input_structure": input_audit_payload(
                         application_inputs=[{"bounds": [100, 300, 100, 390]}]
                     ),
-                    "decision": {
-                        "status": "action",
-                        "action": "input_verified_text", "text": "sample",
-                        "element_id": "local_audited_input_1",
-                    },
+                    "decision": {'status': "action", 'action': 'input', 'text': "sample"},
                 }
             ]
         )
@@ -922,8 +914,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
             "input_structure": audit,
-            "decision": {"status": "action", "action": "input_verified_text", "text": "sample",
-                "element_id": "local_audited_input_1"},
+            "decision": {'status': "action", 'action': 'input', 'text': "sample"},
         }])
 
         observed = SingleStepGenericSceneObserver(provider).observe(
@@ -949,8 +940,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
             "coordinate_space": {"kind": "axis_grid", "width": 1000, "height": 1000},
             "scene": scene,
-            "decision": {"status": "action", "action": "tap_semantic",
-                "element_id": "search-field", "tap_point": [500, 500]},
+            "decision": {'status': "action", 'action': 'tap', 'point': [500, 500]},
         }])
         obstruction = VisualObstruction(kind="top_edge_opaque_band", bounds=(100, 0, 700, 100),
             reason="本地检测到顶边遮挡")
@@ -963,8 +953,8 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 device_id="device-local-01")
 
         self.assertEqual((), observed.elements)
-        self.assertEqual("search-field", model_decision["target"]["element_id"])
-        self.assertEqual("input", model_decision["target"]["role"])
+        self.assertEqual([500, 500], model_decision["point"])
+        self.assertNotIn("target", model_decision)
         self.assertEqual([obstruction.to_dict()], observer.last_diagnostics["local_visual_obstructions"])
 
     def test_single_step_observer_keeps_input_when_optional_preedit_bounds_are_broad(

@@ -246,6 +246,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         expected = {
             "agent_api_cli.py",
             "start_verified.py",  # Verified local API launch tool, not a domain entry.
+            "restart_local_api.py",  # Safe local API restart tool, not a domain entry.
             "capture_click_burst.py",
             "eval_qwen_visual_decision.py",
             "eval_task_sequences.py",

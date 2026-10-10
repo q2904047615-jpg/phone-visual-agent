@@ -92,23 +92,21 @@ class RequestEvidenceTests(unittest.TestCase):
 
 class OptionalFieldContractTests(unittest.TestCase):
     def test_optional_target_details_on_two_canvases_keep_exact_point(self):
-        for height in (1000,):
+        for height in (960, 1280):
             schema = _single_step_response_format({}, input_structure_required=True,
                 request_height=height, available_action_kinds=('tap_semantic',))['json_schema']['schema']
-            target = schema['properties']['decision']['properties']['target']
-            self.assertEqual(['role', 'meaning'], target['required'])
+            self.assertNotIn('target', schema['properties']['decision']['properties'])
             fields = schema['properties']['input_structure']['properties']['application_inputs']['items']
             self.assertNotIn('text', fields['required'])
             self.assertIn('focused', fields['required'])
             for details in ({}, {'label': '目标', 'evidence': ['当前可见']}):
                 payload = {'protocol_version': SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': height},
-                    'scene': {'elements': [], 'summary': '当前目标可见'}, 'input_structure': None,
-                    'decision': decision(action='tap_semantic',
-                        target={'role': 'button', 'meaning': 'open_details', **details}, tap_point=[400, 500])}
+                    'coordinate_space': {'kind': 'axis_grid', 'width': 1000, 'height': 1000},
+                    'scene': {'elements': [], 'summary': '当前目标可见', **details}, 'input_structure': None,
+                    'decision': decision(action='tap', point=[400, 500])}
                 parsed = _parse_single_step_observation_envelope(json.dumps(payload),
                     input_structure_required=False, request_image_size=(720, height))
-                self.assertEqual([400, 500], parsed['decision']['tap_point'])
+                self.assertEqual([400, 500], parsed['decision']['point'])
 
 
 class ExecutionEvidenceTests(LoopHarness):
@@ -117,9 +115,11 @@ class ExecutionEvidenceTests(LoopHarness):
             with self.subTest(outcome=outcome):
                 loop, session, adapter = self.start([
                     (scene(0), loop_decision('tap_semantic', meaning='send_message')),
-                    (scene(1), loop_decision(outcome=outcome))], goal='发送一条消息')
+                    (scene(1), loop_decision(outcome=outcome))], goal='发送一条消息', max_observations=4)
                 loop.run_autonomous_safe_loop(session)
-                self.assertEqual('succeeded' if outcome == 'matched' else 'failed', session.status)
+                self.assertEqual('budget_paused' if outcome == 'uncertain' else 'succeeded', session.status)
+                if outcome == 'uncertain':
+                    self.assertEqual(4, session.execution_budget.observation_attempts)
                 self.assertEqual(1, len(adapter.calls))
                 for filename in ('verification_step_1.json', 'post_action_transition_step_1.json'):
                     record = json.loads((session.run_dir / filename).read_text(encoding='utf-8'))

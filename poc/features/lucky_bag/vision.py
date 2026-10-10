@@ -101,4 +101,3 @@ def interpret(tokens, size, bag=None):
     if countdowns:
         page.countdown = min(countdowns)
     return page
-

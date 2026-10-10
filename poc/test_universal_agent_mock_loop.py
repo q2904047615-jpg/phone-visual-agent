@@ -104,14 +104,13 @@ def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str)
     if status == "finish":
         return {
             "status": "finish", "previous_action_outcome": "matched",
-            "evidence_refs": ["scene.summary"],
             "confidence": 0.97,
             "reason": "合成的新截图已经证明当前目标完成。",
             "postcondition": {"status": "confirmed", "fact": "目标完成"},
         }
     payload = {
         "status": "action",
-        "action": action_kind,
+        "action": {"tap_semantic":"tap", "dismiss_overlay":"dismiss", "input_verified_text":"input", "clear_verified_text":"clear_input"}.get(action_kind, action_kind),
         "confidence": 0.97,
         "reason": "合成观察在同一帧直接选择一个动作。",
         "postcondition": {"status": "unknown", "fact": "等待动作后重新观察"},
@@ -128,18 +127,9 @@ def _same_frame_model_decision(scene: UIScene, *, status: str, action_kind: str)
         if len(scene.elements) != 1:
             raise AssertionError("测试 scene 必须只有一个同帧动作目标。")
         element = scene.elements[0]
-        if action_kind in {"tap_semantic", "dismiss_overlay", "press_enter", "double_tap", "long_press"}:
-            payload["target"] = {
-                "element_id": element.element_id,
-                "role": element.role,
-                "meaning": element.meaning,
-                "label": element.label,
-                "evidence": list(element.evidence),
-            }
+        if action_kind in {"tap_semantic", "dismiss_overlay", "double_tap", "long_press"}:
             center_x, center_y = element.center
-            payload["tap_point"] = [round(center_x * 1000), round(center_y * 1000)]
-        else:
-            payload["element_id"] = element.element_id
+            payload["point"] = [round(center_x * 1000), round(center_y * 1000)]
     elif action_kind == "scroll":
         payload["direction"] = "up"
     return payload

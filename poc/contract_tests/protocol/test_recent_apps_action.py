@@ -116,31 +116,18 @@ class RecentAppsActionTests(unittest.TestCase):
         )
         action = bind_same_response_action(
             {
-                "action": "tap_semantic",
-                "target": {
-                    "element_id": button.element_id,
-                    "role": button.role,
-                    "meaning": button.meaning,
-                    "label": button.label,
-                    "evidence": list(button.evidence),
-                },
-                "tap_point": [500, 850],
+                "action": "tap",
+                "point": [500, 850],
             },
             context=recent_context("清理全部后台应用"),
             observation=trusted(current),
             available_action_kinds={"tap_semantic", "scroll", "back", "home", "open_recent_apps"},
         )
-        self.assertEqual(
-            {"element_id": button.element_id,
-             "target": button.meaning, "role": button.role, "label": button.label,
-             "states": {}, "target_evidence": list(button.evidence),
-             "tap_point": (0.5, 0.85)},
-            action.params,
-        )
+        self.assertEqual({"tap_point": (0.5, 0.85)}, action.params)
 
         resolved = UniversalActionController().resolve_one(action, current)
         self.assertEqual("tap_semantic", resolved.kind)
-        self.assertEqual(button.element_id, resolved.target_element_id)
+        self.assertIsNone(resolved.target_element_id)
         self.assertIsNotNone(resolved.normalized_point)
         self.assertTrue(all(0.0 <= value <= 1.0 for value in resolved.normalized_point or ()))
 

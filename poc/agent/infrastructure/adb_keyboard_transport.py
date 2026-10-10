@@ -55,6 +55,11 @@ class AdbKeyboardTextTransport:
     def profile(self) -> TextTransportProfile:
         return self._profile
 
+    @property
+    def adb_executable(self) -> Path:
+        """The configured adb executable used by setup operations."""
+        return self._adb_executable
+
     def status(self) -> dict[str, Any]:
         """Return a secret-free, read-only readiness snapshot."""
         reason = self._preflight_reason()

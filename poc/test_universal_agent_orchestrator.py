@@ -119,14 +119,19 @@ class RuntimeLifecycleTests(LoopHarness):
         with self.assertRaisesRegex(Exception,'动作集合'):
             self.start([(scene(0),decision('back'))],required_action_kind='home')
 
-    def test_hard_execution_error_counts_attempt_and_releases_lease(self):
+    def test_uncertain_execution_keeps_consumed_scope_and_resumable_lease(self):
         a=FixtureAdapter()
         loop,s,a=self.start([],adapter=a)
         a.execute_error=GenericActionAdapterError('触达不确定',physical_actions=1)
+        scope = s.confirmation_authority.scope()
         with self.assertRaises(GenericActionAdapterError):
-            loop.run_autonomous_safe_loop(s)
-        self.assertEqual(('failed',1,1),(s.status,s.physical_actions,a.execute_calls))
-        self.assertIsNone(loop.device_registry.active_session(s.device_id))
+            loop.confirm_one(s, scope)
+        self.assertEqual(('needs_reobservation',1,1),(s.status,s.physical_actions,a.execute_calls))
+        self.assertEqual(s.session_id, loop.device_registry.active_session(s.device_id))
+        self.assertIsNone(s.confirmation_authority)
+        with self.assertRaises(Exception):
+            loop.confirm_one(s, scope)
+        self.assertEqual(1, a.execute_calls)
 
     def test_refresh_parse_error_releases_lease_without_action(self):
         q=CountingQwen(fail_on=2)
@@ -141,8 +146,12 @@ class RuntimeLifecycleTests(LoopHarness):
         q=CountingQwen(fail_on=2)
         loop,s,a=self.start([(scene(0),decision('home')),(scene(1),decision())],observer=q)
         with self.assertRaisesRegex(RuntimeError,'parse failure'):
-            loop.run_autonomous_safe_loop(s)
-        self.assertEqual(('failed',1),(s.status,s.physical_actions))
+            loop.confirm_one(s, s.confirmation_authority.scope())
+        self.assertEqual(('needs_reobservation',1),(s.status,s.physical_actions))
+        self.assertEqual(1,len(a.calls))
+        self.assertIsNone(s.confirmation_authority)
+        loop.run_autonomous_safe_loop(s)
+        self.assertEqual('succeeded', s.status)
         self.assertEqual(1,len(a.calls))
 
     def test_old_scope_cannot_be_replayed_after_next_observation(self):
@@ -182,11 +191,12 @@ class RuntimeLifecycleTests(LoopHarness):
         self.assertEqual(1,len(a.calls))
         self.assertEqual('succeeded',s.status)
 
-    def test_unmatched_effect_stops_even_if_model_says_whole_task_finish(self):
+    def test_whole_task_finish_keeps_unmatched_last_action_as_evidence(self):
         loop,s,a=self.start([(scene(0),decision('tap_semantic',meaning='send_message')),
             (scene(1),decision(outcome='unmatched'))])
         loop.run_autonomous_safe_loop(s)
-        self.assertEqual('failed',s.status)
+        self.assertEqual('succeeded',s.status)
+        self.assertEqual('unmatched', s.history[-1]['visual_outcome'])
         self.assertEqual(1,len(a.calls))
 
 

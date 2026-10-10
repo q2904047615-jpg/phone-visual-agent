@@ -249,6 +249,8 @@ class GenericSingleActionAdapter:
         device_id: str) -> None:
         self.capture = capture
         self.observer = observer
+        # Optional per-session visual examples; empty for ordinary generic tasks.
+        self.visual_reference_paths: tuple[Path, ...] = ()
         self.robot = robot
         self.app_launcher = app_launcher
         self.text_transport = text_transport
@@ -329,6 +331,8 @@ class GenericSingleActionAdapter:
         available_action_kinds: frozenset[str] | None=None
         ) -> tuple[UIScene, dict[str, Any]]:
         kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
+        if getattr(self.observer, 'supports_visual_references', False) is True:
+            kwargs['visual_reference_paths'] = tuple(self.visual_reference_paths)
         if getattr(self.observer, 'supports_response_evidence', False):
             kwargs.update(device_id=self.device_id, response_evidence_dir=response_evidence_dir,
                 response_evidence_prefix=response_evidence_prefix)
@@ -618,7 +622,8 @@ class GenericSingleActionAdapter:
             input_fragment=resolved.input_fragment,
             text_transport=resolved.text_transport,
             text_scope=text_scope,
-            wait_seconds=max(0.5, self.post_action_settle) if resolved.kind == 'wait_for_change' else None,
+            wait_seconds=(resolved.wait_seconds if resolved.kind == 'wait_for_change' and resolved.wait_seconds is not None
+                else max(0.5, self.post_action_settle) if resolved.kind == 'wait_for_change' else None),
             launch_ref=resolved.launch_ref,
         )
         try:

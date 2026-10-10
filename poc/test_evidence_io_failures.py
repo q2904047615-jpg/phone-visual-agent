@@ -143,7 +143,7 @@ class EvidenceIOFailureTests(LoopHarness):
         self.assertEqual(['clear_text'], [call[0] for call in transport.calls])
         self.assertEqual([], robot.actions)
 
-    def test_real_adapter_failure_count_reaches_terminal_session_without_retry(self):
+    def test_real_adapter_failure_count_reaches_resumable_session_without_retry(self):
         failure = self.run_post_action_failure(FileNotFoundError('response temporary path'))
         adapter = loop_fixtures.FixtureAdapter()
         adapter.execute_error=failure
@@ -153,11 +153,11 @@ class EvidenceIOFailureTests(LoopHarness):
                 loop.confirm_one(session, session.confirmation_authority.scope())
             saved = json.loads((session.run_dir / 'session.json').read_text(encoding='utf-8'))
             self.assertEqual(1, saved['physical_actions'])
-            self.assertEqual('failed', saved['status'])
+            self.assertEqual('needs_reobservation', saved['status'])
             with self.assertRaises(RuntimeError):
                 loop.confirm_one(session, {})
         self.assertEqual(1, adapter.execute_calls)
-        self.assertIsNone(loop.device_registry.active_session(session.device_id))
+        self.assertEqual(session.session_id, loop.device_registry.active_session(session.device_id))
 
 
 if __name__ == '__main__':

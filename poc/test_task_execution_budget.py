@@ -98,8 +98,8 @@ class TaskBudgetTests(LoopHarness):
             runner, session, adapter = self.start(directory)
             adapter.execute_error = GenericActionAdapterError('执行效果不确定', physical_actions=1)
             with self.assertRaises(GenericActionAdapterError):
-                runner.run_autonomous_safe_loop(session)
-            self.assertEqual(('failed', 1, 2),
+                runner.confirm_one(session, session.confirmation_authority.scope())
+            self.assertEqual(('needs_reobservation', 1, 2),
                 (session.status, session.physical_actions, session.execution_budget.observation_attempts))
             self.assertEqual(1, adapter.execute_calls)
 

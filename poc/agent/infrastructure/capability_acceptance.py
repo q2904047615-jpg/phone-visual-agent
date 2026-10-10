@@ -348,13 +348,16 @@ def _resolved_execution_kind(execution_result: Any) -> str:
 
 
 def _canonical_live_evidence_paths(values: Any) -> tuple[Path, ...] | None:
-    """Compare report and live paths in one platform-native representation."""
-    if isinstance(values, (str, bytes)):
+    """Compare report and live paths strictly in one platform-native representation."""
+    if not isinstance(values, (list, tuple)):
         return None
     try:
-        return tuple(Path(str(value)).resolve(strict=False) for value in values)
+        paths = tuple(Path(str(value)).resolve(strict=False) for value in values)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
+    if any(not str(path).strip() for path in paths):
+        return None
+    return paths
 
 
 def _validate_live_promotion_source(*, report: Mapping[str, Any], orientation_credential: OrientationCredential,

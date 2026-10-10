@@ -347,6 +347,28 @@ def _resolved_execution_kind(execution_result: Any) -> str:
     return str(getattr(resolved, "kind", "") or "").strip()
 
 
+def _canonical_live_frame_paths(values: Any) -> tuple[str, ...]:
+    """Resolve live evidence paths before comparing report and execution data.
+
+    Windows temporary directories can expose the same file through short and
+    long path spellings. The report validator already binds every path to a
+    real JPEG inside the trial directory, so canonicalizing both views keeps
+    that binding strict while making the identity comparison platform-stable.
+    """
+
+    if not isinstance(values, (list, tuple)):
+        return ()
+    resolved: list[str] = []
+    try:
+        for value in values:
+            if not isinstance(value, (str, Path)) or not str(value).strip():
+                return ()
+            resolved.append(str(Path(value).resolve(strict=True)))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ()
+    return tuple(resolved)
+
+
 def _validate_live_promotion_source(*, report: Mapping[str, Any], orientation_credential: OrientationCredential,
     execution_result: Any) -> None:
     reject_if(not isinstance(orientation_credential, OrientationCredential), CapabilityAcceptanceError('能力晋级必须接收本进程真实方向凭据对象。'))
@@ -377,8 +399,8 @@ def _validate_live_promotion_source(*, report: Mapping[str, Any], orientation_cr
     reject_if(execution.get('orientation_credential') != orientation_credential.to_dict(), CapabilityAcceptanceError("能力晋级报告方向凭据不是 live 对象的序列化视图。"))
     reject_if(report.get('physical_actions') != physical_actions, CapabilityAcceptanceError("能力晋级报告与 live 动作计数不一致。"))
     reject_if(report.get('action_outcome') != getattr(execution_result, 'action_outcome', None), CapabilityAcceptanceError("能力晋级报告与 live 动作结果不一致。"))
-    before_paths = tuple(str(value) for value in report.get("before_frame_paths", ()))
-    result_paths = tuple((str(value) for value in getattr(execution_result, 'before_frame_paths', ())))
+    before_paths = _canonical_live_frame_paths(report.get("before_frame_paths", ()))
+    result_paths = _canonical_live_frame_paths(getattr(execution_result, 'before_frame_paths', ()))
     reject_if(before_paths != result_paths, CapabilityAcceptanceError("能力晋级报告与 live 动作前证据路径不一致。"))
 
 

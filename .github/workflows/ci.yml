@@ -31,6 +31,10 @@ jobs:
   frontend-offline:
     name: Frontend protocol and browser contracts
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: poc
+      ROBOT_WEB_MOCK: "1"
+      DASHSCOPE_API_KEY: ""
     defaults:
       run:
         working-directory: poc
@@ -43,6 +47,8 @@ jobs:
           cache-dependency-path: poc/package-lock.json
       - name: Install JavaScript dependencies
         run: npm ci
+      - name: Install Python runtime dependencies
+        run: python -m pip install -r requirements-web.txt
       - name: Install the browser used by contract tests
         run: npx playwright install --with-deps chromium
       - name: Run frontend unit and browser contracts
@@ -55,6 +61,7 @@ jobs:
       PYTHONPATH: poc
       ROBOT_WEB_MOCK: "1"
       DASHSCOPE_API_KEY: ""
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

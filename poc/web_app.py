@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+import webbrowser
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -94,11 +96,27 @@ from agent.interfaces.http_models import (
     ManualMotionStartRequest,
 )
 from features.lucky_bag import (
+    DedicatedLuckyBagMonitor,
     FastLuckyBagSessionGateway,
     LuckyBagMonitor,
     LuckyBagProfile,
     build_lucky_bag_goal,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
+_SENSITIVE_DIAGNOSTIC_RE = re.compile(
+    r"(?i)(authorization|api[-_ ]?key|token|password|secret|cookie)\s*[:=]\s*[^\s,;]+"
+)
+
+
+def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
+    """Return a short, single-line diagnostic without a traceback or payload."""
+    text = " ".join(str(error).split())
+    if not text:
+        return type(error).__name__
+    return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
+
 from features.lucky_bag.http import LuckyBagDeviceRequest, LuckyBagStartRequest
 from features.lucky_bag.gmail import DurableNotificationRouter, configured_gmail_sink, gmail_configuration_status
 from features.notifications import JsonlNotificationOutbox
@@ -115,6 +133,14 @@ from features.qishui_ad_test.http import (
 
 
 ROOT = Path(__file__).resolve().parent
+_TRIAL_CONFIG_PATH = ROOT.parent / "trial.json"
+try:
+    _TRIAL_CONFIG = json.loads(_TRIAL_CONFIG_PATH.read_text(encoding="utf-8"))
+except (OSError, ValueError, TypeError):
+    _TRIAL_CONFIG = {}
+_TRIAL_MODE = str(_TRIAL_CONFIG.get("mode") or "")
+_TRIAL_PORT = int(_TRIAL_CONFIG.get("port") or 8765)
+_SERVICE_VERSION = f"0.2.0-trial-{_TRIAL_MODE}" if _TRIAL_MODE else "0.2.0"
 STATIC_DIR = ROOT / "static"
 CONTROL_TOKEN = secrets.token_urlsafe(24)
 DEVICE_REGISTRY_PATH = Path(
@@ -273,8 +299,9 @@ _LUCKY_BAG_NOTIFICATIONS = DurableNotificationRouter(
     outbox=_LUCKY_BAG_OUTBOX,
     remote=configured_gmail_sink(),
 )
-_LUCKY_BAG_MONITOR = LuckyBagMonitor(
-    gateway=_LuckyBagGateway(),
+_LUCKY_BAG_MONITOR = DedicatedLuckyBagMonitor(
+    runtime=runtime,
+    hardware_lock=lambda device_id: _supervised_hardware_lock(device_id),
     output_root=_LUCKY_BAG_OUTPUT_DIR,
     notification_sink=_LUCKY_BAG_NOTIFICATIONS,
 )
@@ -410,8 +437,14 @@ _QWEN_ROUTER_RESPONSE_FORMAT = {
 async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
     _MANUAL_MOTION_MONITOR.registry = runtime.device_task_registry
-    print("机械臂网页控制台：http://127.0.0.1:8765/")
-    print("控制令牌已生成，仅通过本机受保护的页面初始化接口使用。")
+    # Keep startup notices ASCII-only so a Windows cp1252 stdout cannot fail
+    # the lifespan before the application is ready.
+    print(f"Phone Visual Agent web console: http://127.0.0.1:{_TRIAL_PORT}/", flush=True)
+    print("Local control token generated for the protected bootstrap page.", flush=True)
+    if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
+        threading.Timer(
+            1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
+        ).start()
     yield
     _MANUAL_MOTION_MONITOR.shutdown()
     runtime.shutdown()
@@ -422,7 +455,7 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
 
 app = FastAPI(
     title="多 App 机械臂网页控制平台",
-    version="0.2.0",
+    version=_SERVICE_VERSION,
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -594,6 +627,57 @@ def execute_directional_swipe(
     }
 
 
+def _effective_hardware_capabilities(
+    hardware_capabilities: dict[str, Any],
+    hardware_capability_profile: dict[str, Any] | None,
+    default_text_transport: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    effective_profile = hardware_capability_profile
+    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
+        effective_profile = dict(hardware_capability_profile)
+        copied_actions = {
+            str(name): dict(spec)
+            for name, spec in dict(effective_profile.get("actions") or {}).items()
+            if isinstance(spec, dict)
+        }
+        for action_name, operation in (
+            ("input_verified_text", "append_text"),
+            ("clear_verified_text", "clear_text"),
+        ):
+            if action_name in copied_actions:
+                copied_actions[action_name]["text_transport"] = "adb_keyboard"
+                copied_actions[action_name]["operation"] = operation
+                copied_actions[action_name]["implicit_clear"] = False
+                copied_actions[action_name]["retry_on_failure"] = False
+        effective_profile["actions"] = copied_actions
+    profile_actions = (
+        effective_profile.get("actions", {})
+        if isinstance(effective_profile, dict)
+        else {}
+    )
+    profile_capabilities = {
+        str(action): bool(spec.get("enabled"))
+        for action, spec in profile_actions.items()
+        if isinstance(action, str) and isinstance(spec, dict)
+    }
+    return effective_profile, profile_capabilities or hardware_capabilities
+
+
+def _enabled_physical_actions(
+    device_capabilities: dict[str, Any],
+    app_launcher: Any,
+) -> set[str]:
+    enabled_physical_actions = {
+        action
+        for action in CANONICAL_ACTION_KINDS
+        if action != "wait_for_change"
+        and bool(device_capabilities.get(physical_capability_for_action(action), False))
+    }
+    if bool(getattr(app_launcher, "enabled", False)):
+        enabled_physical_actions.add("launch_app")
+    return enabled_physical_actions
+
+
 def _device_capability_snapshot(
     active_runtime: Runtime,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, set[str]]:
@@ -619,43 +703,10 @@ def _device_capability_snapshot(
         and callable(getattr(default_text_transport, "status", None))
         else None
     )
-    if isinstance(hardware_capability_profile, dict) and default_text_transport is not None:
-        hardware_capability_profile = dict(hardware_capability_profile)
-        copied_actions = {
-            str(name): dict(spec)
-            for name, spec in dict(hardware_capability_profile.get("actions") or {}).items()
-            if isinstance(spec, dict)
-        }
-        for action_name, operation in (
-            ("input_verified_text", "append_text"),
-            ("clear_verified_text", "clear_text"),
-        ):
-            if action_name in copied_actions:
-                copied_actions[action_name]["text_transport"] = "adb_keyboard"
-                copied_actions[action_name]["operation"] = operation
-                copied_actions[action_name]["implicit_clear"] = False
-                copied_actions[action_name]["retry_on_failure"] = False
-        hardware_capability_profile["actions"] = copied_actions
-    profile_actions = (
-        hardware_capability_profile.get("actions", {})
-        if isinstance(hardware_capability_profile, dict)
-        else {}
-    )
-    effective_hardware_capabilities = {
-        str(action): bool(spec.get("enabled"))
-        for action, spec in profile_actions.items()
-        if isinstance(action, str) and isinstance(spec, dict)
-    }
-    device_capabilities = effective_hardware_capabilities or hardware_capabilities
-    enabled_physical_actions = {
-        action
-        for action in CANONICAL_ACTION_KINDS
-        if action != "wait_for_change"
-        and bool(device_capabilities.get(physical_capability_for_action(action), False))
-    }
+    hardware_capability_profile, device_capabilities = _effective_hardware_capabilities(
+        hardware_capabilities, hardware_capability_profile, default_text_transport)
     default_app_launcher = active_runtime.app_launcher_for_device(default_device_id)
-    if bool(getattr(default_app_launcher, "enabled", False)):
-        enabled_physical_actions.add("launch_app")
+    enabled_physical_actions = _enabled_physical_actions(device_capabilities, default_app_launcher)
     return (
         default_device_id,
         hardware_capabilities,
@@ -765,6 +816,8 @@ def lucky_bag_feature(
     return {
         "feature_id": "lucky_bag",
         "stage": "goal_preset",
+        "trial": _LUCKY_BAG_MONITOR.config,
+        "notification": gmail_configuration_status(),
         "profile": {
             "device_id": profile.device_id,
             "recipient": profile.recipient,
@@ -1091,6 +1144,14 @@ def start_manual_motion(
     if isinstance(runtime, RuntimeUnavailable):
         raise HTTPException(status_code=503, detail=runtime.startup_error)
     _MANUAL_MOTION_MONITOR.registry = runtime.device_task_registry
+    # Keep startup notices ASCII-only so a Windows cp1252 stdout cannot fail
+    # the lifespan before the application is ready.
+    print(f"Phone Visual Agent web console: http://127.0.0.1:{_TRIAL_PORT}/", flush=True)
+    print("Local control token generated for the protected bootstrap page.", flush=True)
+    if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
+        threading.Timer(
+            1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
+        ).start()
     try:
         runtime.controller_for_device(body.device_id)
         profile = MotionProfile(
@@ -2392,7 +2453,21 @@ def preview_mjpg(device_id: str) -> StreamingResponse:
         while True:
             try:
                 frame, _cached = runtime.capture_preview(device_id, quality=68)
-            except Exception:
+            except Exception as exc:
+                error_type = type(exc).__name__
+                error_text = _diagnostic_error_text(exc)
+                _LOGGER.warning(
+                    "mjpg_preview_stopped device_id=%s error_type=%s error=%s",
+                    device_id,
+                    error_type,
+                    error_text,
+                    extra={
+                        "event": "mjpg_preview_stopped",
+                        "device_id": device_id,
+                        "error_type": error_type,
+                        "error_message": error_text,
+                    },
+                )
                 return
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n"

@@ -40,6 +40,10 @@ class EvalProvider:
     def status(self) -> dict:
         return {"configured": True, "model": self.model}
 
+    def chat(self, messages, max_tokens, **kwargs) -> str:
+        """Expose the public provider boundary while retaining the legacy hook."""
+        return self._chat(messages, max_tokens, **kwargs)
+
     def _chat(self, messages, max_tokens, **kwargs) -> str:
         self.calls += 1
         if self.failure:

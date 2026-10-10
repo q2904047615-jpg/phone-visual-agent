@@ -108,7 +108,7 @@ class FakeProvider:
     def status(self) -> dict:
         return {"configured": True, "model": "fake-qwen"}
 
-    def _chat(
+    def chat(
         self,
         messages: list[dict],
         max_tokens: int | None,
@@ -139,7 +139,7 @@ class SequenceProvider(FakeProvider):
         self.max_tokens_seen: list[int] = []
         self.messages_seen: list[list[dict]] = []
 
-    def _chat(
+    def chat(
         self,
         messages: list[dict],
         max_tokens: int | None,

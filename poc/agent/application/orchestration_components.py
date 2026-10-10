@@ -7,6 +7,8 @@ protocol helpers, so canonical action semantics and persistence stay unchanged.
 
 from collections.abc import Mapping
 from pathlib import Path
+import logging
+import re
 import uuid
 from typing import Any
 
@@ -24,6 +26,22 @@ from agent.domain.execution_budget import (
     TaskExecutionBudget,
 )
 from agent.domain.validation import reject_if
+
+
+_LOGGER = logging.getLogger(__name__)
+_SENSITIVE_DIAGNOSTIC_RE = re.compile(
+    r"(?i)(authorization|api[-_ ]?key|token|password|secret|cookie)\s*[:=]\s*[^\s,;]+"
+)
+
+
+def _diagnostic_error_text(error: BaseException, *, limit: int = 200) -> str:
+    """Return a short, single-line diagnostic with common credentials redacted."""
+    text = " ".join(str(error).split())
+    if not text:
+        return type(error).__name__
+    return _SENSITIVE_DIAGNOSTIC_RE.sub(r"\1=[REDACTED]", text)[:limit]
+
+
 class ObservationDecisionCoordinator:
     def observe_and_decide(self, host, session: UniversalAgentSessionState) -> Any:
         host._clear_action(session)
@@ -92,6 +110,16 @@ class ConfirmationExecutionCoordinator:
             host._best_effort_snapshot(session)
             raise
 
+        def decide_after_action(frames, new_observation, model_decision):
+            return host._decide(session, frames=frames, observation=new_observation,
+                model_decision=model_decision)
+
+        return self._record_executed_action_result(
+            host, session, authority, decision, observation, result, before_actions,
+            decide_after_action)
+
+    def _record_executed_action_result(self, host, session, authority, decision, observation,
+        result, before_actions, decide_after_action):
         host._remember(session, result.evidence, result.after_frame_paths)
         physical = int(result.physical_actions)
         wait = result.resolved_action.kind == 'wait_for_change'
@@ -123,13 +151,19 @@ class ConfirmationExecutionCoordinator:
             'before_observation_id': observation.observation_id, 'before_fingerprint': observation.fingerprint,
             'after_observation_id': new_observation.observation_id,
             'after_fingerprint': new_observation.fingerprint})
+        return self._record_post_action_decision(
+            host, session, authority, decision, observation, result, before_actions,
+            physical, outcome, errors, after_frames, new_observation, decide_after_action)
+
+    def _record_post_action_decision(self, host, session, authority, decision, observation,
+        result, before_actions, physical, outcome, errors, after_frames, new_observation,
+        decide_after_action):
         reject_if(not isinstance(result.after_model_decision, Mapping),
             UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
         session.recent_navigation.record_execution(result.resolved_action.kind)
         try:
             next_model_decision = host._record_qwen_reply(session, result.after_model_decision)
-            next_decision = host._decide(session, frames=after_frames, observation=new_observation,
-                model_decision=next_model_decision)
+            next_decision = decide_after_action(after_frames, new_observation, next_model_decision)
             session.history[-1]["visual_outcome"] = next_decision.previous_action_outcome
             host._remember(session, session.evidence_store.write_verification(session.step_number - 1,
                 {'execution_outcome': outcome, 'visual_outcome': next_decision.previous_action_outcome,
@@ -192,37 +226,7 @@ class AutonomousExecutionCoordinator:
                         # Preserve the reason that caused the recoverable pause;
                         # do not replace it with a generic loop-state message.
                         break
-                    if session.status == 'needs_reobservation':
-                        try:
-                            host._observe_and_decide(session)
-                        except GenericActionAdapterError as exc:
-                            # A transient model/observation failure consumed no
-                            # device action. Keep the lease and spend the next
-                            # observation budget on a fresh screenshot.
-                            if session.status != 'needs_reobservation':
-                                raise
-                            host._remember(session, exc.evidence)
-                            iterations += 1
-                            continue
-                    elif session.status == 'awaiting_confirmation':
-                        authority = session.confirmation_authority
-                        reject_if(authority is None or authority.consumed,
-                            UniversalAgentOrchestratorError('待执行动作缺少一次性scope。'))
-                        try:
-                            host._confirm_one_locked(session, authority.scope())
-                        except Exception as exc:
-                            # The action authority is consumed.  For both a
-                            # stale pre-action frame and an uncertain
-                            # post-action result, the next iteration must only
-                            # obtain a fresh screenshot; never replay here.
-                            if session.status != 'needs_reobservation':
-                                raise
-                            host._clear_action(session)
-                            host._remember(session, getattr(exc, 'evidence', ()))
-                            iterations += 1
-                            continue
-                    else:
-                        session.auto_pause_reason = f'当前状态不能自动推进：{session.status}。'
+                    if not self._run_active_state_step(host, session):
                         break
                     iterations += 1
                 host._apply_pause_request(session)
@@ -244,6 +248,39 @@ class AutonomousExecutionCoordinator:
         return {'physical_actions': session.physical_actions - start_actions, 'iterations': iterations,
             'status': session.status, 'pause_reason': session.auto_pause_reason}
 
+    def _run_active_state_step(self, host, session: UniversalAgentSessionState) -> bool:
+        if session.status == 'needs_reobservation':
+            try:
+                host._observe_and_decide(session)
+            except GenericActionAdapterError as exc:
+                # A transient model/observation failure consumed no device
+                # action. Keep the lease and spend the next observation budget
+                # on a fresh screenshot.
+                if session.status != 'needs_reobservation':
+                    raise
+                host._remember(session, exc.evidence)
+                return True
+            return True
+        if session.status == 'awaiting_confirmation':
+            authority = session.confirmation_authority
+            reject_if(authority is None or authority.consumed,
+                UniversalAgentOrchestratorError('待执行动作缺少一次性scope。'))
+            try:
+                host._confirm_one_locked(session, authority.scope())
+            except Exception as exc:
+                # The action authority is consumed. For both a stale
+                # pre-action frame and an uncertain post-action result, the
+                # next iteration must only obtain a fresh screenshot; never
+                # replay here.
+                if session.status != 'needs_reobservation':
+                    raise
+                host._clear_action(session)
+                host._remember(session, getattr(exc, 'evidence', ()))
+                return True
+            return True
+        session.auto_pause_reason = f'当前状态不能自动推进：{session.status}。'
+        return False
+
 class SessionLifecycleCoordinator:
     def write_snapshot(self, host, session: UniversalAgentSessionState) -> None:
         if session.vision_usage is not None:
@@ -255,8 +292,49 @@ class SessionLifecycleCoordinator:
     def best_effort_snapshot(self, host, session: UniversalAgentSessionState) -> None:
         try:
             host._write_snapshot(session)
-        except Exception:
+        except Exception as exc:
+            error_type = type(exc).__name__
+            error_text = _diagnostic_error_text(exc)
+            _LOGGER.warning(
+                "best_effort_snapshot_failed session_id=%s device_id=%s error_type=%s error=%s",
+                getattr(session, "session_id", ""),
+                getattr(session, "device_id", ""),
+                error_type,
+                error_text,
+                extra={
+                    "event": "best_effort_snapshot_failed",
+                    "session_id": getattr(session, "session_id", ""),
+                    "device_id": getattr(session, "device_id", ""),
+                    "error_type": error_type,
+                    "error_message": error_text,
+                },
+            )
             pass
+    def _build_session(self, host, *, session_id: str, raw_goal: str,
+        exact_input_text: str | None, exact_action_kind: str | None,
+        exact_target_label: str, device_id: str, run_dir: Path,
+        visual_reference_paths: tuple[Path, ...], conversation: tuple[dict[str, str], ...],
+        adapter: Any, evidence_store: Any, vision_usage: VisionSessionUsageLedger,
+        execution_budget: TaskExecutionBudget) -> UniversalAgentSessionState:
+        """Assemble and validate the session before its first observation."""
+        visual_paths = tuple(Path(item) for item in visual_reference_paths)
+        # Reference assets are an internal visual-prompt input, never goal text or action authority.
+        setattr(adapter, "visual_reference_paths", visual_paths)
+        session = UniversalAgentSessionState(session_id=session_id,
+            raw_goal=str(raw_goal or ''), device_id=device_id, run_dir=Path(run_dir),
+            visual_reference_paths=visual_paths,
+            conversation=[dict(item) for item in conversation],
+            adapter=adapter, evidence_store=evidence_store, vision_usage=vision_usage,
+            execution_budget=execution_budget,
+            local_exact_input_authority=exact_input_text is not None,
+            exact_input_text=exact_input_text,
+            exact_action_kind=exact_action_kind or host.required_action_kind,
+            exact_target_label=exact_target_label)
+        reject_if(not session.session_id or not session.raw_goal or not session.device_id,
+            UniversalAgentOrchestratorError('启动Agent需要session_id、目标和device_id。'))
+        reject_if(exact_input_text is not None and exact_action_kind is not None,
+            UniversalAgentOrchestratorError('exact_input_text与exact_action_kind不能同时使用。'))
+        return session
     def start(self, host, *, session_id: str, raw_goal: str, exact_input_text: str | None=None,
         exact_action_kind: str | None=None, exact_target_label: str='', device_id: str,
         run_dir: Path, visual_reference_paths: tuple[Path, ...] = (),
@@ -272,20 +350,13 @@ class SessionLifecycleCoordinator:
             ledger = VisionSessionUsageLedger(session_id=resolved_session)
             with host.device_registry.device_lock(resolved_device), host._vision_usage_scope(ledger):
                 adapter = host.adapter_factory(resolved_device)
-                # Reference assets are an internal visual-prompt input, never goal text or action authority.
-                setattr(adapter, "visual_reference_paths", tuple(Path(item) for item in visual_reference_paths))
                 store = host.evidence_store_factory(Path(run_dir))
-                session = UniversalAgentSessionState(session_id=resolved_session,
-                    raw_goal=str(raw_goal or ''), device_id=resolved_device, run_dir=Path(run_dir),
-                    visual_reference_paths=tuple(Path(item) for item in visual_reference_paths),
-                    conversation=[dict(item) for item in conversation],
-                    adapter=adapter, evidence_store=store, vision_usage=ledger, execution_budget=budget,
-                    local_exact_input_authority=exact_input_text is not None, exact_input_text=exact_input_text,
-                    exact_action_kind=exact_action_kind or host.required_action_kind, exact_target_label=exact_target_label)
-                reject_if(not session.session_id or not session.raw_goal or not session.device_id,
-                    UniversalAgentOrchestratorError('启动Agent需要session_id、目标和device_id。'))
-                reject_if(exact_input_text is not None and exact_action_kind is not None,
-                    UniversalAgentOrchestratorError('exact_input_text与exact_action_kind不能同时使用。'))
+                session = self._build_session(host, session_id=resolved_session, raw_goal=raw_goal,
+                    exact_input_text=exact_input_text, exact_action_kind=exact_action_kind,
+                    exact_target_label=exact_target_label, device_id=resolved_device,
+                    run_dir=run_dir, visual_reference_paths=visual_reference_paths,
+                    conversation=conversation, adapter=adapter, evidence_store=store,
+                    vision_usage=ledger, execution_budget=budget)
                 try:
                     host._observe_and_decide(session)
                     host._write_snapshot(session)

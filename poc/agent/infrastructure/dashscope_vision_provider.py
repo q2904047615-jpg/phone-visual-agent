@@ -12,21 +12,19 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterator
 
 import httpx
-from PIL import Image
-
 from agent.domain.vision_model import VisionAgentError, VisionModelConfig
 from agent.infrastructure.environment_vision_model_config import load_vision_model_config
 from agent.application.vision_usage import VisionSessionUsageLedger
 from agent.infrastructure.atomic_files import atomic_replace_bytes, json_bytes
-
-
-class _DuplicateJSONKeyError(ValueError):
-    pass
+from agent.infrastructure.vision_payload_support import (
+    extract_json_object as _extract_json_object,
+    image_data_url as _image_data_url,
+    image_request_size as _image_request_size,
+)
 
 
 def _validated_response_format(value: Any) -> dict[str, Any] | None:
@@ -53,61 +51,6 @@ def _validated_response_format(value: Any) -> dict[str, Any] | None:
     except (TypeError, ValueError) as exc:
         raise VisionAgentError("千问视觉 json_schema 不能序列化为有效 JSON。") from exc
     return value
-
-
-def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for (key, item) in pairs:
-        reject_if(key in value, _DuplicateJSONKeyError(key))
-        value[key] = item
-    return value
-
-
-def _extract_json_object(raw: str, *, reject_duplicate_keys: bool=False,
-    unwrap_singleton_object_array: bool=False) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith('```'):
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text)
-    load_options = {'object_pairs_hook': _reject_duplicate_json_pairs} if reject_duplicate_keys else {}
-    try:
-        value = json.loads(text, **load_options)
-    except _DuplicateJSONKeyError as exc:
-        raise VisionAgentError(f"模型返回的 JSON 包含重复字段：{exc}") from exc
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        reject_if(start < 0 or end <= start, VisionAgentError("模型没有返回 JSON 对象。"))
-        try:
-            value = json.loads(text[start : end + 1], **load_options)
-        except _DuplicateJSONKeyError as exc:
-            raise VisionAgentError(f'模型返回的 JSON 包含重复字段：{exc}') from exc
-        except json.JSONDecodeError as exc:
-            raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
-    if unwrap_singleton_object_array and isinstance(value, list):
-        reject_if(len(value) != 1 or not isinstance(value[0], dict),
-            VisionAgentError("模型返回的单步观察数组必须恰好包含一个 JSON 对象。"))
-        value = value[0]
-    reject_if(not isinstance(value, dict), VisionAgentError("模型返回值必须是 JSON 对象。"))
-    return value
-
-
-def _image_request_size(image: Image.Image) -> tuple[int, int]:
-    """Return the exact JPEG dimensions sent to the visual model."""
-    return image.width, image.height
-
-
-def _image_data_url(image: Image.Image) -> str:
-    """Encode a readable, bounded JPEG for visual-model requests."""
-
-    result = image.convert("RGB")
-    request_size = _image_request_size(result)
-    if result.size != request_size:
-        result = result.resize(request_size, Image.Resampling.LANCZOS)
-    buffer = BytesIO()
-    result.save(buffer, format="JPEG", quality=82, optimize=True)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded}"
 
 
 def _has_only_valid_inline_jpeg_images(messages: list[dict[str, Any]]) -> bool:
@@ -225,6 +168,19 @@ class DashScopeVisionProvider:
         with self._request_lock:
             return self._chat_locked(messages, max_tokens, timeout=timeout, max_attempts=max_attempts,
                 response_format=response_format)
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int | None,
+        *,
+        timeout: float | None = None,
+        max_attempts: int | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        """Public provider-neutral boundary used by visual observers."""
+        return self._chat(messages, max_tokens, timeout=timeout, max_attempts=max_attempts,
+            response_format=response_format)
 
     def _chat_locked(self, messages: list[dict[str, Any]], max_tokens: int | None, *, timeout: float | None=None,
         max_attempts: int | None=None, response_format: dict[str, Any] | None=None) -> str:

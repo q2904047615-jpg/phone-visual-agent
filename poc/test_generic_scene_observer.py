@@ -46,9 +46,12 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
         self.assertEqual(["action", "finish"], decision["properties"]["status"]["enum"])
         self.assertNotIn("evidence_refs", decision["properties"])
         self.assertEqual(["string", "null"], decision["properties"]["action"]["type"])
-        self.assertEqual("action", decision["anyOf"][0]["properties"]["status"]["const"])
-        self.assertEqual("finish", decision["anyOf"][1]["properties"]["status"]["const"])
-        self.assertEqual("null", decision["anyOf"][1]["properties"]["action"]["type"])
+        finish = next(branch for branch in decision["anyOf"]
+            if branch["properties"]["status"]["enum"] == ["finish"])
+        action = next(branch for branch in decision["anyOf"]
+            if branch["properties"]["action"]["enum"] == ["input"])
+        self.assertEqual("null", finish["properties"]["action"]["type"])
+        self.assertIn("text", action["properties"])
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):

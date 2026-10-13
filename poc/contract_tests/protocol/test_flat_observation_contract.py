@@ -54,9 +54,9 @@ class FlatObservationContractTests(unittest.TestCase):
                 properties = schema['properties']['decision']['properties']
                 decision_schema = schema['properties']['decision']
                 self.assertIn('anyOf', decision_schema)
-                self.assertEqual('action', decision_schema['anyOf'][0]['properties']['status']['const'])
-                self.assertEqual('finish', decision_schema['anyOf'][1]['properties']['status']['const'])
-                self.assertEqual('null', decision_schema['anyOf'][1]['properties']['action']['type'])
+                finish = next(branch for branch in decision_schema['anyOf']
+                    if branch['properties']['status']['enum'] == ['finish'])
+                self.assertEqual('null', finish['properties']['action']['type'])
                 self.assertEqual(MODEL_STEP_DECISION_FIELDS, set(properties))
                 self.assertEqual(set(properties), set(schema['properties']['decision']['required']))
                 self.assertEqual([WIRE_FOR_CANONICAL.get(kind, kind), None], properties['action']['enum'])

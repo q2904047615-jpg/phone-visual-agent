@@ -55,7 +55,7 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-10-13-multimodal-reply-v29"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-10-13-multimodal-reply-v30"
 HISTORY_THUMBNAIL_MAX_SIZE = (360, 640)
 HISTORY_THUMBNAIL_JPEG_QUALITY = 70
 REFERENCE_THUMBNAIL_MAX_SIZE = (480, 480)
@@ -749,29 +749,57 @@ def _single_step_response_format(context: dict[str, Any], *, input_structure_req
 
 def _decision_response_schema(decision_properties: dict[str, Any],
     available_action_kinds: tuple[str, ...]) -> dict[str, Any]:
-    """Bind the action/finish union instead of allowing contradictory pairs."""
+    """Bind status, action, and their action-specific fields in the wire schema."""
     wire_actions = _wire_action_names(available_action_kinds)
+    direct_actions = {'tap', 'dismiss', 'double_tap', 'long_press'}
+    trajectory_actions = {'swipe', 'drag'}
+    null_action_fields = ('point', 'direction', 'start', 'end', 'text', 'app', 'wait_seconds')
+
+    def branch(action: str, *, required: dict[str, Any] | None = None,
+        nulls: tuple[str, ...] = ()) -> dict[str, Any]:
+        props: dict[str, Any] = {'status': {'enum': ['action']}, 'action': {'enum': [action]}}
+        if required:
+            props.update(required)
+        for name in nulls:
+            props[name] = {'type': 'null'}
+        return {'properties': props, 'required': ['status', 'action'],}
+
+    branches: list[dict[str, Any]] = []
+    for action in wire_actions:
+        if action in direct_actions:
+            branches.append(branch(action, required={'point': {'type': 'array', 'items': {'type': 'number'},
+                'minItems': 2, 'maxItems': 2}}, nulls=('direction', 'start', 'end', 'text', 'app', 'wait_seconds')))
+        elif action in trajectory_actions:
+            branches.append(branch(action, required={
+                'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
+                'end': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
+            }, nulls=('point', 'direction', 'text', 'app', 'wait_seconds')))
+        elif action == 'scroll':
+            branches.append(branch(action, required={'direction': {'enum': ['up', 'down', 'left', 'right']}},
+                nulls=('point', 'start', 'end', 'text', 'app', 'wait_seconds')))
+        elif action == 'input':
+            branches.append(branch(action, required={'text': {'type': 'string'}},
+                nulls=('point', 'direction', 'start', 'end', 'app', 'wait_seconds')))
+        elif action == 'launch_app':
+            branches.append(branch(action, required={'app': {'type': 'string'}},
+                nulls=('point', 'direction', 'start', 'end', 'text', 'wait_seconds')))
+        elif action == 'wait_for_change':
+            branches.append(branch(action, required={'wait_seconds': {'type': 'number', 'minimum': 0}},
+                nulls=('point', 'direction', 'start', 'end', 'text', 'app')))
+        else:
+            branches.append(branch(action, nulls=null_action_fields))
+
+    finish = {
+        'properties': {'status': {'enum': ['finish']}, 'action': {'type': 'null'},
+            **{name: {'type': 'null'} for name in null_action_fields}},
+        'required': ['status', 'action'],
+    }
     return {
         'type': 'object',
         'properties': decision_properties,
         'required': list(decision_properties),
         'additionalProperties': False,
-        'anyOf': [
-            {
-                'properties': {
-                    'status': {'const': 'action'},
-                    'action': {'type': 'string', 'enum': list(wire_actions)},
-                },
-                'required': ['status', 'action'],
-            },
-            {
-                'properties': {
-                    'status': {'const': 'finish'},
-                    'action': {'type': 'null'},
-                },
-                'required': ['status', 'action'],
-            },
-        ],
+        'anyOf': [*branches, finish],
     }
 
 

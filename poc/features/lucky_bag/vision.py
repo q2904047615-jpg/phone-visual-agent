@@ -53,7 +53,11 @@ class TemplateDetector:
         self.last_score = 0.0
         # Use actual screen dimensions rather than inherited phone coordinates.
         for path in sorted(self.directory.glob("*.png")):
-            reference = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            # ``cv2.imread`` cannot reliably open non-ASCII Windows paths.  The
+            # project is routinely checked out under a Chinese directory, so
+            # read the bytes through Python and let OpenCV decode them instead.
+            encoded = np.fromfile(path, dtype=np.uint8)
+            reference = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
             if reference is None or float(reference.std()) < 3:
                 continue
             for scale in (.45, .6, .75, .9, 1, 1.15, 1.35, 1.6, 1.9, 2.2):

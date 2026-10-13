@@ -5,6 +5,7 @@ from .runtime_session import (
     UniversalAgentSessionState,
 )
 from .policy import POLICY_PROTOCOL_VERSION, PlatformPolicy, PolicyDecision, PolicyViolation
+from .verifier import VERIFIER_PROTOCOL_VERSION, PlatformVerifier, VerificationError, VerificationResult
 from .universal_agent_sessions import (
     AgentDeviceRuntimeError,
     AgentSessionCommandError,
@@ -16,5 +17,6 @@ from .universal_agent_sessions import (
 
 __all__ = ['AgentDeviceRuntimeError', 'AgentSessionCommandError', 'AgentSessionOperationResult',
     'POLICY_PROTOCOL_VERSION', 'PlatformPolicy', 'PolicyDecision', 'PolicyViolation',
+    'VERIFIER_PROTOCOL_VERSION', 'PlatformVerifier', 'VerificationError', 'VerificationResult',
     'POST_ACTION_TRANSITION_PROTOCOL_VERSION', 'StartUniversalAgentSessionCommand',
     'StartUniversalAgentSessionResult', 'UniversalAgentSessionApplicationService', 'UniversalAgentSessionState']

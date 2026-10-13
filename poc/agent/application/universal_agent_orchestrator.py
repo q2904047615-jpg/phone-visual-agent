@@ -15,6 +15,7 @@ from agent.domain.validation import reject_if
 from agent.application.action_adapter import GenericSingleActionAdapterPort
 from agent.application.planner import ModelAssistedPlanner, PlannerPort
 from agent.application.policy import PlatformPolicy
+from agent.application.verifier import PlatformVerifier
 from agent.application.orchestration_support import (
     UniversalAgentOrchestratorError,
     _action_digest,
@@ -87,7 +88,7 @@ class UniversalAgentOrchestrator:
         self.qwen_observer = qwen_observer
         self.planner = planner or ModelAssistedPlanner(qwen_observer)
         self.policy = policy or PlatformPolicy()
-        self.verifier = verifier
+        self.verifier = verifier or PlatformVerifier()
         self.adapter_factory = adapter_factory
         self.evidence_store_factory = evidence_store_factory
         self.trusted_observation_factory = trusted_observation_factory
@@ -347,10 +348,21 @@ class UniversalAgentOrchestrator:
                 "本次效果已执行，但新图未确认结果；保留不确定效果并重新观察，不自动重复效果。")
             return decision
         if decision.proposal.status == "finish":
+            verification = self.verifier.verify_finish(intent=decision,
+                observation=session.trusted_observation, history=session.history)
+            session.last_verification = verification
+            self._remember(session, session.evidence_store.write_json(
+                f'verification_step_{session.step_number}.json', verification.to_dict()))
+            if verification.state != "completed":
+                self._clear_action(session)
+                session.tool_intent = decision
+                session.qwen_decision = getattr(decision, 'model_decision', decision)
+                self._set_status(session, "needs_reobservation", verification.reason)
+                return decision
             self._clear_action(session)
             session.tool_intent = decision
             session.qwen_decision = getattr(decision, 'model_decision', decision)
-            self._set_status(session, "succeeded")
+            self._set_status(session, verification.terminal_status or "succeeded")
             return decision
         self._bind_confirmation(session)
         kind = action_effect_kind(decision.proposal.action)

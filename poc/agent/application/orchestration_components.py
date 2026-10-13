@@ -144,6 +144,11 @@ class ConfirmationExecutionCoordinator:
         session.step_number += 1
         new_observation = host._build_observation(session, scene=result.after_scene, frames=after_frames,
             observation_id=f'obs_{uuid.uuid4().hex}')
+        platform_verification = host.verifier.verify_action_execution(intent=decision,
+            before=observation, after=new_observation, result=result)
+        session.last_verification = platform_verification
+        host._remember(session, session.evidence_store.write_json(
+            f'platform_verification_step_{session.step_number - 1}.json', platform_verification.to_dict()))
         session.history.append({'step_number': session.step_number - 1, 'task_revision': authority.revision,
             'step_id': authority.step_id, 'effect_ids': list(authority.effect_ids),
             'confirmation_receipt': {'authoritative': True, 'consumed': True, 'scope': authority.scope()},

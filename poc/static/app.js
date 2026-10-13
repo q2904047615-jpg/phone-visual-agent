@@ -895,18 +895,18 @@ function renderAction() {
   const waitingForChange = rawNextAction.action === "wait_for_change";
   const publicTitle = waitingForChange
     ? "等待画面变化"
-    : (action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待 Qwen 判断");
+    : (action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待 Agent 平台判断");
   const publicReason = rawDecision.reason || action.reason || riskSummary || "正在根据当前画面判断下一步。";
   const actionMetadata = action.protocol === "qwen-same-response-action-finish-v9"
     ? '<div class="technical-line">'
-      + "Qwen 已返回当前一步"
+      + "Planner 已签发当前 ToolIntent"
       + " · status " + escapeHtml(action.status)
       + " · session " + escapeHtml(view.sessionId || "—")
       + " · revision " + escapeHtml(action.revision ?? "—")
       + " · observation " + escapeHtml(action.observationId || "—")
       + " · fingerprint " + escapeHtml(action.fingerprint || "—")
       + "</div>"
-    : '<div class="technical-line">Qwen 唯一动作尚未产生</div>';
+    : '<div class="technical-line">当前 ToolIntent 尚未产生</div>';
   const technicalDetails = '<details class="technical-details">'
     + "<summary>查看技术详情</summary>"
     + '<div class="technical-grid">'
@@ -1959,14 +1959,14 @@ async function sendUnifiedQwenMessage(text) {
 
   if (active && !active.isTerminal) {
     try {
-      const response = await withVisionProgress("和 Qwen 对话并等待它判断是否继续操作", () =>
+      const response = await withVisionProgress("与 Agent 平台对话并等待 Planner 判断是否继续操作", () =>
         api(`/api/agent/generic-supervised/${encodeURIComponent(active.sessionId)}/chat`, {
           method: "POST",
           body: JSON.stringify({ device_id: state.sessionDeviceId || state.deviceId, text: message }),
         })
       );
       state.supervisedSession = response.session;
-      toast("Qwen 已结合当前手机画面返回回复并决定下一步。");
+      toast('Agent 平台已结合当前手机画面返回回复并签发下一步。');
       render();
       return true;
     } catch (error) {
@@ -1992,14 +1992,14 @@ async function sendUnifiedQwenMessage(text) {
 
   state.taskAttemptStatus = {
     state: "running",
-    detail: "正在发送消息并等待 Qwen 决定是否需要读取画面或控制手机。",
+    detail: "正在发送消息并等待 Agent 平台决定是否需要读取画面或控制手机。",
     phase: "conversation",
     code: "",
     recoverable: true,
     updatedAt: new Date().toISOString(),
   };
   try {
-    const response = await withVisionProgress("和 Qwen 对话并判断是否需要操作手机", () =>
+    const response = await withVisionProgress("与 Agent 平台对话并判断是否需要操作手机", () =>
       api("/api/qwen/chat", {
         method: "POST",
         body: JSON.stringify({

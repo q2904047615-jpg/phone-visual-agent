@@ -168,7 +168,7 @@ STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查当前画面', 'w
 
 
 class SingleStepGenericSceneObserver():
-    """Use one Qwen envelope per fresh scene as the only scene/input observation authority."""
+    """Use one Model Gateway envelope per fresh scene as the observation input."""
 
     def __init__(self, provider: VisionProviderPort) -> None:
         self.provider = provider

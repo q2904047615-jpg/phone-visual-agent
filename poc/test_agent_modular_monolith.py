@@ -2,6 +2,9 @@ from __future__ import annotations
 from typing import Any
 from agent.domain import CanonicalSelectionReceipt
 from agent.domain import ConfirmationAuthority
+from agent.domain import ToolIntent
+from agent.domain.canonical_action_protocol import GenericStepProposal
+from agent.domain.semantic_action import SemanticAction
 from agent.application import POST_ACTION_TRANSITION_PROTOCOL_VERSION
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +40,15 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             decision_node_id="node-1",
             action_digest="a" * 64,
         )
+        model_decision = SimpleNamespace(
+            task_id="session-1", device_id="phone-1", revision=1,
+            observation_id="obs-1", fingerprint="frame-1",
+            proposal=GenericStepProposal(
+                status="action", action=SemanticAction(
+                    node_id="node-1", action="tap_semantic", params={}
+                )
+            ),
+        )
         session = UniversalAgentSessionState(
             session_id="session-1",
             raw_goal="完成身份认证",
@@ -45,8 +57,12 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             adapter=SnapshotAdapter(),
             evidence_store=object(),  # type: ignore[arg-type]
             status="awaiting_confirmation",
-            qwen_decision=SimpleNamespace(proposal=SimpleNamespace(
-                status="action", action=SimpleNamespace(action="tap_semantic"))),
+            tool_intent=ToolIntent(
+                task_id="session-1", device_id="phone-1", revision=1,
+                observation_id="obs-1", fingerprint="frame-1",
+                proposal=model_decision.proposal, model_decision=model_decision,
+            ),
+            qwen_decision=model_decision,
             confirmation_authority=authority,
             evidence_paths=["a.json", "a.json", "b.json"],
         )
@@ -60,7 +76,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual("tap_semantic", snapshot["controller_decision"]["canonical_class"])
         with self.assertRaises(AttributeError):
             session.controller_decision = CanonicalSelectionReceipt(allowed=False, reason="旧副本否决")
-        session.qwen_decision.proposal.action.action = "home"
+        object.__setattr__(session.tool_intent.proposal.action, "action", "home")
         self.assertEqual("home", session.snapshot()["controller_decision"]["canonical_class"])
         self.assertEqual(authority.scope(), snapshot["confirmation_scope"])
         self.assertEqual(["a.json", "b.json"], snapshot["evidence"])

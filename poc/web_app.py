@@ -1939,7 +1939,8 @@ def start_generic_supervised_session(
 ) -> dict[str, Any]:
     """Start one canonical whole-task visual session.
 
-    Automatic mode advances the same Qwen action/finish loop; it does not build
+    Automatic mode advances the same Planner ToolIntent loop with Qwen as the
+    current Model Gateway; it does not build
     a local plan or restrict execution to a read-only action subset.
     """
 
@@ -2115,7 +2116,7 @@ def unified_qwen_chat_in_session(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Continue the same multimodal conversation and let Qwen choose reply/action together."""
+    """Continue the multimodal conversation; Model Gateway suggestions are signed by Planner."""
 
     verify_local_request(request, x_control_token)
     if isinstance(runtime, RuntimeUnavailable):

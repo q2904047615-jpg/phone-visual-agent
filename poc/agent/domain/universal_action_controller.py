@@ -1,10 +1,10 @@
 """Pure domain service that validates and resolves one current-frame action.
 
-The controller is deliberately not a second goal or visual authority.  Qwen
-selects one action from the current screenshot.  This service only proves that
+The controller is deliberately not a second goal or visual authority.  The
+Planner signs one gateway candidate into a ToolIntent. This service only proves that
 the selected action is executable on that same scene, resolves its geometry,
 and checks exact text receipts. Post-action App identity and navigation progress
-belong to Qwen's same-response action/finish, not a second local visual verdict.
+belong to Runtime/Verifier after a fresh observation, not a second local visual verdict.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ class ResolvedSemanticAction:
 
 
 class UniversalActionController:
-    """Bind Qwen's one current-frame action to safe executable geometry."""
+    """Bind the Planner ToolIntent to safe executable geometry."""
 
     def resolve_one(
         self,
@@ -163,7 +163,7 @@ class UniversalActionController:
         scene: UIScene,
         resolved: Any,
     ) -> ResolvedSemanticAction:
-        # Qwen wire actions provide direct coordinates. Keep the older
+        # Model Gateway wire actions provide direct coordinates. Keep the older
         # element-bound form for internal SemanticAction callers only; the
         # wire normalizer never emits source/destination element fields.
         if action.params.get("start") is None and action.params.get("end") is None and (
@@ -395,7 +395,7 @@ class UniversalActionController:
         before: UIScene,
         after: UIScene,
     ) -> tuple[str, ...]:
-        """Check only exact local receipts; Qwen owns all goal progress."""
+        """Check exact local receipts; Runtime/Verifier owns goal progress."""
 
         before.validate()
         after.validate()
@@ -414,8 +414,8 @@ class UniversalActionController:
             return (f"控制器确认 typed 输入值：{resolved.expected_input_value!r}",)
 
         # Launches, point gestures, swipes and system navigation do not prove task
-        # semantics here.  A stable fresh screenshot is the only receipt; Qwen
-        # decides the next action or finish from that screenshot.
+        # semantics here. A stable fresh screenshot is the only receipt; the
+        # The next Planner cycle decides the next ToolIntent or terminal state.
         return ()
 
     def _require_unique_input(
@@ -476,9 +476,9 @@ class UniversalActionController:
 
     @staticmethod
     def _validate_executable_element(element: UIElement) -> None:
-        # Qwen already selected this exact current-frame element.  Optional
-        # model-authored display-state hints are diagnostic facts, not a
-        # second authority over an otherwise valid canonical action.
+        # The current ToolIntent already identifies this exact current-frame
+        # element. Optional model-authored display-state hints are diagnostic
+        # facts, not a second authority over an otherwise valid action.
         element.validate()
 
     @classmethod
@@ -594,9 +594,9 @@ class UniversalActionController:
                 or self._regions_stably_overlap(before_input.bounds, element.bounds)
                 )
             )
-        # The post-action Qwen response is the authority when the fresh frame
+        # The post-action Planner cycle is the authority when the fresh frame
         # does not expose an input structure (for example, the keyboard or a
-        # transient IME surface hides the field).  Do not turn missing optional
+        # transient IME surface hides the field). Do not turn missing optional
         # visual evidence into a second local completion veto; ambiguity among
         # visible candidates remains a real binding error.
         if not candidates:
@@ -638,7 +638,7 @@ class UniversalActionController:
         element_id = str(action.params.get(f"{prefix}element_id") or "").strip()
         reject_if(
             not element_id,
-            UniversalActionError(f"{action.action} 缺少 Qwen 同帧 {prefix}element_id。"),
+            UniversalActionError(f"{action.action} 缺少当前 ToolIntent 同帧 {prefix}element_id。"),
         )
         try:
             element = scene.get_element(element_id)
@@ -662,7 +662,7 @@ class UniversalActionController:
             return None
         declared_role = str(action.params.get("role") or "").strip()
         reject_if(bool(declared_role) and declared_role != element.role,
-            UniversalActionError("Qwen点按目标与同帧本地投影元素角色不一致。"))
+            UniversalActionError("ToolIntent点按目标与同帧本地投影元素角色不一致。"))
         return element
 
     def _point_action(
@@ -676,7 +676,7 @@ class UniversalActionController:
             target_element_id = element.element_id
         else:
             target_element_id = None
-        point = self._gesture_param_point(action.params.get("tap_point"), "Qwen明确点击点")
+        point = self._gesture_param_point(action.params.get("tap_point"), "ToolIntent明确点击点")
         if element is not None and element.role == "input":
             left, top, right, bottom = element.bounds
             reject_if(

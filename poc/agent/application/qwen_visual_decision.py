@@ -1,4 +1,4 @@
-"""Bind the action or finish emitted by the sole Qwen scene response."""
+"""Adapt one model-gateway observation into a planner input."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-09-06-qwen-whole-task-v19"
-QWEN_VISUAL_DECISION_MODEL_ROLE = "single_response_scene_action_or_finish"
+QWEN_VISUAL_DECISION_MODEL_ROLE = "model_gateway_observation_candidate"
 QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
 
@@ -42,7 +42,7 @@ class QwenVisualDecision:
     proposal: GenericStepProposal
     previous_action_outcome: str | None = None
     protocol_version: str = QWEN_VISUAL_DECISION_PROTOCOL_VERSION
-    decision_source: str = 'qwen_same_response_decision'
+    decision_source: str = 'model_gateway'
 
     def validate(self, context: qwen_task_context_domain.QwenTaskContext) -> None:
         expected_scope = (context.task_id, context.device_id, context.revision,
@@ -62,7 +62,7 @@ class QwenVisualDecision:
 
 
 class QwenVisualDecisionObserver:
-    """Bind Qwen's one current-frame decision; never build or choose another candidate."""
+    """Adapt one Qwen current-frame suggestion; Planner signs the ToolIntent."""
 
     def __init__(self, provider: Any, *, trusted_observation_frame_validator: Callable[..., None]) -> None:
         self.provider = provider
@@ -77,7 +77,7 @@ class QwenVisualDecisionObserver:
         value.update({"visual_decision_protocol": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
             "task_context_protocol": qwen_task_context_domain.SUPPORTED_TASK_CONTEXT_PROTOCOL,
             "model_role": QWEN_VISUAL_DECISION_MODEL_ROLE, "hardware_actions_enabled": False,
-            "selection_authority": "qwen_same_response_decision", **self._metrics})
+            "selection_authority": "platform_planner", **self._metrics})
         value['recent_navigation_protocol'] = RECENT_NAVIGATION_PROTOCOL
         return value
 
@@ -85,10 +85,10 @@ class QwenVisualDecisionObserver:
         Any], trusted_observation: trusted_observation_domain.TrustedObservation, decision_number: int=1,
         available_action_kinds: Iterable[str] | None=None, launch_target: Mapping[str, str] | None=None,
         text_transport_profile: TextTransportProfile | None=None,
-        model_decision: Mapping[str, Any], decision_source: str='qwen_same_response_decision') -> QwenVisualDecision:
+        model_decision: Mapping[str, Any], decision_source: str='model_gateway') -> QwenVisualDecision:
         del decision_number
         started = time.perf_counter()
-        reject_if(decision_source not in {'qwen_same_response_decision', LOCAL_NAVIGATION_SOURCE},
+        reject_if(decision_source not in {'model_gateway', LOCAL_NAVIGATION_SOURCE},
             VisionAgentError('未知执行决策来源。'))
         context = task_context if isinstance(task_context,
             qwen_task_context_domain.QwenTaskContext) else qwen_task_context_domain.QwenTaskContext.from_dict(
@@ -108,7 +108,7 @@ class QwenVisualDecisionObserver:
             "vision_model": public_model_identity(self.provider.status()), "task_id": context.task_id,
             "device_id": context.device_id, "revision": context.revision,
             "observation_id": trusted_observation.observation_id, "fingerprint": trusted_observation.fingerprint,
-            "model_calls": 0, "decision_from_same_observation_response": decision_source == 'qwen_same_response_decision',
+            "model_calls": 0, "decision_from_same_observation_response": decision_source == 'model_gateway',
             "decision_source": decision_source,
             "model_decision_status": payload["status"], "canonical_binding": "direct_current_frame",
             "device_action_kinds": sorted(available_actions)}
@@ -122,7 +122,7 @@ class QwenVisualDecisionObserver:
                     available_action_kinds=available_actions, launch_target=launch_target,
                     text_transport_profile=text_transport_profile)
             except CanonicalActionProtocolError as exc:
-                reason = f"Qwen 当前帧动作无法绑定可信执行参数：{exc}"
+                reason = f"模型网关当前帧动作无法绑定可信执行参数：{exc}"
                 self._metrics["canonical_mapping_failure_count"] += 1
                 self.last_diagnostics["canonical_binding_error"] = reason
                 self.last_diagnostics.update({"decision_status": "invalid",

@@ -39,6 +39,7 @@ class UniversalAgentSessionState:
     trusted_observation: Any = None
     trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     observation_action_kinds: frozenset[str] = field(default_factory=frozenset, repr=False)
+    tool_intent: Any = field(default=None, repr=False)
     qwen_decision: Any = None
     confirmation_authority: ConfirmationAuthority | None = field(default=None, repr=False)
     effect_confirmation_authority: EffectConfirmationAuthority | None = field(default=None, repr=False)
@@ -63,9 +64,9 @@ class UniversalAgentSessionState:
     @property
     def controller_decision(self) -> CanonicalSelectionReceipt | None:
         """Display-only projection; the one-shot authority owns execution permission."""
-        if self.confirmation_authority is None or self.qwen_decision is None:
+        if self.confirmation_authority is None or self.tool_intent is None:
             return None
-        proposal = self.qwen_decision.proposal
+        proposal = self.tool_intent.proposal
         if proposal.status != 'action':
             return None
         return CanonicalSelectionReceipt(allowed=True,
@@ -89,9 +90,10 @@ class UniversalAgentSessionState:
 
     def snapshot(self) -> dict[str, Any]:
         decision = self._serialize(self.qwen_decision)
+        tool_intent = self._serialize(self.tool_intent)
         observation = self._serialize(self.trusted_observation)
-        proposal = self._serialize(getattr(self.qwen_decision, 'proposal',
-            None)) if self.qwen_decision is not None else None
+        proposal = self._serialize(getattr(self.tool_intent, 'proposal',
+            None)) if self.tool_intent is not None else None
         controller = self._serialize(self.controller_decision)
         scene = self._serialize(getattr(self.trusted_observation, 'scene',
             None)) if self.trusted_observation is not None else None
@@ -103,7 +105,8 @@ class UniversalAgentSessionState:
             'failed_reason': self.failed_reason, 'task_context_protocol': '2026-09-06-single-visual-task-v1',
             'task_id': self.session_id, 'revision': self.step_number,
             'goal': self._serialize(self.goal_draft), 'trusted_observation': observation, 'current_scene': scene,
-            'qwen_decision': decision, 'proposal': proposal, 'controller_decision': controller,
+            'qwen_decision': decision, 'tool_intent': tool_intent, 'proposal': proposal,
+            'authority': 'platform_planner', 'controller_decision': controller,
             'qwen_reply': self.qwen_reply, 'history': list(self.history),
             'conversation': [dict(item) for item in self.conversation],
             'evidence': list(dict.fromkeys(self.evidence_paths)),

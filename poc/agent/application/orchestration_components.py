@@ -62,7 +62,7 @@ class ObservationDecisionCoordinator:
             host._best_effort_snapshot(session)
             raise
         reject_if(not isinstance(model_decision, Mapping),
-            UniversalAgentOrchestratorError("Qwen当前观察缺少同响应action/finish。"))
+            UniversalAgentOrchestratorError("模型网关当前观察缺少action/finish候选。"))
         host._remember(session, paths)
         model_decision = host._record_qwen_reply(session, model_decision)
         observation = host._build_observation(session, scene=scene, frames=frames)
@@ -74,7 +74,7 @@ class ObservationDecisionCoordinator:
 class ConfirmationExecutionCoordinator:
     def confirm_one_locked(self, host, session: UniversalAgentSessionState, confirmation: Mapping[str, Any]) -> Any:
         authority = host._consume_confirmation(session, confirmation)
-        observation, decision = session.trusted_observation, session.qwen_decision
+        observation, decision = session.trusted_observation, session.tool_intent
         assert observation is not None and decision is not None
         if not host._reserve_observation(session,
             will_execute=decision.proposal.action.action != 'wait_for_change'):
@@ -147,7 +147,8 @@ class ConfirmationExecutionCoordinator:
         session.history.append({'step_number': session.step_number - 1, 'task_revision': authority.revision,
             'step_id': authority.step_id, 'effect_ids': list(authority.effect_ids),
             'confirmation_receipt': {'authoritative': True, 'consumed': True, 'scope': authority.scope()},
-            'qwen_decision': UniversalAgentSessionState._serialize(decision), 'execution': result.to_dict(),
+            'qwen_decision': UniversalAgentSessionState._serialize(getattr(decision, 'model_decision', decision)),
+            'tool_intent': UniversalAgentSessionState._serialize(decision), 'execution': result.to_dict(),
             'before_observation_id': observation.observation_id, 'before_fingerprint': observation.fingerprint,
             'after_observation_id': new_observation.observation_id,
             'after_fingerprint': new_observation.fingerprint})
@@ -159,7 +160,7 @@ class ConfirmationExecutionCoordinator:
         result, before_actions, physical, outcome, errors, after_frames, new_observation,
         decide_after_action):
         reject_if(not isinstance(result.after_model_decision, Mapping),
-            UniversalAgentOrchestratorError('动作后Qwen观察没有直接返回同响应action/finish。'))
+            UniversalAgentOrchestratorError('动作后模型网关观察没有返回action/finish候选。'))
         session.recent_navigation.record_execution(result.resolved_action.kind)
         try:
             next_model_decision = host._record_qwen_reply(session, result.after_model_decision)
@@ -173,12 +174,12 @@ class ConfirmationExecutionCoordinator:
                 executed_effect=bool(physical == 1 and authority.effect_ids))
         except Exception as exc:
             # The device action is already dispatched.  A malformed or
-            # unbindable post-action Qwen response cannot safely be repaired by
+            # unbindable post-action gateway response cannot safely be repaired by
             # replaying the action; retain the frame/evidence and reobserve.
             host._mark_last_execution_uncertain(session, exc)
             host._clear_action(session)
             host._set_status(session, 'needs_reobservation',
-                '动作已派发但动作后Qwen决策失败；保留不确定效果并重新观察，不自动重复。')
+                '动作已派发但动作后Planner决策失败；保留不确定效果并重新观察，不自动重复。')
             host._best_effort_snapshot(session)
             raise
         transition = {'protocol_version': POST_ACTION_TRANSITION_PROTOCOL_VERSION,
@@ -287,7 +288,7 @@ class SessionLifecycleCoordinator:
             host._remember(session, session.evidence_store.write_json('qwen_usage.json',
                 session.vision_usage.to_dict()))
         host._remember(session, session.evidence_store.write_session(session))
-        host._remember(session, session.evidence_store.write_report({'mode': 'qwen_same_response_single_loop',
+        host._remember(session, session.evidence_store.write_report({'mode': 'platform_planner_model_assisted_loop',
             'policy_version': CANONICAL_SELECTION_RECEIPT_VERSION, 'session': session.snapshot()}))
     def best_effort_snapshot(self, host, session: UniversalAgentSessionState) -> None:
         try:

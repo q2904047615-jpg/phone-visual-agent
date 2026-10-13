@@ -58,11 +58,11 @@ npm test
 Keyboard APK 必须先安装、在系统输入法设置中启用，并选为当前输入法；运行时只读核对这三个条件，
 任一不成立都在广播前以 0 动作停止。输入只执行一次固定 `ADB_INPUT_B64 --es msg <UTF-8 Base64>`
 广播，清空只执行一次固定 `ADB_CLEAR_TEXT` 广播。两者互不隐式组合，失败不重试、不回退机械键盘。
-广播完成只算 transport 回执；正文和高层完成仍由动作后新截图中的 Qwen 当前帧证据判断。
+广播完成只算 transport 回执；正文和高层完成仍由动作后新截图进入 Runtime/Verifier 判断，Qwen 只提供模型网关观察建议。
 
 Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册表自 2026-09-02 起永久退役，
 不再由项目 API 导入、启动或作为回退路径。ADB 可执行文件、serial、IME ID 和广播 action 均由本地
-可信代码与注册表固定，Qwen、网页和任务文本不能提供任意 ADB/Shell/Intent 参数。
+可信代码与注册表固定，Model Gateway（当前可用 Qwen）、网页和任务文本不能提供任意 ADB/Shell/Intent 参数。
 
 可选 App 包名直启配置：
 
@@ -75,8 +75,8 @@ Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册�
 - 用户目标、Qwen 和网页请求都不能传入 package、Shell、Intent、组件或任意命令。能力未配置或目标未登记时，
   不生成直启候选，仍按当前截图寻找 App 图标；
 - 仓库默认注册表保持关闭。启用前应由设备维护者核对 ADB serial 和包名；可信 `launch_app` 只验证
-  注册表绑定和 transport 回执。直启后必须重新截图，页面、下一动作和 `finish` 仍只由下一次 Qwen 响应
-  决定。系统包名不在 Qwen `finish` 后形成第二完成裁决，也不能把 ADB 返回码当作高层任务成功。
+  注册表绑定和 transport 回执。直启后必须重新截图，页面、下一动作和 `finish` 仍须经过下一次 Planner
+  绑定的 ToolIntent。系统包名不形成第二完成裁决，也不能把 ADB 返回码当作高层任务成功。
 
 ### 证据生命周期
 
@@ -112,14 +112,14 @@ Visual Agent Companion IME、TLS bridge、配对、editor session 和旧注册�
 
 ## 执行合同
 
-每次 Qwen 调用只处理当前新截图，并在同一响应中发布 scene 与一个推进当前目标的 `action`，或以同帧
-证据报告 `finish`。当前没有最终控件、需要中间导航或单步不能完成高层目标时仍必须选择推进动作；
+每次 Model Gateway 调用只处理当前新截图，并在同一响应中发布 scene 与一个推进当前目标的 `action`，或以同帧
+证据报告 `finish` 候选。Planner 将候选绑定为唯一 ToolIntent；当前没有最终控件、需要中间导航或单步不能完成高层目标时仍必须选择推进动作；
 Qwen 不再拥有普通语义停止状态。
 点按 `action` 只绑定同帧 decision.target/tap_point；非点按绑定该动作需要的当前元素、字段或方向。本地不得另建候选目录、排序或替模型改选。执行一次后必须取得下一张
-新截图再调用 Qwen；`matched` 只证明刚才动作符合预期，只有当前截图上的 `finish` 才推进高层目标。
+新截图再调用 Model Gateway；`matched` 只证明刚才动作符合预期，只有 Runtime/Verifier 在当前截图上接受绑定的 `finish` 才推进高层目标。
 目标变化后必须按新目标重新截图，禁止预取后继目标上下文、缓存上一轮 decision 或复用旧坐标。执行前
-画面已变化且尚未产生物理动作时，丢弃旧 scope 并把新截图交给 Qwen；已经执行动作后同样只把新截图交给
-Qwen 决定下一步，不进入本地 corrective selector。Qwen 同时接收整任务和实际执行历史，不再调用 DeepSeek 或固定子目标。
+画面已变化且尚未产生物理动作时，丢弃旧 scope 并把新截图交给 Planner/Model Gateway；已经执行动作后同样只把新截图交给
+Planner 重新签发 ToolIntent，不进入本地 corrective selector。Model Gateway 同时接收整任务和实际执行历史，不再调用 DeepSeek 或固定子目标。
 受信任包名直启只是可选的单次设备 transport，不绕过同一 canonical、scope、执行回执和动作后新观察；
 App 内部操作继续完全使用当前视觉闭环和机械臂。
 文字输入时，`input_structure.application_inputs[*].text` 是当前应用输入内容的唯一视觉权威；scene 输入元素只是可选页面上下文，不要求重复正文、标签、状态或几何重合，也不得否决正文。
@@ -134,8 +134,8 @@ App 内部操作继续完全使用当前视觉闭环和机械臂。
 项目采用轻量、渐进式 DDD 模块化单体，不拆微服务。正式业务切片已经迁入 `agent/`，根目录只保留受 allowlist 约束的 interfaces/tools/evals：
 
 - `agent/domain/` 定义轻量目标、当前 UI scene、canonical action、Controller 硬校验、瞬时 typed 文字事务及设备/会话/风险不变量；
-- `agent/application/` 管理整任务及实际执行历史，把同一次 Qwen scene/input/decision 直接绑定为一个 action 或 finish，并编排一次观察、一次执行和下一张截图；
-- `agent/infrastructure/` 提供 Qwen provider、场景观察、单动作执行 adapter、Robot/Replay 执行、设备独占、文件系统证据持久化、相机/动作协调、标定/方向门和设备控制器注册表；
+- `agent/application/` 管理整任务及实际执行历史，把 Model Gateway scene/input/decision 交给 Planner 封装为 ToolIntent，并编排一次观察、一次执行和下一张截图；
+- `agent/infrastructure/` 提供 Model Gateway provider（当前可用 Qwen）、场景观察、单动作执行 adapter、Robot/Replay 执行、设备独占、文件系统证据持久化、相机/动作协调、标定/方向门和设备控制器注册表；
 - `web_app.py` 保留 HTTP/Pydantic 转换与组合根职责。
 
 正式运行不存在 selector、动作后 replan、持久视觉/输入 lineage、decision cache、scene-only decision

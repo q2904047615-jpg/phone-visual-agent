@@ -13,6 +13,7 @@ import uuid
 
 from agent.domain.validation import reject_if
 from agent.application.action_adapter import GenericSingleActionAdapterPort
+from agent.application.planner import ModelAssistedPlanner, PlannerPort
 from agent.application.orchestration_support import (
     UniversalAgentOrchestratorError,
     _action_digest,
@@ -71,7 +72,7 @@ class ObservationBridge:
 
 
 class UniversalAgentOrchestrator:
-    """Run one authoritative Qwen action/finish decision at a time."""
+    """Run one platform-authoritative intent at a time."""
 
     TERMINAL_STATUSES = TERMINAL_SESSION_STATUSES
 
@@ -79,9 +80,10 @@ class UniversalAgentOrchestrator:
         adapter_factory: Callable[[str], GenericSingleActionAdapterPort],
         evidence_store_factory: AgentEvidenceStoreFactory, trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None=None, device_registry: DeviceTaskRegistryPort,
-        required_action_kind: str | None=None) -> None:
+        required_action_kind: str | None=None, planner: PlannerPort | None=None) -> None:
         self.required_action_kind = required_action_kind
         self.qwen_observer = qwen_observer
+        self.planner = planner or ModelAssistedPlanner(qwen_observer)
         self.adapter_factory = adapter_factory
         self.evidence_store_factory = evidence_store_factory
         self.trusted_observation_factory = trusted_observation_factory
@@ -121,6 +123,7 @@ class UniversalAgentOrchestrator:
             session.confirmation_authority.consumed = True
             session.confirmation_authority.invalid_reason = 'reobserve'
         session.qwen_decision = None
+        session.tool_intent = None
         session.confirmation_authority = None
 
     @staticmethod
@@ -167,7 +170,8 @@ class UniversalAgentOrchestrator:
             'step_id': authority.step_id,
             'effect_ids': list(authority.effect_ids),
             'confirmation_receipt': {'authoritative': True, 'consumed': True, 'scope': authority.scope()},
-            'qwen_decision': UniversalAgentSessionState._serialize(decision),
+            'qwen_decision': UniversalAgentSessionState._serialize(getattr(decision, 'model_decision', decision)),
+            'tool_intent': UniversalAgentSessionState._serialize(decision),
             'execution': execution,
             'before_observation_id': getattr(session.trusted_observation, 'observation_id', None),
             'before_fingerprint': getattr(session.trusted_observation, 'fingerprint', None),
@@ -251,6 +255,10 @@ class UniversalAgentOrchestrator:
 
     def _decide(self, session: UniversalAgentSessionState, *, frames: list[Any] | tuple[Any, ...],
         observation: Any, model_decision: Mapping[str, Any]) -> Any:
+        # Keep the default Model Gateway binding live when tests or a runtime
+        # reload replace the provider on the compatibility facade.
+        if isinstance(self.planner, ModelAssistedPlanner) and self.planner.model_gateway is not self.qwen_observer:
+            self.planner.model_gateway = self.qwen_observer
         context = self._task_context(session)
         available = session.observation_action_kinds
         reject_if(not available, UniversalAgentOrchestratorError('当前观察缺少已签发动作集合。'))
@@ -283,7 +291,7 @@ class UniversalAgentOrchestrator:
             args['text_transport_profile'] = profile
         if navigation is not None:
             args['decision_source'] = LOCAL_NAVIGATION_SOURCE
-        return self.qwen_observer.decide(**args)
+        return self.planner.plan(**args)
 
     @staticmethod
     def _validate_decision_binding(session: UniversalAgentSessionState, observation: Any, decision: Any) -> None:
@@ -292,14 +300,18 @@ class UniversalAgentOrchestrator:
         actual = (decision.task_id, decision.device_id, decision.revision, decision.observation_id,
             decision.fingerprint)
         reject_if(actual != expected or decision.trusted_observation is not observation,
-            UniversalAgentOrchestratorError("Qwen决策没有绑定当前task/device/revision/observation。"))
+            UniversalAgentOrchestratorError("Planner ToolIntent没有绑定当前task/device/revision/observation。"))
         decision.proposal.validate(observation.scene)
 
     def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any,
         executed_effect: bool=False) -> Any:
         self._validate_decision_binding(session, session.trusted_observation, decision)
-        session.qwen_decision = decision
-        self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, decision))
+        session.tool_intent = decision
+        model_decision = getattr(decision, 'model_decision', decision)
+        session.qwen_decision = model_decision
+        self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, model_decision))
+        self._remember(session, session.evidence_store.write_json(
+            f'tool_intent_step_{session.step_number}.json', decision.to_dict()))
         uncertain_history = bool(session.history and (
             str(session.history[-1].get('execution', {}).get('action_outcome') or '') == 'uncertain'
             or str(session.history[-1].get('visual_outcome') or '') == 'uncertain'
@@ -327,7 +339,8 @@ class UniversalAgentOrchestrator:
             return decision
         if decision.proposal.status == "finish":
             self._clear_action(session)
-            session.qwen_decision = decision
+            session.tool_intent = decision
+            session.qwen_decision = getattr(decision, 'model_decision', decision)
             self._set_status(session, "succeeded")
             return decision
         self._bind_confirmation(session)
@@ -357,7 +370,7 @@ class UniversalAgentOrchestrator:
         return self._observation_coordinator.observe_and_decide(self, session)
 
     def _current_confirmation_scope(self, session: UniversalAgentSessionState) -> dict[str, Any]:
-        observation, decision = session.trusted_observation, session.qwen_decision
+        observation, decision = session.trusted_observation, session.tool_intent
         reject_if(observation is None or decision is None or decision.proposal.status != "action",
             UniversalAgentOrchestratorError("当前没有可执行动作scope。"))
         self._validate_decision_binding(session, observation, decision)
@@ -414,7 +427,7 @@ class UniversalAgentOrchestrator:
 
     def _bind_effect_confirmation(self, session: UniversalAgentSessionState) -> None:
         scope = self._current_confirmation_scope(session)
-        preview = session.qwen_decision.proposal.action.to_dict()
+        preview = session.tool_intent.proposal.action.to_dict()
         session.effect_confirmation_authority = EffectConfirmationAuthority(session_id=session.session_id,
             task_id=session.session_id, device_id=session.device_id, revision=session.step_number,
             step_id=scope["step_id"], effect_ids=tuple(scope["effect_ids"]),

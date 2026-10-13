@@ -105,7 +105,8 @@ class GenericActionExecutionResult:
     physical_actions: int
     after_model_decision: dict[str, Any] = field(repr=False, compare=False)
     primary_input_confirmation_reused: bool = False
-    # Transport/hard-check result only. Visual success belongs to Qwen's new frame.
+    # Transport/hard-check result only. Visual success belongs to Runtime's
+    # fresh observation after the Planner ToolIntent executes.
     action_outcome: str = "executed"
     verification_errors: tuple[str, ...] = ()
     robot_result: Any = None
@@ -521,7 +522,7 @@ class GenericSingleActionAdapter:
         except GenericActionAdapterError as exc:
             raise GenericActionAdapterError(str(exc), evidence=before_paths) from exc
         before = planned_scene
-        # Qwen's action is immutable after selection.  Local code may validate
+        # The Planner ToolIntent is immutable after signing. Local code may validate
         # device/scope/geometry, but it may not rewrite its semantic fields.
         try:
             resolved = self.controller.resolve_one(requested_action, before, confirmed=True)

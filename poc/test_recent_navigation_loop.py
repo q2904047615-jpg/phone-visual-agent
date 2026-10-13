@@ -122,7 +122,7 @@ class RecentNavigationTests(LoopHarness):
         loop, s, a = self.start(rows)
         loop.run_autonomous_safe_loop(s)
         self.assertEqual(['home', 'open_recent_apps', 'tap_semantic'], [x.action for x in a.calls])
-        self.assertEqual('qwen_same_response_decision', s.history[-1]['qwen_decision']['decision_source'])
+        self.assertEqual('model_gateway', s.history[-1]['qwen_decision']['decision_source'])
 
     def test_original_model_choice_and_actual_local_action_are_distinct_evidence(self):
         loop, s, a = self.start(self.rows())

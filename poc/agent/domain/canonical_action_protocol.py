@@ -1,7 +1,7 @@
-"""Bind one Qwen action from the current screenshot to trusted local data.
+"""Bind one Model Gateway candidate from the current screenshot to trusted local data.
 
-Qwen owns the choice. This module never builds or ranks another semantic
-candidate catalog after the model has selected an action.
+Planner owns the executable ToolIntent. This module never builds or ranks
+another semantic candidate catalog after the gateway has proposed an action.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from .validation import dataclass_wire, reject_if
 CANONICAL_ACTION_PROTOCOL = "2026-09-06-canonical-whole-task-v10"
 
 # The model wire contract is intentionally smaller than the internal transport
-# catalog. Qwen owns visual evidence; the local parser receives only one
-# generic action and its executable geometry.
+# catalog. The Model Gateway owns visual evidence; the local parser receives
+# only one generic candidate and its executable geometry.
 MODEL_ACTION_ALIASES = {
     "tap": "tap_semantic",
     "dismiss": "dismiss_overlay",
@@ -111,7 +111,7 @@ def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
         CanonicalActionProtocolError("只有wait_for_change可以携带wait_seconds。"))
     outcome = value.get("previous_action_outcome")
     state_action_consistent = value.get("state_action_consistent")
-    reject_if(state_action_consistent is False, CanonicalActionProtocolError("Qwen明确报告当前状态与所选动作矛盾。"))
+    reject_if(state_action_consistent is False, CanonicalActionProtocolError("模型网关明确报告当前状态与所选动作矛盾。"))
     reject_if(
         state_action_consistent is not None and not isinstance(state_action_consistent, bool),
         CanonicalActionProtocolError("state_action_consistent必须是boolean或null。"),
@@ -270,7 +270,7 @@ class GenericStepProposal:
 
     def validate(self, scene: Any) -> None:
         reject_if(self.status not in {"action", "finish"},
-            CanonicalActionProtocolError("Qwen 单步只允许 action 或 finish。"))
+            CanonicalActionProtocolError("模型网关单步只允许 action 或 finish。"))
         reject_if((self.status == "action") != (self.action is not None),
             CanonicalActionProtocolError("action/finish 与动作载荷不一致。"))
         if self.action is None:
@@ -289,7 +289,7 @@ class GenericStepProposal:
 def bind_same_response_action(payload: Mapping[str, Any], *, context: Any, observation: Any,
     available_action_kinds: Iterable[str], launch_target: Mapping[str, str] | None=None,
     text_transport_profile: TextTransportProfile | None=None) -> SemanticAction:
-    """Bind Qwen's one current-frame choice without choosing another action."""
+    """Bind the gateway's one current-frame candidate without choosing another action."""
 
     scene = observation.scene
     scene.validate()
@@ -297,16 +297,16 @@ def bind_same_response_action(payload: Mapping[str, Any], *, context: Any, obser
     kind = MODEL_ACTION_ALIASES.get(wire_kind, wire_kind)
     available = frozenset(str(item).strip() for item in available_action_kinds)
     reject_if(wire_kind not in MODEL_WIRE_ACTIONS and kind not in CANONICAL_ACTION_KINDS,
-        CanonicalActionProtocolError(f"Qwen 动作不属于通用动作协议：{wire_kind or 'missing'}。"))
+        CanonicalActionProtocolError(f"模型网关动作不属于通用动作协议：{wire_kind or 'missing'}。"))
     reject_if(kind not in available,
-        CanonicalActionProtocolError(f"当前观察签发的动作集合不包含 Qwen 选择的 canonical 动作：{kind}。"))
+        CanonicalActionProtocolError(f"当前观察签发的动作集合不包含模型网关建议的 canonical 动作：{kind}。"))
 
     params: dict[str, Any] = {}
     if payload.get("effect") is not None:
         params["effect_kind"] = payload["effect"]
     if kind in MODEL_STEP_DIRECT_POINT_ACTIONS:
-        # Qwen owns the visual target decision. The executor receives only
-        # the selected point; scene elements remain diagnostic context.
+        # The gateway supplies the visual target candidate. Planner signs it
+        # into ToolIntent; the executor receives only the selected point.
         params["tap_point"] = _canonical_model_point(payload.get("tap_point", payload.get("point")), f"{kind}.point")
         if kind == "long_press":
             params["duration_ms"] = 800
@@ -337,7 +337,7 @@ def bind_same_response_action(payload: Mapping[str, Any], *, context: Any, obser
 
 
 def _current_input_target(observation: Any) -> UIElement:
-    """Bind the Qwen-reported current input fact for the trusted text transport."""
+    """Bind the model-gateway current input fact for the trusted text transport."""
     fields = [item for item in observation.scene.elements
         if item.role == "input" and item.states.get("input_field_id") == "current_input"]
     reject_if(len(fields) != 1, CanonicalActionProtocolError("同帧输入事实没有唯一可执行字段。"))

@@ -21,11 +21,12 @@ from .session import (
     require_session_device,
 )
 from .session_evidence import AgentEvidenceStoreFactory, AgentEvidenceStorePort, EvidenceStoreError
+from .tool_intent import ToolIntent, ToolIntentError
 
 __all__ = ['ACTIVE_SESSION_STATUSES', 'CANONICAL_SELECTION_RECEIPT_VERSION', 'DEVICE_EXECUTOR_PROTOCOL',
     'AgentSession', 'AgentSessionConflictError', 'AgentSessionDeviceMismatchError',
     'AgentSessionNotFoundError', 'AgentSessionRepository',
     'AgentEvidenceStoreFactory', 'AgentEvidenceStorePort', 'CanonicalSelectionReceipt', 'ConfirmationAuthority',
     'DeviceActionRequest', 'DeviceExecutionError', 'DeviceExecutionResult', 'DeviceExecutor', 'DeviceTaskRegistryError',
-    'DeviceTaskRegistryPort', 'EvidenceStoreError', 'EffectConfirmationAuthority',
+    'DeviceTaskRegistryPort', 'EvidenceStoreError', 'EffectConfirmationAuthority', 'ToolIntent', 'ToolIntentError',
     'require_session_device']

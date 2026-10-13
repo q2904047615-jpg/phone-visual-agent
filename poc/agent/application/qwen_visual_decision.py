@@ -81,6 +81,27 @@ class QwenVisualDecisionObserver:
         value['recent_navigation_protocol'] = RECENT_NAVIGATION_PROTOCOL
         return value
 
+    # Model Gateway transport surface used by the generic scene observer.
+    # Keeping this delegation on the registered adapter prevents observation
+    # code from constructing a provider behind the registry's back.
+    def chat(self, *args: Any, **kwargs: Any) -> Any:
+        return self.provider.chat(*args, **kwargs)
+
+    def _chat(self, *args: Any, **kwargs: Any) -> Any:
+        return self.provider._chat(*args, **kwargs)
+
+    def call_scope(self, *args: Any, **kwargs: Any) -> Any:
+        factory = getattr(self.provider, "call_scope", None)
+        return factory(*args, **kwargs) if callable(factory) else _null_context()
+
+    def session_usage_scope(self, *args: Any, **kwargs: Any) -> Any:
+        factory = getattr(self.provider, "session_usage_scope", None)
+        return factory(*args, **kwargs) if callable(factory) else _null_context()
+
+    @property
+    def last_network_attempts(self) -> int:
+        return int(getattr(self.provider, "last_network_attempts", 0) or 0)
+
     def decide(self, *, frames: list[Image.Image], task_context: qwen_task_context_domain.QwenTaskContext | dict[str,
         Any], trusted_observation: trusted_observation_domain.TrustedObservation, decision_number: int=1,
         available_action_kinds: Iterable[str] | None=None, launch_target: Mapping[str, str] | None=None,
@@ -148,6 +169,11 @@ def _action_decision(payload: Mapping[str, Any], *, context: qwen_task_context_d
         fingerprint=observation.fingerprint, trusted_observation=observation,
         previous_action_outcome=payload.get("previous_action_outcome"),
         proposal=GenericStepProposal(status="action", action=action, reason=reason))
+
+
+def _null_context():
+    from contextlib import nullcontext
+    return nullcontext()
 
 
 def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_domain.QwenTaskContext,

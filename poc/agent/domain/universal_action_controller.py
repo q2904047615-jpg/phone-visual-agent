@@ -63,6 +63,9 @@ class ResolvedSemanticAction:
 class UniversalActionController:
     """Bind the Planner ToolIntent to safe executable geometry."""
 
+    def __init__(self, *, tool_registry: Any | None = None) -> None:
+        self.tool_registry = tool_registry
+
     def resolve_one(
         self,
         action: SemanticAction,
@@ -72,6 +75,11 @@ class UniversalActionController:
     ) -> ResolvedSemanticAction:
         del confirmed  # Product confirmation is decided before this geometry-only service.
         scene.validate()
+        if self.tool_registry is not None:
+            try:
+                self.tool_registry.require(action.action)
+            except (KeyError, ValueError) as exc:
+                raise UniversalActionError(f"Tool Registry 拒绝动作：{action.action}：{exc}") from exc
         def resolved(kind: str | None = None, **values: Any) -> ResolvedSemanticAction:
             return ResolvedSemanticAction(
                 node_id=action.node_id,

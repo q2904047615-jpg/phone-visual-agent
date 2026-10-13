@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from agent.application import (
     AgentDeviceRuntimeError,
     AgentSessionCommandError,
+    AgentSessionRecoveryRequiredError,
     StartUniversalAgentSessionCommand,
 )
 from agent.application.async_task_registry import AsyncTaskRegistry
@@ -746,6 +747,8 @@ def _execution_architecture_status(
     return {
         "model_role": "whole_task_visual_agent",
         "controller": "universal_action_controller",
+        "model_gateway": active_runtime.model_gateway_registry.status(),
+        "tool_registry": active_runtime.tool_registry.status(),
         "fixed_app_workflows_retired": True,
         "active_orchestrator": "universal_agent",
         "universal_agent": {
@@ -1545,6 +1548,7 @@ CAPABILITY_ACCEPTANCE_ERRORS = (CapabilityAcceptanceError, *COMMON_OPERATION_ERR
 
 GENERIC_SESSION_ERRORS = (
     AgentSessionCommandError,
+    AgentSessionRecoveryRequiredError,
     AgentSessionConflictError,
     *COMMON_OPERATION_ERRORS,
 )
@@ -2027,6 +2031,39 @@ def get_generic_supervised_session(
     }
 
 
+@app.get("/api/agent/generic-supervised/{session_id}/events")
+def get_generic_supervised_events(
+    session_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Return the durable Runtime event cursor for the console Trace view."""
+
+    verify_local_request(request, x_control_token)
+    _require_generic_supervised_session(session_id)
+    after_raw = request.query_params.get("after_sequence", "0")
+    try:
+        after_sequence = int(after_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="after_sequence必须是非负整数。") from exc
+    if after_sequence < 0:
+        raise HTTPException(status_code=422, detail="after_sequence必须是非负整数。")
+    repository = getattr(runtime, "agent_session_repository", None)
+    events = getattr(repository, "events", None)
+    if not callable(events):
+        raise HTTPException(status_code=503, detail="当前Runtime没有可查询的持久事件账本。")
+    try:
+        values = events(session_id, after_sequence=after_sequence)
+    except AgentSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "session_id": session_id,
+        "after_sequence": after_sequence,
+        "events": values,
+        "next_sequence": values[-1]["sequence"] if values else after_sequence,
+    }
+
+
 @app.post("/api/qwen/chat")
 def unified_qwen_chat(
     body: QwenDraftChatRequest,
@@ -2054,8 +2091,9 @@ def unified_qwen_chat(
             {"role": "system", "content": _QWEN_ROUTER_SYSTEM_PROMPT},
             *conversation,
         ]
-        with runtime.vision_provider.call_scope(stage="qwen_entry_route"):
-            raw_route = runtime.vision_provider._chat(
+        gateway = runtime.model_gateway_registry.default()
+        with gateway.call_scope(stage="qwen_entry_route"):
+            raw_route = gateway._chat(
                 router_messages,
                 max_tokens=512,
                 response_format=_QWEN_ROUTER_RESPONSE_FORMAT,

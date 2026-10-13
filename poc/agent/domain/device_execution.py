@@ -37,6 +37,10 @@ class DeviceTaskRegistryPort(Protocol):
 
     def is_locked_by_current_thread(self, device_id: str) -> bool: ...
 
+    def fencing_epoch(self, device_id: str, session_id: str) -> int: ...
+
+    def assert_fencing_epoch(self, device_id: str, session_id: str, epoch: int) -> None: ...
+
 
 @dataclass(frozen=True)
 class DeviceActionRequest(DataclassWire):

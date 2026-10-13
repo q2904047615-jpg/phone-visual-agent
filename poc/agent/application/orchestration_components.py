@@ -80,6 +80,12 @@ class ConfirmationExecutionCoordinator:
             will_execute=decision.proposal.action.action != 'wait_for_change'):
             return None
         host._set_status(session, 'executing_one_action')
+        # Persist the dispatching boundary before any external connector call.
+        # A restart can classify the tail as possibly executed and refuse replay.
+        host._write_snapshot(session)
+        assert_epoch = getattr(host.device_registry, 'assert_fencing_epoch', None)
+        if callable(assert_epoch) and session.lease_epoch:
+            assert_epoch(session.device_id, session.session_id, session.lease_epoch)
         before_actions = session.physical_actions
         session.goal_draft = host.bridge.goal_draft(session)
         try:
@@ -326,8 +332,11 @@ class SessionLifecycleCoordinator:
         visual_paths = tuple(Path(item) for item in visual_reference_paths)
         # Reference assets are an internal visual-prompt input, never goal text or action authority.
         setattr(adapter, "visual_reference_paths", visual_paths)
+        lease_epoch_provider = getattr(host.device_registry, 'fencing_epoch', None)
+        lease_epoch = lease_epoch_provider(device_id, session_id) if callable(lease_epoch_provider) else 0
         session = UniversalAgentSessionState(session_id=session_id,
             raw_goal=str(raw_goal or ''), device_id=device_id, run_dir=Path(run_dir),
+            lease_epoch=lease_epoch,
             visual_reference_paths=visual_paths,
             conversation=[dict(item) for item in conversation],
             adapter=adapter, evidence_store=evidence_store, vision_usage=vision_usage,

@@ -22,6 +22,7 @@ class DeviceTaskRegistry:
         self._locks: dict[str, threading.RLock] = {}
         self._active: dict[str, str] = {}
         self._owners: dict[str, tuple[int, int]] = {}
+        self._epochs: dict[str, int] = {}
         self._lease_directory = Path(lease_directory) if lease_directory is not None else None
         self._leases: dict[str, InterProcessLease] = {}
 
@@ -43,10 +44,13 @@ class DeviceTaskRegistry:
         with self._guard:
             active = self._active.get(device)
             reject_if(active is not None and active != session, DeviceTaskRegistryError(f'设备 {device} 已有活动任务：{active}。'))
+            if active is None:
+                self._epochs[device] = self._epochs.get(device, 0) + 1
+            epoch = self._epochs.get(device, 1)
             lease_path = self._lease_path(device)
             if lease_path is not None and device not in self._leases:
                 lease = InterProcessLease(lease_path, owner_id=session, metadata={'device_id': device,
-                    'session_id': session})
+                    'session_id': session, 'fencing_epoch': epoch})
                 if not lease.acquire():
                     payload = InterProcessLease.active_payload(lease_path) or {}
                     owner = str(payload.get("session_id") or "另一个进程")
@@ -76,6 +80,23 @@ class DeviceTaskRegistry:
                 return None
             payload = InterProcessLease.active_payload(lease_path) or {}
             return str(payload.get("session_id") or "").strip() or None
+
+    def fencing_epoch(self, device_id: str, session_id: str) -> int:
+        """Return the current ownership epoch for a session."""
+
+        device = self._id(device_id, "device_id")
+        session = self._id(session_id, "session_id")
+        with self._guard:
+            reject_if(self._active.get(device) != session,
+                      DeviceTaskRegistryError(f"设备 {device} 不属于会话 {session}。"))
+            return self._epochs.get(device, 0)
+
+    def assert_fencing_epoch(self, device_id: str, session_id: str, epoch: int) -> None:
+        device = self._id(device_id, "device_id")
+        session = self._id(session_id, "session_id")
+        with self._guard:
+            reject_if(self._active.get(device) != session or self._epochs.get(device) != int(epoch),
+                      DeviceTaskRegistryError(f"设备 {device} 的租约 fencing epoch 已失效。"))
 
     @contextmanager
     def device_lock(self, device_id: str) -> Iterator[None]:

@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from pathlib import Path
+import tempfile
+import unittest
+
+from agent.infrastructure.sqlite_session_repository import SqliteAgentSessionRepository
+
+
+class _Session:
+    def __init__(self, session_id: str = "s1", status: str = "created") -> None:
+        self.session_id = session_id
+        self.device_id = "device-1"
+        self.status = status
+        self.physical_actions = 0
+        self.run_dir = Path("run")
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "device_id": self.device_id,
+            "status": self.status,
+            "physical_actions": self.physical_actions,
+            "created_at": "2026-10-13T00:00:00+00:00",
+        }
+
+
+class SqliteSessionRepositoryTests(unittest.TestCase):
+    def test_snapshot_and_event_are_committed_together(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SqliteAgentSessionRepository(Path(directory) / "runtime.sqlite3")
+            session = _Session()
+            repository.add(session)
+            session.status = "executing_one_action"
+            repository.save(session, event_type="before_dispatch")
+            events = repository.events(session.session_id)
+            self.assertEqual(["session_created", "before_dispatch"], [item["event_type"] for item in events])
+            self.assertEqual("executing_one_action", events[-1]["status"])
+            repository.close()
+
+    def test_restart_marks_inflight_session_recovery_required_and_never_replays(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            first = SqliteAgentSessionRepository(database)
+            first.add(_Session(status="executing_one_action"))
+            first.close()
+
+            second = SqliteAgentSessionRepository(database)
+            recovered = second.require("s1")
+            self.assertEqual("recovery_required", recovered.status)
+            self.assertTrue(getattr(recovered, "recovery_required"))
+            self.assertEqual("recovery_required", second.events("s1")[-1]["event_type"])
+            second.close()
+
+    def test_clear_removes_durable_sessions_and_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SqliteAgentSessionRepository(Path(directory) / "runtime.sqlite3")
+            repository.add(_Session())
+            repository.clear()
+            self.assertIsNone(repository.get("s1"))
+            self.assertEqual([], repository.active_snapshots())
+            repository.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -243,6 +243,7 @@ class GenericSingleActionAdapter:
     def __init__(self, *, capture: Callable[[], Image.Image], observer: SingleStepGenericSceneObserver, robot: Any,
         device_executor: DeviceExecutor | None=None, app_launcher: Any=None,
         text_transport: TrustedTextTransportPort | None=None,
+        tool_registry: Any | None=None,
         controller: UniversalActionController | None=None,
         frame_interval: float=0.37, post_action_settle: float=1.5, post_action_timeout: float | None=None,
         post_action_continuous_timeout: float | None=None,
@@ -255,13 +256,14 @@ class GenericSingleActionAdapter:
         self.robot = robot
         self.app_launcher = app_launcher
         self.text_transport = text_transport
+        self.tool_registry = tool_registry
         if text_transport is not None:
             text_transport.profile.validate()
             reject_if(text_transport.profile.device_id != device_id,
                 ValueError('ADB Keyboard profile 与 adapter device_id 不一致。'))
         self.device_executor = device_executor or RobotDeviceExecutor(robot, app_launcher=app_launcher,
-            text_transport=text_transport)
-        self.controller = controller or UniversalActionController()
+            text_transport=text_transport, tool_registry=tool_registry)
+        self.controller = controller or UniversalActionController(tool_registry=tool_registry)
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
         self.post_action_timeout = max(0.0, 10.0 if post_action_timeout is None else float(post_action_timeout))

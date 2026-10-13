@@ -170,8 +170,11 @@ STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查当前画面', 'w
 class SingleStepGenericSceneObserver():
     """Use one Model Gateway envelope per fresh scene as the observation input."""
 
-    def __init__(self, provider: VisionProviderPort) -> None:
+    def __init__(self, provider: VisionProviderPort, *, gateway: Any | None = None) -> None:
         self.provider = provider
+        # Keep ``provider`` as a diagnostics/backward-compatible identity, but
+        # route actual model calls through the Runtime-selected Gateway.
+        self.gateway = gateway or provider
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
         self._stage_lock = threading.RLock()
@@ -191,7 +194,7 @@ class SingleStepGenericSceneObserver():
 
     def _provider_chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None,
         response_format: dict[str, Any] | None=None) -> str:
-        return self.provider.chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS,
+        return self.gateway.chat(messages, max_tokens=max_tokens, timeout=OBSERVATION_TIMEOUT_SECONDS,
             max_attempts=OBSERVATION_MAX_ATTEMPTS,
             response_format=response_format or {'type': 'json_object'})
 
@@ -372,7 +375,7 @@ class SingleStepGenericSceneObserver():
             Path(response_evidence_dir) / f"{response_id}_model_request.json"
             if response_evidence_dir is not None else None
         )
-        scope_factory = getattr(self.provider, "call_scope", None)
+        scope_factory = getattr(self.gateway, "call_scope", None)
         scope = (
             scope_factory(
                 stage="single_step_observation",

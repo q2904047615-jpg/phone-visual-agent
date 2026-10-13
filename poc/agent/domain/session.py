@@ -10,6 +10,12 @@ ACTIVE_SESSION_STATUSES = frozenset({'created', 'planning', 'observing', 'awaiti
 
 TERMINAL_SESSION_STATUSES = frozenset({'succeeded', 'blocked', 'failed', 'cancelled'})
 
+# A process restart after an external dispatch cannot prove whether the
+# physical effect happened.  Recovery is therefore an explicit non-terminal
+# state which blocks replay until a human or a future recovery workflow
+# resolves the durable record.
+RECOVERY_REQUIRED_STATUS = 'recovery_required'
+
 
 class AgentSessionNotFoundError(LookupError):
     """Raised when a requested universal-agent session does not exist."""
@@ -28,6 +34,10 @@ class AgentSessionDeviceMismatchError(ValueError):
         self.requested_device_id = requested_device_id
 
 
+class AgentSessionRecoveryRequiredError(RuntimeError):
+    """Raised when a durable session needs post-crash reconciliation."""
+
+
 class AgentSession(Protocol):
     """Minimum domain-facing shape of a universal-agent session."""
 
@@ -41,7 +51,7 @@ class AgentSession(Protocol):
 
 
 class AgentSessionRepository(Protocol):
-    """Single process-local authority for universal-agent session storage."""
+    """Durable authority for universal-agent session storage and events."""
 
     def add(self, session: AgentSession) -> None: ...
 
@@ -54,6 +64,10 @@ class AgentSessionRepository(Protocol):
     def clear(self) -> None: ...
 
     def active_snapshots(self) -> list[dict[str, Any]]: ...
+
+    def save(self, session: AgentSession, *, event_type: str = 'state_snapshot') -> None: ...
+
+    def events(self, session_id: str, *, after_sequence: int = 0) -> list[dict[str, Any]]: ...
 
 
 def require_session_device(session: AgentSession, requested_device_id: str) -> None:

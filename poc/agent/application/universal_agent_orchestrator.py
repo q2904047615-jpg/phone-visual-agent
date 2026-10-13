@@ -83,7 +83,8 @@ class UniversalAgentOrchestrator:
         evidence_store_factory: AgentEvidenceStoreFactory, trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None=None, device_registry: DeviceTaskRegistryPort,
         required_action_kind: str | None=None, planner: PlannerPort | None=None,
-        policy: PlatformPolicy | None=None, verifier: Any | None=None) -> None:
+        policy: PlatformPolicy | None=None, verifier: Any | None=None,
+        session_persister: Callable[[UniversalAgentSessionState], None] | None=None) -> None:
         self.required_action_kind = required_action_kind
         self.qwen_observer = qwen_observer
         self.planner = planner or ModelAssistedPlanner(qwen_observer)
@@ -94,6 +95,7 @@ class UniversalAgentOrchestrator:
         self.trusted_observation_factory = trusted_observation_factory
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry
+        self.session_persister = session_persister
         self._observation_coordinator = ObservationDecisionCoordinator()
         self._confirmation_coordinator = ConfirmationExecutionCoordinator()
         self._execution_coordinator = AutonomousExecutionCoordinator()
@@ -233,7 +235,9 @@ class UniversalAgentOrchestrator:
         return frozenset(actions)
 
     def _write_snapshot(self, session: UniversalAgentSessionState) -> None:
-        return self._lifecycle_coordinator.write_snapshot(self, session)
+        self._lifecycle_coordinator.write_snapshot(self, session)
+        if self.session_persister is not None:
+            self.session_persister(session)
 
     def _best_effort_snapshot(self, session: UniversalAgentSessionState) -> None:
         return self._lifecycle_coordinator.best_effort_snapshot(self, session)

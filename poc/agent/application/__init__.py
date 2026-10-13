@@ -9,13 +9,14 @@ from .verifier import VERIFIER_PROTOCOL_VERSION, PlatformVerifier, VerificationE
 from .universal_agent_sessions import (
     AgentDeviceRuntimeError,
     AgentSessionCommandError,
+    AgentSessionRecoveryRequiredError,
     AgentSessionOperationResult,
     StartUniversalAgentSessionCommand,
     StartUniversalAgentSessionResult,
     UniversalAgentSessionApplicationService,
 )
 
-__all__ = ['AgentDeviceRuntimeError', 'AgentSessionCommandError', 'AgentSessionOperationResult',
+__all__ = ['AgentDeviceRuntimeError', 'AgentSessionCommandError', 'AgentSessionRecoveryRequiredError', 'AgentSessionOperationResult',
     'POLICY_PROTOCOL_VERSION', 'PlatformPolicy', 'PolicyDecision', 'PolicyViolation',
     'VERIFIER_PROTOCOL_VERSION', 'PlatformVerifier', 'VerificationError', 'VerificationResult',
     'POST_ACTION_TRANSITION_PROTOCOL_VERSION', 'StartUniversalAgentSessionCommand',

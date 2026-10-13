@@ -130,6 +130,19 @@ registry.release("device-a", "child-session-a")
             self.assertIsNone(parent.active_session("device-a"))
             self.assertIsNone(parent.active_session("device-b"))
 
+    def test_fencing_epoch_changes_after_release_and_reacquire(self) -> None:
+        registry = DeviceTaskRegistry()
+        registry.reserve("device-a", "session-a")
+        first = registry.fencing_epoch("device-a", "session-a")
+        registry.assert_fencing_epoch("device-a", "session-a", first)
+        registry.release("device-a", "session-a")
+        registry.reserve("device-a", "session-b")
+        second = registry.fencing_epoch("device-a", "session-b")
+        self.assertGreater(second, first)
+        with self.assertRaises(DeviceTaskRegistryError):
+            registry.assert_fencing_epoch("device-a", "session-a", first)
+        registry.release("device-a", "session-b")
+
 
 if __name__ == "__main__":
     unittest.main()

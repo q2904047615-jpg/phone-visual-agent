@@ -16,13 +16,15 @@ from agent.application import UniversalAgentSessionApplicationService
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
 from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
+from agent.domain.model_gateway import ModelGatewayRegistration, ModelGatewayRegistry
+from agent.domain.tool_registry import build_canonical_tool_registry
 from agent.domain.universal_action_controller import UniversalActionController
 from agent.infrastructure import (
     DeviceControllerRegistry as InfrastructureDeviceControllerRegistry,
     DeviceRuntimeResourceRegistry,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
-    InMemoryAgentSessionRepository,
+    SqliteAgentSessionRepository,
     SHARED_DEVICE_LEASE_DIR,
 )
 from agent.infrastructure.adb_keyboard_transport import AdbKeyboardRuntimeRegistry
@@ -101,28 +103,46 @@ class Runtime:
         self.vision_provider = DashScopeVisionProvider(enable_thinking=True)
         self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(adb_keyboard_registry_path)
         self._adb_pairing_services: dict[str, AdbPairingService | None] = {}
-        self.generic_scene_observer = SingleStepGenericSceneObserver(self.vision_provider)
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider,
             trusted_observation_frame_validator=validate_trusted_observation_against_frames,
         )
+        provider_status = self.vision_provider.status()
+        self.model_gateway_registry = ModelGatewayRegistry()
+        self.model_gateway_registry.register(ModelGatewayRegistration(
+            gateway_id="qwen",
+            model=str(provider_status.get("model") or "qwen3-vl-plus"),
+            capabilities=frozenset({"vision", "structured_output", "planning_suggestion"}),
+            version="qwen-visual-decision-v1",
+            gateway=self.qwen_visual_decision_observer,
+        ), default=True)
+        self.model_gateway = self.model_gateway_registry.default()
+        self.tool_registry = build_canonical_tool_registry()
+        self.generic_scene_observer = SingleStepGenericSceneObserver(
+            self.vision_provider, gateway=self.model_gateway
+        )
         self.device_task_registry = DeviceTaskRegistry(lease_directory=SHARED_DEVICE_LEASE_DIR)
+        self.agent_session_repository = SqliteAgentSessionRepository(Path(output_dir) / "runtime.sqlite3")
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
-            qwen_observer=self.qwen_visual_decision_observer,
+            qwen_observer=self.model_gateway,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=lambda: self.capture_agent_frame(device_id),
                 observer=self.generic_scene_observer,
                 robot=self.controller_for_device(device_id),
                 app_launcher=self.app_launcher_for_device(device_id),
-                controller=UniversalActionController(),
+                controller=UniversalActionController(tool_registry=self.tool_registry),
                 device_id=device_id,
                 text_transport=self.text_transport_for_device(device_id),
+                tool_registry=self.tool_registry,
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
+            session_persister=lambda session: self.agent_session_repository.save(
+                session, event_type=("dispatching" if session.status == "executing_one_action"
+                                     else "runtime_snapshot")
+            ),
         )
-        self.agent_session_repository = InMemoryAgentSessionRepository()
         self.universal_agent_session_service = UniversalAgentSessionApplicationService(
             orchestrator_provider=lambda: self.universal_agent_orchestrator,
             sessions=self.agent_session_repository,
@@ -199,14 +219,15 @@ class Runtime:
     ) -> UniversalAgentOrchestrator:
         return UniversalAgentOrchestrator(
             required_action_kind=candidate_action,
-            qwen_observer=self.qwen_visual_decision_observer,
+            qwen_observer=self.model_gateway,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=lambda: self.capture_agent_frame(device_id, controller=provisional_controller),
                 observer=self.generic_scene_observer,
                 robot=provisional_controller,
-                controller=UniversalActionController(),
+                controller=UniversalActionController(tool_registry=self.tool_registry),
                 device_id=device_id,
                 text_transport=self.text_transport_for_device(device_id),
+                tool_registry=self.tool_registry,
             ),
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,

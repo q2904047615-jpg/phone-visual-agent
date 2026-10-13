@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping, Protocol
 from agent.domain import (
     AgentSession,
     AgentSessionConflictError,
+    AgentSessionRecoveryRequiredError,
     AgentSessionRepository,
     DeviceTaskRegistryPort,
     require_session_device,
@@ -104,16 +105,27 @@ class UniversalAgentSessionApplicationService:
     def _orchestrator(self) -> UniversalAgentOrchestratorPort:
         return self._orchestrator_provider()
 
-    @staticmethod
-    def _require_start_available(orchestrator: UniversalAgentOrchestratorPort, device_id: str) -> None:
+    def _require_start_available(self, orchestrator: UniversalAgentOrchestratorPort, device_id: str) -> None:
         active_session_id = orchestrator.device_registry.active_session(device_id)
         reject_if(active_session_id is not None, AgentSessionConflictError(f'设备 {device_id} 已有活动任务：{active_session_id}。'))
+        for snapshot in self._sessions.active_snapshots():
+            if str(snapshot.get("device_id") or "") == device_id:
+                raise AgentSessionConflictError(
+                    f'设备 {device_id} 有尚未完成或待恢复会话：{snapshot.get("session_id") or "unknown"}。'
+                )
 
     def require(self, session_id: str) -> AgentSession:
         return self._sessions.require(session_id)
 
     def active_snapshots(self) -> list[dict[str, Any]]:
         return self._sessions.active_snapshots()
+
+    @staticmethod
+    def _ensure_recoverable(session: AgentSession) -> None:
+        if getattr(session, "recovery_required", False) or session.status == "recovery_required":
+            raise AgentSessionRecoveryRequiredError(
+                "会话在服务重启前尚未完成；已停止新动作，必须先核对外部效果后才能恢复。"
+            )
 
     def _ensure_ready_or_invalidate(self, orchestrator: UniversalAgentOrchestratorPort,
         session: AgentSession) -> None:
@@ -193,6 +205,7 @@ class UniversalAgentSessionApplicationService:
 
     def approve_effects(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
         Any] | None) -> AgentSessionOperationResult:
+        self._ensure_recoverable(session)
         self._ensure_device_ready(session.device_id)
         reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('调用 Qwen 处理受限效果前必须确认完整效果作用域。'))
         require_session_device(session, str(confirmation.get('device_id') or ''))
@@ -203,12 +216,14 @@ class UniversalAgentSessionApplicationService:
 
     def confirm(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
         Any] | None) -> AgentSessionOperationResult:
+        self._ensure_recoverable(session)
         orchestrator = self._orchestrator()
         self._ensure_ready_or_invalidate(orchestrator, session)
         reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('执行一个动作前必须提交完整且明确的确认作用域。'))
         return self._exclusive_operation(session, lambda: orchestrator.confirm_one(session, confirmation))
 
     def refresh(self, session: AgentSession, *, requested_device_id: str) -> AgentSessionOperationResult:
+        self._ensure_recoverable(session)
         require_session_device(session, requested_device_id)
         self._ensure_device_ready(session.device_id)
         return self._exclusive_operation(session, lambda: self._orchestrator().refresh_decision(session))
@@ -216,6 +231,7 @@ class UniversalAgentSessionApplicationService:
     def run_automatic(self, session: AgentSession, *, requested_device_id: str, confirmed: bool,
         confirmation: Mapping[str, Any] | None, max_physical_actions: int | None=None,
         max_observations: int | None=None) -> AgentSessionOperationResult:
+        self._ensure_recoverable(session)
         require_session_device(session, requested_device_id)
         orchestrator = self._orchestrator()
         self._ensure_ready_or_invalidate(orchestrator, session)
@@ -225,12 +241,14 @@ class UniversalAgentSessionApplicationService:
 
     def cancel(self, session_id: str, *, requested_device_id: str) -> AgentSessionOperationResult:
         with self._sessions.locked(session_id) as session:
+            self._ensure_recoverable(session)
             require_session_device(session, requested_device_id)
             self._orchestrator().cancel(session)
             return AgentSessionOperationResult(session=session)
 
     def pause(self, session_id: str, *, requested_device_id: str) -> AgentSessionOperationResult:
         with self._sessions.locked(session_id) as session:
+            self._ensure_recoverable(session)
             require_session_device(session, requested_device_id)
             self._orchestrator().pause(session)
             return AgentSessionOperationResult(session=session)

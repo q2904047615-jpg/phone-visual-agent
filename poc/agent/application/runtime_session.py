@@ -30,6 +30,7 @@ class UniversalAgentSessionState:
     run_dir: Path
     adapter: Any = field(repr=False)
     evidence_store: AgentEvidenceStorePort = field(repr=False)
+    lease_epoch: int = 0
     visual_reference_paths: tuple[Path, ...] = field(default_factory=tuple, repr=False)
     vision_usage: VisionSessionUsageLedger | None = field(default=None, repr=False)
     exact_input_text: str | None = None
@@ -102,6 +103,7 @@ class UniversalAgentSessionState:
         scene = self._serialize(getattr(self.trusted_observation, 'scene',
             None)) if self.trusted_observation is not None else None
         return {'session_id': self.session_id, 'raw_goal': self.raw_goal, 'device_id': self.device_id,
+            'lease_epoch': self.lease_epoch,
             'created_at': self.created_at, 'status': self.status, 'step_number': self.step_number,
             'physical_actions': self.physical_actions,
             'visual_reference_count': len(self.visual_reference_paths), 'qwen_usage': self._serialize(self.vision_usage),

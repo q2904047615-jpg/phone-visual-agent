@@ -27,10 +27,12 @@ class RobotDeviceExecutor:
     }
     def __init__(self, robot: Any, *, app_launcher: Any=None,
         text_transport: TrustedTextTransportPort | None=None,
+        tool_registry: Any | None=None,
         sleep: Callable[[float], None]=time.sleep) -> None:
         self.robot = robot
         self.app_launcher = app_launcher
         self.text_transport = text_transport
+        self.tool_registry = tool_registry
         self.sleep = sleep
         self._handlers: dict[str, Callable[[DeviceActionRequest], DeviceExecutionResult]] = {
             'scroll': self._swipe,
@@ -50,6 +52,11 @@ class RobotDeviceExecutor:
 
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         request.validate()
+        if self.tool_registry is not None:
+            try:
+                self.tool_registry.require(request.kind)
+            except (KeyError, ValueError) as exc:
+                raise DeviceExecutionError(f"Tool Registry 拒绝设备动作：{request.kind}：{exc}") from exc
         click_spec = self._CLICK_TRANSPORTS.get(request.kind)
         if click_spec is not None:
             return self._click(request, *click_spec)

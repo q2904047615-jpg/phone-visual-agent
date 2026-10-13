@@ -69,6 +69,14 @@ class AgentSessionRepository(Protocol):
 
     def events(self, session_id: str, *, after_sequence: int = 0) -> list[dict[str, Any]]: ...
 
+    def reconcile_recovered(
+        self,
+        session_id: str,
+        *,
+        requested_device_id: str,
+        external_effect: str,
+    ) -> AgentSession: ...
+
 
 def require_session_device(session: AgentSession, requested_device_id: str) -> None:
     """Enforce the device identity already fixed by the session aggregate."""

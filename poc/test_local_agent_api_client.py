@@ -85,6 +85,15 @@ def _openapi(*, version="0.2.0", include_start=True):
                 },
             }
         ),
+        "Recovery": _schema_object(
+            {
+                "device_id": string,
+                "external_effect": {"type": "string", "enum": ["not_dispatched", "unknown"]},
+                "confirmed": {"type": "boolean"},
+                "resume": {"type": "boolean"},
+            },
+            ("device_id",),
+        ),
     }
 
     def body(ref):
@@ -106,6 +115,7 @@ def _openapi(*, version="0.2.0", include_start=True):
         session_path + "/next": {"post": body("#/components/schemas/Device")},
         session_path + "/auto": {"post": body("#/components/schemas/Auto")},
         session_path + "/cancel": {"post": body("#/components/schemas/Device")},
+        session_path + "/reconcile": {"post": body("#/components/schemas/Recovery")},
         session_path + "/pause": {"post": body("#/components/schemas/Device")},
     }
     if include_start:
@@ -137,6 +147,36 @@ def _scope(**changes):
 
 
 class LocalAgentApiClientTests(unittest.TestCase):
+    def test_reconcile_session_uses_typed_route_and_explicit_confirmation(self):
+        posts = []
+
+        def handler(request):
+            if request.url.path == "/api/session":
+                return httpx.Response(200, json={"token": "secret", "version": "0.2.0"})
+            if request.url.path == "/openapi.json":
+                return httpx.Response(200, json=_openapi())
+            if request.method == "GET":
+                return httpx.Response(200, json={
+                    "session": {"session_id": "abc", "device_id": "phone-02"},
+                })
+            posts.append((request.url.path, json.loads(request.read())))
+            return httpx.Response(200, json={"session": {"session_id": "abc", "status": "cancelled"}})
+
+        with self._client(handler) as client:
+            client.reconcile_session("abc", resume=True)
+        self.assertEqual(
+            (
+                "/api/agent/generic-supervised/abc/reconcile",
+                {
+                    "device_id": "phone-02",
+                    "external_effect": "not_dispatched",
+                    "confirmed": True,
+                    "resume": True,
+                },
+            ),
+            posts[-1],
+        )
+
     def test_budget_start_and_auto_are_typed_and_preserve_omitted_limits(self):
         posts = []
 

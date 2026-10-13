@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import uuid
 from typing import Any, Callable, Mapping, Protocol
 
 from agent.domain import (
@@ -82,6 +83,12 @@ class AgentSessionOperationResult:
     session: AgentSession
     operation: Any = None
     physical_actions: int = 0
+
+
+@dataclass(frozen=True)
+class RecoveryReconciliationResult:
+    session: AgentSession
+    replacement: AgentSession | None = None
 
 
 class UniversalAgentSessionApplicationService:
@@ -245,6 +252,59 @@ class UniversalAgentSessionApplicationService:
             require_session_device(session, requested_device_id)
             self._orchestrator().cancel(session)
             return AgentSessionOperationResult(session=session)
+
+    def reconcile_recovered(
+        self,
+        session_id: str,
+        *,
+        requested_device_id: str,
+        external_effect: str,
+        confirmed: bool,
+        resume: bool = False,
+    ) -> RecoveryReconciliationResult:
+        session = self.require(session_id)
+        require_session_device(session, requested_device_id)
+        if not getattr(session, "recovery_required", False) and session.status != "recovery_required":
+            raise AgentSessionCommandError("会话当前不需要恢复核对。")
+        if confirmed is not True:
+            raise AgentSessionCommandError("恢复核对必须由用户明确确认。")
+        if external_effect != "not_dispatched":
+            raise AgentSessionCommandError("当前只允许核对为未派发外部动作；未知效果不能恢复。")
+        if int(getattr(session, "physical_actions", 0)) != 0:
+            raise AgentSessionCommandError("已有物理动作记录，不能按未派发恢复。")
+        snapshot = session.snapshot()
+        reconciled = self._sessions.reconcile_recovered(
+            session_id,
+            requested_device_id=requested_device_id,
+            external_effect=external_effect,
+        )
+        if not resume:
+            return RecoveryReconciliationResult(session=reconciled)
+        goal = snapshot.get("goal") if isinstance(snapshot.get("goal"), Mapping) else {}
+        entities = goal.get("entities") if isinstance(goal, Mapping) else {}
+        entities = entities if isinstance(entities, Mapping) else {}
+        budget = snapshot.get("execution_budget")
+        budget = budget if isinstance(budget, Mapping) else {}
+        replacement_id = uuid.uuid4().hex
+        old_run_dir = Path(getattr(session, "run_dir", snapshot.get("run_dir", "recovery")))
+        command = StartUniversalAgentSessionCommand(
+            session_id=replacement_id,
+            raw_goal=str(snapshot.get("raw_goal") or ""),
+            exact_input_text=entities.get("exact_input_text"),
+            exact_action_kind=entities.get("required_action_kind"),
+            exact_target_label=str(entities.get("exact_target_label") or ""),
+            device_id=requested_device_id,
+            run_dir=old_run_dir.parent / f"{old_run_dir.name}_resume_{replacement_id[:8]}",
+            auto_advance=False,
+            conversation=tuple(
+                item for item in snapshot.get("conversation", [])
+                if isinstance(item, Mapping)
+            ),
+            max_physical_actions=int(budget.get("max_physical_actions") or DEFAULT_DEVICE_ACTION_BUDGET),
+            max_observations=int(budget.get("max_observations") or DEFAULT_OBSERVATION_BUDGET),
+        )
+        started = self.start(command)
+        return RecoveryReconciliationResult(session=reconciled, replacement=started.session)
 
     def pause(self, session_id: str, *, requested_device_id: str) -> AgentSessionOperationResult:
         with self._sessions.locked(session_id) as session:

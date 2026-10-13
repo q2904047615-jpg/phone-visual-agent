@@ -5,7 +5,7 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator
 
-from agent.domain import ACTIVE_SESSION_STATUSES, AgentSession, AgentSessionNotFoundError
+from agent.domain import ACTIVE_SESSION_STATUSES, AgentSession, AgentSessionNotFoundError, RECOVERY_REQUIRED_STATUS
 
 
 class InMemoryAgentSessionRepository:
@@ -43,3 +43,20 @@ class InMemoryAgentSessionRepository:
         with self._lock:
             return [session.snapshot() for session in self._sessions.values() if session.status
                 in ACTIVE_SESSION_STATUSES]
+
+    def reconcile_recovered(
+        self,
+        session_id: str,
+        *,
+        requested_device_id: str,
+        external_effect: str,
+    ) -> AgentSession:
+        with self._lock:
+            session = self.require(session_id)
+            reject_if(session.device_id != requested_device_id, ValueError("请求device_id与会话锁定设备不一致。"))
+            reject_if(session.status != RECOVERY_REQUIRED_STATUS, ValueError("会话当前不需要恢复核对。"))
+            reject_if(external_effect != "not_dispatched", ValueError("当前只允许核对为未派发外部动作。"))
+            session.status = "cancelled"
+            if hasattr(session, "recovery_required"):
+                session.recovery_required = False
+            return session

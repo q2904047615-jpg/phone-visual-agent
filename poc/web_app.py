@@ -89,6 +89,7 @@ from agent.interfaces.http_models import (
     GenericSceneRequest,
     GenericSupervisedAutoRequest,
     GenericSupervisedDeviceRequest,
+    GenericRecoveryReconciliationRequest,
     GenericSupervisedStartRequest,
     GenericSupervisedStepRequest,
     QwenChatRequest,
@@ -2408,6 +2409,44 @@ def cancel_generic_supervised_session(
     session = cancelled.session
     report = _write_generic_supervised_report(session)
     return {"session": session.snapshot(), "report": report}
+
+
+@app.post("/api/agent/generic-supervised/{session_id}/reconcile")
+def reconcile_generic_supervised_session(
+    session_id: str,
+    body: GenericRecoveryReconciliationRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    session = _require_generic_supervised_session(session_id)
+    try:
+        reconciled = runtime.universal_agent_session_service.reconcile_recovered(
+            session_id,
+            requested_device_id=body.device_id,
+            external_effect=body.external_effect,
+            confirmed=body.confirmed,
+            resume=body.resume,
+        )
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
+    except GENERIC_SESSION_ERRORS as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=0,
+            ),
+        ) from exc
+    report = _write_generic_supervised_report(reconciled.session)
+    replacement = reconciled.replacement
+    return {
+        "mode": "generic_supervised_recovery",
+        "session": reconciled.session.snapshot(),
+        "replacement_session": replacement.snapshot() if replacement is not None else None,
+        "report": report,
+    }
 
 
 @app.post("/api/agent/generic-supervised/{session_id}/pause")

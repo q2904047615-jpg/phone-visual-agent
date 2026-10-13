@@ -57,6 +57,7 @@ class LocalAgentApiClient:
     NEXT_ROUTE = SESSION_ROUTE + "/next"
     AUTO_ROUTE = SESSION_ROUTE + "/auto"
     CANCEL_ROUTE = SESSION_ROUTE + "/cancel"
+    RECONCILE_ROUTE = SESSION_ROUTE + "/reconcile"
     PAUSE_ROUTE = SESSION_ROUTE + "/pause"
 
     def __init__(
@@ -239,6 +240,30 @@ class LocalAgentApiClient:
 
     def cancel_session(self, session_id: str) -> JsonObject:
         return self._device_session_post(self.CANCEL_ROUTE, session_id)
+
+    def reconcile_session(
+        self,
+        session_id: str,
+        *,
+        resume: bool = False,
+        confirmed: bool = True,
+        external_effect: str = "not_dispatched",
+    ) -> JsonObject:
+        current = self.get_session(session_id)
+        session = self._session_object(current)
+        device_id = self._required_string(session, "device_id", "会话缺少 device_id。")
+        return self._request(
+            "POST",
+            self.RECONCILE_ROUTE,
+            path_params={"session_id": self._resource_id(session_id)},
+            payload={
+                "device_id": device_id,
+                "external_effect": external_effect,
+                "confirmed": confirmed,
+                "resume": resume,
+            },
+            read_only=False,
+        )
 
     def pause_session(self, session_id: str) -> JsonObject:
         return self._device_session_post(self.PAUSE_ROUTE, session_id)

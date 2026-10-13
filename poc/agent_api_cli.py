@@ -110,9 +110,17 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--auto-advance", action="store_true")
     start.add_argument("--max-physical-actions", type=int)
     start.add_argument("--max-observations", type=int)
-    for name in ("get", "confirm-once", "next", "cancel", "pause", "auto"):
+    for name in ("get", "confirm-once", "next", "cancel", "reconcile", "pause", "auto"):
         command = subparsers.add_parser(name)
         command.add_argument("--session-id", required=True)
+        if name == "reconcile":
+            command.add_argument("--resume", action="store_true")
+            command.add_argument("--confirmed", action="store_true")
+            command.add_argument(
+                "--external-effect",
+                choices=("not_dispatched", "unknown"),
+                default="unknown",
+            )
         if name == "auto":
             command.add_argument("--max-physical-actions", type=int)
             command.add_argument("--max-observations", type=int)
@@ -161,6 +169,14 @@ def main(argv: list[str] | None = None) -> int:
                 result = raw if args.full else _session_projection(raw)
             elif args.command == "cancel":
                 raw = client.cancel_session(args.session_id)
+                result = raw if args.full else _session_projection(raw)
+            elif args.command == "reconcile":
+                raw = client.reconcile_session(
+                    args.session_id,
+                    resume=args.resume,
+                    confirmed=args.confirmed,
+                    external_effect=args.external_effect,
+                )
                 result = raw if args.full else _session_projection(raw)
             else:
                 raw = client.pause_session(args.session_id)

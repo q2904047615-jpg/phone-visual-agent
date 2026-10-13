@@ -52,6 +52,26 @@ class SqliteSessionRepositoryTests(unittest.TestCase):
             self.assertEqual("recovery_required", second.events("s1")[-1]["event_type"])
             second.close()
 
+    def test_reconcile_not_dispatched_closes_recovered_session_without_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            first = SqliteAgentSessionRepository(database)
+            first.add(_Session(status="awaiting_confirmation"))
+            first.close()
+
+            second = SqliteAgentSessionRepository(database)
+            recovered = second.reconcile_recovered(
+                "s1",
+                requested_device_id="device-1",
+                external_effect="not_dispatched",
+            )
+            self.assertEqual("cancelled", recovered.status)
+            self.assertFalse(recovered.recovery_required)
+            self.assertEqual(0, recovered.physical_actions)
+            self.assertEqual("recovery_reconciled", second.events("s1")[-1]["event_type"])
+            self.assertEqual([], second.active_snapshots())
+            second.close()
+
     def test_clear_removes_durable_sessions_and_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = SqliteAgentSessionRepository(Path(directory) / "runtime.sqlite3")

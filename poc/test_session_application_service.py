@@ -3,7 +3,7 @@ from agent.domain import AgentSessionConflictError
 from agent.domain import AgentSessionDeviceMismatchError
 from agent.infrastructure import InMemoryAgentSessionRepository
 from pathlib import Path
-from agent.application import StartUniversalAgentSessionCommand
+from agent.application import AgentSessionCommandError, StartUniversalAgentSessionCommand
 import tempfile
 import unittest
 from test_support.agent_modular_monolith import (
@@ -159,6 +159,68 @@ class AgentSessionApplicationTests(_BaseAgentSessionApplicationTests):
             set(active_statuses),
             {item["status"] for item in repository.active_snapshots()},
         )
+
+    def test_recovery_reconciliation_requires_confirmation_and_can_start_fresh_observation(self) -> None:
+        registry = FakeDeviceRegistry()
+        orchestrator = FakeOrchestrator(registry)
+        repository = InMemoryAgentSessionRepository()
+
+        class RecoveredFakeSession(FakeSession):
+            recovery_required = True
+
+            def snapshot(self):
+                return {
+                    **super().snapshot(),
+                    "status": self.status,
+                    "recovery_required": True,
+                    "raw_goal": "只读查看当前页面",
+                    "goal": {"entities": {
+                        "exact_input_text": None,
+                        "required_action_kind": "tap_semantic",
+                        "exact_target_label": "我",
+                    }},
+                    "conversation": [],
+                    "execution_budget": {
+                        "max_physical_actions": 2,
+                        "max_observations": 4,
+                    },
+                }
+
+        session = RecoveredFakeSession(
+            session_id="recovered-001",
+            device_id="phone-01",
+            run_dir=Path("recovery-run"),
+            status="recovery_required",
+        )
+        repository.add(session)
+        service = self._service(
+            orchestrator,
+            repository,
+            ready_calls=[],
+            lease_calls=[],
+            task_calls=[],
+        )
+
+        with self.assertRaisesRegex(AgentSessionCommandError, "明确确认"):
+            service.reconcile_recovered(
+                session.session_id,
+                requested_device_id="phone-01",
+                external_effect="not_dispatched",
+                confirmed=False,
+            )
+        result = service.reconcile_recovered(
+            session.session_id,
+            requested_device_id="phone-01",
+            external_effect="not_dispatched",
+            confirmed=True,
+            resume=True,
+        )
+        self.assertEqual("cancelled", result.session.status)
+        self.assertFalse(getattr(result.session, "recovery_required", True))
+        self.assertIsNotNone(result.replacement)
+        self.assertNotEqual(session.session_id, result.replacement.session_id)
+        self.assertEqual("tap_semantic", orchestrator.start_calls[-1]["exact_action_kind"])
+        self.assertEqual(0, result.replacement.physical_actions)
 
 
 if __name__ == "__main__":

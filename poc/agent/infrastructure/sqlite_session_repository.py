@@ -49,6 +49,7 @@ class RecoveredAgentSession:
     status: str = RECOVERY_REQUIRED_STATUS
     physical_actions: int = 0
     recovery_required: bool = True
+    recovery_resolution: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         result = dict(self._snapshot)
@@ -57,9 +58,14 @@ class RecoveredAgentSession:
             "task_id": self.session_id,
             "device_id": self.device_id,
             "status": self.status,
-            "recovery_required": True,
-            "recovery_reason": "进程重启后仍有未完成运行；外部动作结果必须先核对，不允许自动重放。",
+            "recovery_required": self.recovery_required,
+            "recovery_reason": (
+                "进程重启后仍有未完成运行；外部动作结果必须先核对，不允许自动重放。"
+                if self.recovery_required else ""
+            ),
         })
+        if self.recovery_resolution is not None:
+            result["recovery_resolution"] = dict(self.recovery_resolution)
         return result
 
 
@@ -222,7 +228,13 @@ class SqliteAgentSessionRepository:
             device_id=str(row["device_id"]),
             run_dir=Path(str(row["run_dir"])),
             _snapshot=snapshot,
+            status=str(row["status"]),
             physical_actions=int(row["physical_actions"] or 0),
+            recovery_required=bool(snapshot.get("recovery_required", row["status"] == RECOVERY_REQUIRED_STATUS)),
+            recovery_resolution=(
+                dict(snapshot["recovery_resolution"])
+                if isinstance(snapshot.get("recovery_resolution"), dict) else None
+            ),
         )
 
     def get(self, session_id: str) -> AgentSession | None:
@@ -302,6 +314,56 @@ class SqliteAgentSessionRepository:
                 }
                 for row in rows
             ]
+
+    def reconcile_recovered(
+        self,
+        session_id: str,
+        *,
+        requested_device_id: str,
+        external_effect: str,
+    ) -> RecoveredAgentSession:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM runtime_sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            reject_if(row is None, AgentSessionNotFoundError("通用单步会话不存在。"))
+            reject_if(str(row["device_id"]) != str(requested_device_id), ValueError("请求device_id与会话锁定设备不一致。"))
+            reject_if(str(row["status"]) != RECOVERY_REQUIRED_STATUS, ValueError("会话当前不需要恢复核对。"))
+            reject_if(external_effect != "not_dispatched", ValueError("当前只允许核对为未派发外部动作。"))
+            snapshot = json.loads(row["snapshot_json"])
+            resolution = {
+                "external_effect": external_effect,
+                "reconciled_at": _now(),
+            }
+            snapshot.update({
+                "status": "cancelled",
+                "recovery_required": False,
+                "recovery_reason": "",
+                "recovery_resolution": resolution,
+            })
+            revision = int(row["revision"]) + 1
+            now = _now()
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "UPDATE runtime_sessions SET status=?, revision=?, updated_at=?, snapshot_json=? "
+                    "WHERE session_id=?",
+                    ("cancelled", revision, now, _json(snapshot), session_id),
+                )
+                self._connection.execute(
+                    "INSERT INTO runtime_events(session_id,event_type,status,revision,occurred_at,payload_json) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (session_id, "recovery_reconciled", "cancelled", revision, now, _json(resolution)),
+                )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+            updated = self._connection.execute(
+                "SELECT * FROM runtime_sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            assert updated is not None
+            return self._recovered_from_row(updated)
 
     def close(self) -> None:
         with self._lock:

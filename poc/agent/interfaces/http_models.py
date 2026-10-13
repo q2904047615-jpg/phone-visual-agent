@@ -46,6 +46,13 @@ class GenericSupervisedDeviceRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
 
 
+class GenericRecoveryReconciliationRequest(StrictAgentRequest):
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    external_effect: Literal["not_dispatched", "unknown"] = "unknown"
+    confirmed: StrictBool = False
+    resume: StrictBool = False
+
+
 class QwenChatRequest(StrictAgentRequest):
     """A natural-language message added to an existing Qwen task session."""
 

@@ -51,7 +51,8 @@ class PlatformVerifier:
         intent.validate(observation)
         reject_if(intent.status != "finish", VerificationError("Verifier只接受finish ToolIntent作为终态候选。"))
         reject_if(not intent.reason.strip(), VerificationError("终态候选缺少当前Observation完成事实。"))
-        if history and self._has_uncertain_tail(history[-1]):
+        if (history and self._has_uncertain_tail(history[-1])
+                and intent.previous_action_outcome != "matched"):
             return VerificationResult(
                 state="needs_reobservation", terminal_status=None,
                 observation_id=observation.observation_id, fingerprint=observation.fingerprint,

@@ -94,6 +94,35 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
                 finally:
                     orchestrator.cancel(session)
 
+    def test_recovery_cancel_is_a_conflict_and_does_not_become_http_500(self) -> None:
+        orchestrator, _, _, _ = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-recovery-cancel",
+            raw_goal="只读恢复检查",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-recovery-cancel",
+        )
+        web_app.runtime.agent_session_repository.add(session)
+        error = web_app.AgentSessionRecoveryRequiredError(
+            "会话在服务重启前尚未完成；已停止新动作，必须先核对外部效果后才能恢复。"
+        )
+        path = f"/api/agent/generic-supervised/{session.session_id}/cancel"
+        with patch.object(
+            web_app.runtime.universal_agent_session_service,
+            "cancel",
+            side_effect=error,
+        ):
+            response = self.client.post(
+                path,
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertEqual(0, response.json()["detail"]["physical_actions"])
+        self.assertIn("服务重启前", response.json()["detail"]["error"])
+        self.assertEqual("awaiting_confirmation", session.status)
+        orchestrator.cancel(session)
+
     def test_machine_position_endpoint_updates_selected_position(self) -> None:
         response = self.client.post(
             "/api/device/device-local-01/machine-position",

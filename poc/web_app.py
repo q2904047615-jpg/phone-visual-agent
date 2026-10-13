@@ -2386,6 +2386,7 @@ def cancel_generic_supervised_session(
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
+    session = _require_generic_supervised_session(session_id)
     try:
         cancelled = runtime.universal_agent_session_service.cancel(
             session_id,
@@ -2395,6 +2396,15 @@ def cancel_generic_supervised_session(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AgentSessionDeviceMismatchError as exc:
         _raise_agent_session_device_mismatch(exc)
+    except GENERIC_SESSION_ERRORS as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=0,
+            ),
+        ) from exc
     session = cancelled.session
     report = _write_generic_supervised_report(session)
     return {"session": session.snapshot(), "report": report}
@@ -2410,6 +2420,7 @@ def pause_generic_supervised_session(
     """Invalidate any pending confirmation without touching hardware."""
 
     verify_local_request(request, x_control_token)
+    session = _require_generic_supervised_session(session_id)
     try:
         paused = runtime.universal_agent_session_service.pause(
             session_id,
@@ -2419,6 +2430,15 @@ def pause_generic_supervised_session(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AgentSessionDeviceMismatchError as exc:
         _raise_agent_session_device_mismatch(exc)
+    except GENERIC_SESSION_ERRORS as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=0,
+            ),
+        ) from exc
     session = paused.session
     report = _write_generic_supervised_report(session)
     return {

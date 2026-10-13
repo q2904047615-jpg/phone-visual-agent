@@ -70,6 +70,10 @@ class StartUniversalAgentSessionCommand:
     conversation: tuple[dict[str, str], ...] = ()
     max_physical_actions: int = DEFAULT_DEVICE_ACTION_BUDGET
     max_observations: int = DEFAULT_OBSERVATION_BUDGET
+    initial_physical_actions: int = 0
+    initial_observation_attempts: int = 0
+    recovery_parent_session_id: str | None = None
+    recovery_mode: str = ''
 
 
 @dataclass(frozen=True)
@@ -180,6 +184,10 @@ class UniversalAgentSessionApplicationService:
                         conversation=command.conversation,
                         max_physical_actions=command.max_physical_actions,
                         max_observations=command.max_observations,
+                        initial_physical_actions=command.initial_physical_actions,
+                        initial_observation_attempts=command.initial_observation_attempts,
+                        recovery_parent_session_id=command.recovery_parent_session_id,
+                        recovery_mode=command.recovery_mode,
                     )
             except Exception as exc:
                 # The orchestrator attaches a session when initial observation or
@@ -268,28 +276,44 @@ class UniversalAgentSessionApplicationService:
             raise AgentSessionCommandError("会话当前不需要恢复核对。")
         if confirmed is not True:
             raise AgentSessionCommandError("恢复核对必须由用户明确确认。")
-        if external_effect != "not_dispatched":
-            raise AgentSessionCommandError("当前只允许核对为未派发外部动作；未知效果不能恢复。")
-        if int(getattr(session, "physical_actions", 0)) != 0:
-            raise AgentSessionCommandError("已有物理动作记录，不能按未派发恢复。")
+        physical_actions = int(getattr(session, "physical_actions", 0))
+        if external_effect not in {"not_dispatched", "unknown"}:
+            raise AgentSessionCommandError("恢复核对的外部效果类型不受支持。")
+        if external_effect == "not_dispatched" and physical_actions != 0:
+            raise AgentSessionCommandError("已有物理动作记录，不能核对为未派发。")
+        if external_effect == "unknown" and not resume:
+            # Cancellation is allowed for an unknown effect, but it is recorded
+            # as an explicit no-replay compensation rather than a success.
+            pass
         # A resume creates a new runtime session.  Check the target before
         # closing the recovery gate so an unavailable/unregistered device
         # leaves the original durable recovery state intact.
         if resume:
             self._ensure_device_ready(requested_device_id)
         snapshot = session.snapshot()
+        budget = snapshot.get("execution_budget")
+        budget = budget if isinstance(budget, Mapping) else {}
+        if resume and int(budget.get("observation_attempts") or 0) >= int(
+            budget.get("max_observations") or DEFAULT_OBSERVATION_BUDGET
+        ):
+            raise AgentSessionCommandError("恢复会话没有剩余观察预算，不能创建新观察。")
+        resolution = (
+            "not_dispatched_fresh_observation" if external_effect == "not_dispatched" and resume
+            else "not_dispatched_cancelled_no_replay" if external_effect == "not_dispatched"
+            else "unknown_effect_fresh_observation" if resume
+            else "unknown_effect_cancelled_no_replay"
+        )
         reconciled = self._sessions.reconcile_recovered(
             session_id,
             requested_device_id=requested_device_id,
             external_effect=external_effect,
+            resolution=resolution,
         )
         if not resume:
             return RecoveryReconciliationResult(session=reconciled)
         goal = snapshot.get("goal") if isinstance(snapshot.get("goal"), Mapping) else {}
         entities = goal.get("entities") if isinstance(goal, Mapping) else {}
         entities = entities if isinstance(entities, Mapping) else {}
-        budget = snapshot.get("execution_budget")
-        budget = budget if isinstance(budget, Mapping) else {}
         replacement_id = uuid.uuid4().hex
         old_run_dir = Path(getattr(session, "run_dir", snapshot.get("run_dir", "recovery")))
         command = StartUniversalAgentSessionCommand(
@@ -307,6 +331,11 @@ class UniversalAgentSessionApplicationService:
             ),
             max_physical_actions=int(budget.get("max_physical_actions") or DEFAULT_DEVICE_ACTION_BUDGET),
             max_observations=int(budget.get("max_observations") or DEFAULT_OBSERVATION_BUDGET),
+            initial_physical_actions=physical_actions,
+            initial_observation_attempts=int(budget.get("observation_attempts") or 0),
+            recovery_parent_session_id=session_id,
+            recovery_mode="fresh_observation_after_unknown_effect" if external_effect == "unknown"
+                else "fresh_observation_after_not_dispatched",
         )
         started = self.start(command)
         return RecoveryReconciliationResult(session=reconciled, replacement=started.session)

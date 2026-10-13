@@ -224,6 +224,68 @@ class AgentSessionApplicationTests(_BaseAgentSessionApplicationTests):
         self.assertEqual("tap_semantic", orchestrator.start_calls[-1]["exact_action_kind"])
         self.assertEqual(0, result.replacement.physical_actions)
 
+    def test_unknown_effect_with_prior_action_preserves_budget_and_never_replays(self) -> None:
+        registry = FakeDeviceRegistry()
+        orchestrator = FakeOrchestrator(registry)
+        repository = InMemoryAgentSessionRepository()
+
+        class RecoveredActionSession(FakeSession):
+            recovery_required = True
+
+            def snapshot(self):
+                return {
+                    **super().snapshot(),
+                    "recovery_required": True,
+                    "raw_goal": "点击当前页面按钮",
+                    "goal": {"entities": {
+                        "exact_input_text": None,
+                        "required_action_kind": "tap_semantic",
+                        "exact_target_label": "按钮",
+                    }},
+                    "conversation": [],
+                    "execution_budget": {
+                        "max_physical_actions": 2,
+                        "max_observations": 4,
+                        "physical_actions": self.physical_actions,
+                        "observation_attempts": 2,
+                    },
+                }
+
+        session = RecoveredActionSession(
+            session_id="recovered-action-001",
+            device_id="phone-01",
+            run_dir=Path("recovery-run"),
+            status="recovery_required",
+            physical_actions=1,
+        )
+        repository.add(session)
+        ready_calls: list[str] = []
+        service = self._service(
+            orchestrator,
+            repository,
+            ready_calls=ready_calls,
+            lease_calls=[],
+            task_calls=[],
+        )
+
+        result = service.reconcile_recovered(
+            session.session_id,
+            requested_device_id="phone-01",
+            external_effect="unknown",
+            confirmed=True,
+            resume=True,
+        )
+        self.assertEqual("cancelled", result.session.status)
+        self.assertIsNotNone(result.replacement)
+        self.assertEqual(1, result.replacement.physical_actions)
+        self.assertEqual(1, orchestrator.start_calls[-1]["initial_physical_actions"])
+        self.assertEqual(2, orchestrator.start_calls[-1]["initial_observation_attempts"])
+        self.assertEqual("recovered-action-001", orchestrator.start_calls[-1]["recovery_parent_session_id"])
+        self.assertEqual(
+            "fresh_observation_after_unknown_effect",
+            orchestrator.start_calls[-1]["recovery_mode"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,11 +8,11 @@ from agent.infrastructure.sqlite_session_repository import SqliteAgentSessionRep
 
 
 class _Session:
-    def __init__(self, session_id: str = "s1", status: str = "created") -> None:
+    def __init__(self, session_id: str = "s1", status: str = "created", physical_actions: int = 0) -> None:
         self.session_id = session_id
         self.device_id = "device-1"
         self.status = status
-        self.physical_actions = 0
+        self.physical_actions = physical_actions
         self.run_dir = Path("run")
 
     def snapshot(self) -> dict[str, object]:
@@ -80,6 +80,30 @@ class SqliteSessionRepositoryTests(unittest.TestCase):
             self.assertIsNone(repository.get("s1"))
             self.assertEqual([], repository.active_snapshots())
             repository.close()
+
+    def test_unknown_effect_reconciliation_records_no_replay_compensation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            first = SqliteAgentSessionRepository(database)
+            first.add(_Session(status="executing_one_action", physical_actions=1))
+            first.close()
+
+            second = SqliteAgentSessionRepository(database)
+            recovered = second.reconcile_recovered(
+                "s1",
+                requested_device_id="device-1",
+                external_effect="unknown",
+                resolution="unknown_effect_cancelled_no_replay",
+            )
+            self.assertEqual("cancelled", recovered.status)
+            self.assertEqual(1, recovered.physical_actions)
+            self.assertEqual("unknown", recovered.recovery_resolution["external_effect"])
+            self.assertEqual(
+                "unknown_effect_cancelled_no_replay",
+                recovered.recovery_resolution["resolution"],
+            )
+            self.assertEqual("recovery_reconciled", second.events("s1")[-1]["event_type"])
+            second.close()
 
 
 if __name__ == "__main__":

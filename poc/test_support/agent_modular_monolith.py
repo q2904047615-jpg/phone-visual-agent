@@ -52,6 +52,7 @@ class FakeOrchestrator:
             session_id=kwargs["session_id"],
             device_id=kwargs["device_id"],
             run_dir=kwargs["run_dir"],
+            physical_actions=int(kwargs.get("initial_physical_actions", 0)),
         )
 
     def refresh_decision(self, _session: FakeSession) -> object:

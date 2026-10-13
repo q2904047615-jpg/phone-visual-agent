@@ -321,6 +321,7 @@ class SqliteAgentSessionRepository:
         *,
         requested_device_id: str,
         external_effect: str,
+        resolution: str = "reconciled",
     ) -> RecoveredAgentSession:
         with self._lock:
             row = self._connection.execute(
@@ -329,17 +330,19 @@ class SqliteAgentSessionRepository:
             reject_if(row is None, AgentSessionNotFoundError("通用单步会话不存在。"))
             reject_if(str(row["device_id"]) != str(requested_device_id), ValueError("请求device_id与会话锁定设备不一致。"))
             reject_if(str(row["status"]) != RECOVERY_REQUIRED_STATUS, ValueError("会话当前不需要恢复核对。"))
-            reject_if(external_effect != "not_dispatched", ValueError("当前只允许核对为未派发外部动作。"))
+            reject_if(external_effect not in {"not_dispatched", "unknown"}, ValueError("恢复核对的外部效果类型不受支持。"))
             snapshot = json.loads(row["snapshot_json"])
-            resolution = {
+            resolution_payload = {
                 "external_effect": external_effect,
+                "resolution": resolution,
+                "physical_actions_before": int(row["physical_actions"] or 0),
                 "reconciled_at": _now(),
             }
             snapshot.update({
                 "status": "cancelled",
                 "recovery_required": False,
                 "recovery_reason": "",
-                "recovery_resolution": resolution,
+                "recovery_resolution": resolution_payload,
             })
             revision = int(row["revision"]) + 1
             now = _now()
@@ -353,7 +356,7 @@ class SqliteAgentSessionRepository:
                 self._connection.execute(
                     "INSERT INTO runtime_events(session_id,event_type,status,revision,occurred_at,payload_json) "
                     "VALUES(?,?,?,?,?,?)",
-                    (session_id, "recovery_reconciled", "cancelled", revision, now, _json(resolution)),
+                    (session_id, "recovery_reconciled", "cancelled", revision, now, _json(resolution_payload)),
                 )
                 self._connection.execute("COMMIT")
             except Exception:

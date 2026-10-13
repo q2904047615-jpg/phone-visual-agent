@@ -327,7 +327,9 @@ class SessionLifecycleCoordinator:
         exact_target_label: str, device_id: str, run_dir: Path,
         visual_reference_paths: tuple[Path, ...], conversation: tuple[dict[str, str], ...],
         adapter: Any, evidence_store: Any, vision_usage: VisionSessionUsageLedger,
-        execution_budget: TaskExecutionBudget) -> UniversalAgentSessionState:
+        execution_budget: TaskExecutionBudget,
+        recovery_parent_session_id: str | None = None,
+        recovery_mode: str = '') -> UniversalAgentSessionState:
         """Assemble and validate the session before its first observation."""
         visual_paths = tuple(Path(item) for item in visual_reference_paths)
         # Reference assets are an internal visual-prompt input, never goal text or action authority.
@@ -341,6 +343,8 @@ class SessionLifecycleCoordinator:
             conversation=[dict(item) for item in conversation],
             adapter=adapter, evidence_store=evidence_store, vision_usage=vision_usage,
             execution_budget=execution_budget,
+            recovery_parent_session_id=recovery_parent_session_id,
+            recovery_mode=recovery_mode,
             local_exact_input_authority=exact_input_text is not None,
             exact_input_text=exact_input_text,
             exact_action_kind=exact_action_kind or host.required_action_kind,
@@ -355,8 +359,19 @@ class SessionLifecycleCoordinator:
         run_dir: Path, visual_reference_paths: tuple[Path, ...] = (),
         conversation: tuple[dict[str, str], ...] = (),
         max_physical_actions: int=DEFAULT_DEVICE_ACTION_BUDGET,
-        max_observations: int=DEFAULT_OBSERVATION_BUDGET) -> UniversalAgentSessionState:
+        max_observations: int=DEFAULT_OBSERVATION_BUDGET,
+        initial_physical_actions: int = 0,
+        initial_observation_attempts: int = 0,
+        recovery_parent_session_id: str | None = None,
+        recovery_mode: str = '') -> UniversalAgentSessionState:
         budget = TaskExecutionBudget(max_physical_actions=max_physical_actions, max_observations=max_observations)
+        reject_if(type(initial_physical_actions) is not int or initial_physical_actions < 0
+            or initial_physical_actions > max_physical_actions,
+            UniversalAgentOrchestratorError('恢复会话的已用物理动作预算无效。'))
+        reject_if(type(initial_observation_attempts) is not int or initial_observation_attempts < 0
+            or initial_observation_attempts > max_observations,
+            UniversalAgentOrchestratorError('恢复会话的已用观察预算无效。'))
+        budget.observation_attempts = initial_observation_attempts
         resolved_session = str(session_id or '').strip()
         resolved_device = str(device_id or '').strip()
         host.device_registry.reserve(resolved_device, resolved_session)
@@ -371,7 +386,10 @@ class SessionLifecycleCoordinator:
                     exact_target_label=exact_target_label, device_id=resolved_device,
                     run_dir=run_dir, visual_reference_paths=visual_reference_paths,
                     conversation=conversation, adapter=adapter, evidence_store=store,
-                    vision_usage=ledger, execution_budget=budget)
+                    vision_usage=ledger, execution_budget=budget,
+                    recovery_parent_session_id=recovery_parent_session_id,
+                    recovery_mode=recovery_mode)
+                session.physical_actions = initial_physical_actions
                 try:
                     host._observe_and_decide(session)
                     host._write_snapshot(session)

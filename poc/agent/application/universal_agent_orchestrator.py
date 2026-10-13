@@ -578,12 +578,20 @@ class UniversalAgentOrchestrator:
         run_dir: Path, visual_reference_paths: tuple[Path, ...] = (),
         conversation: tuple[dict[str, str], ...] = (),
         max_physical_actions: int=DEFAULT_DEVICE_ACTION_BUDGET,
-        max_observations: int=DEFAULT_OBSERVATION_BUDGET) -> UniversalAgentSessionState:
+        max_observations: int=DEFAULT_OBSERVATION_BUDGET,
+        initial_physical_actions: int = 0,
+        initial_observation_attempts: int = 0,
+        recovery_parent_session_id: str | None = None,
+        recovery_mode: str = '') -> UniversalAgentSessionState:
         return self._lifecycle_coordinator.start(self, session_id=session_id, raw_goal=raw_goal,
             exact_input_text=exact_input_text, exact_action_kind=exact_action_kind,
             exact_target_label=exact_target_label, device_id=device_id, run_dir=run_dir,
             visual_reference_paths=visual_reference_paths, conversation=conversation,
-            max_physical_actions=max_physical_actions, max_observations=max_observations)
+            max_physical_actions=max_physical_actions, max_observations=max_observations,
+            initial_physical_actions=initial_physical_actions,
+            initial_observation_attempts=initial_observation_attempts,
+            recovery_parent_session_id=recovery_parent_session_id,
+            recovery_mode=recovery_mode)
 
     def _terminate(self, session: UniversalAgentSessionState, *, status: str, message: str) -> None:
         return self._lifecycle_coordinator.terminate(self, session, status=status, message=message)

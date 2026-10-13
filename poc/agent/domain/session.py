@@ -75,6 +75,7 @@ class AgentSessionRepository(Protocol):
         *,
         requested_device_id: str,
         external_effect: str,
+        resolution: str = 'reconciled',
     ) -> AgentSession: ...
 
 

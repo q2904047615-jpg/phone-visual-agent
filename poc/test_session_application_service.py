@@ -193,10 +193,11 @@ class AgentSessionApplicationTests(_BaseAgentSessionApplicationTests):
             status="recovery_required",
         )
         repository.add(session)
+        ready_calls: list[str] = []
         service = self._service(
             orchestrator,
             repository,
-            ready_calls=[],
+            ready_calls=ready_calls,
             lease_calls=[],
             task_calls=[],
         )
@@ -219,6 +220,7 @@ class AgentSessionApplicationTests(_BaseAgentSessionApplicationTests):
         self.assertFalse(getattr(result.session, "recovery_required", True))
         self.assertIsNotNone(result.replacement)
         self.assertNotEqual(session.session_id, result.replacement.session_id)
+        self.assertEqual(["phone-01", "phone-01"], ready_calls)
         self.assertEqual("tap_semantic", orchestrator.start_calls[-1]["exact_action_kind"])
         self.assertEqual(0, result.replacement.physical_actions)
 

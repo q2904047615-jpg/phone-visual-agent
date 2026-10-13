@@ -272,6 +272,11 @@ class UniversalAgentSessionApplicationService:
             raise AgentSessionCommandError("当前只允许核对为未派发外部动作；未知效果不能恢复。")
         if int(getattr(session, "physical_actions", 0)) != 0:
             raise AgentSessionCommandError("已有物理动作记录，不能按未派发恢复。")
+        # A resume creates a new runtime session.  Check the target before
+        # closing the recovery gate so an unavailable/unregistered device
+        # leaves the original durable recovery state intact.
+        if resume:
+            self._ensure_device_ready(requested_device_id)
         snapshot = session.snapshot()
         reconciled = self._sessions.reconcile_recovered(
             session_id,

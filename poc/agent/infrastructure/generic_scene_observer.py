@@ -55,7 +55,7 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-10-13-multimodal-reply-v28"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-10-13-multimodal-reply-v29"
 HISTORY_THUMBNAIL_MAX_SIZE = (360, 640)
 HISTORY_THUMBNAIL_JPEG_QUALITY = 70
 REFERENCE_THUMBNAIL_MAX_SIZE = (480, 480)
@@ -737,8 +737,7 @@ def _single_step_response_format(context: dict[str, Any], *, input_structure_req
             },
             'scene': scene_schema,
             'input_structure': input_schema,
-            'decision': {'type': 'object', 'properties': decision_properties,
-                'required': list(decision_properties), 'additionalProperties': False},
+            'decision': _decision_response_schema(decision_properties, available_action_kinds),
         },
         'required': ['reply', 'protocol_version', 'coordinate_space', 'scene', 'input_structure', 'decision'],
         'additionalProperties': False,
@@ -746,6 +745,34 @@ def _single_step_response_format(context: dict[str, Any], *, input_structure_req
     return {'type': 'json_schema', 'json_schema': {
         'name': 'current_scene_observation', 'strict': True, 'schema': schema,
     }}
+
+
+def _decision_response_schema(decision_properties: dict[str, Any],
+    available_action_kinds: tuple[str, ...]) -> dict[str, Any]:
+    """Bind the action/finish union instead of allowing contradictory pairs."""
+    wire_actions = _wire_action_names(available_action_kinds)
+    return {
+        'type': 'object',
+        'properties': decision_properties,
+        'required': list(decision_properties),
+        'additionalProperties': False,
+        'anyOf': [
+            {
+                'properties': {
+                    'status': {'const': 'action'},
+                    'action': {'type': 'string', 'enum': list(wire_actions)},
+                },
+                'required': ['status', 'action'],
+            },
+            {
+                'properties': {
+                    'status': {'const': 'finish'},
+                    'action': {'type': 'null'},
+                },
+                'required': ['status', 'action'],
+            },
+        ],
+    }
 
 
 def _input_structure_response_schema(required: bool) -> dict[str, Any]:

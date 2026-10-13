@@ -51,10 +51,12 @@ class FlatObservationContractTests(unittest.TestCase):
             with self.subTest(action=kind):
                 schema = _single_step_response_format({}, input_structure_required=False,
                     request_height=1280, available_action_kinds=(kind,))['json_schema']['schema']
-                wire = json.dumps(schema)
-                for retired in ('oneOf', 'anyOf', 'allOf'):
-                    self.assertNotIn(retired, wire)
                 properties = schema['properties']['decision']['properties']
+                decision_schema = schema['properties']['decision']
+                self.assertIn('anyOf', decision_schema)
+                self.assertEqual('action', decision_schema['anyOf'][0]['properties']['status']['const'])
+                self.assertEqual('finish', decision_schema['anyOf'][1]['properties']['status']['const'])
+                self.assertEqual('null', decision_schema['anyOf'][1]['properties']['action']['type'])
                 self.assertEqual(MODEL_STEP_DECISION_FIELDS, set(properties))
                 self.assertEqual(set(properties), set(schema['properties']['decision']['required']))
                 self.assertEqual([WIRE_FOR_CANONICAL.get(kind, kind), None], properties['action']['enum'])

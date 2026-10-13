@@ -27,7 +27,7 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
         decision = wrapper["schema"]["properties"]["decision"]
 
         self.assertIs(wrapper["strict"], True)
-        self.assertNotIn("oneOf", wrapper["schema"])
+        self.assertIn("anyOf", decision)
         self.assertEqual(["action", "finish"], decision["properties"]["status"]["enum"])
         self.assertEqual(set(decision["properties"]), set(decision["required"]))
         self.assertEqual(["clear_input", "input", None],
@@ -46,6 +46,9 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
         self.assertEqual(["action", "finish"], decision["properties"]["status"]["enum"])
         self.assertNotIn("evidence_refs", decision["properties"])
         self.assertEqual(["string", "null"], decision["properties"]["action"]["type"])
+        self.assertEqual("action", decision["anyOf"][0]["properties"]["status"]["const"])
+        self.assertEqual("finish", decision["anyOf"][1]["properties"]["status"]["const"])
+        self.assertEqual("null", decision["anyOf"][1]["properties"]["action"]["type"])
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
@@ -300,7 +303,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         self.assertEqual([None], provider.max_tokens_seen)
         self.assertEqual("json_schema", provider.call_options["response_format"]["type"])
         schema = provider.call_options["response_format"]["json_schema"]["schema"]
-        self.assertNotIn("oneOf", schema)
+        self.assertIn("anyOf", schema["properties"]["decision"])
         self.assertEqual(["action", "finish"],
             schema["properties"]["decision"]["properties"]["status"]["enum"])
 

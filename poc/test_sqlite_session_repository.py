@@ -52,6 +52,19 @@ class SqliteSessionRepositoryTests(unittest.TestCase):
             self.assertEqual("recovery_required", second.events("s1")[-1]["event_type"])
             second.close()
 
+    def test_active_row_written_after_open_is_exposed_as_recovery_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            current_process = SqliteAgentSessionRepository(database)
+            external_process = SqliteAgentSessionRepository(database)
+            external_process.add(_Session(status="awaiting_confirmation"))
+            external_process.close()
+
+            recovered = current_process.require("s1")
+            self.assertEqual("recovery_required", recovered.status)
+            self.assertTrue(getattr(recovered, "recovery_required"))
+            current_process.close()
+
     def test_reconcile_not_dispatched_closes_recovered_session_without_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "runtime.sqlite3"

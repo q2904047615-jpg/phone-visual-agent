@@ -223,14 +223,23 @@ class SqliteAgentSessionRepository:
 
     def _recovered_from_row(self, row: sqlite3.Row) -> RecoveredAgentSession:
         snapshot = json.loads(row["snapshot_json"])
+        stored_status = str(row["status"])
+        # A row written by another process after this repository was opened is
+        # still a live projection from this process's perspective. Treat every
+        # active status as recovery-required before exposing it to orchestration
+        # so a missing in-memory session can never receive a live cancel/execute
+        # path and crash on absent runtime-only fields.
+        recovery_required = stored_status in ACTIVE_SESSION_STATUSES or bool(
+            snapshot.get("recovery_required", False)
+        ) or stored_status == RECOVERY_REQUIRED_STATUS
         return RecoveredAgentSession(
             session_id=str(row["session_id"]),
             device_id=str(row["device_id"]),
             run_dir=Path(str(row["run_dir"])),
             _snapshot=snapshot,
-            status=str(row["status"]),
+            status=RECOVERY_REQUIRED_STATUS if recovery_required else stored_status,
             physical_actions=int(row["physical_actions"] or 0),
-            recovery_required=bool(snapshot.get("recovery_required", row["status"] == RECOVERY_REQUIRED_STATUS)),
+            recovery_required=recovery_required,
             recovery_resolution=(
                 dict(snapshot["recovery_resolution"])
                 if isinstance(snapshot.get("recovery_resolution"), dict) else None

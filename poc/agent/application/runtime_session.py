@@ -40,6 +40,8 @@ class UniversalAgentSessionState:
     trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     observation_action_kinds: frozenset[str] = field(default_factory=frozenset, repr=False)
     tool_intent: Any = field(default=None, repr=False)
+    last_policy_decision: Any = field(default=None, repr=False)
+    last_verification: Any = field(default=None, repr=False)
     qwen_decision: Any = None
     confirmation_authority: ConfirmationAuthority | None = field(default=None, repr=False)
     effect_confirmation_authority: EffectConfirmationAuthority | None = field(default=None, repr=False)
@@ -91,6 +93,8 @@ class UniversalAgentSessionState:
     def snapshot(self) -> dict[str, Any]:
         decision = self._serialize(self.qwen_decision)
         tool_intent = self._serialize(self.tool_intent)
+        policy = self._serialize(self.last_policy_decision)
+        verification = self._serialize(self.last_verification)
         observation = self._serialize(self.trusted_observation)
         proposal = self._serialize(getattr(self.tool_intent, 'proposal',
             None)) if self.tool_intent is not None else None
@@ -106,6 +110,7 @@ class UniversalAgentSessionState:
             'task_id': self.session_id, 'revision': self.step_number,
             'goal': self._serialize(self.goal_draft), 'trusted_observation': observation, 'current_scene': scene,
             'qwen_decision': decision, 'tool_intent': tool_intent, 'proposal': proposal,
+            'policy_decision': policy, 'last_verification': verification,
             'authority': 'platform_planner', 'controller_decision': controller,
             'qwen_reply': self.qwen_reply, 'history': list(self.history),
             'conversation': [dict(item) for item in self.conversation],

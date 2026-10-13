@@ -14,6 +14,7 @@ import uuid
 from agent.domain.validation import reject_if
 from agent.application.action_adapter import GenericSingleActionAdapterPort
 from agent.application.planner import ModelAssistedPlanner, PlannerPort
+from agent.application.policy import PlatformPolicy
 from agent.application.orchestration_support import (
     UniversalAgentOrchestratorError,
     _action_digest,
@@ -39,7 +40,7 @@ from agent.domain.execution_budget import (
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.domain.recent_navigation import LOCAL_NAVIGATION_SOURCE
 from agent.domain.qwen_task_context import (
-    QwenTaskContext, action_effect_kind, CONFIRMATION_EFFECT_KINDS, execution_history_entry,
+    QwenTaskContext, action_effect_kind, execution_history_entry,
 )
 from agent.domain.session import TERMINAL_SESSION_STATUSES
 
@@ -80,10 +81,13 @@ class UniversalAgentOrchestrator:
         adapter_factory: Callable[[str], GenericSingleActionAdapterPort],
         evidence_store_factory: AgentEvidenceStoreFactory, trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None=None, device_registry: DeviceTaskRegistryPort,
-        required_action_kind: str | None=None, planner: PlannerPort | None=None) -> None:
+        required_action_kind: str | None=None, planner: PlannerPort | None=None,
+        policy: PlatformPolicy | None=None, verifier: Any | None=None) -> None:
         self.required_action_kind = required_action_kind
         self.qwen_observer = qwen_observer
         self.planner = planner or ModelAssistedPlanner(qwen_observer)
+        self.policy = policy or PlatformPolicy()
+        self.verifier = verifier
         self.adapter_factory = adapter_factory
         self.evidence_store_factory = evidence_store_factory
         self.trusted_observation_factory = trusted_observation_factory
@@ -312,6 +316,11 @@ class UniversalAgentOrchestrator:
         self._remember(session, session.evidence_store.write_qwen_decision(session.step_number, model_decision))
         self._remember(session, session.evidence_store.write_json(
             f'tool_intent_step_{session.step_number}.json', decision.to_dict()))
+        policy_decision = self.policy.evaluate(intent=decision,
+            observation=session.trusted_observation, history=session.history)
+        session.last_policy_decision = policy_decision
+        self._remember(session, session.evidence_store.write_json(
+            f'policy_step_{session.step_number}.json', policy_decision.to_dict()))
         uncertain_history = bool(session.history and (
             str(session.history[-1].get('execution', {}).get('action_outcome') or '') == 'uncertain'
             or str(session.history[-1].get('visual_outcome') or '') == 'uncertain'
@@ -345,7 +354,7 @@ class UniversalAgentOrchestrator:
             return decision
         self._bind_confirmation(session)
         kind = action_effect_kind(decision.proposal.action)
-        if kind in CONFIRMATION_EFFECT_KINDS:
+        if policy_decision.requires_user_confirmation:
             self._set_status(session, "awaiting_effect_confirmation")
             self._bind_effect_confirmation(session)
         else:

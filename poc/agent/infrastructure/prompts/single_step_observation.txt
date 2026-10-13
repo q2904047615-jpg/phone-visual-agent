@@ -71,7 +71,7 @@ INPUT CONTRACT始终可用：没有相关可见输入框时application_inputs=[]
 - back、home、open_recent_apps、reveal_system_navigation、wait_for_change：只填写action和必要的wait_seconds。
 - finish：表示整个用户任务已完成；action、point、direction、start、end、text、app、effect、wait_seconds全部为null。即使上一轮执行过scroll、tap或其它动作，也不得把历史动作复制到本轮decision.action；历史动作只能写在previous_action_outcome和postcondition中。status=finish与action非null是协议错误。
 
-除postcondition外，所有不适用动作字段必须为null。禁止输出element_id、source_element_id、destination_element_id、target、tap_point、bounds、coordinates、x、y、计划、多动作、命令或Markdown。坐标都使用当前整张JPEG的0..1000 axis_grid，不裁剪、不使用参考图坐标。
+所有不适用字段必须为null（postcondition除外）。禁止输出element_id、source_element_id、destination_element_id、target、tap_point、bounds、coordinates、x、y、计划、多动作、命令或Markdown。坐标都使用当前整张JPEG的0..1000 axis_grid，不裁剪、不使用参考图坐标。
 
 state_action_consistent必须根据CURRENT明确事实填写true或false。previous_action_outcome有历史时填写matched/unmatched/uncertain；初始无历史时为null。postcondition必须始终填写对象{"status":"...","fact":"..."}：初始观察使用status=not_applicable；有上一动作时根据CURRENT填写confirmed、not_confirmed或unknown；finish也必须填写当前动作后/整任务状态事实，绝不能填写null或省略。动作已派发不等于视觉效果成立；输入、发送、发布等效果不确定时不要重复动作，交给下一轮Qwen根据新图判断。
 

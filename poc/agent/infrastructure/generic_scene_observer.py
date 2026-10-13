@@ -55,7 +55,7 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-09-02-single-step-scene-action-finish-v9"
-SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-09-25-multimodal-reply-v27"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = "2026-10-13-multimodal-reply-v28"
 HISTORY_THUMBNAIL_MAX_SIZE = (360, 640)
 HISTORY_THUMBNAIL_JPEG_QUALITY = 70
 REFERENCE_THUMBNAIL_MAX_SIZE = (480, 480)
@@ -817,7 +817,12 @@ def _decision_response_properties(available_action_kinds: tuple[str, ...]) -> di
             'description': '仅wait_for_change使用；其他动作必须为null。'},
         'previous_action_outcome': {'type': ['string', 'null'], 'enum': ['matched', 'unmatched', 'uncertain', None]},
         'state_action_consistent': {'type': ['boolean', 'null']},
-        'postcondition': {'type': ['object', 'null'], 'properties': {
+        # Live Gateway responses must carry the action-after contract. The
+        # parser still accepts null for legacy offline fixtures with no prior
+        # action, but the structured response schema does not invite omission.
+        'postcondition': {'type': 'object', 'description': (
+            '动作后观察合同。无上一动作时也填写status=not_applicable；有上一动作或finish判断时，'
+            '必须根据CURRENT填写confirmed、not_confirmed或unknown，不得为null。'), 'properties': {
             'status': {'type': 'string', 'enum': ['confirmed', 'not_confirmed', 'unknown', 'not_applicable']},
             'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False},
         'confidence': {'type': 'number'}, 'reason': {'type': 'string'},

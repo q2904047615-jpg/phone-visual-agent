@@ -52,7 +52,7 @@ INPUT CONTRACT始终可用：没有相关可见输入框时application_inputs=[]
 "input_structure":{"application_inputs":[]},"decision":{
 "status":"action","action":"tap","point":[500,500],"direction":null,"start":null,"end":null,
 "text":null,"app":null,"effect":null,"wait_seconds":null,"previous_action_outcome":null,
-"state_action_consistent":true,"postcondition":null,"confidence":1.0,"reason":"当前图依据"}}
+"state_action_consistent":true,"postcondition":{"status":"not_applicable","fact":"本轮没有上一动作"},"confidence":1.0,"reason":"当前图依据"}}
 
 动作协议只有一个目标：返回本次要执行的一个通用动作候选。画面元素、元素含义、目标判断、拖动来源和目的地、成功判断由模型网关结合scene、reason和当前图片提出；Planner 负责绑定 ToolIntent，网页展示不形成第二动作权威。
 
@@ -71,9 +71,9 @@ INPUT CONTRACT始终可用：没有相关可见输入框时application_inputs=[]
 - back、home、open_recent_apps、reveal_system_navigation、wait_for_change：只填写action和必要的wait_seconds。
 - finish：表示整个用户任务已完成；action、point、direction、start、end、text、app、effect、wait_seconds全部为null。
 
-所有不适用字段必须为null。禁止输出element_id、source_element_id、destination_element_id、target、tap_point、bounds、coordinates、x、y、计划、多动作、命令或Markdown。坐标都使用当前整张JPEG的0..1000 axis_grid，不裁剪、不使用参考图坐标。
+除postcondition外，所有不适用动作字段必须为null。禁止输出element_id、source_element_id、destination_element_id、target、tap_point、bounds、coordinates、x、y、计划、多动作、命令或Markdown。坐标都使用当前整张JPEG的0..1000 axis_grid，不裁剪、不使用参考图坐标。
 
-state_action_consistent必须根据CURRENT明确事实填写true或false。previous_action_outcome有历史时填写matched/unmatched/uncertain；初始无历史时为null。动作已派发不等于视觉效果成立；输入、发送、发布等效果不确定时不要重复动作，交给下一轮Qwen根据新图判断。
+state_action_consistent必须根据CURRENT明确事实填写true或false。previous_action_outcome有历史时填写matched/unmatched/uncertain；初始无历史时为null。postcondition必须始终填写对象{"status":"...","fact":"..."}：初始观察使用status=not_applicable；有上一动作时根据CURRENT填写confirmed、not_confirmed或unknown；finish也必须填写当前动作后/整任务状态事实，绝不能填写null或省略。动作已派发不等于视觉效果成立；输入、发送、发布等效果不确定时不要重复动作，交给下一轮Qwen根据新图判断。
 
 输入动作仍必须先依据CURRENT和input_structure确认当前字段；本地ADB Keyboard只执行Qwen给出的完整正文，不寻找字段、不修改文字、不选择候选。
 

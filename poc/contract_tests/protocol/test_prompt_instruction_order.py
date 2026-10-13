@@ -24,6 +24,8 @@ class PromptInstructionOrderTests(unittest.TestCase):
                     '依据本会话实际历史与当前画面判断前项是否满足，再推进后项',
                     '不能反过来要求所有任务必须有动作',
                     '输入、发送、发布等效果不确定时不要重复动作',
+                    'postcondition必须始终填写对象',
+                    'finish也必须填写当前动作后/整任务状态事实',
                     '不生成固定步骤清单', '本地不按业务子目标清单推进',
                     '执行后必须取得新截图', '交给下一轮Qwen根据新图判断'):
                     self.assertTrue(text in prompt, msg=text)

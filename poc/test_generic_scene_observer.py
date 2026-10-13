@@ -32,6 +32,8 @@ class StructuredDecisionContractTests(_BaseStructuredDecisionContractTests):
         self.assertEqual(set(decision["properties"]), set(decision["required"]))
         self.assertEqual(["clear_input", "input", None],
             decision["properties"]["action"]["enum"])
+        self.assertEqual("object", decision["properties"]["postcondition"]["type"])
+        self.assertIn("不得为null", decision["properties"]["postcondition"]["description"])
         self.assertEqual([1000], wrapper["schema"]["properties"]["coordinate_space"]["properties"][
             "height"]["enum"])
 

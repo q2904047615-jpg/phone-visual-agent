@@ -88,6 +88,11 @@ class FlatObservationContractTests(unittest.TestCase):
         self.assertIsNone(result['target'])
         self.assertIsNone(result['tap_point'])
 
+    def test_finish_after_a_previous_action_requires_postcondition(self):
+        with self.assertRaisesRegex(CanonicalActionProtocolError, '动作后必须提供postcondition'):
+            normalize_model_step_decision(decision(
+                status='finish', previous_action_outcome='matched', postcondition=None))
+
     def test_wait_for_change_accepts_a_finite_wait_duration_only_for_wait(self):
         normalized = normalize_model_step_decision(decision(
             action='wait_for_change', wait_seconds=300, reason='等待开奖后重新观察'))

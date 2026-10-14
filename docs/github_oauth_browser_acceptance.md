@@ -33,8 +33,25 @@ GitHub OAuth App 的 callback URL 必须与 `GITHUB_OAUTH_REDIRECT_URI` 完全�
 1. 启动服务后，通过官方 typed client 调用 `GET /api/control-plane/auth/github/start`，请求带当前 `X-Control-Token` 和本机 Origin。
 2. 在返回的 `authorization_url` 中完成 GitHub 登录和授权；浏览器应回到固定 callback。
 3. callback 返回的 `data.session.user_id` 必须等于映射文件目标主体；响应正文不得出现 GitHub access token。
-4. 使用返回的 `principal_token` 访问一个已授权的 Control Plane 读接口，再用会话撤销接口撤销自己；撤销后再次访问应返回身份无效。
+4. 通过官方类型化客户端核对映射目标主体，再携带返回的 `principal_token` 调用会话撤销接口撤销自己；用同一令牌再次调用该受主体认证保护的接口，应返回 `401 identity_invalid`。当前 Control Plane GET 路由只检查本机控制令牌，读取成功不能证明 OAuth 主体认证有效。
 5. 检查审计只出现 provider、subject、user_id、session 等必要元数据，不出现 code、state、verifier、access token 或 client secret。
 6. 重放同一个 callback URL 应返回 `oauth_state_invalid`；改动 mapping 后重新登录，未映射用户应返回 `external_identity_mapping_not_found`。
 
-离线回归已经覆盖授权 URL、PKCE、state 原子消费、callback code exchange、token revalidation、身份映射和会话签发。真实验收仍需要你在本机配置 GitHub OAuth App 和映射文件；只提供 client_id、issuer 或 callback URL 等非敏感信息即可协助核对，不要发送 secret/token。
+离线回归已经覆盖授权 URL、PKCE、state 原子消费、callback code exchange、token revalidation、身份映射和会话签发。部署配置和每次真实验收应分别记录，不要发送 secret/token。
+
+## 2026-10-15 真实登录验收记录（Asia/Shanghai）
+
+结论：本次真实 GitHub 浏览器登录、身份映射、本地会话撤销及相关审计链已验证可行。不是完整 GA 验收，也不是全部 OAuth 异常场景实测。
+
+- 用户在 GitHub 浏览器中完成登录和授权；本机 callback 返回本地主体会话。
+- GitHub 数字用户 ID `279507169` 映射到已存在的 `local-org / local-owner`。
+- 验收会话 `a193476335aa4d19a627474c030e14ca` 于北京时间 00:20:56 签发，00:24:01 撤销。
+- 官方类型化客户端调用自身会话撤销接口返回 HTTP 200、`revoked=true`；用同一令牌再次调用返回 HTTP 401、`identity_invalid`。只撤销本地主体会话，没有撤销 GitHub OAuth App 授权。
+- SQLite 只读核对确认该会话已设置 `revoked_at`，令牌字段存储 64 字符哈希。
+- 审计序号 21、23、24、25 分别记录 `issued`、`permission_allowed`、`revoked`、`identity_invalid`。最后一条因身份无效归入 `unknown`，通过只读 SQLite 查询核对；未猜测不存在的审计 API。
+- 本次回调响应未含 GitHub access token；本次核对的审计元数据未出现 code/state/verifier/token/secret 等敏感字段，亦未含实际 client secret。
+- 服务 bootstrap/OpenAPI 通过，controller/camera 在线，`busy=false`、`active_tasks=[]`；本批没有手机动作或模型调用。
+
+本地脱敏证据：`poc/output/web/github_oauth_live_20261015/acceptance_report.json`（忽略提交）。API 验收启动关闭 HTTP access log，避免记录回调查询参数。辅助本机验收进程已经退出，浏览器中的会话正文已替换为验收状态。
+
+未在本次真实登录中复测：回调重放、state 过期、未映射账号和 GitHub 故障路径；这些仍仅有既有离线合同证据。普通 GET 接口的主体认证、网站登录态界面、并发配额/计费和 GA 发布均不由本次结果推导完成。

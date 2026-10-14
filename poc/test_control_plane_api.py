@@ -51,7 +51,15 @@ class ControlPlaneApiTests(unittest.TestCase):
         spec = self.client.get("/openapi.json").json()["paths"]
         control_plane_paths = {path: methods for path, methods in spec.items() if path.startswith("/api/control-plane/")}
         self.assertTrue(control_plane_paths)
-        self.assertTrue(all(set(methods) == {"get"} for methods in control_plane_paths.values()))
+        read_paths = {
+            "/api/control-plane/organizations/{organization_id}",
+            "/api/control-plane/organizations/{organization_id}/teams",
+            "/api/control-plane/organizations/{organization_id}/principals",
+            "/api/control-plane/organizations/{organization_id}/quotas",
+            "/api/control-plane/organizations/{organization_id}/audit",
+        }
+        self.assertTrue(all("get" in set(control_plane_paths[path]) for path in read_paths))
+        self.assertEqual({"post"}, set(control_plane_paths["/api/control-plane/auth/sessions"]))
 
     def test_audit_is_durable_and_redacts_sensitive_metadata(self) -> None:
         response = self.client.get(
@@ -73,6 +81,63 @@ class ControlPlaneApiTests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(404, response.status_code)
+
+    def test_identity_session_and_idempotent_writes(self) -> None:
+        auth = self.client.post(
+            "/api/control-plane/auth/sessions",
+            headers=self.headers,
+            json={"organization_id": "local-org", "user_id": "local-owner"},
+        )
+        self.assertEqual(200, auth.status_code, auth.text)
+        session = auth.json()["data"]["session"]
+        principal_token = session["principal_token"]
+        self.assertNotIn(principal_token, self.repository.database_path.read_bytes().decode("utf-8", errors="ignore"))
+        base_headers = {
+            **self.headers,
+            "X-Control-Plane-Token": principal_token,
+            "Idempotency-Key": "team-write-001",
+        }
+        payload = {"team_id": "team-write-001", "name": "Write Team", "member_ids": ["local-owner"]}
+        created = self.client.post(
+            "/api/control-plane/organizations/local-org/teams",
+            headers=base_headers,
+            json=payload,
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        replay = self.client.post(
+            "/api/control-plane/organizations/local-org/teams",
+            headers=base_headers,
+            json=payload,
+        )
+        self.assertEqual(200, replay.status_code, replay.text)
+        self.assertTrue(replay.json()["idempotent_replay"])
+        conflict = self.client.post(
+            "/api/control-plane/organizations/local-org/teams",
+            headers=base_headers,
+            json={"team_id": "team-write-002", "name": "Different", "member_ids": ["local-owner"]},
+        )
+        self.assertEqual(409, conflict.status_code, conflict.text)
+        no_identity = self.client.post(
+            "/api/control-plane/organizations/local-org/teams",
+            headers={"X-Control-Token": web_app.CONTROL_TOKEN, "Idempotency-Key": "team-write-unauth"},
+            json={"team_id": "team-write-003", "name": "No Identity", "member_ids": []},
+        )
+        self.assertEqual(401, no_identity.status_code)
+
+        principal_headers = {**self.headers, "X-Control-Plane-Token": principal_token, "Idempotency-Key": "principal-write-001"}
+        principal = self.client.post(
+            "/api/control-plane/organizations/local-org/principals",
+            headers=principal_headers,
+            json={"user_id": "write-user-001", "role": "operator", "team_ids": ["team-write-001"]},
+        )
+        self.assertEqual(201, principal.status_code, principal.text)
+        quota_headers = {**self.headers, "X-Control-Plane-Token": principal_token, "Idempotency-Key": "quota-write-001"}
+        quota = self.client.put(
+            "/api/control-plane/organizations/local-org/quotas/daily",
+            headers=quota_headers,
+            json={"quota_key": "daily", "period": "daily", "max_runs": 88},
+        )
+        self.assertEqual(200, quota.status_code, quota.text)
 
 
 if __name__ == "__main__":

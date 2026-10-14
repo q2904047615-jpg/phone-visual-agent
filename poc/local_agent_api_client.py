@@ -64,6 +64,9 @@ class LocalAgentApiClient:
     CONTROL_PLANE_PRINCIPALS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/principals"
     CONTROL_PLANE_QUOTAS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas"
     CONTROL_PLANE_AUDIT_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/audit"
+    CONTROL_PLANE_IDENTITY_SESSION_ROUTE = "/api/control-plane/auth/sessions"
+    CONTROL_PLANE_TEAM_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams/{team_id}"
+    CONTROL_PLANE_QUOTA_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas/{quota_key}"
 
     def __init__(
         self,
@@ -181,6 +184,75 @@ class LocalAgentApiClient:
             path_params={"organization_id": self._resource_id(organization_id)},
             query_params={"after_sequence": str(after_sequence), "limit": str(limit)},
             read_only=True,
+        )
+
+    def control_plane_identity_session(self, organization_id: str, user_id: str) -> JsonObject:
+        return self._request(
+            "POST", self.CONTROL_PLANE_IDENTITY_SESSION_ROUTE,
+            payload={"organization_id": self._resource_id(organization_id), "user_id": self._resource_id(user_id)},
+            read_only=False,
+        )
+
+    def control_plane_create_team(self, organization_id: str, *, team_id: str, name: str,
+                                  member_ids: list[str], principal_token: str,
+                                  idempotency_key: str) -> JsonObject:
+        return self._control_plane_write(
+            "POST", self.CONTROL_PLANE_TEAMS_ROUTE,
+            organization_id=organization_id, principal_token=principal_token,
+            idempotency_key=idempotency_key,
+            payload={"team_id": team_id, "name": name, "member_ids": list(member_ids)},
+        )
+
+    def control_plane_update_team(self, organization_id: str, team_id: str, *,
+                                  principal_token: str, idempotency_key: str,
+                                  name: str | None = None, member_ids: list[str] | None = None) -> JsonObject:
+        payload: JsonObject = {}
+        if name is not None:
+            payload["name"] = name
+        if member_ids is not None:
+            payload["member_ids"] = list(member_ids)
+        return self._control_plane_write(
+            "PATCH", self.CONTROL_PLANE_TEAM_ITEM_ROUTE,
+            organization_id=organization_id, team_id=team_id,
+            principal_token=principal_token, idempotency_key=idempotency_key, payload=payload,
+        )
+
+    def control_plane_create_principal(self, organization_id: str, *, user_id: str, role: str,
+                                       team_ids: list[str], principal_token: str,
+                                       idempotency_key: str) -> JsonObject:
+        return self._control_plane_write(
+            "POST", self.CONTROL_PLANE_PRINCIPALS_ROUTE,
+            organization_id=organization_id, principal_token=principal_token,
+            idempotency_key=idempotency_key,
+            payload={"user_id": user_id, "role": role, "team_ids": list(team_ids)},
+        )
+
+    def control_plane_update_quota(self, organization_id: str, quota_key: str, *, period: str,
+                                   principal_token: str, idempotency_key: str,
+                                   max_runs: int | None = None,
+                                   max_physical_actions: int | None = None,
+                                   max_model_tokens: int | None = None) -> JsonObject:
+        return self._control_plane_write(
+            "PUT", self.CONTROL_PLANE_QUOTA_ITEM_ROUTE,
+            organization_id=organization_id, quota_key=quota_key,
+            principal_token=principal_token, idempotency_key=idempotency_key,
+            payload={"quota_key": quota_key, "period": period, "max_runs": max_runs,
+                     "max_physical_actions": max_physical_actions, "max_model_tokens": max_model_tokens},
+        )
+
+    def _control_plane_write(self, method: str, route_template: str, *, organization_id: str,
+                             principal_token: str, idempotency_key: str, payload: JsonObject,
+                             team_id: str | None = None, quota_key: str | None = None) -> JsonObject:
+        if not principal_token or not idempotency_key:
+            self._raise_contract("Control Plane 写操作必须提供主体令牌和幂等键。")
+        params = {"organization_id": self._resource_id(organization_id)}
+        if team_id is not None:
+            params["team_id"] = self._resource_id(team_id)
+        if quota_key is not None:
+            params["quota_key"] = self._resource_id(quota_key)
+        return self._request(
+            method, route_template, path_params=params, payload=payload, read_only=False,
+            extra_headers={"X-Control-Plane-Token": principal_token, "Idempotency-Key": idempotency_key},
         )
 
     def doctor(self, device_id: str) -> JsonObject:
@@ -329,6 +401,7 @@ class LocalAgentApiClient:
         *,
         path_params: Mapping[str, str] | None = None,
         query_params: Mapping[str, str] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         payload: JsonObject | None = None,
         read_only: bool,
     ) -> JsonObject:
@@ -349,6 +422,7 @@ class LocalAgentApiClient:
             concrete_path,
             payload=payload,
             query_params=query_params,
+            extra_headers=extra_headers,
             token=self._token,
             read_only=read_only,
         )
@@ -469,10 +543,12 @@ class LocalAgentApiClient:
         *,
         payload: JsonObject | None = None,
         query_params: Mapping[str, str] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         token: str = "",
         read_only: bool,
     ) -> JsonObject:
         headers = {"X-Control-Token": token} if token else {}
+        headers.update(dict(extra_headers or {}))
         try:
             kwargs: dict[str, Any] = {"headers": headers}
             if payload is not None:

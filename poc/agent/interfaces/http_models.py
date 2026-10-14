@@ -25,6 +25,36 @@ class StrictAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ControlPlaneIdentitySessionRequest(StrictAgentRequest):
+    organization_id: StrictStr = Field(min_length=1, max_length=128)
+    user_id: StrictStr = Field(min_length=1, max_length=128)
+
+
+class ControlPlaneTeamWriteRequest(StrictAgentRequest):
+    team_id: StrictStr = Field(min_length=1, max_length=128)
+    name: StrictStr = Field(min_length=1, max_length=256)
+    member_ids: list[StrictStr] = Field(default_factory=list, max_length=500)
+
+
+class ControlPlaneTeamUpdateRequest(StrictAgentRequest):
+    name: StrictStr | None = Field(default=None, min_length=1, max_length=256)
+    member_ids: list[StrictStr] | None = Field(default=None, max_length=500)
+
+
+class ControlPlanePrincipalWriteRequest(StrictAgentRequest):
+    user_id: StrictStr = Field(min_length=1, max_length=128)
+    role: Literal["viewer", "operator", "admin", "owner"]
+    team_ids: list[StrictStr] = Field(default_factory=list, max_length=500)
+
+
+class ControlPlaneQuotaWriteRequest(StrictAgentRequest):
+    quota_key: StrictStr = Field(min_length=1, max_length=128)
+    period: Literal["daily", "monthly"]
+    max_runs: StrictInt | None = Field(default=None, ge=0)
+    max_physical_actions: StrictInt | None = Field(default=None, ge=0)
+    max_model_tokens: StrictInt | None = Field(default=None, ge=0)
+
+
 class QwenConversationMessage(StrictAgentRequest):
     role: Literal["user", "assistant"]
     content: StrictStr = Field(min_length=1)

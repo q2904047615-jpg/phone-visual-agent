@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ import webbrowser
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator, Literal, Mapping
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -74,6 +75,7 @@ from agent.infrastructure.robot_controller import (
     MockRobotController,
     WEB_OUTPUT_DIR,
 )
+from agent.infrastructure.sqlite_control_plane_repository import LOCAL_ORGANIZATION_ID
 from agent.domain.vision_model import VisionAgentError
 from agent.domain.execution_budget import (
     DEFAULT_DEVICE_ACTION_BUDGET,
@@ -85,6 +87,11 @@ from agent.interfaces.http_models import (
     CapabilityCancelRequest,
     CapabilityEffectApprovalRequest,
     CapabilityPromotionRequest,
+    ControlPlaneIdentitySessionRequest,
+    ControlPlanePrincipalWriteRequest,
+    ControlPlaneQuotaWriteRequest,
+    ControlPlaneTeamUpdateRequest,
+    ControlPlaneTeamWriteRequest,
     DevicePairRequest,
     DirectionalSwipeRequest,
     GenericEffectApprovalRequest,
@@ -523,6 +530,66 @@ def _validate_control_plane_page(after_sequence: int, limit: int) -> tuple[int, 
     return int(after_sequence), int(limit)
 
 
+def _control_plane_write_context(
+    request: Request,
+    organization_id: str,
+    permission: str,
+    x_control_token: str | None,
+    x_control_plane_token: str | None,
+    idempotency_key: str | None,
+) -> tuple[SqliteControlPlaneRepository, dict[str, Any], str]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    if not x_control_plane_token:
+        raise HTTPException(status_code=401, detail={"code": "identity_required", "message": "需要 Control Plane 主体会话。"})
+    principal = store.authenticate_identity_session(x_control_plane_token)
+    if principal is None:
+        raise HTTPException(status_code=401, detail={"code": "identity_invalid", "message": "Control Plane 主体会话无效或已过期。"})
+    if principal["organization_id"] != organization_id:
+        raise HTTPException(status_code=403, detail={"code": "organization_forbidden", "message": "主体不属于请求组织。"})
+    if permission not in principal["permissions"]:
+        raise HTTPException(status_code=403, detail={"code": "permission_denied", "message": f"缺少权限：{permission}。"})
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 128:
+        raise HTTPException(status_code=422, detail={"code": "idempotency_required", "message": "写操作必须提供 1-128 位 Idempotency-Key。"})
+    return store, principal, key
+
+
+def _control_plane_write_envelope(
+    request: Request,
+    data: dict[str, Any],
+    *,
+    idempotent_replay: bool,
+) -> dict[str, Any]:
+    result = _control_plane_envelope(data)
+    result.update({
+        "request_id": _control_plane_request_id(request),
+        "idempotent_replay": bool(idempotent_replay),
+    })
+    return result
+
+
+def _control_plane_write_request_hash(operation: str, organization_id: str, body: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        {"operation": operation, "organization_id": organization_id, "body": dict(body)},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _control_plane_write_http_error(error: BaseException) -> HTTPException:
+    code = str(error.args[0]) if isinstance(error, KeyError) and error.args else str(error)
+    if code in {"organization_not_found", "team_not_found", "principal_not_found"}:
+        return HTTPException(status_code=404, detail={"code": code, "message": "Control Plane 资源不存在。"})
+    if code in {"team_already_exists", "principal_already_exists", "idempotency_conflict"}:
+        return HTTPException(status_code=409, detail={"code": code, "message": "Control Plane 写入冲突。"})
+    if code in {"member_not_found", "duplicate_member_ids"}:
+        return HTTPException(status_code=422, detail={"code": code, "message": "团队成员必须是同一组织内已存在主体且不可重复。"})
+    if code == "team_not_found":
+        return HTTPException(status_code=404, detail={"code": code, "message": "团队不存在。"})
+    return HTTPException(status_code=422, detail={"code": "control_plane_validation", "message": str(error)})
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -631,6 +698,170 @@ def control_plane_audit(
                        request_id=request_id, metadata={"method": "GET", "after_sequence": after_sequence, "limit": limit})
     page = store.read_audit(organization_id, after_sequence=after_sequence, limit=limit)
     return _control_plane_envelope({"organization_id": organization_id, **page})
+
+
+@app.post("/api/control-plane/auth/sessions")
+def control_plane_identity_session(
+    body: ControlPlaneIdentitySessionRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Bootstrap a durable principal session from the local service identity."""
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    try:
+        session = store.issue_identity_session(
+            organization_id=body.organization_id,
+            user_id=body.user_id,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail={"code": str(error), "message": "主体不存在。"}) from error
+    store.record_audit(
+        organization_id=body.organization_id,
+        resource="identity_session",
+        outcome="issued",
+        request_id=_control_plane_request_id(request),
+        metadata={"user_id": body.user_id, "session_id": session["session_id"]},
+    )
+    return _control_plane_write_envelope(request, {"session": session}, idempotent_replay=False)
+
+
+@app.post("/api/control-plane/organizations/{organization_id}/teams")
+def control_plane_create_team(
+    organization_id: str,
+    body: ControlPlaneTeamWriteRequest,
+    request: Request,
+    response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(
+        request, organization_id, "team.manage", x_control_token, x_control_plane_token, idempotency_key,
+    )
+    try:
+        status_code, data, replay = store.create_team(
+            organization_id=organization_id,
+            principal_user_id=principal["user_id"],
+            idempotency_key=key,
+            request_hash=_control_plane_write_request_hash("team.create", organization_id, body.model_dump()),
+            team_id=body.team_id,
+            name=body.name,
+            member_ids=tuple(body.member_ids),
+        )
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    store.record_audit(organization_id=organization_id, resource="team.create",
+                       outcome="replay" if replay else "created", request_id=_control_plane_request_id(request),
+                       metadata={"team_id": body.team_id, "status_code": status_code})
+    response.status_code = 200 if replay else status_code
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+@app.patch("/api/control-plane/organizations/{organization_id}/teams/{team_id}")
+def control_plane_update_team(
+    organization_id: str,
+    team_id: str,
+    body: ControlPlaneTeamUpdateRequest,
+    request: Request,
+    response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(
+        request, organization_id, "team.manage", x_control_token, x_control_plane_token, idempotency_key,
+    )
+    if body.name is None and body.member_ids is None:
+        raise HTTPException(status_code=422, detail={"code": "empty_update", "message": "至少提供一个团队字段。"})
+    try:
+        status_code, data, replay = store.update_team(
+            organization_id=organization_id,
+            principal_user_id=principal["user_id"],
+            idempotency_key=key,
+            request_hash=_control_plane_write_request_hash("team.update", organization_id, body.model_dump()),
+            team_id=team_id,
+            name=body.name,
+            member_ids=tuple(body.member_ids) if body.member_ids is not None else None,
+        )
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    store.record_audit(organization_id=organization_id, resource="team.update",
+                       outcome="replay" if replay else "updated", request_id=_control_plane_request_id(request),
+                       metadata={"team_id": team_id, "status_code": status_code})
+    response.status_code = 200 if replay else status_code
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+@app.post("/api/control-plane/organizations/{organization_id}/principals")
+def control_plane_create_principal(
+    organization_id: str,
+    body: ControlPlanePrincipalWriteRequest,
+    request: Request,
+    response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(
+        request, organization_id, "identity.manage", x_control_token, x_control_plane_token, idempotency_key,
+    )
+    try:
+        status_code, data, replay = store.create_principal(
+            organization_id=organization_id,
+            principal_user_id=principal["user_id"],
+            idempotency_key=key,
+            request_hash=_control_plane_write_request_hash("principal.create", organization_id, body.model_dump()),
+            user_id=body.user_id,
+            role=body.role,
+            team_ids=tuple(body.team_ids),
+        )
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    store.record_audit(organization_id=organization_id, resource="principal.create",
+                       outcome="replay" if replay else "created", request_id=_control_plane_request_id(request),
+                       metadata={"user_id": body.user_id, "status_code": status_code})
+    response.status_code = 200 if replay else status_code
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+@app.put("/api/control-plane/organizations/{organization_id}/quotas/{quota_key}")
+def control_plane_update_quota(
+    organization_id: str,
+    quota_key: str,
+    body: ControlPlaneQuotaWriteRequest,
+    request: Request,
+    response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(
+        request, organization_id, "quota.manage", x_control_token, x_control_plane_token, idempotency_key,
+    )
+    if body.quota_key != quota_key:
+        raise HTTPException(status_code=422, detail={"code": "quota_key_mismatch", "message": "路径 quota_key 与请求体不一致。"})
+    if body.max_runs is None and body.max_physical_actions is None and body.max_model_tokens is None:
+        raise HTTPException(status_code=422, detail={"code": "quota_limit_required", "message": "至少提供一个配额上限。"})
+    try:
+        status_code, data, replay = store.upsert_quota(
+            organization_id=organization_id,
+            principal_user_id=principal["user_id"],
+            idempotency_key=key,
+            request_hash=_control_plane_write_request_hash("quota.update", organization_id, body.model_dump()),
+            quota_key=body.quota_key,
+            period=body.period,
+            max_runs=body.max_runs,
+            max_physical_actions=body.max_physical_actions,
+            max_model_tokens=body.max_model_tokens,
+        )
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    store.record_audit(organization_id=organization_id, resource="quota.update",
+                       outcome="replay" if replay else "updated", request_id=_control_plane_request_id(request),
+                       metadata={"quota_key": quota_key, "status_code": status_code})
+    response.status_code = 200 if replay else status_code
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
 
 
 @app.post("/api/session/reload")

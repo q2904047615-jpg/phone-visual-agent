@@ -25,6 +25,7 @@ from agent.infrastructure import (
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
     SqliteAgentSessionRepository,
+    SqliteControlPlaneRepository,
     SHARED_DEVICE_LEASE_DIR,
 )
 from agent.infrastructure.adb_keyboard_transport import AdbKeyboardRuntimeRegistry
@@ -122,7 +123,9 @@ class Runtime:
             self.vision_provider, gateway=self.model_gateway
         )
         self.device_task_registry = DeviceTaskRegistry(lease_directory=SHARED_DEVICE_LEASE_DIR)
-        self.agent_session_repository = SqliteAgentSessionRepository(Path(output_dir) / "runtime.sqlite3")
+        runtime_database = Path(output_dir) / "runtime.sqlite3"
+        self.agent_session_repository = SqliteAgentSessionRepository(runtime_database)
+        self.control_plane_repository = SqliteControlPlaneRepository(runtime_database)
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
             qwen_observer=self.model_gateway,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(

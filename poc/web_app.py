@@ -40,7 +40,9 @@ from agent.infrastructure import (
     DeviceRuntimeResourceError,
     InterProcessLease,
     SHARED_DEVICE_LEASE_DIR,
+    SqliteControlPlaneRepository,
 )
+from agent.domain.control_plane import API_CONTRACT_VERSION, CONTROL_PLANE_PROTOCOL
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
 )
@@ -491,6 +493,36 @@ def verify_local_request(request: Request, token: str | None) -> None:
             raise HTTPException(status_code=403, detail="只允许本机网页请求。")
 
 
+def _control_plane_store() -> SqliteControlPlaneRepository:
+    if isinstance(runtime, RuntimeUnavailable):
+        raise HTTPException(status_code=503, detail="Control Plane 持久化尚未就绪。")
+    store = getattr(runtime, "control_plane_repository", None)
+    if not isinstance(store, SqliteControlPlaneRepository):
+        raise HTTPException(status_code=503, detail="Control Plane 持久化尚未就绪。")
+    return store
+
+
+def _control_plane_request_id(request: Request) -> str:
+    value = str(request.headers.get("x-request-id") or "").strip()
+    return value[:128] if value else uuid.uuid4().hex
+
+
+def _control_plane_envelope(data: Any) -> dict[str, Any]:
+    return {
+        "control_plane_protocol": CONTROL_PLANE_PROTOCOL,
+        "api_version": API_CONTRACT_VERSION,
+        "data": data,
+    }
+
+
+def _validate_control_plane_page(after_sequence: int, limit: int) -> tuple[int, int]:
+    if isinstance(after_sequence, bool) or after_sequence < 0:
+        raise HTTPException(status_code=422, detail="after_sequence 必须是非负整数。")
+    if isinstance(limit, bool) or limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit 必须在 1-100。")
+    return int(after_sequence), int(limit)
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -507,6 +539,98 @@ def session() -> dict[str, Any]:
         "version": app.version,
         "reload_supported": True,
     }
+
+
+@app.get("/api/control-plane/organizations/{organization_id}")
+def control_plane_organization(
+    organization_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    organization = store.get_organization(organization_id)
+    store.record_audit(
+        organization_id=organization_id, resource="organization", outcome="found" if organization else "not_found",
+        request_id=_control_plane_request_id(request), metadata={"method": "GET"},
+    )
+    if organization is None:
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    return _control_plane_envelope({"organization": organization})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/teams")
+def control_plane_teams(
+    organization_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        store.record_audit(organization_id=organization_id, resource="teams", outcome="not_found",
+                           request_id=_control_plane_request_id(request), metadata={"method": "GET"})
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    teams = store.list_teams(organization_id)
+    store.record_audit(organization_id=organization_id, resource="teams", outcome="ok",
+                       request_id=_control_plane_request_id(request), metadata={"method": "GET", "count": len(teams)})
+    return _control_plane_envelope({"organization_id": organization_id, "teams": teams})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/principals")
+def control_plane_principals(
+    organization_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        store.record_audit(organization_id=organization_id, resource="principals", outcome="not_found",
+                           request_id=_control_plane_request_id(request), metadata={"method": "GET"})
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    principals = store.list_principals(organization_id)
+    store.record_audit(organization_id=organization_id, resource="principals", outcome="ok",
+                       request_id=_control_plane_request_id(request), metadata={"method": "GET", "count": len(principals)})
+    return _control_plane_envelope({"organization_id": organization_id, "principals": principals})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/quotas")
+def control_plane_quotas(
+    organization_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        store.record_audit(organization_id=organization_id, resource="quotas", outcome="not_found",
+                           request_id=_control_plane_request_id(request), metadata={"method": "GET"})
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    quotas = store.list_quotas(organization_id)
+    store.record_audit(organization_id=organization_id, resource="quotas", outcome="ok",
+                       request_id=_control_plane_request_id(request), metadata={"method": "GET", "count": len(quotas)})
+    return _control_plane_envelope({"organization_id": organization_id, "quotas": quotas})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/audit")
+def control_plane_audit(
+    organization_id: str,
+    request: Request,
+    after_sequence: int = 0,
+    limit: int = 50,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    after_sequence, limit = _validate_control_plane_page(after_sequence, limit)
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    request_id = _control_plane_request_id(request)
+    store.record_audit(organization_id=organization_id, resource="audit", outcome="ok",
+                       request_id=request_id, metadata={"method": "GET", "after_sequence": after_sequence, "limit": limit})
+    page = store.read_audit(organization_id, after_sequence=after_sequence, limit=limit)
+    return _control_plane_envelope({"organization_id": organization_id, **page})
 
 
 @app.post("/api/session/reload")

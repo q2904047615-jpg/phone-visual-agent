@@ -59,6 +59,11 @@ class LocalAgentApiClient:
     CANCEL_ROUTE = SESSION_ROUTE + "/cancel"
     RECONCILE_ROUTE = SESSION_ROUTE + "/reconcile"
     PAUSE_ROUTE = SESSION_ROUTE + "/pause"
+    CONTROL_PLANE_ORGANIZATION_ROUTE = "/api/control-plane/organizations/{organization_id}"
+    CONTROL_PLANE_TEAMS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams"
+    CONTROL_PLANE_PRINCIPALS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/principals"
+    CONTROL_PLANE_QUOTAS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas"
+    CONTROL_PLANE_AUDIT_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/audit"
 
     def __init__(
         self,
@@ -140,6 +145,43 @@ class LocalAgentApiClient:
 
     def device_status(self) -> JsonObject:
         return self._request("GET", self.DEVICE_ROUTE, read_only=True)
+
+    def control_plane_organization(self, organization_id: str) -> JsonObject:
+        return self._request(
+            "GET", self.CONTROL_PLANE_ORGANIZATION_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
+        )
+
+    def control_plane_teams(self, organization_id: str) -> JsonObject:
+        return self._request(
+            "GET", self.CONTROL_PLANE_TEAMS_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
+        )
+
+    def control_plane_principals(self, organization_id: str) -> JsonObject:
+        return self._request(
+            "GET", self.CONTROL_PLANE_PRINCIPALS_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
+        )
+
+    def control_plane_quotas(self, organization_id: str) -> JsonObject:
+        return self._request(
+            "GET", self.CONTROL_PLANE_QUOTAS_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
+        )
+
+    def control_plane_audit(self, organization_id: str, *, after_sequence: int = 0,
+                            limit: int = 50) -> JsonObject:
+        if isinstance(after_sequence, bool) or after_sequence < 0:
+            self._raise_contract("after_sequence 必须是非负整数。")
+        if isinstance(limit, bool) or limit < 1 or limit > 100:
+            self._raise_contract("limit 必须在 1-100。")
+        return self._request(
+            "GET", self.CONTROL_PLANE_AUDIT_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)},
+            query_params={"after_sequence": str(after_sequence), "limit": str(limit)},
+            read_only=True,
+        )
 
     def doctor(self, device_id: str) -> JsonObject:
         return self._request(
@@ -286,6 +328,7 @@ class LocalAgentApiClient:
         route_template: str,
         *,
         path_params: Mapping[str, str] | None = None,
+        query_params: Mapping[str, str] | None = None,
         payload: JsonObject | None = None,
         read_only: bool,
     ) -> JsonObject:
@@ -305,6 +348,7 @@ class LocalAgentApiClient:
             method,
             concrete_path,
             payload=payload,
+            query_params=query_params,
             token=self._token,
             read_only=read_only,
         )
@@ -424,6 +468,7 @@ class LocalAgentApiClient:
         path: str,
         *,
         payload: JsonObject | None = None,
+        query_params: Mapping[str, str] | None = None,
         token: str = "",
         read_only: bool,
     ) -> JsonObject:
@@ -432,6 +477,8 @@ class LocalAgentApiClient:
             kwargs: dict[str, Any] = {"headers": headers}
             if payload is not None:
                 kwargs["json"] = payload
+            if query_params:
+                kwargs["params"] = dict(query_params)
             response = self._client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:
             raise LocalAgentApiError(

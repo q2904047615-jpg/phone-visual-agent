@@ -1,8 +1,8 @@
-"""Offline Control Plane contracts for the GA transition.
+"""Control Plane contracts for the GA transition.
 
-These contracts are intentionally not wired into Runtime admission yet.  They
-make organization, team, permission, quota, API and SDK semantics testable
-before the product decides how those controls should affect live tasks.
+These contracts define organization, team, permission, quota, API and SDK
+semantics.  The current online integration is a read-only local projection;
+they are intentionally not Runtime admission or Policy authority.
 """
 
 from __future__ import annotations

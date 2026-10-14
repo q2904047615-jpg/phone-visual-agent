@@ -1,6 +1,6 @@
-# Control Plane 离线合同（2026-10-14）
+# Control Plane 合同与只读线上接入（2026-10-14）
 
-本文件记录 GA 控制面的第一批离线合同。实现位于 `poc/agent/domain/control_plane.py`，测试位于 `poc/test_control_plane_contract.py`。
+本文件记录 GA 控制面的第一批合同。领域实现位于 `poc/agent/domain/control_plane.py`，持久化实现位于 `poc/agent/infrastructure/sqlite_control_plane_repository.py`，只读路由位于 `poc/web_app.py`。
 
 ## 范围
 
@@ -11,12 +11,15 @@
 
 ## 边界
 
-这些类型目前只用于离线合同和评测，尚未接入 `web_app`、Runtime、Policy 或设备执行链。因此它们不会替现有风险边界新增确认，也不会把配额或权限结果偷偷变成任务 `blocked`。接入运行时前需要单独定义数据存储、身份认证、审计、并发扣减和用户批准的产品策略。
+当前已接入本机 Web API 的只读投影：组织、团队、主体、配额和审计均从与 Runtime 共用的 `runtime.sqlite3` 读取。服务首次启动时只创建缺失的本地演示投影 `local-org`，使用 `INSERT OR IGNORE`，不会覆盖已有数据。所有 Control Plane 路由都要求现有本机控制令牌，并只公开 GET；审计记录请求 ID、资源、结果和数量等元数据，过滤令牌、授权头、密码、密钥和 Cookie。
+
+这些路由仍未接入身份认证、写入 API、并发配额扣减、计费、Runtime admission、Policy 或设备执行链。因此它们不会替现有风险边界新增确认，也不会把配额或权限结果变成任务 `blocked`。第二台真机、多设备调度和 GA 发布仍不在本批范围内。
 
 ## 验证
 
 ```text
 python -m unittest poc.test_control_plane_contract -v
+python -m unittest poc.test_control_plane_api -v
 ```
 
-当前目标是先证明数据隔离、权限映射、配额计算和 API/SDK 版本封套可稳定回放；这不等于 GA 控制面已上线。
+当前验证证明数据隔离、权限映射、配额计算、API/SDK 版本封套，以及本机只读路由、SQLite 持久化和审计分页可稳定回放；这不等于身份认证、写入控制面或 GA 发布已完成。

@@ -14,9 +14,10 @@ from .device_task_registry import DeviceTaskRegistry
 from .file_system_evidence_store import FileSystemAgentEvidenceStore
 from .in_memory_session_repository import InMemoryAgentSessionRepository
 from .sqlite_session_repository import RecoveredAgentSession, SqliteAgentSessionRepository
+from .sqlite_control_plane_repository import SqliteControlPlaneRepository
 
 __all__ = ['AdbPairingError', 'AdbPairingService', 'DeviceTaskRegistry', 'CameraPreviewUnavailable', 'DeviceCameraCoordinator', 'DeviceControllerRegistry',
     'DeviceControllerRegistryError', 'DeviceRuntimeResourceError', 'DeviceRuntimeResourceRegistry',
     'FileSystemAgentEvidenceStore', 'InMemoryAgentSessionRepository', 'RecoveredAgentSession',
-    'SqliteAgentSessionRepository', 'InterProcessLease', 'ReplayDeviceExecutor',
+    'SqliteAgentSessionRepository', 'SqliteControlPlaneRepository', 'InterProcessLease', 'ReplayDeviceExecutor',
     'RobotDeviceExecutor', 'ProvisionalDeviceControllerError', 'SHARED_DEVICE_LEASE_DIR']

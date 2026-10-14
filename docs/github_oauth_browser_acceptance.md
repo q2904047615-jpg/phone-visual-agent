@@ -10,7 +10,20 @@
 
 默认不带 `browser=true` 的 API 授权码流程保留 JSON 会话封套合同。网站使用 `http://127.0.0.1:8765/`，与部署回调同主机；服务重启会使进行中的 OAuth 请求失效，需要重新登录，已签发且未过期/撤销的 SQLite 会话仍有效。
 
-本批离线证据：身份/API 定向 33 项通过；日常 Python 933 项、4 skipped，前端单元 19 项、浏览器 28 项通过。历史实验 120 项中 2 failures/38 errors，修改前 HEAD 隔离副本复现同样结果（缺失历史样本及旧断言），不得宣称完整历史回归通过。真实网站入口验收待本批加载后记录；已有下文真实 OAuth API 验收不能替代网站验收。
+本批离线证据：身份/API 定向 33 项通过；日常 Python 933 项、4 skipped，前端单元 19 项、浏览器 28 项通过。历史实验 120 项中 2 failures/38 errors，修改前 HEAD 隔离副本复现同样结果（缺失历史样本及旧断言），不得宣称完整历史回归通过。
+
+网站真实验收已通过（代码提交 `1a7a317`）：
+
+- 从工作台「使用 GitHub 登录」进入 GitHub，复用用户已有 GitHub 登录和授权，真实 code exchange 后自动返回工作台，显示 `已登录 · local-owner`、`local-org` 和会话有效期。
+- 回到工作台后的 URL 无 code/state/token；Cookie 为 HttpOnly、SameSite=Lax，path 为 `/api/control-plane/auth`。本机 HTTP 验收不设 Secure，未把本地结果当成公网 HTTPS 部署验收。
+- 浏览器刷新后仍显示已登录；localStorage/sessionStorage 未新增 OAuth 或主体令牌存储。
+- 点击「退出登录」后显示未登录，GitHub 登录按钮重新可用，浏览器会话 Cookie 已删除，SQLite 会话 `09a2580271fb4c02b1daf05abd575339` 已撤销。审计序号 28/29/30 对应签发、权限通过、撤销。
+- 1280px 桌面和 390px 手机宽度下账号按钮可见且未越出视口。
+- 最终 bootstrap/OpenAPI 通过，`busy=false`、`active_tasks=[]`；未发起模型请求或手机动作。
+
+网站脱敏证据：`poc/output/web/github_website_20261015/report.json`。仅网站登录/状态/退出范围完成；未宣称所有资源已接入用户隔离或 GA 已完成。
+
+环境收尾：日常回归在共享 Runtime SQLite 留下零动作 `api-scope` 测试记录；服务重载前的第一次对账因数据库行尚未进入恢复态返回 HTTP 500。已保留该错误，启动核对建立恢复态后通过官方 `not_dispatched` 对账取消，零动作、无重放；本批未改动 Runtime 来掩盖此既有测试隔离缺口。
 
 ## 部署配置
 

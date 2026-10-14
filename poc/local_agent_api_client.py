@@ -66,6 +66,8 @@ class LocalAgentApiClient:
     CONTROL_PLANE_AUDIT_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/audit"
     CONTROL_PLANE_IDENTITY_SESSION_ROUTE = "/api/control-plane/auth/sessions"
     CONTROL_PLANE_EXTERNAL_SESSION_ROUTE = "/api/control-plane/auth/external-sessions"
+    CONTROL_PLANE_GITHUB_OAUTH_START_ROUTE = "/api/control-plane/auth/github/start"
+    CONTROL_PLANE_GITHUB_OAUTH_CALLBACK_ROUTE = "/api/control-plane/auth/github/callback"
     CONTROL_PLANE_REVOKE_SESSION_ROUTE = CONTROL_PLANE_IDENTITY_SESSION_ROUTE + "/{session_id}"
     CONTROL_PLANE_TEAM_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams/{team_id}"
     CONTROL_PLANE_QUOTA_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas/{quota_key}"
@@ -200,6 +202,12 @@ class LocalAgentApiClient:
             "POST", self.CONTROL_PLANE_EXTERNAL_SESSION_ROUTE,
             payload={"provider_id": provider_id, "assertion": dict(assertion)}, read_only=False,
             extra_headers={},
+        )
+
+    def control_plane_github_oauth_start(self) -> JsonObject:
+        return self._request(
+            "GET", self.CONTROL_PLANE_GITHUB_OAUTH_START_ROUTE,
+            read_only=False,
         )
 
     def control_plane_revoke_identity_session(self, session_id: str, *, principal_token: str,

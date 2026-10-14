@@ -16,6 +16,7 @@ CONTROL_PLANE_PROTOCOL = "2026-10-14-control-plane-v1"
 API_CONTRACT_VERSION = "2026-10-14-api-v1"
 SDK_CONTRACT_VERSION = "2026-10-14-sdk-v1"
 EXTERNAL_IDENTITY_PROTOCOL = "2026-10-14-external-identity-v1"
+GITHUB_OAUTH_BROWSER_PROTOCOL = "2026-10-14-github-oauth-browser-v1"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _ROLES = frozenset({"viewer", "operator", "admin", "owner"})
 _PERMISSIONS = frozenset({
@@ -318,5 +319,5 @@ __all__ = [
     "API_CONTRACT_VERSION", "CONTROL_PLANE_PROTOCOL", "EXTERNAL_IDENTITY_PROTOCOL", "SDK_CONTRACT_VERSION", "ROLE_PERMISSIONS",
     "ApiError", "ApiRequestEnvelope", "ApiResponseEnvelope", "ControlPlaneOrganization",
     "ControlPlanePrincipal", "ControlPlaneSnapshot", "ControlPlaneTeam", "QuotaDecision", "QuotaLimit",
-    "QuotaUsage", "SdkContractManifest", "ExternalIdentity", "ExternalIdentityProvider", "evaluate_quota",
+    "QuotaUsage", "SdkContractManifest", "ExternalIdentity", "ExternalIdentityProvider", "GITHUB_OAUTH_BROWSER_PROTOCOL", "evaluate_quota",
 ]

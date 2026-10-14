@@ -13,7 +13,7 @@ import time
 import uuid
 import webbrowser
 from contextlib import asynccontextmanager, contextmanager, nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping
 
@@ -48,7 +48,12 @@ from agent.infrastructure import (
     GitHubOAuthConfigurationError,
     GitHubOAuthProvider,
 )
-from agent.domain.control_plane import API_CONTRACT_VERSION, CONTROL_PLANE_PROTOCOL, EXTERNAL_IDENTITY_PROTOCOL
+from agent.domain.control_plane import (
+    API_CONTRACT_VERSION,
+    CONTROL_PLANE_PROTOCOL,
+    EXTERNAL_IDENTITY_PROTOCOL,
+    GITHUB_OAUTH_BROWSER_PROTOCOL,
+)
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
 )
@@ -205,6 +210,8 @@ except Exception as exc:
 
 control_plane_identity_registry = ExternalIdentityProviderRegistry()
 _github_oauth_provider = None
+_github_oauth_pending_verifiers: dict[str, tuple[str, float]] = {}
+_GITHUB_OAUTH_STATE_TTL_SECONDS = 600
 try:
     _github_oauth_provider = GitHubOAuthProvider.from_environment()
 except GitHubOAuthConfigurationError as exc:
@@ -804,6 +811,148 @@ def control_plane_external_identity_session(
                        metadata={"provider_id": identity.provider_id, "subject": identity.subject, "user_id": identity.user_id},
                        actor=actor)
     return _control_plane_envelope({
+        "external_identity_protocol": EXTERNAL_IDENTITY_PROTOCOL,
+        "session": session,
+    })
+
+
+def _github_browser_provider() -> GitHubOAuthProvider:
+    provider = control_plane_identity_registry.get("github")
+    if not isinstance(provider, GitHubOAuthProvider):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "external_provider_not_configured", "message": "GitHub OAuth provider 尚未配置。"},
+        )
+    return provider
+
+
+@app.get("/api/control-plane/auth/github/start")
+def control_plane_github_oauth_start(
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Start GitHub's browser authorization-code flow with state and PKCE."""
+    verify_local_request(request, x_control_token)
+    provider = _github_browser_provider()
+    store = _control_plane_store()
+    now = time.time()
+    for key, (_, expires_at) in list(_github_oauth_pending_verifiers.items()):
+        if expires_at <= now:
+            _github_oauth_pending_verifiers.pop(key, None)
+    state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = provider.pkce_challenge(code_verifier)
+    state_hash = hashlib.sha256(state.encode("utf-8")).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=_GITHUB_OAUTH_STATE_TTL_SECONDS)
+    expires_text = expires_at.isoformat(timespec="milliseconds")
+    store.create_oauth_state(
+        state_hash=state_hash,
+        provider_id=provider.provider_id,
+        redirect_uri=provider.redirect_uri,
+        expires_at=expires_text,
+    )
+    _github_oauth_pending_verifiers[state_hash] = (code_verifier, expires_at.timestamp())
+    authorization_url = provider.authorization_url(state=state, code_challenge=code_challenge)
+    store.record_audit(
+        organization_id="unknown",
+        resource="identity.external.oauth",
+        outcome="authorization_started",
+        request_id=_control_plane_request_id(request),
+        metadata={"provider_id": provider.provider_id, "redirect_uri": provider.redirect_uri},
+        actor="local-control-token",
+    )
+    return _control_plane_envelope({
+        "github_oauth_browser_protocol": GITHUB_OAUTH_BROWSER_PROTOCOL,
+        "oauth_flow": "authorization_code",
+        "provider_id": provider.provider_id,
+        "authorization_url": authorization_url,
+        "redirect_uri": provider.redirect_uri,
+        "expires_at": expires_text,
+        "state_ttl_seconds": _GITHUB_OAUTH_STATE_TTL_SECONDS,
+    })
+
+
+@app.get("/api/control-plane/auth/github/callback")
+def control_plane_github_oauth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> dict[str, Any]:
+    """Consume GitHub's callback, exchange the code, then issue a local session."""
+    provider = _github_browser_provider()
+    store = _control_plane_store()
+    state_value = str(state or "").strip()
+    state_hash = hashlib.sha256(state_value.encode("utf-8")).hexdigest() if state_value else ""
+    record = store.consume_oauth_state(
+        state_hash=state_hash,
+        provider_id=provider.provider_id,
+    ) if state_hash else None
+    pending = _github_oauth_pending_verifiers.pop(state_hash, None) if state_hash else None
+    if record is None or pending is None:
+        store.record_audit(
+            organization_id="unknown",
+            resource="identity.external.oauth",
+            outcome="state_rejected",
+            request_id=_control_plane_request_id(request),
+            metadata={"provider_id": provider.provider_id},
+            actor="external:github",
+        )
+        raise HTTPException(status_code=400, detail={"code": "oauth_state_invalid", "message": "OAuth state 无效、已过期或已使用。"})
+    code_verifier, expires_at = pending
+    if expires_at <= time.time() or record["redirect_uri"] != provider.redirect_uri:
+        raise HTTPException(status_code=400, detail={"code": "oauth_state_invalid", "message": "OAuth state 无效或已过期。"})
+    if error:
+        store.record_audit(
+            organization_id="unknown",
+            resource="identity.external.oauth",
+            outcome="authorization_denied",
+            request_id=_control_plane_request_id(request),
+            metadata={"provider_id": provider.provider_id, "error": str(error)[:64]},
+            actor="external:github",
+        )
+        raise HTTPException(status_code=400, detail={"code": "oauth_authorization_denied", "message": "GitHub OAuth 授权未完成。"})
+    code_value = str(code or "").strip()
+    if not code_value:
+        raise HTTPException(status_code=400, detail={"code": "oauth_code_missing", "message": "GitHub OAuth 回调缺少授权码。"})
+    try:
+        access_token = provider.exchange_code(code=code_value, code_verifier=code_verifier)
+        identity = control_plane_identity_registry.authenticate(
+            provider.provider_id, {"access_token": access_token}
+        )
+    except ExternalIdentityProviderUnavailable as exc:
+        store.record_audit(organization_id="unknown", resource="identity.external.oauth", outcome="provider_unavailable",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": provider.provider_id}, actor="external:github")
+        raise HTTPException(status_code=503, detail={"code": "external_provider_unavailable", "message": "GitHub OAuth provider 暂时不可用。"}) from exc
+    except ExternalIdentityMappingNotFound as exc:
+        store.record_audit(organization_id="unknown", resource="identity.external.oauth", outcome="mapping_not_found",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": provider.provider_id}, actor="external:github")
+        raise HTTPException(status_code=404, detail={"code": "external_identity_mapping_not_found", "message": "GitHub 身份尚未完成主体映射。"}) from exc
+    except (ValueError, TypeError) as exc:
+        store.record_audit(organization_id="unknown", resource="identity.external.oauth", outcome="assertion_rejected",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": provider.provider_id}, actor="external:github")
+        raise HTTPException(status_code=401, detail={"code": "external_identity_rejected", "message": "GitHub OAuth 身份未通过验证。"}) from exc
+    try:
+        session = store.issue_identity_session(
+            organization_id=identity.organization_id,
+            user_id=identity.user_id,
+        )
+    except KeyError as exc:
+        store.record_audit(organization_id=identity.organization_id, resource="identity.external.oauth", outcome="principal_not_found",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": identity.provider_id, "user_id": identity.user_id}, actor="external:github")
+        raise HTTPException(status_code=404, detail={"code": "principal_not_found", "message": "GitHub 身份映射的主体不存在。"}) from exc
+    store.record_audit(
+        organization_id=identity.organization_id,
+        resource="identity.external.oauth",
+        outcome="issued",
+        request_id=_control_plane_request_id(request),
+        metadata={"provider_id": identity.provider_id, "subject": identity.subject, "user_id": identity.user_id},
+        actor="external:github",
+    )
+    return _control_plane_envelope({
+        "github_oauth_browser_protocol": GITHUB_OAUTH_BROWSER_PROTOCOL,
+        "oauth_flow": "authorization_code",
         "external_identity_protocol": EXTERNAL_IDENTITY_PROTOCOL,
         "session": session,
     })

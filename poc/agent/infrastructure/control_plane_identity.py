@@ -36,5 +36,9 @@ class ExternalIdentityProviderRegistry:
     def provider_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._providers))
 
+    def get(self, provider_id: str) -> ExternalIdentityProvider | None:
+        """Return a registered provider for protocol-specific flows."""
+        return self._providers.get(str(provider_id or "").strip())
+
 
 __all__ = ["ExternalIdentityProviderRegistry"]

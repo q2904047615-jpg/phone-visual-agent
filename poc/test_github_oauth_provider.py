@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 import httpx
@@ -127,6 +128,37 @@ class GitHubOAuthProviderTests(unittest.TestCase):
             self.assertIsNotNone(provider)
             provider.close()
 
+    def test_authorization_url_and_code_exchange_use_pkce_and_fixed_redirect(self) -> None:
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"access_token": "gho-exchanged"}, request=request)
+
+        provider = GitHubOAuthProvider(
+            client_id="client-123",
+            client_secret="secret-value",
+            mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+            transport=httpx.MockTransport(handler),
+        )
+        verifier = "v" * 64
+        state = "state-value"
+        try:
+            url = provider.authorization_url(state=state, code_challenge=provider.pkce_challenge(verifier))
+            query = parse_qs(urlparse(url).query)
+            self.assertEqual(["client-123"], query["client_id"])
+            self.assertEqual(["S256"], query["code_challenge_method"])
+            self.assertEqual([state], query["state"])
+            self.assertEqual([provider.redirect_uri], query["redirect_uri"])
+            self.assertEqual("gho-exchanged", provider.exchange_code(code="authorization-code", code_verifier=verifier))
+        finally:
+            provider.close()
+        self.assertEqual("/login/oauth/access_token", seen["path"])
+        self.assertEqual("authorization-code", seen["body"]["code"])
+        self.assertEqual(verifier, seen["body"]["code_verifier"])
+        self.assertEqual("secret-value", seen["body"]["client_secret"])
+
 
 class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
     def test_mapped_identity_issues_session_and_mapping_miss_is_audited(self) -> None:
@@ -173,6 +205,63 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
                 self.assertTrue(any(item["outcome"] == "mapping_not_found" for item in unknown_audit))
             finally:
                 repository.close()
+
+    def test_browser_authorization_code_flow_consumes_state_and_issues_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SqliteControlPlaneRepository(Path(directory) / "runtime.sqlite3")
+            seen: dict[str, object] = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                payload = json.loads(request.content)
+                if request.url.host == "github.com":
+                    seen["exchange"] = payload
+                    return httpx.Response(200, json={"access_token": "gho-browser-token"}, request=request)
+                seen["check"] = payload
+                return httpx.Response(200, json=_valid_payload(), request=request)
+
+            provider = GitHubOAuthProvider(
+                client_id="client-123",
+                client_secret="secret-value",
+                mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+                transport=httpx.MockTransport(handler),
+            )
+            registry = web_app.ExternalIdentityProviderRegistry()
+            registry.register(provider)
+            with patch.object(web_app.runtime, "control_plane_repository", repository), \
+                 patch.object(web_app, "control_plane_identity_registry", registry), \
+                 patch.dict(os.environ, {"ROBOT_WEB_NO_BROWSER": "1"}):
+                with TestClient(web_app.app) as client:
+                    start = client.get(
+                        "/api/control-plane/auth/github/start",
+                        headers={"Origin": "http://127.0.0.1", "X-Control-Token": web_app.CONTROL_TOKEN},
+                    )
+                    self.assertEqual(200, start.status_code, start.text)
+                    start_data = start.json()["data"]
+                    query = parse_qs(urlparse(start_data["authorization_url"]).query)
+                    self.assertEqual([provider.redirect_uri], query["redirect_uri"])
+                    state = query["state"][0]
+                    callback = client.get(
+                        "/api/control-plane/auth/github/callback",
+                        params={"code": "authorization-code", "state": state},
+                    )
+                    self.assertEqual(200, callback.status_code, callback.text)
+                    self.assertEqual("local-owner", callback.json()["data"]["session"]["user_id"])
+                    self.assertNotIn("access_token", callback.text)
+                    replay = client.get(
+                        "/api/control-plane/auth/github/callback",
+                        params={"code": "authorization-code", "state": state},
+                    )
+                    self.assertEqual(400, replay.status_code, replay.text)
+            try:
+                exchange = seen["exchange"]
+                query_challenge = query["code_challenge"][0]
+                self.assertEqual(query_challenge, provider.pkce_challenge(exchange["code_verifier"]))
+                self.assertEqual({"access_token": "gho-browser-token"}, seen["check"])
+                audit = repository.read_audit("local-org", limit=100)["entries"]
+                self.assertTrue(any(item["resource"] == "identity.external.oauth" and item["outcome"] == "issued" for item in audit))
+            finally:
+                repository.close()
+                provider.close()
 
 
 if __name__ == "__main__":

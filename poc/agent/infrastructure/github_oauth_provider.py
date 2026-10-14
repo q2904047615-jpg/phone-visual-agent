@@ -14,7 +14,9 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+import base64
+import hashlib
 
 import httpx
 
@@ -24,7 +26,12 @@ from agent.domain.control_plane import ExternalIdentity
 GITHUB_PROVIDER_ID = "github"
 GITHUB_API_BASE_URL = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
+GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+DEFAULT_GITHUB_REDIRECT_URI = "http://127.0.0.1:8765/api/control-plane/auth/github/callback"
+GITHUB_OAUTH_SCOPE = "read:user"
 _MAX_ACCESS_TOKEN_LENGTH = 512
+_MAX_AUTHORIZATION_CODE_LENGTH = 1024
 
 
 class GitHubOAuthConfigurationError(ValueError):
@@ -90,6 +97,7 @@ class GitHubOAuthProvider:
         transport: httpx.BaseTransport | None = None,
         timeout_seconds: float = 10.0,
         base_url: str = GITHUB_API_BASE_URL,
+        redirect_uri: str = DEFAULT_GITHUB_REDIRECT_URI,
     ) -> None:
         self.client_id = str(client_id or "").strip()
         self.client_secret = str(client_secret or "")
@@ -97,9 +105,19 @@ class GitHubOAuthProvider:
             raise GitHubOAuthConfigurationError("GitHub OAuth client_id 和 client_secret 必须同时配置。")
         if base_url != GITHUB_API_BASE_URL and transport is None:
             raise GitHubOAuthConfigurationError("GitHub OAuth endpoint 必须使用固定 api.github.com。")
+        self.redirect_uri = str(redirect_uri or "").strip()
+        if not self.redirect_uri or not self.redirect_uri.startswith(("http://", "https://")) \
+                or "?" in self.redirect_uri or "#" in self.redirect_uri:
+            raise GitHubOAuthConfigurationError("GitHub OAuth redirect_uri 必须是无查询参数的 HTTP(S) URL。")
         self._mappings = dict(mappings)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
+            timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
+            follow_redirects=False,
+            transport=transport,
+        )
+        self._oauth_client = httpx.Client(
+            base_url="https://github.com",
             timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
             follow_redirects=False,
             transport=transport,
@@ -116,6 +134,7 @@ class GitHubOAuthProvider:
         client_id = str(values.get("GITHUB_OAUTH_CLIENT_ID", "")).strip()
         client_secret = str(values.get("GITHUB_OAUTH_CLIENT_SECRET", ""))
         mapping_path = str(values.get("GITHUB_OAUTH_IDENTITY_MAP_FILE", "")).strip()
+        redirect_uri = str(values.get("GITHUB_OAUTH_REDIRECT_URI", DEFAULT_GITHUB_REDIRECT_URI)).strip()
         if not client_id and not client_secret and not mapping_path:
             return None
         if not client_id or not client_secret or not mapping_path:
@@ -127,10 +146,68 @@ class GitHubOAuthProvider:
             client_secret=client_secret,
             mappings=_read_mapping_file(Path(mapping_path)),
             transport=transport,
+            redirect_uri=redirect_uri,
         )
 
     def close(self) -> None:
         self._client.close()
+        self._oauth_client.close()
+
+    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+        if not state or len(state) > 256:
+            raise ValueError("GitHub OAuth state 无效。")
+        if not code_challenge or len(code_challenge) < 43 or len(code_challenge) > 128:
+            raise ValueError("GitHub OAuth code_challenge 无效。")
+        return GITHUB_AUTHORIZE_URL + "?" + urlencode({
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "scope": GITHUB_OAUTH_SCOPE,
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "allow_signup": "false",
+        })
+
+    @staticmethod
+    def pkce_challenge(code_verifier: str) -> str:
+        if not isinstance(code_verifier, str) or len(code_verifier) < 43 or len(code_verifier) > 128:
+            raise ValueError("GitHub OAuth code_verifier 无效。")
+        return base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+
+    def exchange_code(self, *, code: str, code_verifier: str) -> str:
+        code = str(code or "").strip()
+        if not code or len(code) > _MAX_AUTHORIZATION_CODE_LENGTH:
+            raise ValueError("GitHub OAuth authorization code 无效。")
+        if not isinstance(code_verifier, str) or len(code_verifier) < 43 or len(code_verifier) > 128:
+            raise ValueError("GitHub OAuth code_verifier 无效。")
+        try:
+            response = self._oauth_client.post(
+                "/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                json={
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "code": code,
+                    "redirect_uri": self.redirect_uri,
+                    "code_verifier": code_verifier,
+                },
+            )
+        except httpx.TransportError as exc:
+            raise ExternalIdentityProviderUnavailable("GitHub OAuth provider 不可达。") from exc
+        if response.status_code >= 500:
+            raise ExternalIdentityProviderUnavailable("GitHub OAuth provider 返回服务故障。")
+        if response.status_code != 200:
+            raise ValueError("GitHub OAuth authorization code 未通过验证。")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ExternalIdentityProviderUnavailable("GitHub OAuth provider 返回了无效响应。") from exc
+        if not isinstance(payload, Mapping):
+            raise ExternalIdentityProviderUnavailable("GitHub OAuth provider 返回了无效响应。")
+        token = payload.get("access_token")
+        if not isinstance(token, str) or not token.strip() or len(token) > _MAX_ACCESS_TOKEN_LENGTH:
+            raise ValueError("GitHub OAuth authorization code 未换取有效 token。")
+        return token.strip()
 
     @staticmethod
     def _access_token(assertion: Mapping[str, Any]) -> str:
@@ -225,5 +302,9 @@ __all__ = [
     "GitHubOAuthProvider",
     "GITHUB_API_BASE_URL",
     "GITHUB_API_VERSION",
+    "GITHUB_AUTHORIZE_URL",
+    "GITHUB_TOKEN_URL",
+    "DEFAULT_GITHUB_REDIRECT_URI",
+    "GITHUB_OAUTH_SCOPE",
     "GITHUB_PROVIDER_ID",
 ]

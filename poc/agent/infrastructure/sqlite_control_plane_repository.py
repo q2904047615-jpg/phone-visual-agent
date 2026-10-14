@@ -141,6 +141,16 @@ class SqliteControlPlaneRepository:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(organization_id, principal_user_id, idempotency_key)
             );
+            CREATE TABLE IF NOT EXISTS control_plane_oauth_states (
+                state_hash TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                redirect_uri TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                consumed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS control_plane_oauth_states_expiry
+                ON control_plane_oauth_states(provider_id, expires_at, consumed_at);
             INSERT INTO control_plane_meta(key, value)
                 VALUES ('schema_version', 'control-plane-sqlite-v1')
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value;
@@ -372,6 +382,49 @@ class SqliteControlPlaneRepository:
             request_hash=request_hash,
             write=write,
         )
+
+    def create_oauth_state(self, *, state_hash: str, provider_id: str,
+                           redirect_uri: str, expires_at: str) -> None:
+        """Persist a one-time OAuth state without storing the browser secret."""
+        if not state_hash or not provider_id or not redirect_uri or not expires_at:
+            raise ValueError("OAuth state 字段不能为空。")
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO control_plane_oauth_states(state_hash,provider_id,redirect_uri,expires_at,created_at,consumed_at) "
+                "VALUES(?,?,?,?,?,NULL)",
+                (state_hash, provider_id, redirect_uri, expires_at, _now()),
+            )
+
+    def consume_oauth_state(self, *, state_hash: str, provider_id: str,
+                            now: str | None = None) -> dict[str, str] | None:
+        """Atomically consume an unexpired state and return its redirect URI."""
+        current = now or _now()
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT provider_id,redirect_uri,expires_at,consumed_at FROM control_plane_oauth_states "
+                    "WHERE state_hash=?", (state_hash,),
+                ).fetchone()
+                if row is None or str(row["provider_id"]) != str(provider_id) \
+                        or row["consumed_at"] is not None or str(row["expires_at"]) <= current:
+                    self._connection.execute("ROLLBACK")
+                    return None
+                consumed_at = _now()
+                self._connection.execute(
+                    "UPDATE control_plane_oauth_states SET consumed_at=? WHERE state_hash=? AND consumed_at IS NULL",
+                    (consumed_at, state_hash),
+                )
+                self._connection.execute("COMMIT")
+                return {
+                    "provider_id": str(row["provider_id"]),
+                    "redirect_uri": str(row["redirect_uri"]),
+                    "expires_at": str(row["expires_at"]),
+                    "consumed_at": consumed_at,
+                }
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
 
     def _run_idempotent(self, *, organization_id: str, principal_user_id: str,
                         idempotency_key: str, operation: str, request_hash: str,

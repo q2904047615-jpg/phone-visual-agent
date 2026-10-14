@@ -8,11 +8,13 @@ from agent.infrastructure.sqlite_session_repository import SqliteAgentSessionRep
 
 
 class _Session:
-    def __init__(self, session_id: str = "s1", status: str = "created", physical_actions: int = 0) -> None:
+    def __init__(self, session_id: str = "s1", status: str = "created", physical_actions: int = 0,
+                 failed_reason: str = "") -> None:
         self.session_id = session_id
         self.device_id = "device-1"
         self.status = status
         self.physical_actions = physical_actions
+        self.failed_reason = failed_reason
         self.run_dir = Path("run")
 
     def snapshot(self) -> dict[str, object]:
@@ -21,6 +23,7 @@ class _Session:
             "device_id": self.device_id,
             "status": self.status,
             "physical_actions": self.physical_actions,
+            "failed_reason": self.failed_reason,
             "created_at": "2026-10-13T00:00:00+00:00",
         }
 
@@ -120,6 +123,56 @@ class SqliteSessionRepositoryTests(unittest.TestCase):
             )
             self.assertEqual("recovery_reconciled", second.events("s1")[-1]["event_type"])
             second.close()
+
+    def test_read_events_is_bounded_and_cursor_replays_without_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SqliteAgentSessionRepository(Path(directory) / "runtime.sqlite3")
+            session = _Session()
+            repository.add(session)
+            for status in ("observing", "awaiting_confirmation", "cancelled"):
+                session.status = status
+                repository.save(session, event_type=f"status_{status}")
+
+            first = repository.read_events("s1", limit=2)
+            self.assertEqual(2, len(first.events))
+            self.assertTrue(first.has_more)
+            self.assertEqual(first.events[-1].sequence, first.next_sequence)
+            second = repository.read_events("s1", after_sequence=first.next_sequence, limit=2)
+            self.assertEqual(2, len(second.events))
+            self.assertFalse(second.has_more)
+            self.assertEqual(
+                [item.sequence for item in first.events + second.events],
+                sorted(item.sequence for item in first.events + second.events),
+            )
+            self.assertEqual((), repository.read_events("s1", after_sequence=second.next_sequence).events)
+            repository.close()
+
+    def test_failed_event_exposes_one_report_only_primary_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SqliteAgentSessionRepository(Path(directory) / "runtime.sqlite3")
+            session = _Session(status="failed", failed_reason="策略确认scope不一致。")
+            repository.add(session)
+            page = repository.read_events("s1")
+            failure = page.events[-1].failure
+            self.assertIsNotNone(failure)
+            assert failure is not None
+            self.assertEqual("policy", failure.category)
+            self.assertEqual("runtime", failure.stage)
+            self.assertEqual("策略确认scope不一致。", failure.message)
+            self.assertEqual("policy", page.to_dict()["events"][-1]["failure"]["category"])
+            repository.close()
+
+    def test_replay_cursor_and_limit_reject_ambiguous_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SqliteAgentSessionRepository(Path(directory) / "runtime.sqlite3")
+            repository.add(_Session())
+            with self.assertRaises(ValueError):
+                repository.read_events("s1", after_sequence=-1)
+            with self.assertRaises(ValueError):
+                repository.read_events("s1", limit=0)
+            with self.assertRaises(ValueError):
+                repository.read_events("s1", limit=True)  # type: ignore[arg-type]
+            repository.close()
 
 
 if __name__ == "__main__":

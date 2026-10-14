@@ -2043,25 +2043,31 @@ def get_generic_supervised_events(
     verify_local_request(request, x_control_token)
     _require_generic_supervised_session(session_id)
     after_raw = request.query_params.get("after_sequence", "0")
+    limit_raw = request.query_params.get("limit", "200")
     try:
         after_sequence = int(after_raw)
+        limit = int(limit_raw)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail="after_sequence必须是非负整数。") from exc
-    if after_sequence < 0:
-        raise HTTPException(status_code=422, detail="after_sequence必须是非负整数。")
+        raise HTTPException(status_code=422, detail="after_sequence和limit必须是整数。") from exc
+    if after_sequence < 0 or not 1 <= limit <= 200:
+        raise HTTPException(status_code=422, detail="after_sequence必须非负，limit必须在1～200之间。")
     repository = getattr(runtime, "agent_session_repository", None)
-    events = getattr(repository, "events", None)
-    if not callable(events):
+    read_events = getattr(repository, "read_events", None)
+    if not callable(read_events):
         raise HTTPException(status_code=503, detail="当前Runtime没有可查询的持久事件账本。")
     try:
-        values = events(session_id, after_sequence=after_sequence)
+        page = read_events(session_id, after_sequence=after_sequence, limit=limit)
     except AgentSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
+        "protocol_version": page.to_dict()["protocol_version"],
         "session_id": session_id,
         "after_sequence": after_sequence,
-        "events": values,
-        "next_sequence": values[-1]["sequence"] if values else after_sequence,
+        "events": [event.to_dict() for event in page.events],
+        "next_sequence": page.next_sequence,
+        "has_more": page.has_more,
     }
 
 

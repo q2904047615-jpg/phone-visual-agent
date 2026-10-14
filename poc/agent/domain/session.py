@@ -69,6 +69,9 @@ class AgentSessionRepository(Protocol):
 
     def events(self, session_id: str, *, after_sequence: int = 0) -> list[dict[str, Any]]: ...
 
+    def read_events(self, session_id: str, *, after_sequence: int = 0,
+                    limit: int = 200) -> Any: ...
+
     def reconcile_recovered(
         self,
         session_id: str,

@@ -25,6 +25,13 @@ from agent.domain import (
     RECOVERY_REQUIRED_STATUS,
 )
 from agent.domain.validation import reject_if
+from agent.domain.runtime_event import (
+    MAX_REPLAY_PAGE_SIZE,
+    RuntimeEvent,
+    RuntimeEventPage,
+    validate_replay_cursor,
+    validate_replay_page_size,
+)
 
 
 SCHEMA_VERSION = "runtime-sqlite-v1"
@@ -307,25 +314,58 @@ class SqliteAgentSessionRepository:
             return sorted([*live, *recovered], key=lambda item: str(item.get("updated_at", "")), reverse=True)
 
     def events(self, session_id: str, *, after_sequence: int = 0) -> list[dict[str, Any]]:
+        """Return the complete validated event history for compatibility callers."""
+        page = self._read_events(session_id, after_sequence=after_sequence, limit=None)
+        return [event.to_dict() for event in page.events]
+
+    def read_events(self, session_id: str, *, after_sequence: int = 0,
+                    limit: int = MAX_REPLAY_PAGE_SIZE) -> RuntimeEventPage:
+        """Read one bounded, validated page for deterministic read-only replay."""
+        cursor = validate_replay_cursor(after_sequence)
+        page_size = validate_replay_page_size(limit)
+        return self._read_events(session_id, after_sequence=cursor, limit=page_size)
+
+    def _read_events(self, session_id: str, *, after_sequence: int,
+                     limit: int | None) -> RuntimeEventPage:
         with self._lock:
             reject_if(self.get(session_id) is None, AgentSessionNotFoundError("通用单步会话不存在。"))
-            rows = self._connection.execute(
+            query = (
                 "SELECT sequence,session_id,event_type,status,revision,occurred_at,payload_json "
-                "FROM runtime_events WHERE session_id=? AND sequence>? ORDER BY sequence ASC",
-                (session_id, int(after_sequence)),
+                "FROM runtime_events WHERE session_id=? AND sequence>? ORDER BY sequence ASC"
+            )
+            params: list[Any] = [session_id, int(after_sequence)]
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit) + 1)
+            rows = self._connection.execute(
+                query, tuple(params),
             ).fetchall()
-            return [
-                {
+            has_more = limit is not None and len(rows) > limit
+            if has_more:
+                rows = rows[:limit]
+            events: list[RuntimeEvent] = []
+            previous_sequence = int(after_sequence)
+            previous_revision = -1
+            for row in rows:
+                payload = json.loads(row["payload_json"])
+                event = RuntimeEvent.from_row({
                     "sequence": int(row["sequence"]),
                     "session_id": row["session_id"],
                     "event_type": row["event_type"],
                     "status": row["status"],
                     "revision": int(row["revision"]),
                     "occurred_at": row["occurred_at"],
-                    "payload": json.loads(row["payload_json"]),
-                }
-                for row in rows
-            ]
+                    "payload": payload,
+                }, expected_session_id=session_id)
+                reject_if(event.sequence <= previous_sequence,
+                          ValueError("事件sequence必须严格递增。"))
+                reject_if(event.revision < previous_revision,
+                          ValueError("事件revision不能倒退。"))
+                events.append(event)
+                previous_sequence = event.sequence
+                previous_revision = event.revision
+            return RuntimeEventPage(session_id=session_id, after_sequence=int(after_sequence),
+                                    events=tuple(events), has_more=bool(has_more))
 
     def reconcile_recovered(
         self,

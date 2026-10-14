@@ -65,6 +65,8 @@ class LocalAgentApiClient:
     CONTROL_PLANE_QUOTAS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas"
     CONTROL_PLANE_AUDIT_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/audit"
     CONTROL_PLANE_IDENTITY_SESSION_ROUTE = "/api/control-plane/auth/sessions"
+    CONTROL_PLANE_EXTERNAL_SESSION_ROUTE = "/api/control-plane/auth/external-sessions"
+    CONTROL_PLANE_REVOKE_SESSION_ROUTE = CONTROL_PLANE_IDENTITY_SESSION_ROUTE + "/{session_id}"
     CONTROL_PLANE_TEAM_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams/{team_id}"
     CONTROL_PLANE_QUOTA_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas/{quota_key}"
 
@@ -191,6 +193,23 @@ class LocalAgentApiClient:
             "POST", self.CONTROL_PLANE_IDENTITY_SESSION_ROUTE,
             payload={"organization_id": self._resource_id(organization_id), "user_id": self._resource_id(user_id)},
             read_only=False,
+        )
+
+    def control_plane_external_identity_session(self, provider_id: str, assertion: Mapping[str, Any]) -> JsonObject:
+        return self._request(
+            "POST", self.CONTROL_PLANE_EXTERNAL_SESSION_ROUTE,
+            payload={"provider_id": provider_id, "assertion": dict(assertion)}, read_only=False,
+            extra_headers={},
+        )
+
+    def control_plane_revoke_identity_session(self, session_id: str, *, principal_token: str,
+                                              idempotency_key: str) -> JsonObject:
+        if not principal_token or not idempotency_key:
+            self._raise_contract("会话撤销必须提供主体令牌和幂等键。")
+        return self._request(
+            "DELETE", self.CONTROL_PLANE_REVOKE_SESSION_ROUTE,
+            path_params={"session_id": self._resource_id(session_id)}, read_only=False,
+            extra_headers={"X-Control-Plane-Token": principal_token, "Idempotency-Key": idempotency_key},
         )
 
     def control_plane_create_team(self, organization_id: str, *, team_id: str, name: str,

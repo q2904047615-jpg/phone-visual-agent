@@ -8,6 +8,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import web_app
+from agent.domain.control_plane import ExternalIdentity
+from agent.infrastructure.control_plane_identity import ExternalIdentityProviderRegistry
 from agent.infrastructure.sqlite_control_plane_repository import SqliteControlPlaneRepository
 
 
@@ -138,6 +140,59 @@ class ControlPlaneApiTests(unittest.TestCase):
             json={"quota_key": "daily", "period": "daily", "max_runs": 88},
         )
         self.assertEqual(200, quota.status_code, quota.text)
+
+    def test_external_identity_port_and_session_revocation_are_audited(self) -> None:
+        class FakeProvider:
+            provider_id = "fake-oidc"
+
+            def authenticate(self, assertion):
+                if assertion.get("subject") != "external-subject-001":
+                    raise ValueError("invalid assertion")
+                return ExternalIdentity(
+                    provider_id=self.provider_id,
+                    subject="external-subject-001",
+                    organization_id="local-org",
+                    user_id="local-owner",
+                    claims={"issuer": "https://issuer.example"},
+                )
+
+        registry = ExternalIdentityProviderRegistry()
+        registry.register(FakeProvider())
+        with patch.object(web_app, "control_plane_identity_registry", registry):
+            response = self.client.post(
+                "/api/control-plane/auth/external-sessions",
+                headers={"Origin": "http://127.0.0.1"},
+                json={"provider_id": "fake-oidc", "assertion": {"subject": "external-subject-001"}},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        session = response.json()["data"]["session"]
+        revoke_headers = {
+            **self.headers,
+            "X-Control-Plane-Token": session["principal_token"],
+            "Idempotency-Key": "revoke-001",
+        }
+        revoked = self.client.delete(
+            f"/api/control-plane/auth/sessions/{session['session_id']}",
+            headers=revoke_headers,
+        )
+        self.assertEqual(200, revoked.status_code, revoked.text)
+        self.assertTrue(revoked.json()["data"]["revoked"])
+        replay = self.client.delete(
+            f"/api/control-plane/auth/sessions/{session['session_id']}",
+            headers=revoke_headers,
+        )
+        self.assertEqual(401, replay.status_code, replay.text)
+        audit = self.repository.read_audit("local-org", limit=100)["entries"]
+        self.assertTrue(any(entry["resource"] == "identity.external" and entry["outcome"] == "issued" for entry in audit))
+        self.assertTrue(any(entry["resource"] == "identity.session.revoke" and entry["outcome"] == "permission_allowed" for entry in audit))
+
+    def test_external_identity_without_provider_is_not_accepted(self) -> None:
+        response = self.client.post(
+            "/api/control-plane/auth/external-sessions",
+            headers={"Origin": "http://127.0.0.1"},
+            json={"provider_id": "missing-provider", "assertion": {}},
+        )
+        self.assertEqual(503, response.status_code, response.text)
 
 
 if __name__ == "__main__":

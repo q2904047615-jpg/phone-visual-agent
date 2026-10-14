@@ -326,6 +326,53 @@ class SqliteControlPlaneRepository:
             )
             return cursor.rowcount == 1
 
+    def get_identity_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT session_id,organization_id,user_id,issued_at,expires_at,revoked_at "
+                "FROM control_plane_identity_sessions WHERE session_id=?", (session_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "session_id": str(row["session_id"]),
+                "organization_id": str(row["organization_id"]),
+                "user_id": str(row["user_id"]),
+                "issued_at": str(row["issued_at"]),
+                "expires_at": str(row["expires_at"]),
+                "revoked_at": str(row["revoked_at"]) if row["revoked_at"] else None,
+            }
+
+    def revoke_identity_session_idempotent(
+        self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
+        request_hash: str, session_id: str,
+    ) -> tuple[int, dict[str, Any], bool]:
+        def write() -> tuple[int, dict[str, Any]]:
+            row = self._connection.execute(
+                "SELECT organization_id,user_id,revoked_at FROM control_plane_identity_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("identity_session_not_found")
+            if str(row["organization_id"]) != organization_id:
+                raise ValueError("organization_forbidden")
+            changed = False
+            if row["revoked_at"] is None:
+                self._connection.execute(
+                    "UPDATE control_plane_identity_sessions SET revoked_at=? WHERE session_id=?",
+                    (_now(), session_id),
+                )
+                changed = True
+            return 200, {"session_id": session_id, "revoked": changed}
+        return self._run_idempotent(
+            organization_id=organization_id,
+            principal_user_id=principal_user_id,
+            idempotency_key=idempotency_key,
+            operation="identity.session.revoke",
+            request_hash=request_hash,
+            write=write,
+        )
+
     def _run_idempotent(self, *, organization_id: str, principal_user_id: str,
                         idempotency_key: str, operation: str, request_hash: str,
                         write: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str, Any], bool]:
@@ -469,7 +516,8 @@ class SqliteControlPlaneRepository:
                                     request_hash=request_hash, write=write)
 
     def record_audit(self, *, organization_id: str, resource: str, outcome: str,
-                     request_id: str | None = None, metadata: Mapping[str, Any] | None = None) -> int:
+                     request_id: str | None = None, metadata: Mapping[str, Any] | None = None,
+                     actor: str = "local-control-token") -> int:
         safe_metadata = {
             str(key): value for key, value in (metadata or {}).items()
             if str(key).lower() not in {"token", "authorization", "password", "secret", "cookie"}
@@ -477,7 +525,7 @@ class SqliteControlPlaneRepository:
         with self._lock:
             cursor = self._connection.execute(
                 "INSERT INTO control_plane_audit(occurred_at,request_id,organization_id,resource,outcome,actor,metadata_json) VALUES(?,?,?,?,?,?,?)",
-                (_now(), request_id or uuid.uuid4().hex, organization_id, resource, outcome, "local-control-token", _json(safe_metadata)),
+                (_now(), request_id or uuid.uuid4().hex, organization_id, resource, outcome, actor[:128], _json(safe_metadata)),
             )
             return int(cursor.lastrowid)
 

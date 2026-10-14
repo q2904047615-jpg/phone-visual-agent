@@ -165,11 +165,11 @@ def evaluate_device_registry(path: Path, *, real_evidence: bool = False) -> GARe
                        ("poc/test_device_exclusivity.py", "poc/test_device_runtime_resources.py")),
         ReadinessCheck("multi_device_physical_acceptance", "pass" if physical_status == "pass" else "blocked",
                        "等待真实第二机位及独立校准证据。" if physical_status != "pass" else "真实多设备证据已登记。"),
-        ReadinessCheck("users_teams_permissions", "partial", "用户/团队/角色权限、主体会话和写入权限已接入本机 Control Plane；外部身份认证和运行时授权尚未接入。",
+        ReadinessCheck("users_teams_permissions", "partial", "用户/团队/角色权限、主体会话、会话撤销和写入权限已接入本机 Control Plane；外部 provider 和运行时授权尚未接入。",
                        ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
         ReadinessCheck("quotas_billing", "partial", "配额计算、写入和幂等持久化已验证，计费与运行时扣减尚未接入；本批不新增隐式阻断。",
                        ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
-        ReadinessCheck("api_sdk", "partial", "API/SDK 版本、幂等、错误封套、主体会话和本机读写路由已验证，外部线上身份接入尚未完成。",
+        ReadinessCheck("api_sdk", "partial", "API/SDK 版本、幂等、错误封套、主体会话、撤销和本机读写路由已验证，具体外部身份 provider 尚未配置。",
                        ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py", "docs/control_plane_offline_contract.md")),
         ReadinessCheck("version_rollback", "partial", "工具/能力晋级已有回滚合同，平台版本回滚尚未形成 GA 发布流程。"),
     )

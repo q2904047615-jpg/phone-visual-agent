@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 
 CONTROL_PLANE_PROTOCOL = "2026-10-14-control-plane-v1"
 API_CONTRACT_VERSION = "2026-10-14-api-v1"
 SDK_CONTRACT_VERSION = "2026-10-14-sdk-v1"
+EXTERNAL_IDENTITY_PROTOCOL = "2026-10-14-external-identity-v1"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _ROLES = frozenset({"viewer", "operator", "admin", "owner"})
 _PERMISSIONS = frozenset({
@@ -44,6 +45,35 @@ def _require_nonnegative(value: int, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field_name} 必须是非负整数。")
     return value
+
+
+@dataclass(frozen=True)
+class ExternalIdentity:
+    """Identity returned only after an external provider verifies an assertion."""
+
+    provider_id: str
+    subject: str
+    organization_id: str
+    user_id: str
+    claims: Mapping[str, Any] = field(default_factory=dict)
+    protocol_version: str = EXTERNAL_IDENTITY_PROTOCOL
+
+    def validate(self) -> None:
+        if self.protocol_version != EXTERNAL_IDENTITY_PROTOCOL:
+            raise ValueError("外部身份协议版本不受支持。")
+        _require_id(self.provider_id, "provider_id")
+        _require_id(self.subject, "subject")
+        _require_id(self.organization_id, "organization_id")
+        _require_id(self.user_id, "user_id")
+        if not isinstance(self.claims, Mapping):
+            raise ValueError("外部身份 claims 必须是对象。")
+
+
+class ExternalIdentityProvider(Protocol):
+    provider_id: str
+
+    def authenticate(self, assertion: Mapping[str, Any]) -> ExternalIdentity:
+        """Verify an external assertion and return a normalized identity."""
 
 
 @dataclass(frozen=True)
@@ -285,8 +315,8 @@ class SdkContractManifest:
 
 
 __all__ = [
-    "API_CONTRACT_VERSION", "CONTROL_PLANE_PROTOCOL", "SDK_CONTRACT_VERSION", "ROLE_PERMISSIONS",
+    "API_CONTRACT_VERSION", "CONTROL_PLANE_PROTOCOL", "EXTERNAL_IDENTITY_PROTOCOL", "SDK_CONTRACT_VERSION", "ROLE_PERMISSIONS",
     "ApiError", "ApiRequestEnvelope", "ApiResponseEnvelope", "ControlPlaneOrganization",
     "ControlPlanePrincipal", "ControlPlaneSnapshot", "ControlPlaneTeam", "QuotaDecision", "QuotaLimit",
-    "QuotaUsage", "SdkContractManifest", "evaluate_quota",
+    "QuotaUsage", "SdkContractManifest", "ExternalIdentity", "ExternalIdentityProvider", "evaluate_quota",
 ]

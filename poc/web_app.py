@@ -42,8 +42,9 @@ from agent.infrastructure import (
     InterProcessLease,
     SHARED_DEVICE_LEASE_DIR,
     SqliteControlPlaneRepository,
+    ExternalIdentityProviderRegistry,
 )
-from agent.domain.control_plane import API_CONTRACT_VERSION, CONTROL_PLANE_PROTOCOL
+from agent.domain.control_plane import API_CONTRACT_VERSION, CONTROL_PLANE_PROTOCOL, EXTERNAL_IDENTITY_PROTOCOL
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
 )
@@ -87,6 +88,7 @@ from agent.interfaces.http_models import (
     CapabilityCancelRequest,
     CapabilityEffectApprovalRequest,
     CapabilityPromotionRequest,
+    ControlPlaneExternalIdentityRequest,
     ControlPlaneIdentitySessionRequest,
     ControlPlanePrincipalWriteRequest,
     ControlPlaneQuotaWriteRequest,
@@ -196,6 +198,8 @@ try:
     )
 except Exception as exc:
     runtime = RuntimeUnavailable(exc)
+
+control_plane_identity_registry = ExternalIdentityProviderRegistry()
 
 
 class _QishuiAdTestGateway:
@@ -487,9 +491,7 @@ async def disable_static_cache(request: Request, call_next):
     return response
 
 
-def verify_local_request(request: Request, token: str | None) -> None:
-    if token != CONTROL_TOKEN:
-        raise HTTPException(status_code=403, detail="控制令牌无效。")
+def verify_local_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if origin:
         try:
@@ -498,6 +500,12 @@ def verify_local_request(request: Request, token: str | None) -> None:
             raise HTTPException(status_code=403, detail="来源地址无效。")
         if origin_host not in {"127.0.0.1", "localhost"}:
             raise HTTPException(status_code=403, detail="只允许本机网页请求。")
+
+
+def verify_local_request(request: Request, token: str | None) -> None:
+    verify_local_origin(request)
+    if token != CONTROL_TOKEN:
+        raise HTTPException(status_code=403, detail="控制令牌无效。")
 
 
 def _control_plane_store() -> SqliteControlPlaneRepository:
@@ -533,6 +541,7 @@ def _validate_control_plane_page(after_sequence: int, limit: int) -> tuple[int, 
 def _control_plane_write_context(
     request: Request,
     organization_id: str,
+    operation: str,
     permission: str,
     x_control_token: str | None,
     x_control_plane_token: str | None,
@@ -540,18 +549,31 @@ def _control_plane_write_context(
 ) -> tuple[SqliteControlPlaneRepository, dict[str, Any], str]:
     verify_local_request(request, x_control_token)
     store = _control_plane_store()
+    request_id = _control_plane_request_id(request)
     if not x_control_plane_token:
+        store.record_audit(organization_id=organization_id, resource=operation, outcome="identity_required",
+                           request_id=request_id, metadata={"permission": permission}, actor="anonymous")
         raise HTTPException(status_code=401, detail={"code": "identity_required", "message": "需要 Control Plane 主体会话。"})
     principal = store.authenticate_identity_session(x_control_plane_token)
     if principal is None:
+        store.record_audit(organization_id=organization_id, resource=operation, outcome="identity_invalid",
+                           request_id=request_id, metadata={"permission": permission}, actor="anonymous")
         raise HTTPException(status_code=401, detail={"code": "identity_invalid", "message": "Control Plane 主体会话无效或已过期。"})
     if principal["organization_id"] != organization_id:
+        store.record_audit(organization_id=organization_id, resource=operation, outcome="organization_forbidden",
+                           request_id=request_id, metadata={"permission": permission, "user_id": principal["user_id"]}, actor=principal["user_id"])
         raise HTTPException(status_code=403, detail={"code": "organization_forbidden", "message": "主体不属于请求组织。"})
     if permission not in principal["permissions"]:
+        store.record_audit(organization_id=organization_id, resource=operation, outcome="permission_denied",
+                           request_id=request_id, metadata={"permission": permission, "user_id": principal["user_id"]}, actor=principal["user_id"])
         raise HTTPException(status_code=403, detail={"code": "permission_denied", "message": f"缺少权限：{permission}。"})
     key = str(idempotency_key or "").strip()
     if not key or len(key) > 128:
+        store.record_audit(organization_id=organization_id, resource=operation, outcome="idempotency_required",
+                           request_id=request_id, metadata={"permission": permission, "user_id": principal["user_id"]}, actor=principal["user_id"])
         raise HTTPException(status_code=422, detail={"code": "idempotency_required", "message": "写操作必须提供 1-128 位 Idempotency-Key。"})
+    store.record_audit(organization_id=organization_id, resource=operation, outcome="permission_allowed",
+                       request_id=request_id, metadata={"permission": permission, "user_id": principal["user_id"]}, actor=principal["user_id"])
     return store, principal, key
 
 
@@ -726,6 +748,98 @@ def control_plane_identity_session(
     return _control_plane_write_envelope(request, {"session": session}, idempotent_replay=False)
 
 
+@app.post("/api/control-plane/auth/external-sessions")
+def control_plane_external_identity_session(
+    body: ControlPlaneExternalIdentityRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Exchange a provider-verified assertion through the explicit provider port."""
+    verify_local_origin(request)
+    store = _control_plane_store()
+    actor = f"external:{body.provider_id}"[:128]
+    try:
+        identity = control_plane_identity_registry.authenticate(body.provider_id, body.assertion)
+    except KeyError as error:
+        store.record_audit(organization_id="unknown", resource="identity.external", outcome="provider_unavailable",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)
+        raise HTTPException(status_code=503, detail={"code": str(error.args[0]), "message": "外部身份 provider 尚未配置。"}) from error
+    except (ValueError, TypeError) as error:
+        store.record_audit(organization_id="unknown", resource="identity.external", outcome="assertion_rejected",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)
+        raise HTTPException(status_code=401, detail={"code": "external_identity_rejected", "message": "外部身份断言未通过验证。"}) from error
+    try:
+        session = store.issue_identity_session(
+            organization_id=identity.organization_id,
+            user_id=identity.user_id,
+        )
+    except KeyError as error:
+        store.record_audit(organization_id=identity.organization_id, resource="identity.external", outcome="principal_not_found",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": identity.provider_id, "user_id": identity.user_id}, actor=actor)
+        raise HTTPException(status_code=404, detail={"code": "principal_not_found", "message": "外部身份映射的主体不存在。"}) from error
+    store.record_audit(organization_id=identity.organization_id, resource="identity.external", outcome="issued",
+                       request_id=_control_plane_request_id(request),
+                       metadata={"provider_id": identity.provider_id, "subject": identity.subject, "user_id": identity.user_id},
+                       actor=actor)
+    return _control_plane_envelope({
+        "external_identity_protocol": EXTERNAL_IDENTITY_PROTOCOL,
+        "session": session,
+    })
+
+
+@app.delete("/api/control-plane/auth/sessions/{session_id}")
+def control_plane_revoke_identity_session(
+    session_id: str,
+    request: Request,
+    response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    request_id = _control_plane_request_id(request)
+    if not x_control_plane_token:
+        store.record_audit(organization_id="unknown", resource="identity.session.revoke", outcome="identity_required",
+                           request_id=request_id, metadata={"session_id": session_id}, actor="anonymous")
+        raise HTTPException(status_code=401, detail={"code": "identity_required", "message": "需要 Control Plane 主体会话。"})
+    principal = store.authenticate_identity_session(x_control_plane_token)
+    if principal is None:
+        store.record_audit(organization_id="unknown", resource="identity.session.revoke", outcome="identity_invalid",
+                           request_id=request_id, metadata={"session_id": session_id}, actor="anonymous")
+        raise HTTPException(status_code=401, detail={"code": "identity_invalid", "message": "Control Plane 主体会话无效或已过期。"})
+    target = store.get_identity_session(session_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail={"code": "identity_session_not_found", "message": "主体会话不存在。"})
+    if target["organization_id"] != principal["organization_id"]:
+        store.record_audit(organization_id=target["organization_id"], resource="identity.session.revoke", outcome="organization_forbidden",
+                           request_id=request_id, metadata={"session_id": session_id, "user_id": principal["user_id"]}, actor=principal["user_id"])
+        raise HTTPException(status_code=403, detail={"code": "organization_forbidden", "message": "主体不属于目标会话组织。"})
+    is_self = target["user_id"] == principal["user_id"] and target["session_id"] == principal["session_id"]
+    if not is_self and "identity.manage" not in principal["permissions"]:
+        store.record_audit(organization_id=target["organization_id"], resource="identity.session.revoke", outcome="permission_denied",
+                           request_id=request_id, metadata={"permission": "identity.manage", "session_id": session_id, "user_id": principal["user_id"]}, actor=principal["user_id"])
+        raise HTTPException(status_code=403, detail={"code": "permission_denied", "message": "撤销他人会话需要 identity.manage。"})
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 128:
+        raise HTTPException(status_code=422, detail={"code": "idempotency_required", "message": "会话撤销必须提供 Idempotency-Key。"})
+    store.record_audit(organization_id=target["organization_id"], resource="identity.session.revoke", outcome="permission_allowed",
+                       request_id=request_id, metadata={"session_id": session_id, "user_id": principal["user_id"], "self": is_self}, actor=principal["user_id"])
+    try:
+        status_code, data, replay = store.revoke_identity_session_idempotent(
+            organization_id=target["organization_id"], principal_user_id=principal["user_id"],
+            idempotency_key=key,
+            request_hash=_control_plane_write_request_hash("identity.session.revoke", target["organization_id"], {"session_id": session_id}),
+            session_id=session_id,
+        )
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    store.record_audit(organization_id=target["organization_id"], resource="identity.session.revoke",
+                       outcome="replay" if replay else "revoked", request_id=request_id,
+                       metadata={"session_id": session_id, "status_code": status_code}, actor=principal["user_id"])
+    response.status_code = 200
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
 @app.post("/api/control-plane/organizations/{organization_id}/teams")
 def control_plane_create_team(
     organization_id: str,
@@ -737,7 +851,7 @@ def control_plane_create_team(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     store, principal, key = _control_plane_write_context(
-        request, organization_id, "team.manage", x_control_token, x_control_plane_token, idempotency_key,
+        request, organization_id, "team.create", "team.manage", x_control_token, x_control_plane_token, idempotency_key,
     )
     try:
         status_code, data, replay = store.create_team(
@@ -770,7 +884,7 @@ def control_plane_update_team(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     store, principal, key = _control_plane_write_context(
-        request, organization_id, "team.manage", x_control_token, x_control_plane_token, idempotency_key,
+        request, organization_id, "team.update", "team.manage", x_control_token, x_control_plane_token, idempotency_key,
     )
     if body.name is None and body.member_ids is None:
         raise HTTPException(status_code=422, detail={"code": "empty_update", "message": "至少提供一个团队字段。"})
@@ -804,7 +918,7 @@ def control_plane_create_principal(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     store, principal, key = _control_plane_write_context(
-        request, organization_id, "identity.manage", x_control_token, x_control_plane_token, idempotency_key,
+        request, organization_id, "principal.create", "identity.manage", x_control_token, x_control_plane_token, idempotency_key,
     )
     try:
         status_code, data, replay = store.create_principal(
@@ -837,7 +951,7 @@ def control_plane_update_quota(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     store, principal, key = _control_plane_write_context(
-        request, organization_id, "quota.manage", x_control_token, x_control_plane_token, idempotency_key,
+        request, organization_id, "quota.update", "quota.manage", x_control_token, x_control_plane_token, idempotency_key,
     )
     if body.quota_key != quota_key:
         raise HTTPException(status_code=422, detail={"code": "quota_key_mismatch", "message": "路径 quota_key 与请求体不一致。"})

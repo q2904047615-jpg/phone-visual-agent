@@ -30,6 +30,11 @@ class ControlPlaneIdentitySessionRequest(StrictAgentRequest):
     user_id: StrictStr = Field(min_length=1, max_length=128)
 
 
+class ControlPlaneExternalIdentityRequest(StrictAgentRequest):
+    provider_id: StrictStr = Field(min_length=1, max_length=128)
+    assertion: dict[str, Any] = Field(default_factory=dict)
+
+
 class ControlPlaneTeamWriteRequest(StrictAgentRequest):
     team_id: StrictStr = Field(min_length=1, max_length=128)
     name: StrictStr = Field(min_length=1, max_length=256)

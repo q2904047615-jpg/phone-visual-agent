@@ -16,9 +16,19 @@ from .in_memory_session_repository import InMemoryAgentSessionRepository
 from .sqlite_session_repository import RecoveredAgentSession, SqliteAgentSessionRepository
 from .sqlite_control_plane_repository import SqliteControlPlaneRepository
 from .control_plane_identity import ExternalIdentityProviderRegistry
+from .github_oauth_provider import (
+    ExternalIdentityMappingNotFound,
+    ExternalIdentityProviderUnavailable,
+    GitHubIdentityMapping,
+    GitHubOAuthConfigurationError,
+    GitHubOAuthProvider,
+)
 
 __all__ = ['AdbPairingError', 'AdbPairingService', 'DeviceTaskRegistry', 'CameraPreviewUnavailable', 'DeviceCameraCoordinator', 'DeviceControllerRegistry',
     'DeviceControllerRegistryError', 'DeviceRuntimeResourceError', 'DeviceRuntimeResourceRegistry',
     'FileSystemAgentEvidenceStore', 'InMemoryAgentSessionRepository', 'RecoveredAgentSession',
-    'SqliteAgentSessionRepository', 'SqliteControlPlaneRepository', 'ExternalIdentityProviderRegistry', 'InterProcessLease', 'ReplayDeviceExecutor',
+    'SqliteAgentSessionRepository', 'SqliteControlPlaneRepository', 'ExternalIdentityProviderRegistry',
+    'ExternalIdentityMappingNotFound', 'ExternalIdentityProviderUnavailable',
+    'GitHubIdentityMapping', 'GitHubOAuthConfigurationError', 'GitHubOAuthProvider',
+    'InterProcessLease', 'ReplayDeviceExecutor',
     'RobotDeviceExecutor', 'ProvisionalDeviceControllerError', 'SHARED_DEVICE_LEASE_DIR']

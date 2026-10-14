@@ -43,6 +43,10 @@ from agent.infrastructure import (
     SHARED_DEVICE_LEASE_DIR,
     SqliteControlPlaneRepository,
     ExternalIdentityProviderRegistry,
+    ExternalIdentityMappingNotFound,
+    ExternalIdentityProviderUnavailable,
+    GitHubOAuthConfigurationError,
+    GitHubOAuthProvider,
 )
 from agent.domain.control_plane import API_CONTRACT_VERSION, CONTROL_PLANE_PROTOCOL, EXTERNAL_IDENTITY_PROTOCOL
 from agent.infrastructure.capability_acceptance import (
@@ -200,6 +204,15 @@ except Exception as exc:
     runtime = RuntimeUnavailable(exc)
 
 control_plane_identity_registry = ExternalIdentityProviderRegistry()
+_github_oauth_provider = None
+try:
+    _github_oauth_provider = GitHubOAuthProvider.from_environment()
+except GitHubOAuthConfigurationError as exc:
+    # A partial deployment configuration must fail closed for external login
+    # without preventing the local phone Runtime from starting.
+    _LOGGER.warning("GitHub OAuth provider disabled: %s", _diagnostic_error_text(exc))
+if _github_oauth_provider is not None:
+    control_plane_identity_registry.register(_github_oauth_provider)
 
 
 class _QishuiAdTestGateway:
@@ -461,6 +474,8 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
             1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
         ).start()
     yield
+    if _github_oauth_provider is not None:
+        _github_oauth_provider.close()
     _MANUAL_MOTION_MONITOR.shutdown()
     runtime.shutdown()
     _LUCKY_BAG_MONITOR.shutdown()
@@ -763,6 +778,14 @@ def control_plane_external_identity_session(
         store.record_audit(organization_id="unknown", resource="identity.external", outcome="provider_unavailable",
                            request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)
         raise HTTPException(status_code=503, detail={"code": str(error.args[0]), "message": "外部身份 provider 尚未配置。"}) from error
+    except ExternalIdentityProviderUnavailable as error:
+        store.record_audit(organization_id="unknown", resource="identity.external", outcome="provider_unavailable",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)
+        raise HTTPException(status_code=503, detail={"code": "external_provider_unavailable", "message": "外部身份 provider 暂时不可用。"}) from error
+    except ExternalIdentityMappingNotFound as error:
+        store.record_audit(organization_id="unknown", resource="identity.external", outcome="mapping_not_found",
+                           request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)
+        raise HTTPException(status_code=404, detail={"code": "external_identity_mapping_not_found", "message": "外部身份尚未完成主体映射。"}) from error
     except (ValueError, TypeError) as error:
         store.record_audit(organization_id="unknown", resource="identity.external", outcome="assertion_rejected",
                            request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)

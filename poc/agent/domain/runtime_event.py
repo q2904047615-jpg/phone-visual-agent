@@ -88,7 +88,7 @@ def classify_runtime_failure(
         category = "device"
     elif any(token in lowered for token in ("config", "配置", "registry", "注册表")):
         category = "configuration"
-    elif any(token in lowered for token in ("execute", "执行", "transport", "动作")):
+    elif any(token in lowered for token in ("execute", "execution", "执行", "transport", "动作")):
         category = "execution"
     else:
         category = "system"

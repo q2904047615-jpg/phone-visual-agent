@@ -11,12 +11,15 @@ from typing import Any, Mapping
 from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
+    RuntimeFailure,
+    classify_runtime_failure,
 )
 from agent.infrastructure import ReplayDeviceExecutor
 from agent.domain.text_transport import TextTransportActionScope
 
 
 TASK_SEQUENCE_BENCHMARK_PROTOCOL = "2026-08-25-task-sequence-replay-v1"
+TASK_SEQUENCE_EVALUATION_PROTOCOL = "2026-10-14-task-sequence-evaluation-v1"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -102,6 +105,7 @@ def evaluate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     total_expected = 0
     total_matched = 0
+    failure_categories: dict[str, int] = {}
 
     for raw_case in cases:
         if not isinstance(raw_case, Mapping):
@@ -147,6 +151,7 @@ def evaluate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         )
         case_started = time.perf_counter()
         failure = ""
+        failure_diagnostic: RuntimeFailure | None = None
         matched = 0
         try:
             for request in recorded_requests:
@@ -154,13 +159,23 @@ def evaluate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
                 matched += 1
             if not replay.complete:
                 failure = "录制序列提前结束。"
+                failure_diagnostic = classify_runtime_failure(
+                    failure, stage="verification.replay_terminal"
+                )
             elif recorded_terminal != expected_terminal:
                 failure = (
                     "终态不匹配："
                     f"{recorded_terminal or 'missing'} != {expected_terminal}"
                 )
+                failure_diagnostic = classify_runtime_failure(
+                    failure, stage="verification.replay_terminal"
+                )
         except (DeviceExecutionError, TaskSequenceBenchmarkError) as exc:
             failure = str(exc)
+            failure_diagnostic = classify_runtime_failure(
+                exc, stage=("execution.replay_action" if isinstance(exc, DeviceExecutionError)
+                            else "configuration.replay_manifest")
+            )
         total_expected += len(expected_requests)
         total_matched += matched
         results.append(
@@ -170,6 +185,8 @@ def evaluate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
                 "goal": goal,
                 "passed": not failure,
                 "failure": failure,
+                "failure_category": failure_diagnostic.category if failure_diagnostic else None,
+                "failure_code": failure_diagnostic.code if failure_diagnostic else None,
                 "expected_actions": len(expected_requests),
                 "matched_actions": matched,
                 "terminal_status": recorded_terminal,
@@ -181,16 +198,22 @@ def evaluate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
+        if failure_diagnostic is not None:
+            failure_categories[failure_diagnostic.category] = (
+                failure_categories.get(failure_diagnostic.category, 0) + 1
+            )
 
     passed_cases = sum(1 for item in results if item["passed"])
     return {
         "protocol_version": TASK_SEQUENCE_BENCHMARK_PROTOCOL,
+        "evaluation_protocol": TASK_SEQUENCE_EVALUATION_PROTOCOL,
         "mode": "offline_read_only",
         "manifest_digest": _digest(dict(manifest)),
         "case_count": len(results),
         "distinct_app_scopes": len(app_scopes),
         "passed_cases": passed_cases,
         "failed_cases": len(results) - passed_cases,
+        "failure_categories": dict(sorted(failure_categories.items())),
         "task_success_rate": passed_cases / len(results),
         "expected_actions": total_expected,
         "matched_actions": total_matched,

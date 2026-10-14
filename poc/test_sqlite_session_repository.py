@@ -71,6 +71,24 @@ class SqliteSessionRepositoryTests(unittest.TestCase):
             self.assertTrue(active[0]["recovery_required"])
             current_process.close()
 
+    def test_cached_live_projection_yields_to_cross_process_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runtime.sqlite3"
+            current_process = SqliteAgentSessionRepository(database)
+            current_process.add(_Session(status="awaiting_confirmation"))
+            self.assertEqual("awaiting_confirmation", current_process.require("s1").status)
+
+            external_process = SqliteAgentSessionRepository(database)
+            recovered = external_process.reconcile_recovered(
+                "s1", requested_device_id="device-1", external_effect="not_dispatched",
+            )
+            self.assertEqual("cancelled", recovered.status)
+            external_process.close()
+
+            self.assertEqual([], current_process.active_snapshots())
+            self.assertEqual("cancelled", current_process.require("s1").status)
+            current_process.close()
+
     def test_reconcile_not_dispatched_closes_recovered_session_without_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "runtime.sqlite3"

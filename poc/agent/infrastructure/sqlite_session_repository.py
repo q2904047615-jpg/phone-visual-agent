@@ -256,12 +256,23 @@ class SqliteAgentSessionRepository:
     def get(self, session_id: str) -> AgentSession | None:
         with self._lock:
             live = self._sessions.get(session_id)
-            if live is not None:
-                return live
             row = self._connection.execute(
                 "SELECT * FROM runtime_sessions WHERE session_id=?", (session_id,)
             ).fetchone()
-            return self._recovered_from_row(row) if row is not None else None
+            if row is None:
+                if live is not None:
+                    self._sessions.pop(session_id, None)
+                return None
+            if live is None:
+                return self._recovered_from_row(row)
+            durable_status = str(row["status"])
+            # A recovered projection can be resolved by another process while
+            # this process is still alive.  Re-read durable terminal/recovery
+            # state instead of returning the stale in-memory projection.
+            if isinstance(live, RecoveredAgentSession) or durable_status == RECOVERY_REQUIRED_STATUS \
+                    or durable_status not in ACTIVE_SESSION_STATUSES:
+                return self._recovered_from_row(row)
+            return live
 
     def require(self, session_id: str) -> AgentSession:
         session = self.get(session_id)
@@ -303,6 +314,17 @@ class SqliteAgentSessionRepository:
             # sessions recovered from a prior process.
             live = []
             for session in self._sessions.values():
+                row = self._connection.execute(
+                    "SELECT * FROM runtime_sessions WHERE session_id=?", (session.session_id,)
+                ).fetchone()
+                if row is None:
+                    continue
+                durable_status = str(row["status"])
+                if durable_status == RECOVERY_REQUIRED_STATUS:
+                    live.append(self._recovered_from_row(row).snapshot())
+                    continue
+                if durable_status not in ACTIVE_SESSION_STATUSES:
+                    continue
                 snapshot = dict(session.snapshot())
                 if snapshot.get("status", getattr(session, "status", "")) in statuses:
                     live.append(snapshot)

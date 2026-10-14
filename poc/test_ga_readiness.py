@@ -44,7 +44,7 @@ class GAReadinessTests(unittest.TestCase):
         self.assertEqual("pass", report.offline_virtual_status)
         self.assertEqual("blocked_no_real_evidence", report.physical_multi_device_status)
         self.assertEqual("pass", next(item.status for item in report.checks if item.check_id == "offline_virtual_multi_device"))
-        self.assertEqual("not_started", next(item.status for item in report.ga_scope if item.check_id == "users_teams_permissions"))
+        self.assertEqual("partial", next(item.status for item in report.ga_scope if item.check_id == "users_teams_permissions"))
 
     def test_missing_calibration_blocks_virtual_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

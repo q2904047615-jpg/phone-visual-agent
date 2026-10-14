@@ -37,6 +37,12 @@ from .runtime_event import (
     validate_replay_cursor,
     validate_replay_page_size,
 )
+from .control_plane import (
+    API_CONTRACT_VERSION, CONTROL_PLANE_PROTOCOL, SDK_CONTRACT_VERSION, ROLE_PERMISSIONS,
+    ApiError, ApiRequestEnvelope, ApiResponseEnvelope, ControlPlaneOrganization,
+    ControlPlanePrincipal, ControlPlaneSnapshot, ControlPlaneTeam, QuotaDecision, QuotaLimit,
+    QuotaUsage, SdkContractManifest, evaluate_quota,
+)
 
 __all__ = ['ACTIVE_SESSION_STATUSES', 'CANONICAL_SELECTION_RECEIPT_VERSION', 'DEVICE_EXECUTOR_PROTOCOL',
     'AgentSession', 'AgentSessionConflictError', 'AgentSessionDeviceMismatchError',
@@ -50,4 +56,7 @@ __all__ = ['ACTIVE_SESSION_STATUSES', 'CANONICAL_SELECTION_RECEIPT_VERSION', 'DE
     'FAILURE_CATEGORIES', 'MAX_REPLAY_PAGE_SIZE', 'RUNTIME_EVENT_REPLAY_PROTOCOL',
     'RuntimeEvent', 'RuntimeEventPage', 'RuntimeFailure', 'classify_runtime_failure',
     'validate_replay_cursor', 'validate_replay_page_size',
-    'require_session_device']
+    'require_session_device', 'API_CONTRACT_VERSION', 'CONTROL_PLANE_PROTOCOL', 'SDK_CONTRACT_VERSION',
+    'ROLE_PERMISSIONS', 'ApiError', 'ApiRequestEnvelope', 'ApiResponseEnvelope',
+    'ControlPlaneOrganization', 'ControlPlanePrincipal', 'ControlPlaneSnapshot', 'ControlPlaneTeam',
+    'QuotaDecision', 'QuotaLimit', 'QuotaUsage', 'SdkContractManifest', 'evaluate_quota']

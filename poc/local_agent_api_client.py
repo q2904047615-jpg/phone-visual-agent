@@ -204,11 +204,18 @@ class LocalAgentApiClient:
             extra_headers={},
         )
 
-    def control_plane_github_oauth_start(self) -> JsonObject:
+    def control_plane_github_oauth_start(self, *, browser: bool = False) -> JsonObject:
         return self._request(
             "GET", self.CONTROL_PLANE_GITHUB_OAUTH_START_ROUTE,
+            query_params={"browser": "true"} if browser else None,
             read_only=False,
         )
+
+    def control_plane_browser_session(self) -> JsonObject:
+        return self._request("GET", "/api/control-plane/auth/browser-session", read_only=True)
+
+    def control_plane_browser_logout(self) -> JsonObject:
+        return self._request("POST", "/api/control-plane/auth/browser-logout", read_only=False)
 
     def control_plane_revoke_identity_session(self, session_id: str, *, principal_token: str,
                                               idempotency_key: str) -> JsonObject:

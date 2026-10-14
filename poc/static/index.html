@@ -19,6 +19,14 @@
         <span class="sidebar-live-dot"></span>
         <div><strong>本地 Agent</strong><small id="modeBadge">正在连接</small></div>
       </div>
+      <section class="account-panel" aria-label="网站账号">
+        <strong id="accountStatus" aria-live="polite">正在检查登录状态</strong>
+        <small id="accountDetail"></small>
+        <button id="githubLoginButton" class="secondary-button" type="button" disabled>使用 GitHub 登录</button>
+        <button id="accountLogoutButton" class="secondary-button" type="button" hidden>退出登录</button>
+        <button id="accountRetryButton" class="secondary-button" type="button" hidden>重新检查</button>
+        <p id="accountError" role="status" hidden></p>
+      </section>
       <div class="sidebar-note">
         <span class="eyebrow">ONE CONVERSATION</span>
         <p>把任务交给 Agent 平台。模型网关结合当前手机画面提供建议，Planner 负责签发并执行。</p>
@@ -241,6 +249,7 @@
   </dialog>
 
   <script src="/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"></script>
+  <script src="/assets/account.js?v=20261015-github-login-v1"></script>
   <script src="/assets/app.js?v=20260927-main-chain-cleanup-v1"></script>
 </body>
 </html>

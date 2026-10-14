@@ -713,3 +713,9 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 }
 .task-run-status-primary[data-task-state="not-started"] .task-run-status-label { color: #c4cee4; }
 .task-run-status-primary .task-run-status-detail { font-size: 11px; }
+/* Website account controls also remain usable in the compact sidebar. */
+.account-panel { display: flex; flex-direction: column; gap: 10px; padding: 16px; min-width: 0; }
+.account-panel strong, .account-panel small, .account-panel p { overflow-wrap: anywhere; }
+.account-panel small { opacity: .8; }
+.account-panel p { margin: 0; font-size: 13px; }
+.account-panel [hidden] { display: none !important; }

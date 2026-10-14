@@ -2,6 +2,16 @@
 
 当前实现是 GitHub OAuth Web application authorization-code flow：浏览器授权、固定回调、服务端 code exchange、PKCE、Check a token、稳定用户 ID 映射和本地主体会话签发。
 
+## 网站登录入口（2026-10-15）
+
+工作台账号区域提供「使用 GitHub 登录」、当前主体/组织/有效期和「退出登录」。网页登录请求使用 `GET /api/control-plane/auth/github/start?browser=true`；服务设置短期 HttpOnly 浏览器绑定 Cookie，回调必须匹配发起浏览器，再复用同一 GitHub 验证和 SQLite 会话签发链。成功后 303 返回工作台，仅在 HttpOnly、SameSite=Lax Cookie 中保存本地主体令牌，Cookie 路径限定 `/api/control-plane/auth`，HTTPS 下设置 Secure，HTTP 仅用于现有本机验收地址。
+
+`GET /api/control-plane/auth/browser-session` 从 SQLite 验证当前 Cookie，仅返回登录状态、主体、组织、角色和过期时间；无效/过期 Cookie 会被清除。`POST /api/control-plane/auth/browser-logout` 通过现有会话撤销权威撤销当前会话并清除 Cookie，重复退出安全。两接口保留本机控制令牌与来源校验；登录状态不接入手机 Runtime admission。回调失败回到工作台显示固定提示，不把授权码、令牌或供应商原始错误带进 URL；认证响应禁止缓存。JS/localStorage/sessionStorage 不保存主体令牌。
+
+默认不带 `browser=true` 的 API 授权码流程保留 JSON 会话封套合同。网站使用 `http://127.0.0.1:8765/`，与部署回调同主机；服务重启会使进行中的 OAuth 请求失效，需要重新登录，已签发且未过期/撤销的 SQLite 会话仍有效。
+
+本批离线证据：身份/API 定向 33 项通过；日常 Python 933 项、4 skipped，前端单元 19 项、浏览器 28 项通过。历史实验 120 项中 2 failures/38 errors，修改前 HEAD 隔离副本复现同样结果（缺失历史样本及旧断言），不得宣称完整历史回归通过。真实网站入口验收待本批加载后记录；已有下文真实 OAuth API 验收不能替代网站验收。
+
 ## 部署配置
 
 在运行 API 的同一进程环境中设置：

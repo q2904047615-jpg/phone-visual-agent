@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.application import (
@@ -210,7 +210,10 @@ except Exception as exc:
 
 control_plane_identity_registry = ExternalIdentityProviderRegistry()
 _github_oauth_provider = None
-_github_oauth_pending_verifiers: dict[str, tuple[str, float]] = {}
+_github_oauth_pending_verifiers: dict[str, tuple[str, float, str]] = {}
+_BROWSER_SESSION_COOKIE = "agent_principal"
+_OAUTH_BROWSER_COOKIE = "agent_oauth_browser"
+_AUTH_COOKIE_PATH = "/api/control-plane/auth"
 _GITHUB_OAUTH_STATE_TTL_SECONDS = 600
 try:
     _github_oauth_provider = GitHubOAuthProvider.from_environment()
@@ -510,6 +513,9 @@ async def disable_static_cache(request: Request, call_next):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    if path.startswith("/api/control-plane/auth/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -829,6 +835,8 @@ def _github_browser_provider() -> GitHubOAuthProvider:
 @app.get("/api/control-plane/auth/github/start")
 def control_plane_github_oauth_start(
     request: Request,
+    response: Response,
+    browser: bool = False,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
     """Start GitHub's browser authorization-code flow with state and PKCE."""
@@ -836,7 +844,7 @@ def control_plane_github_oauth_start(
     provider = _github_browser_provider()
     store = _control_plane_store()
     now = time.time()
-    for key, (_, expires_at) in list(_github_oauth_pending_verifiers.items()):
+    for key, (_, expires_at, _) in list(_github_oauth_pending_verifiers.items()):
         if expires_at <= now:
             _github_oauth_pending_verifiers.pop(key, None)
     state = secrets.token_urlsafe(32)
@@ -851,7 +859,15 @@ def control_plane_github_oauth_start(
         redirect_uri=provider.redirect_uri,
         expires_at=expires_text,
     )
-    _github_oauth_pending_verifiers[state_hash] = (code_verifier, expires_at.timestamp())
+    binding = secrets.token_urlsafe(32) if browser else ""
+    _github_oauth_pending_verifiers[state_hash] = (
+        code_verifier, expires_at.timestamp(),
+        hashlib.sha256(binding.encode()).hexdigest() if binding else "",
+    )
+    if browser:
+        response.set_cookie(_OAUTH_BROWSER_COOKIE, binding, max_age=_GITHUB_OAUTH_STATE_TTL_SECONDS,
+                            path=_AUTH_COOKIE_PATH, httponly=True, samesite="lax",
+                            secure=request.url.scheme == "https")
     authorization_url = provider.authorization_url(state=state, code_challenge=code_challenge)
     store.record_audit(
         organization_id="unknown",
@@ -872,8 +888,7 @@ def control_plane_github_oauth_start(
     })
 
 
-@app.get("/api/control-plane/auth/github/callback")
-def control_plane_github_oauth_callback(
+def _complete_github_oauth_callback(
     request: Request,
     code: str | None = None,
     state: str | None = None,
@@ -885,6 +900,13 @@ def control_plane_github_oauth_callback(
     store = _control_plane_store()
     state_value = str(state or "").strip()
     state_hash = hashlib.sha256(state_value.encode("utf-8")).hexdigest() if state_value else ""
+    pending = _github_oauth_pending_verifiers.get(state_hash)
+    if pending and pending[2]:
+        binding = request.cookies.get(_OAUTH_BROWSER_COOKIE, "")
+        if not binding or not secrets.compare_digest(pending[2], hashlib.sha256(binding.encode()).hexdigest()):
+            store.record_audit(organization_id="unknown", resource="identity.external.oauth",
+                               outcome="browser_binding_rejected", metadata={"provider_id": "github"})
+            raise HTTPException(status_code=400, detail={"code": "oauth_browser_mismatch", "message": "请在发起登录的浏览器中完成授权。"})
     record = store.consume_oauth_state(
         state_hash=state_hash,
         provider_id=provider.provider_id,
@@ -900,7 +922,7 @@ def control_plane_github_oauth_callback(
             actor="external:github",
         )
         raise HTTPException(status_code=400, detail={"code": "oauth_state_invalid", "message": "OAuth state 无效、已过期或已使用。"})
-    code_verifier, expires_at = pending
+    code_verifier, expires_at, _ = pending
     if expires_at <= time.time() or record["redirect_uri"] != provider.redirect_uri:
         raise HTTPException(status_code=400, detail={"code": "oauth_state_invalid", "message": "OAuth state 无效或已过期。"})
     if error:
@@ -956,6 +978,73 @@ def control_plane_github_oauth_callback(
         "external_identity_protocol": EXTERNAL_IDENTITY_PROTOCOL,
         "session": session,
     })
+
+
+@app.get("/api/control-plane/auth/github/callback", response_model=None)
+def control_plane_github_oauth_callback(
+    request: Request, code: str | None = None, state: str | None = None,
+    error: str | None = None, error_description: str | None = None,
+) -> Response | dict[str, Any]:
+    state_hash = hashlib.sha256(str(state or "").strip().encode()).hexdigest()
+    pending = _github_oauth_pending_verifiers.get(state_hash)
+    browser = bool((pending and pending[2]) or request.cookies.get(_OAUTH_BROWSER_COOKIE))
+    try:
+        result = _complete_github_oauth_callback(request, code, state, error, error_description)
+    except HTTPException as exc:
+        if not browser:
+            raise
+        error_code = exc.detail.get("code", "login_failed") if isinstance(exc.detail, dict) else "login_failed"
+        response = RedirectResponse("/?login_error=" + error_code, status_code=303)
+        response.delete_cookie(_OAUTH_BROWSER_COOKIE, path=_AUTH_COOKIE_PATH)
+        return response
+    if not browser:
+        return result
+    # Reuse the same durable principal session; the website never sees its token.
+    session = result["data"]["session"]
+    store = _control_plane_store()
+    previous = store.authenticate_identity_session(request.cookies.get(_BROWSER_SESSION_COOKIE, ""))
+    if previous:
+        store.revoke_identity_session(previous["session_id"])
+        store.record_audit(organization_id=previous["organization_id"], resource="identity.session.revoke",
+                           outcome="replaced", metadata={"session_id": previous["session_id"]}, actor=previous["user_id"])
+    response = RedirectResponse("/?login=success", status_code=303)
+    ttl = max(0, int((datetime.fromisoformat(session["expires_at"]) - datetime.now(timezone.utc)).total_seconds()))
+    response.set_cookie(_BROWSER_SESSION_COOKIE, session["principal_token"], max_age=ttl,
+                        path=_AUTH_COOKIE_PATH, httponly=True, samesite="lax", secure=request.url.scheme == "https")
+    response.delete_cookie(_OAUTH_BROWSER_COOKIE, path=_AUTH_COOKIE_PATH)
+    return response
+
+
+@app.get("/api/control-plane/auth/browser-session")
+def control_plane_browser_session(request: Request, response: Response,
+                                  x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    token = request.cookies.get(_BROWSER_SESSION_COOKIE, "")
+    principal = _control_plane_store().authenticate_identity_session(token)
+    if token and not principal:
+        response.delete_cookie(_BROWSER_SESSION_COOKIE, path=_AUTH_COOKIE_PATH)
+    return _control_plane_envelope({
+        "authenticated": principal is not None,
+        "github_available": isinstance(control_plane_identity_registry.get("github"), GitHubOAuthProvider),
+        "session": ({key: principal[key] for key in ("user_id", "organization_id", "role", "expires_at")}
+                    if principal else None),
+    })
+
+
+@app.post("/api/control-plane/auth/browser-logout")
+def control_plane_browser_logout(request: Request, response: Response,
+                                 x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    token = request.cookies.get(_BROWSER_SESSION_COOKIE, "")
+    principal = _control_plane_store().authenticate_identity_session(token)
+    if principal:
+        control_plane_revoke_identity_session(
+            principal["session_id"], request, response, x_control_token, token,
+            "browser-logout-" + principal["session_id"],
+        )
+    response.delete_cookie(_BROWSER_SESSION_COOKIE, path=_AUTH_COOKIE_PATH)
+    response.delete_cookie(_OAUTH_BROWSER_COOKIE, path=_AUTH_COOKIE_PATH)
+    return _control_plane_envelope({"authenticated": False})
 
 
 @app.delete("/api/control-plane/auth/sessions/{session_id}")

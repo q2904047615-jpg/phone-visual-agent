@@ -2536,6 +2536,7 @@ async function init() {
     const mode = document.querySelector("#modeBadge");
     mode.textContent = session.mock ? "模拟模式 · 无实机动作" : "实机接口已连接";
     mode.classList.toggle("live-mode", !session.mock);
+    if (window.AgentAccount) await window.AgentAccount.mount(api);
     await refreshDevice();
     if (!isBrowserReload) {
       await restoreLuckyBagMonitor();

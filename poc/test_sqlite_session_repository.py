@@ -63,6 +63,9 @@ class SqliteSessionRepositoryTests(unittest.TestCase):
             recovered = current_process.require("s1")
             self.assertEqual("recovery_required", recovered.status)
             self.assertTrue(getattr(recovered, "recovery_required"))
+            active = current_process.active_snapshots()
+            self.assertEqual(["recovery_required"], [item["status"] for item in active])
+            self.assertTrue(active[0]["recovery_required"])
             current_process.close()
 
     def test_reconcile_not_dispatched_closes_recovered_session_without_replay(self) -> None:

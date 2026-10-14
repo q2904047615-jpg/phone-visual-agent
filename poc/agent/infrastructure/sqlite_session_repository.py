@@ -285,11 +285,10 @@ class SqliteAgentSessionRepository:
         with self._lock:
             statuses = tuple(sorted(ACTIVE_SESSION_STATUSES | {RECOVERY_REQUIRED_STATUS}))
             rows = self._connection.execute(
-                "SELECT snapshot_json FROM runtime_sessions WHERE status IN (" + ",".join("?" for _ in statuses) + ") "
+                "SELECT * FROM runtime_sessions WHERE status IN (" + ",".join("?" for _ in statuses) + ") "
                 "ORDER BY updated_at DESC",
                 statuses,
             ).fetchall()
-            durable = [json.loads(row["snapshot_json"]) for row in rows]
             live_ids = set(self._sessions)
             # The current process owns live aggregates.  Read their latest
             # projection so an in-process terminal transition is visible even
@@ -300,7 +299,11 @@ class SqliteAgentSessionRepository:
                 snapshot = dict(session.snapshot())
                 if snapshot.get("status", getattr(session, "status", "")) in statuses:
                     live.append(snapshot)
-            recovered = [snapshot for snapshot in durable if snapshot.get("session_id") not in live_ids]
+            recovered = [
+                self._recovered_from_row(row).snapshot()
+                for row in rows
+                if str(row["session_id"]) not in live_ids
+            ]
             return sorted([*live, *recovered], key=lambda item: str(item.get("updated_at", "")), reverse=True)
 
     def events(self, session_id: str, *, after_sequence: int = 0) -> list[dict[str, Any]]:

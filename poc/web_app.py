@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from agent.interfaces import website_access
@@ -547,17 +548,57 @@ async def disable_static_cache(request: Request, call_next):
     return response
 
 
+def _configured_public_origin() -> str | None:
+    """Return the one explicitly configured public HTTPS origin, if valid."""
+
+    raw = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+    ):
+        return None
+    return f"https://{parsed.netloc}".rstrip("/")
+
+
 def verify_local_origin(request: Request) -> None:
     origin = request.headers.get("origin")
-    if origin:
-        try:
-            origin_host = origin.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
-        except IndexError:
-            raise HTTPException(status_code=403, detail="来源地址无效。")
-        if origin_host not in {"127.0.0.1", "localhost"}:
-            raise HTTPException(status_code=403, detail="只允许本机网页请求。")
-        if origin.rstrip("/") != str(request.base_url).rstrip("/"):
-            raise HTTPException(status_code=403, detail="只允许同源网页请求。")
+    if not origin:
+        return
+    normalized = origin.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if (
+        not parsed.scheme
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(status_code=403, detail="来源地址无效。")
+
+    request_origin = str(request.base_url).rstrip("/")
+    local_origin = parsed.hostname.lower() in {"127.0.0.1", "localhost", "::1"}
+    if local_origin:
+        if normalized != request_origin:
+            raise HTTPException(status_code=403, detail="只允许本机同源网页请求。")
+        return
+
+    public_origin = _configured_public_origin()
+    if public_origin and normalized == public_origin:
+        return
+    if public_origin:
+        raise HTTPException(status_code=403, detail="只允许配置的公网同源网页请求。")
+    raise HTTPException(status_code=403, detail="只允许本机网页请求。")
 
 
 def verify_local_request(request: Request, token: str | None) -> None:

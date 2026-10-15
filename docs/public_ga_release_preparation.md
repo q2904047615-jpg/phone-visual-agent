@@ -27,6 +27,7 @@
 - 未启用第二台设备、未执行手机动作、未调用外部支付或推送。
 - 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。
 - 配置预检已收敛为只阻断公网入口和 OAuth App 外部配置，不再要求重复提供可推导的模型、本机路径或当前 owner 映射。
+- `PUBLIC_BASE_URL=https://agent.jianlizhineng.cn` 的隔离 HTTP 回归已通过：配置的公网 origin 可访问，其他 origin 返回 `403`；该回归使用临时 SQLite，不代表公网 DNS/HTTPS 已验收。
 - 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标；目标仍有 `-wal/-shm` sidecar 时会拒绝覆盖，需先停写入并完成 checkpoint。
 
 ## 公共 GA 必须先确定的配置
@@ -41,7 +42,7 @@
 - 代理是否传递并且只信任 `Host`、`X-Forwarded-Proto` 等头部。不能让公网客户端伪造这些头部。
 - 公网入口的来源策略：只允许该 HTTPS origin，不能继续使用“任意 Origin”或把本机控制令牌当作用户身份。
 
-当前代码的 `start_verified.py` 和 `verify_local_origin` 仍是本机验收合同；公共部署前必须针对上述域名完成一次受控来源配置、Cookie `Secure` 行为和跨站拒绝验收。
+当前代码的 `verify_local_origin` 已支持显式 `PUBLIC_BASE_URL` 公网 HTTPS origin：未配置时继续只允许本机同源请求，配置后只额外允许该精确公网 origin，其他来源仍拒绝。公共部署前仍必须针对上述域名完成一次受控来源配置、Cookie `Secure` 行为和跨站拒绝验收。
 
 ### 2. GitHub OAuth（必填）
 

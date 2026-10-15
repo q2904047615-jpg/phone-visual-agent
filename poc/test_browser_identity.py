@@ -112,6 +112,21 @@ class BrowserIdentityTests(unittest.TestCase):
                          headers={**self.headers, 'Origin': 'https://evil.example'}).status_code)
         self.assertTrue(self.status().json()['data']['authenticated'])
 
+    def test_configured_public_origin_is_allowed_but_other_origin_is_rejected(self):
+        with patch.dict('os.environ', {'PUBLIC_BASE_URL': 'https://agent.jianlizhineng.cn'}):
+            with TestClient(web_app.app, base_url='https://agent.jianlizhineng.cn') as public:
+                headers = {
+                    'X-Control-Token': web_app.CONTROL_TOKEN,
+                    'Origin': 'https://agent.jianlizhineng.cn',
+                }
+                allowed = public.get('/api/control-plane/auth/github/start?browser=true', headers=headers)
+                self.assertEqual(200, allowed.status_code, allowed.text)
+                self.assertIn('Secure', allowed.headers['set-cookie'])
+                denied = public.get('/api/control-plane/auth/github/start?browser=true', headers={
+                    **headers, 'Origin': 'https://evil.example',
+                })
+                self.assertEqual(403, denied.status_code, denied.text)
+
     def test_denial_and_restarted_flow_return_clean_error_redirect(self):
         state = self.start()
         r = self.client.get('/api/control-plane/auth/github/callback',

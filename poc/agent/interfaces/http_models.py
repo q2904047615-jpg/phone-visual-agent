@@ -60,6 +60,11 @@ class ControlPlaneQuotaWriteRequest(StrictAgentRequest):
     max_model_tokens: StrictInt | None = Field(default=None, ge=0)
 
 
+class DeviceAssignmentRequest(StrictAgentRequest):
+    user_id: StrictStr | None = Field(default=None, min_length=1, max_length=128)
+    expected_revision: StrictInt = Field(ge=0)
+
+
 class QwenConversationMessage(StrictAgentRequest):
     role: Literal["user", "assistant"]
     content: StrictStr = Field(min_length=1)

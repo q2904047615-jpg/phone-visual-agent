@@ -21,17 +21,17 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _ROLES = frozenset({"viewer", "operator", "admin", "owner"})
 _PERMISSIONS = frozenset({
     "task.read", "task.create", "task.cancel", "device.read", "device.execute",
-    "audit.read", "team.manage", "identity.manage", "quota.read", "quota.manage", "billing.read",
+    "audit.read", "team.manage", "identity.manage", "device.manage", "quota.read", "quota.manage", "billing.read",
 })
 ROLE_PERMISSIONS: Mapping[str, frozenset[str]] = {
     "viewer": frozenset({"task.read", "device.read", "audit.read"}),
     "operator": frozenset({"task.read", "task.create", "task.cancel", "device.read", "device.execute", "audit.read"}),
-    "admin": frozenset({"task.read", "task.create", "task.cancel", "device.read", "device.execute", "audit.read", "team.manage", "identity.manage", "quota.read", "quota.manage"}),
+    "admin": frozenset({"task.read", "task.create", "task.cancel", "device.read", "device.execute", "device.manage", "audit.read", "team.manage", "identity.manage", "quota.read", "quota.manage"}),
     "owner": _PERMISSIONS,
 }
 QUOTA_PERIODS = frozenset({"daily", "monthly"})
 MUTATING_OPERATIONS = frozenset({
-    "task.create", "task.cancel", "team.create", "team.update", "principal.create", "quota.update",
+    "task.create", "task.cancel", "team.create", "team.update", "principal.create", "quota.update", "device.assign",
 })
 
 

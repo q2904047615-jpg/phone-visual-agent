@@ -722,3 +722,8 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 #top[hidden], #accessNotice[hidden], #manualMotionStatus[hidden] { display: none !important; }
 .access-notice { margin: auto; padding: 48px 24px; max-width: 640px; }
 .access-notice p { color: #aab7ce; line-height: 1.8; }
+.device-management-dialog { width: min(640px, calc(100vw - 32px)); max-height: 85vh; overflow-y: auto; }
+.device-assignment-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 16px 0; border-bottom: 1px solid #344158; }
+.device-assignment-card strong, .device-assignment-card p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.device-assignment-card select { min-width: 0; width: 100%; }
+@media (max-width: 480px) { .device-assignment-card { grid-template-columns: minmax(0, 1fr); } }

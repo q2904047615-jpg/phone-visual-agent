@@ -4,6 +4,34 @@ The control token is CSRF protection, never an identity. All non-public routes
 authenticate a durable identity session before reading data or dispatching work.
 """
 from fastapi import HTTPException, Request
+from collections import Counter
+from contextlib import contextmanager
+import threading
+
+# Short critical sections serialize ownership changes with admission, without
+# serializing ordinary requests or execution on independent devices.
+assignment_lock = threading.RLock()
+inflight_devices = Counter()
+
+
+@contextmanager
+def device_access(store, request, device_ids):
+    devices = set(device_ids)
+    with assignment_lock:
+        principal = store.authenticate_identity_session(identity_token(request))
+        if principal is None:
+            reject(store, request, None, "identity_required", 401)
+        for device_id in devices:
+            require_device(store, request, principal, device_id)
+        inflight_devices.update(devices)
+    try:
+        yield
+    finally:
+        with assignment_lock:
+            inflight_devices.subtract(devices)
+            for device_id in devices:
+                if not inflight_devices[device_id]:
+                    del inflight_devices[device_id]
 
 PRINCIPAL_COOKIE = "agent_principal_v2"
 RESOURCE_PARAMETERS = {
@@ -35,6 +63,7 @@ def reject(store, request, principal, code, status=403):
 def permission_for(path, method):
     if path.startswith("/api/control-plane/organizations/"):
         tail = path.split("/{organization_id}", 1)[1]
+        if tail.startswith("/devices"): return "device.manage"
         if tail.startswith("/quotas"): return "quota.read" if method == "GET" else "quota.manage"
         if tail == "/audit": return "audit.read"
         if tail.startswith("/principals"): return "identity.manage"
@@ -59,6 +88,7 @@ async def authorize(request: Request, store, verify_origin, default_device_id):
     if principal is None:
         reject(store, request, None, "identity_required", 401)
     request.state.principal = principal
+    request.state.website_devices = set()
     if path == "/api/control-plane/auth/sessions":
         # Retired bootstrap impersonation must not become available to a
         # logged-in operator while its route is being removed.
@@ -71,6 +101,10 @@ async def authorize(request: Request, store, verify_origin, default_device_id):
         reject(store, request, principal, "permission_denied")
     if path.startswith("/api/control-plane/"):
         return
+    if path in {"/api/device", "/api/stop"}:
+        for item in store.device_assignments(principal["organization_id"]):
+            if item["user_id"] == principal["user_id"]:
+                require_device(store, request, principal, item["device_id"])
     for param, kind in RESOURCE_PARAMETERS.items():
         if param in request.path_params:
             resource = store.owned_resource(kind, request.path_params[param], principal)
@@ -101,6 +135,8 @@ async def authorize(request: Request, store, verify_origin, default_device_id):
 def require_device(store, request, principal, device_id):
     if store.owned_resource("device", device_id, principal) is None:
         reject(store, request, principal, "device_forbidden")
+    if hasattr(request.state, "website_devices"):
+        request.state.website_devices.add(device_id)
 
 
 def claim(store, request, kind, resource_id, device_id):

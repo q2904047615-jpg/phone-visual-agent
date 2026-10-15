@@ -25,6 +25,7 @@
         <button id="githubLoginButton" class="secondary-button" type="button" disabled>使用 GitHub 登录</button>
         <button id="accountLogoutButton" class="secondary-button" type="button" hidden>退出登录</button>
         <button id="accountRetryButton" class="secondary-button" type="button" hidden>重新检查</button>
+        <button id="deviceManagementButton" class="secondary-button" type="button" hidden>管理设备分配</button>
         <p id="accountError" role="status" hidden></p>
       </section>
       <div class="sidebar-note">
@@ -249,7 +250,16 @@
     </form>
   </dialog>
 
+  <dialog id="deviceManagementDialog" class="risk-dialog device-management-dialog" aria-labelledby="deviceManagementTitle">
+    <h2 id="deviceManagementTitle">设备分配</h2>
+    <p>为组织成员分配手机。每台手机同一时间只属于一人，历史任务不会转移。</p>
+    <p class="dialog-help">改派前请结束设备上的任务。分配不会退出手机内的 App 账号或清除手机内容。</p>
+    <div id="deviceAssignmentList"></div>
+    <p id="deviceAssignmentMessage" role="status"></p>
+    <div class="dialog-actions"><button id="deviceAssignmentRefresh" class="secondary-button" type="button">刷新</button><button id="deviceAssignmentClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
   <script src="/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"></script>
+  <script src="/assets/device_assignments.js?v=20261015-v1"></script>
   <script src="/assets/account.js?v=20261015-github-login-v1"></script>
   <script src="/assets/app.js?v=20260927-main-chain-cleanup-v1"></script>
 </body>

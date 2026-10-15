@@ -39,6 +39,7 @@ let accountReady = false;
 let accountPermissions = [];
 let accountEpoch = 0;
 let accountMounted = false;
+let deviceManagement = null;
 
 function clearPrivateView() {
   accountEpoch++;
@@ -66,6 +67,7 @@ function clearPrivateView() {
 }
 
 function acceptAccount(value) {
+  deviceManagement?.account(value);
   const session = value?.authenticated ? value.session : null;
   const next = session ? `${session.organization_id}/${session.user_id}` : '';
   if (accountMounted && !accountReady && next) { window.location.replace('/'); return; }
@@ -1312,6 +1314,13 @@ async function refreshDevice() {
     api("/api/session"),
   ]);
   state.device = device;
+  const assigned = Array.isArray(device.devices) ? device.devices : [];
+  const selectionChanged = !assigned.some(item => item.device_id === state.deviceId);
+  if (selectionChanged) {
+    state.deviceId = assigned[0]?.device_id || '';
+    document.querySelector('#phonePreview').removeAttribute('src');
+    localStorage.removeItem(devicePreferenceKey);
+  }
   const motions = Array.isArray(device?.manual_motion_tests) ? device.manual_motion_tests : [];
   const deviceMotions = motions.filter(item => String(item.profile?.device_id || "") === String(state.deviceId));
   state.manualMotion = deviceMotions.find(item => ["starting", "running", "stopping"].includes(item.status)) || deviceMotions[0] || null;
@@ -1322,6 +1331,7 @@ async function refreshDevice() {
   renderStatus();
   renderPairingPanel();
   renderManualMotionStatus();
+  if (selectionChanged) render();
 }
 
 let sessionReconcileInFlight = false;
@@ -1365,6 +1375,7 @@ async function reconcileSupervisedSession() {
 }
 
 function refreshPreview() {
+  if (document.querySelector('#deviceManagementDialog')?.open) return;
   if (!accountReady || !state.device?.devices?.some(item => item.device_id === state.deviceId)) return;
   const preview = document.querySelector("#phonePreview");
   if (preview && state.deviceId) {
@@ -2608,6 +2619,7 @@ async function init() {
     let session = await api("/api/session");
     state.token = session.token;
     state.mock = session.mock;
+    deviceManagement = window.DeviceAssignments?.mount(api, async () => { await refreshDevice(); render(); refreshPreview(); });
     if (window.AgentAccount) await window.AgentAccount.mount(api, acceptAccount);
     accountMounted = true;
     if (!accountReady) return;

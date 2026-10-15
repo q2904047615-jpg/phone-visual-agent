@@ -102,6 +102,7 @@ from agent.interfaces.http_models import (
     ControlPlaneIdentitySessionRequest,
     ControlPlanePrincipalWriteRequest,
     ControlPlaneQuotaWriteRequest,
+    DeviceAssignmentRequest,
     ControlPlaneTeamUpdateRequest,
     ControlPlaneTeamWriteRequest,
     DevicePairRequest,
@@ -496,9 +497,19 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
 
 async def _authorize_website_request(request: Request):
     if request.url.path in {"/", "/api/session"}:
+        yield
         return
-    await website_access.authorize(request, _control_plane_store(), verify_local_origin,
+    store = _control_plane_store()
+    await website_access.authorize(request, store, verify_local_origin,
                                    runtime.device_controllers.default_device_id)
+    devices = getattr(request.state, "website_devices", set())
+    # A stream checks each frame; holding a lease for the entire stream would
+    # make merely watching a phone prevent reassignment forever.
+    if devices and request.url.path != "/api/preview.mjpg":
+        with website_access.device_access(store, request, devices):
+            yield
+    else:
+        yield
 
 
 app = FastAPI(
@@ -1282,6 +1293,77 @@ def reload_api(
         "already_scheduled": False,
         "revision": _current_code_revision(ROOT.parent),
     }
+
+
+def _device_assignment_unavailable(device_id: str) -> str:
+    if website_access.inflight_devices[device_id]:
+        return "device_inflight"
+    if _GENERIC_START_TASKS.active_for("device_id", device_id):
+        return "device_has_active_work"
+    if runtime.device_task_registry.active_session(device_id):
+        return "device_has_active_work"
+    if any(item["device_id"] == device_id for item in _active_session_status(runtime)):
+        return "device_has_active_work"
+    terminal = {"cancelled", "completed", "succeeded", "failed", "blocked", "expired", "stopped"}
+    for monitor in (*_LUCKY_BAG_MONITOR.list(), *_QISHUI_AD_TEST_MONITOR.list()):
+        if monitor.profile.device_id == device_id and monitor.status not in terminal:
+            return "device_has_active_work"
+    for trial in runtime.capability_acceptance_manager.snapshots():
+        if trial["device_id"] == device_id and trial["session"].get("status") not in terminal:
+            return "device_has_active_work"
+    if any(item["profile"]["device_id"] == device_id and item["status"] in ManualMotionMonitor.ACTIVE
+           for item in _MANUAL_MOTION_MONITOR.list()):
+        return "device_has_active_work"
+    if runtime.device_runtime_resources.coordination_lock(device_id).locked():
+        return "device_inflight"
+    if runtime.controller_for_device(device_id).device_status().get("busy"):
+        return "device_inflight"
+    return ""
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/devices")
+def control_plane_devices(organization_id: str, request: Request,
+                         x_control_token: str | None = Header(default=None, alias="X-Control-Token")):
+    verify_local_request(request, x_control_token)
+    # Inventory metadata only: never include camera, task or model content.
+    known = {item["device_id"]: item for item in runtime.device_controllers.descriptors()}
+    devices = [{**item, "registered": item["device_id"] in known}
+               for item in _control_plane_store().device_assignments(organization_id)]
+    return _control_plane_envelope({"devices": devices})
+
+
+@app.put("/api/control-plane/organizations/{organization_id}/devices/{device_id}/assignment")
+def control_plane_assign_device(organization_id: str, device_id: str, body: DeviceAssignmentRequest,
+    request: Request, x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+    store, principal, key = _control_plane_write_context(request, organization_id, "device.assign", "device.manage",
+        x_control_token, x_control_plane_token, idempotency_key)
+    try:
+        with website_access.assignment_lock:
+            own_inventory = {x["device_id"] for x in store.device_assignments(organization_id)}
+            registered = {x["device_id"] for x in runtime.device_controllers.descriptors()}
+            if device_id not in own_inventory or device_id not in registered:
+                raise KeyError("device_not_found")
+            _status, data, replay = store.assign_device(organization_id=organization_id,
+                principal_user_id=principal["user_id"], device_id=device_id, user_id=body.user_id,
+                expected_revision=body.expected_revision, idempotency_key=key,
+                unavailable_reason=_device_assignment_unavailable(device_id))
+    except (KeyError, ValueError) as error:
+        code = str(error.args[0])
+        messages = {"device_not_found": (404, "设备未登记在当前组织。"),
+                    "assignee_not_found": (422, "请选择当前组织中已存在的成员。"),
+                    "assignment_conflict": (409, "设备分配已变化，请刷新后重试。"),
+                    "device_has_active_work": (409, "设备有未结束任务，请先结束或取消任务后再分配。"),
+                    "device_inflight": (409, "设备请求正在处理，请稍后重试。"),
+                    "idempotency_conflict": (409, "此请求标识已用于其他操作，请刷新后重试。")}
+        if code not in messages:
+            raise
+        status, message = messages[code]
+        store.record_audit(organization_id=organization_id, resource="device.assign", outcome=code,
+            request_id=_control_plane_request_id(request), actor=principal["user_id"], metadata={"device_id": device_id})
+        raise HTTPException(status, detail={"code": code, "message": message}) from error
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
 
 
 @app.get("/api/apps")
@@ -3355,7 +3437,8 @@ def preview_mjpg(device_id: str, request: Request) -> StreamingResponse:
             if principal is None or _control_plane_store().owned_resource("device", device_id, principal) is None:
                 return
             try:
-                frame, _cached = runtime.capture_preview(device_id, quality=68)
+                with website_access.device_access(_control_plane_store(), request, {device_id}):
+                    frame, _cached = runtime.capture_preview(device_id, quality=68)
             except Exception as exc:
                 error_type = type(exc).__name__
                 error_text = _diagnostic_error_text(exc)

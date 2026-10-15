@@ -72,6 +72,10 @@ class SqliteControlPlaneRepository:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS control_plane_device_assignment_versions (
+                device_id TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS control_plane_resource_owners (
                 kind TEXT NOT NULL,
                 resource_id TEXT NOT NULL,
@@ -611,6 +615,42 @@ class SqliteControlPlaneRepository:
                 "metadata": json.loads(row["metadata_json"]),
             } for row in rows]
             return {"after_sequence": int(after_sequence), "entries": entries, "has_more": has_more}
+
+    def device_assignments(self, organization_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT r.resource_id AS device_id,r.organization_id,r.user_id,COALESCE(v.revision,0) AS revision "
+                "FROM control_plane_resource_owners r LEFT JOIN control_plane_device_assignment_versions v "
+                "ON v.device_id=r.resource_id WHERE r.kind='device' AND r.organization_id=? ORDER BY r.resource_id",
+                (organization_id,)).fetchall()
+            return [{**dict(row), "user_id": row["user_id"] or None} for row in rows]
+
+    def assign_device(self, *, organization_id: str, principal_user_id: str, device_id: str,
+                      user_id: str | None, expected_revision: int, idempotency_key: str,
+                      unavailable_reason: str = "") -> tuple[int, dict[str, Any], bool]:
+        payload = {"device_id": device_id, "user_id": user_id, "expected_revision": expected_revision}
+        def write():
+            row = next((x for x in self.device_assignments(organization_id) if x["device_id"] == device_id), None)
+            if row is None:
+                raise KeyError("device_not_found")
+            if user_id is not None and not self._connection.execute(
+                "SELECT 1 FROM control_plane_principals WHERE organization_id=? AND user_id=?", (organization_id, user_id)
+            ).fetchone():
+                raise ValueError("assignee_not_found")
+            if row["revision"] != expected_revision:
+                raise ValueError("assignment_conflict")
+            if unavailable_reason:
+                raise ValueError(unavailable_reason)
+            revision = row["revision"] + 1
+            self._connection.execute("UPDATE control_plane_resource_owners SET user_id=? WHERE kind='device' AND resource_id=? AND organization_id=?",
+                                     (user_id or "", device_id, organization_id))
+            self._connection.execute("INSERT INTO control_plane_device_assignment_versions VALUES(?,?) ON CONFLICT(device_id) DO UPDATE SET revision=excluded.revision", (device_id, revision))
+            self.record_audit(organization_id=organization_id, resource="device.assign", outcome="assigned" if user_id else "unassigned",
+                              request_id=idempotency_key, actor=principal_user_id,
+                              metadata={"device_id": device_id, "previous_user_id": row["user_id"], "user_id": user_id, "revision": revision})
+            return 200, {"assignment": {**row, "user_id": user_id, "revision": revision}}
+        return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
+            idempotency_key=idempotency_key, operation="device.assign", request_hash=self.request_hash(payload), write=write)
 
     def claim_resource(self, kind: str, resource_id: str, principal: Mapping[str, Any], *, device_id: str = "") -> None:
         """Insert immutable ownership before dispatch. Never claim on a read."""

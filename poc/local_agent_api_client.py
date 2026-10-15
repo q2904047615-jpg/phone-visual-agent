@@ -61,6 +61,8 @@ class LocalAgentApiClient:
     PAUSE_ROUTE = SESSION_ROUTE + "/pause"
     CONTROL_PLANE_ORGANIZATION_ROUTE = "/api/control-plane/organizations/{organization_id}"
     CONTROL_PLANE_TEAMS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams"
+    CONTROL_PLANE_DEVICES_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/devices"
+    CONTROL_PLANE_DEVICE_ASSIGNMENT_ROUTE = CONTROL_PLANE_DEVICES_ROUTE + "/{device_id}/assignment"
     CONTROL_PLANE_PRINCIPALS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/principals"
     CONTROL_PLANE_QUOTAS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas"
     CONTROL_PLANE_AUDIT_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/audit"
@@ -166,6 +168,21 @@ class LocalAgentApiClient:
             "GET", self.CONTROL_PLANE_TEAMS_ROUTE,
             path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
         )
+
+    def control_plane_devices(self, organization_id: str) -> JsonObject:
+        return self._request("GET", self.CONTROL_PLANE_DEVICES_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True)
+
+    def control_plane_assign_device(self, organization_id: str, device_id: str, *,
+                                   user_id: str | None, expected_revision: int, idempotency_key: str) -> JsonObject:
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            self._raise_contract("expected_revision 必须是非负整数。")
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 128:
+            self._raise_contract("必须提供有效的 Idempotency-Key。")
+        return self._request("PUT", self.CONTROL_PLANE_DEVICE_ASSIGNMENT_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id), "device_id": self._resource_id(device_id)},
+            payload={"user_id": self._resource_id(user_id) if user_id is not None else None, "expected_revision": expected_revision},
+            extra_headers={"Idempotency-Key": idempotency_key}, read_only=False)
 
     def control_plane_principals(self, organization_id: str) -> JsonObject:
         return self._request(

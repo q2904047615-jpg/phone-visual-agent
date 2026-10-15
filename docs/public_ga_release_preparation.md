@@ -13,11 +13,12 @@
 - 单设备软件 GA 评估报告已经可以持久化，`offline_ga_status=pass`。
 - 服务运行在最近一次干净 revision（以 `/api/session` 返回的 `revision` 为准），启动自检 `verified=true`，`/api/session` 为 `ready=true`。
 - SQLite active release 与 Git HEAD 一致；未结算配额预留和活动 Runtime 均为 `0`，SQLite 保留离线回归产生的历史计费账本，未调用支付服务。
-- 本批 Python 离线回归为 `1019` 通过、`4` 跳过；前端完整回归基线为 `64/64`。
+- 本批 Python 离线回归为 `1021` 通过、`4` 跳过；前端完整回归基线为 `64/64`。
 - OpenAPI 的 billing、platform releases、platform rollback 路由已核对。
 - 未启用第二台设备、未执行手机动作、未调用外部支付或推送。
 - 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。
 - 配置预检已收敛为只阻断公网入口和 OAuth App 外部配置，不再要求重复提供可推导的模型、本机路径或当前 owner 映射。
+- 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标。
 
 ## 公共 GA 必须先确定的配置
 
@@ -56,6 +57,27 @@
 - 进程管理方式（Windows 服务、计划任务、容器或其他）以及停止/重启权限。
 - 监控和日志保留位置；日志必须继续脱敏，不保存 OAuth code、state、verifier、access token、client secret 或主体 token。
 
+在域名准备好之前，这部分可以先用本地临时目录做离线演练。示例（命令只输出路径、页数和 `integrity=ok`，不会输出密钥）：
+
+```powershell
+python poc/evals/runtime_sqlite_backup.py verify `
+  --database poc/output/web/runtime.sqlite3 `
+  --required-table control_plane_meta `
+  --required-table control_plane_platform_releases
+python poc/evals/runtime_sqlite_backup.py backup `
+  --source poc/output/web/runtime.sqlite3 `
+  --destination poc/output/web/ga_readiness_20261014/runtime.sqlite3.backup `
+  --required-table control_plane_meta `
+  --required-table control_plane_platform_releases
+python poc/evals/runtime_sqlite_backup.py restore `
+  --backup poc/output/web/ga_readiness_20261014/runtime.sqlite3.backup `
+  --destination poc/output/web/ga_readiness_20261014/runtime.sqlite3.restore-check `
+  --required-table control_plane_meta `
+  --required-table control_plane_platform_releases
+```
+
+恢复生产库前仍需由部署负责人确定持久备份目录、保留周期和停机/切换窗口；工具不会自动覆盖当前运行库。
+
 ### 5. 当前设备连接配置（单设备即可）
 
 - 保持 `device-local-01` 为唯一启用设备和 `local-owner` 的归属。
@@ -73,8 +95,8 @@
 1. 在部署环境运行 `python poc/evals/check_public_ga_config.py`，确认所有必填项存在且不打印 secret；当前配置缺失时应返回阻断状态。
 2. 通过 HTTPS 反向代理完成 GitHub OAuth 登录、退出、过期和回调重放拒绝检查。
 3. 核对 Secure/HttpOnly/SameSite Cookie、同源策略、跨组织隔离和无主体访问拒绝。
-4. 用干净 revision 启动并核对 `/api/session`、OpenAPI、SQLite active release 和备份恢复点。
-5. 在受控浏览器环境复跑前端 `64/64`，复跑 Python 全量离线回归 `1014`/`4 skipped`。
+4. 用干净 revision 启动并核对 `/api/session`、OpenAPI、SQLite active release 和备份恢复点；备份恢复点使用上述在线备份工具验证。
+5. 在受控浏览器环境复跑前端 `64/64`，复跑 Python 全量离线回归 `1021`/`4 skipped`。
 6. 用平台回滚合同做一次无活动任务的演练；不自动 checkout、不覆盖用户数据。
 
 ## 可以暂缓但不能冒充已验收

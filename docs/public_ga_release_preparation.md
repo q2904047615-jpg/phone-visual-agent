@@ -8,6 +8,15 @@
 
 公共上线需要先确定 HTTPS 公网入口、反向代理信任边界和 GitHub OAuth 回调地址，再实施对应的受信来源配置和部署验收。没有这些配置时，保持本机监听是正确状态。
 
+## 本批锁定的公网入口
+
+本项目暂定使用智能简历主域名下的独立子域名：
+
+- `PUBLIC_BASE_URL=https://agent.jianlizhineng.cn`
+- `GITHUB_OAUTH_REDIRECT_URI=https://agent.jianlizhineng.cn/api/control-plane/auth/github/callback`
+
+该子域名不会覆盖现有的 `jianlizhineng.cn` 网站。当前只把它作为部署目标写入准备合同；DNS、证书和反向代理尚未修改，服务仍保持 `127.0.0.1:8765` 本机监听。
+
 ## 本批已完成
 
 - 单设备软件 GA 评估报告已经可以持久化，`offline_ga_status=pass`。
@@ -26,7 +35,7 @@
 
 ### 1. 公网入口与传输安全（必填）
 
-- `PUBLIC_BASE_URL`：完整 HTTPS 地址，例如 `https://agent.example.com`。
+- `PUBLIC_BASE_URL`：固定为 `https://agent.jianlizhineng.cn`；必须由 DNS 指向受控的公网反向代理，并使用有效 TLS 证书。
 - DNS 所属域名和 TLS 终止位置（Cloudflare、Nginx、Caddy 或其他受控反向代理）。
 - 反向代理到本机 API 的地址、端口和健康检查路径；应用仍建议只监听回环地址。
 - 代理是否传递并且只信任 `Host`、`X-Forwarded-Proto` 等头部。不能让公网客户端伪造这些头部。
@@ -38,7 +47,7 @@
 
 - `GITHUB_OAUTH_CLIENT_ID`：可以提供非敏感 client ID。
 - `GITHUB_OAUTH_CLIENT_SECRET`：只通过部署环境的 Secret 管理器设置，不要发到聊天或提交到 Git。
-- `GITHUB_OAUTH_REDIRECT_URI`：必须与 GitHub OAuth App 完全一致，例如 `https://agent.example.com/api/control-plane/auth/github/callback`。
+- `GITHUB_OAUTH_REDIRECT_URI`：固定为 `https://agent.jianlizhineng.cn/api/control-plane/auth/github/callback`，并必须与 GitHub OAuth App 完全一致。
 - `GITHUB_OAUTH_IDENTITY_MAP_FILE`：服务器上的受信映射文件绝对路径。
 - 首个 owner 的 GitHub 稳定数字用户 ID，以及目标 `organization_id/user_id`。只提供 ID 和映射目标，不提供 access token。
 
@@ -98,6 +107,18 @@ python poc/evals/runtime_sqlite_backup.py restore `
 4. 用干净 revision 启动并核对 `/api/session`、OpenAPI、SQLite active release 和备份恢复点；备份恢复点使用上述在线备份工具验证。
 5. 在受控浏览器环境复跑前端 `64/64`，复跑 Python 全量离线回归 `1021`/`4 skipped`。
 6. 用平台回滚合同做一次无活动任务的演练；不自动 checkout、不覆盖用户数据。
+
+## 现在仍需要你或部署环境提供的配置
+
+域名目标已经确定，后续只剩部署侧配置，不需要再选择域名：
+
+1. 为 `agent.jianlizhineng.cn` 配置 DNS（A/AAAA 或 CNAME）并确认指向受控公网反向代理。
+2. 在该反向代理配置 HTTPS 证书，并把 `/` 和 `/api/` 按部署方案转发到本机 API；应用继续只监听回环地址。
+3. 在 GitHub OAuth App 中把 callback URL 精确设置为 `https://agent.jianlizhineng.cn/api/control-plane/auth/github/callback`，提供 Client ID；Client Secret 只注入部署环境的 Secret 管理器。
+4. 在部署环境注入 `DASHSCOPE_API_KEY`、`GITHUB_OAUTH_CLIENT_SECRET`，并确认持久 SQLite、身份映射文件、租约目录和备份目录的绝对路径及可写权限。
+5. 确定进程管理、日志脱敏、备份保留周期和恢复演练负责人；这些属于上线运维配置，不能由本地代码自动推断。
+
+以下内容目前不需要提供：第二台真机、第二个 GitHub 账号、根域名替换、支付账号或外部通知账号。
 
 ## 可以暂缓但不能冒充已验收
 

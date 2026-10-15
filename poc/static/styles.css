@@ -735,4 +735,12 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 .team-member-picker .team-member-option[hidden] { display: none; }
 .team-member-option input { width: auto; flex-shrink: 0; }
 #teamMemberSummary { overflow-wrap: anywhere; }
+#teamManagementDialog { box-sizing: border-box; padding: 20px; border: 1px solid #344158; border-radius: 16px; background: #111b2b; color: #ecf2ff; }
+#teamManagementDialog h2 { margin: 0 0 12px; font-size: 22px; line-height: 1.4; }
+#teamManagementDialog p { line-height: 1.6; }
+#teamManagementDialog .dialog-help { color: #aab7ce; font-size: 13px; }
+#teamManagementDialog input:not([type=checkbox]) { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #40516c; border-radius: 8px; background: #0b1321; color: #ecf2ff; font: inherit; }
+#teamManagementDialog > label { display: grid; gap: 8px; margin-top: 18px; }
+#teamManagementDialog details { margin-top: 18px; }
+#teamManagementDialog .dialog-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 18px; }
 @media (max-width: 480px) { .device-assignment-card { grid-template-columns: minmax(0, 1fr); } }

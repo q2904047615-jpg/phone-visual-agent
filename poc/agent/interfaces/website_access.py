@@ -98,6 +98,7 @@ def permission_for(path, method):
         if tail.startswith("/devices"): return "device.manage"
         if tail.startswith("/quotas"): return "quota.read" if method == "GET" else "quota.manage"
         if tail == "/audit": return "audit.read"
+        if tail.startswith("/notifications"): return "audit.read"
         if tail.startswith("/principals"): return "identity.manage"
         if tail.startswith("/github-identities"): return "identity.manage"
         return "task.read" if method == "GET" else "team.manage"

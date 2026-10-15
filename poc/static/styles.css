@@ -751,4 +751,18 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 #projectManagementDialog input:not([type=checkbox]), #projectManagementDialog textarea { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #40516c; border-radius: 8px; background: #0b1321; color: #ecf2ff; font: inherit; }
 #projectManagementDialog textarea { min-height: 76px; resize: vertical; }
 #projectManagementDialog > label { display: grid; gap: 8px; margin-top: 18px; }
+.quota-card { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.quota-card strong, .quota-card small { grid-column: 1 / -1; }
+.quota-card label { display: grid; gap: 7px; }
+.quota-card input, .quota-card select, #auditViewerDialog input { box-sizing: border-box; width: 100%; padding: 9px; border: 1px solid #40516c; border-radius: 8px; background: #0b1321; color: #ecf2ff; }
+.quota-card button { grid-column: 1 / -1; justify-self: end; }
+#auditViewerDialog > label { display: grid; gap: 8px; margin-top: 16px; }
+.audit-entry { display: grid; gap: 5px; padding: 12px 0; border-bottom: 1px solid #344158; overflow-wrap: anywhere; }
+.audit-entry small { color: #aab7ce; }
+.audit-entry code { white-space: pre-wrap; color: #cbd6ee; font-size: 11px; }
+.notification-entry { display: grid; gap: 6px; padding: 13px 0; border-bottom: 1px solid #344158; overflow-wrap: anywhere; }
+.notification-entry small { color: #aab7ce; }
+.notification-entry p { margin: 0; color: #cbd6ee; line-height: 1.5; }
+.notification-entry button { justify-self: end; }
+.notification-entry.is-read { opacity: .7; }
 @media (max-width: 480px) { .device-assignment-card { grid-template-columns: minmax(0, 1fr); } }

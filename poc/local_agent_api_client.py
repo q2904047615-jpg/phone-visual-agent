@@ -50,6 +50,7 @@ class LocalAgentApiClient:
     """OpenAPI-checked client for the current universal-agent HTTP surface."""
 
     DEVICE_ROUTE = "/api/device"
+    RELOAD_ROUTE = "/api/session/reload"
     DOCTOR_ROUTE = "/api/doctor/{device_id}"
     START_ROUTE = "/api/agent/generic-supervised/start"
     SESSION_ROUTE = "/api/agent/generic-supervised/{session_id}"
@@ -155,6 +156,10 @@ class LocalAgentApiClient:
             "openapi_verified": True,
             "control_token_loaded": True,
         }
+
+    def reload_service(self) -> JsonObject:
+        """Request a guarded API reload through the verified service route."""
+        return self._request("POST", self.RELOAD_ROUTE, read_only=False)
 
     def device_status(self) -> JsonObject:
         return self._request("GET", self.DEVICE_ROUTE, read_only=True)

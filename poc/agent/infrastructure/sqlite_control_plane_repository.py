@@ -164,6 +164,19 @@ class SqliteControlPlaneRepository:
             );
             CREATE INDEX IF NOT EXISTS control_plane_audit_org_sequence
                 ON control_plane_audit(organization_id, sequence);
+            CREATE TABLE IF NOT EXISTS control_plane_notifications (
+                notification_id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                notification_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                read_at TEXT,
+                FOREIGN KEY(organization_id) REFERENCES control_plane_organizations(organization_id)
+            );
+            CREATE INDEX IF NOT EXISTS control_plane_notifications_user
+                ON control_plane_notifications(organization_id, user_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS control_plane_identity_sessions (
                 session_id TEXT PRIMARY KEY,
                 token_hash TEXT NOT NULL UNIQUE,
@@ -913,7 +926,46 @@ class SqliteControlPlaneRepository:
                 "INSERT INTO control_plane_audit(occurred_at,request_id,organization_id,resource,outcome,actor,metadata_json) VALUES(?,?,?,?,?,?,?)",
                 (_now(), request_id or uuid.uuid4().hex, organization_id, resource, outcome, actor[:128], _json(safe_metadata)),
             )
+            # Notifications are a small user-scoped projection of material
+            # writes. Never copy request metadata or authentication material.
+            if actor and actor != "local-control-token" and outcome in {
+                "created", "updated", "assigned", "unassigned", "linked", "unlinked",
+                "disabled", "enabled", "revoked", "archived", "restored",
+            }:
+                title = f"{resource} · {outcome}"
+                body = "组织资源状态已更新，可在对应管理页面查看详情。"
+                self._connection.execute(
+                    "INSERT INTO control_plane_notifications(notification_id,organization_id,user_id,notification_type,title,body,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (uuid.uuid4().hex, organization_id, actor[:128], "control_plane_change", title[:256], body, _now()),
+                )
             return int(cursor.lastrowid)
+
+    def list_notifications(self, organization_id: str, user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM control_plane_notifications WHERE organization_id=? AND user_id=? "
+                "ORDER BY created_at DESC, notification_id DESC LIMIT ?",
+                (organization_id, user_id, int(limit)),
+            ).fetchall()
+            return [{
+                "notification_id": str(row["notification_id"]),
+                "organization_id": str(row["organization_id"]),
+                "user_id": str(row["user_id"]),
+                "notification_type": str(row["notification_type"]),
+                "title": str(row["title"]),
+                "body": str(row["body"]),
+                "created_at": str(row["created_at"]),
+                "read_at": row["read_at"],
+            } for row in rows]
+
+    def mark_notification_read(self, organization_id: str, user_id: str, notification_id: str) -> bool:
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE control_plane_notifications SET read_at=COALESCE(read_at, ?) "
+                "WHERE notification_id=? AND organization_id=? AND user_id=?",
+                (_now(), notification_id, organization_id, user_id),
+            )
+            return cursor.rowcount == 1
 
     def read_audit(self, organization_id: str, *, after_sequence: int = 0, limit: int = 50,
                    actor: str | None = None) -> dict[str, Any]:

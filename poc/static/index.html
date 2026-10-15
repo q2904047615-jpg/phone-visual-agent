@@ -30,6 +30,9 @@
         <button id="teamManagementButton" class="secondary-button" type="button" hidden>管理团队与分组</button>
         <button id="projectManagementButton" class="secondary-button" type="button" hidden>管理项目</button>
         <button id="githubIdentityButton" class="secondary-button" type="button" hidden>管理 GitHub 关联</button>
+        <button id="quotaManagementButton" class="secondary-button" type="button" hidden>管理配额</button>
+        <button id="auditViewerButton" class="secondary-button" type="button" hidden>查看审计</button>
+        <button id="notificationButton" class="secondary-button" type="button" hidden>查看通知</button>
         <p id="accountError" role="status" hidden></p>
       </section>
       <div class="sidebar-note">
@@ -329,11 +332,37 @@
     <p id="githubIdentityMessage" role="status"></p>
     <div class="dialog-actions"><button id="githubIdentityRefresh" type="button" class="secondary-button">刷新</button><button id="githubIdentityClose" type="button" class="secondary-button">关闭</button></div>
   </dialog>
+  <dialog id="quotaManagementDialog" class="risk-dialog device-management-dialog" aria-labelledby="quotaManagementTitle">
+    <h2 id="quotaManagementTitle">组织配额</h2>
+    <p>查看本组织当前的运行、物理动作和模型 Token 配额。配额写入带幂等键，保存失败不会改变旧值。</p>
+    <p class="dialog-help">当前版本记录配额与使用量投影；运行时扣减和计费接入仍按 GA 计划单独验收。</p>
+    <div id="quotaList"></div>
+    <p id="quotaMessage" role="status"></p>
+    <div class="dialog-actions"><button id="quotaRefresh" class="secondary-button" type="button">刷新</button><button id="quotaClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
+  <dialog id="auditViewerDialog" class="risk-dialog device-management-dialog" aria-labelledby="auditViewerTitle">
+    <h2 id="auditViewerTitle">操作审计</h2>
+    <p>只显示当前组织的审计记录，按序号增量读取；敏感认证材料不会进入列表。</p>
+    <label>筛选资源<input id="auditFilter" type="search" placeholder="例如 project.update" aria-label="筛选审计资源"></label>
+    <div id="auditList"></div>
+    <p id="auditMessage" role="status"></p>
+    <div class="dialog-actions"><button id="auditMore" class="secondary-button" type="button" hidden>读取更多</button><button id="auditRefresh" class="secondary-button" type="button">刷新</button><button id="auditClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
+  <dialog id="notificationDialog" class="risk-dialog device-management-dialog" aria-labelledby="notificationTitle">
+    <h2 id="notificationTitle">通知</h2>
+    <p>只显示发给当前账号的组织变更通知。通知内容不包含任务正文、截图、令牌或其他账号数据。</p>
+    <div id="notificationList"></div>
+    <p id="notificationMessage" role="status"></p>
+    <div class="dialog-actions"><button id="notificationRefresh" class="secondary-button" type="button">刷新</button><button id="notificationClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
   <script src="/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"></script>
   <script src="/assets/github_identities.js?v=20261015-v1"></script>
   <script src="/assets/members.js?v=20261015-v1"></script>
   <script src="/assets/teams.js?v=20261015-v1"></script>
   <script src="/assets/projects.js?v=20261015-v1"></script>
+  <script src="/assets/quotas.js?v=20261015-v1"></script>
+  <script src="/assets/audit.js?v=20261015-v1"></script>
+  <script src="/assets/notifications.js?v=20261015-v1"></script>
   <script src="/assets/device_assignments.js?v=20261015-v1"></script>
   <script src="/assets/account.js?v=20261015-github-login-v1"></script>
   <script src="/assets/app.js?v=20260927-main-chain-cleanup-v1"></script>

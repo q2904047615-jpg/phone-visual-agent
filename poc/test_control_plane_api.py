@@ -42,6 +42,7 @@ class ControlPlaneApiTests(unittest.TestCase):
             "/api/control-plane/organizations/local-org/principals",
             "/api/control-plane/organizations/local-org/quotas",
             "/api/control-plane/organizations/local-org/audit?limit=20",
+            "/api/control-plane/organizations/local-org/notifications",
         }
         for path in paths:
             with self.subTest(path=path):
@@ -60,9 +61,28 @@ class ControlPlaneApiTests(unittest.TestCase):
             "/api/control-plane/organizations/{organization_id}/principals",
             "/api/control-plane/organizations/{organization_id}/quotas",
             "/api/control-plane/organizations/{organization_id}/audit",
+            "/api/control-plane/organizations/{organization_id}/notifications",
         }
         self.assertTrue(all("get" in set(control_plane_paths[path]) for path in read_paths))
         self.assertNotIn('/api/control-plane/auth/sessions',control_plane_paths)
+
+    def test_notifications_are_user_scoped_and_mark_read_is_idempotent(self) -> None:
+        self.repository.record_audit(organization_id="local-org", resource="project.update", outcome="updated", actor="local-owner")
+        notifications = self.repository.list_notifications("local-org", "local-owner")
+        self.assertTrue(notifications)
+        item = notifications[0]
+        response = self.client.get("/api/control-plane/organizations/local-org/notifications", headers=self.headers)
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertTrue(any(row["notification_id"] == item["notification_id"] for row in response.json()["data"]["notifications"]))
+        read = self.client.post(
+            f"/api/control-plane/organizations/local-org/notifications/{item['notification_id']}/read",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(200, read.status_code, read.text)
+        self.assertTrue(self.repository.list_notifications("local-org", "local-owner")[0]["read_at"])
+        foreign = self.repository.mark_notification_read("local-org", "missing-user", item["notification_id"])
+        self.assertFalse(foreign)
 
     def test_audit_is_durable_and_redacts_sensitive_metadata(self) -> None:
         response = self.client.get(

@@ -833,6 +833,41 @@ def control_plane_audit(
     return _control_plane_envelope({"organization_id": organization_id, **page})
 
 
+@app.get("/api/control-plane/organizations/{organization_id}/notifications")
+def control_plane_notifications(
+    organization_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    principal = request.state.principal
+    if store.get_organization(organization_id) is None:
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    notifications = store.list_notifications(organization_id, principal["user_id"])
+    store.record_audit(organization_id=organization_id, resource="notifications", outcome="ok",
+                       request_id=_control_plane_request_id(request), actor=principal["user_id"],
+                       metadata={"method": "GET", "count": len(notifications)})
+    return _control_plane_envelope({"organization_id": organization_id, "notifications": notifications})
+
+
+@app.post("/api/control-plane/organizations/{organization_id}/notifications/{notification_id}/read")
+def control_plane_mark_notification_read(
+    organization_id: str,
+    notification_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    principal = request.state.principal
+    if store.get_organization(organization_id) is None:
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    if not store.mark_notification_read(organization_id, principal["user_id"], notification_id):
+        raise HTTPException(status_code=404, detail="通知不存在或不属于当前账号。")
+    return _control_plane_envelope({"organization_id": organization_id, "notification_id": notification_id, "read": True})
+
+
 @app.post("/api/control-plane/auth/external-sessions")
 def control_plane_external_identity_session(
     body: ControlPlaneExternalIdentityRequest,

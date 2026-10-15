@@ -44,6 +44,9 @@ let memberManagement = null;
 let teamManagement = null;
 let projectManagement = null;
 let githubIdentityManagement = null;
+let quotaManagement = null;
+let auditViewer = null;
+let notificationViewer = null;
 
 function clearPrivateView() {
   accountEpoch++;
@@ -76,6 +79,9 @@ function acceptAccount(value) {
   teamManagement?.account(value);
   projectManagement?.account(value);
   githubIdentityManagement?.account(value);
+  quotaManagement?.account(value);
+  auditViewer?.account(value);
+  notificationViewer?.account(value);
   const session = value?.authenticated ? value.session : null;
   const next = session ? `${session.organization_id}/${session.user_id}` : '';
   if (accountMounted && !accountReady && next) { window.location.replace('/'); return; }
@@ -2640,6 +2646,11 @@ async function init() {
     githubIdentityManagement = window.GitHubIdentities?.mount(api, async () => {
       acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
     });
+    quotaManagement = window.OrganizationQuotas?.mount(api, async () => {
+      acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
+    });
+    auditViewer = window.OrganizationAudit?.mount(api);
+    notificationViewer = window.OrganizationNotifications?.mount(api);
     if (window.AgentAccount) await window.AgentAccount.mount(api, acceptAccount);
     accountMounted = true;
     if (!accountReady) return;

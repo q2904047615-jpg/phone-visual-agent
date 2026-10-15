@@ -62,6 +62,18 @@ def _online_copy(source: Path, destination: Path) -> None:
         raise ValueError("sqlite_backup_same_path")
     if not source.is_file():
         raise FileNotFoundError(source)
+    sidecars = tuple(
+        path for path in (
+            Path(f"{destination}-wal"),
+            Path(f"{destination}-shm"),
+        ) if path.exists()
+    )
+    if sidecars:
+        raise RuntimeError(
+            "sqlite_destination_sidecars_present: "
+            + ",".join(str(path) for path in sidecars)
+            + "; stop writers and checkpoint before replacing this target"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent

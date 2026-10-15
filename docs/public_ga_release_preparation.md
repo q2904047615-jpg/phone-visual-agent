@@ -18,7 +18,7 @@
 - 未启用第二台设备、未执行手机动作、未调用外部支付或推送。
 - 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。
 - 配置预检已收敛为只阻断公网入口和 OAuth App 外部配置，不再要求重复提供可推导的模型、本机路径或当前 owner 映射。
-- 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标。
+- 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标；目标仍有 `-wal/-shm` sidecar 时会拒绝覆盖，需先停写入并完成 checkpoint。
 
 ## 公共 GA 必须先确定的配置
 

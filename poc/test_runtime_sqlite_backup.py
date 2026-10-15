@@ -54,6 +54,22 @@ class RuntimeSqliteBackupTests(unittest.TestCase):
             with closing(sqlite3.connect(target)) as connection:
                 self.assertEqual("source", connection.execute("SELECT value FROM state").fetchone()[0])
 
+    def test_restore_rejects_target_with_wal_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.sqlite3"
+            backup = root / "backup.sqlite3"
+            target = root / "target.sqlite3"
+            with closing(sqlite3.connect(source)) as connection:
+                connection.execute("CREATE TABLE state(value TEXT NOT NULL)")
+                connection.execute("INSERT INTO state VALUES ('source')")
+                connection.commit()
+            backup_sqlite_database(source, backup, required_tables=("state",))
+            target.write_bytes(b"existing")
+            Path(f"{target}-wal").write_bytes(b"stale-wal")
+            with self.assertRaisesRegex(RuntimeError, "sqlite_destination_sidecars_present"):
+                restore_sqlite_database(backup, target, replace=True, required_tables=("state",))
+
 
 if __name__ == "__main__":
     unittest.main()

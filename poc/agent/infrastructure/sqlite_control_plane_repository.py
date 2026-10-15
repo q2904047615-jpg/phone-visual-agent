@@ -72,6 +72,14 @@ class SqliteControlPlaneRepository:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS control_plane_resource_owners (
+                kind TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                organization_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                PRIMARY KEY(kind, resource_id)
+            );
             CREATE TABLE IF NOT EXISTS control_plane_organizations (
                 organization_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -582,11 +590,13 @@ class SqliteControlPlaneRepository:
             )
             return int(cursor.lastrowid)
 
-    def read_audit(self, organization_id: str, *, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
+    def read_audit(self, organization_id: str, *, after_sequence: int = 0, limit: int = 50,
+                   actor: str | None = None) -> dict[str, Any]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM control_plane_audit WHERE organization_id=? AND sequence>? ORDER BY sequence ASC LIMIT ?",
-                (organization_id, int(after_sequence), int(limit) + 1),
+                "SELECT * FROM control_plane_audit WHERE organization_id=? AND sequence>? "
+                + ("AND actor=? " if actor is not None else "") + "ORDER BY sequence ASC LIMIT ?",
+                (organization_id, int(after_sequence), *((actor,) if actor is not None else ()), int(limit) + 1),
             ).fetchall()
             has_more = len(rows) > limit
             rows = rows[:limit]
@@ -601,6 +611,46 @@ class SqliteControlPlaneRepository:
                 "metadata": json.loads(row["metadata_json"]),
             } for row in rows]
             return {"after_sequence": int(after_sequence), "entries": entries, "has_more": has_more}
+
+    def claim_resource(self, kind: str, resource_id: str, principal: Mapping[str, Any], *, device_id: str = "") -> None:
+        """Insert immutable ownership before dispatch. Never claim on a read."""
+        owner = (principal["organization_id"], principal["user_id"], device_id)
+        with self._lock:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO control_plane_resource_owners VALUES(?,?,?,?,?)",
+                (kind, resource_id, *owner))
+            row = self._connection.execute(
+                "SELECT organization_id,user_id,device_id FROM control_plane_resource_owners WHERE kind=? AND resource_id=?",
+                (kind, resource_id)).fetchone()
+            if tuple(row) != owner:
+                raise ValueError("resource_owner_conflict")
+
+    def owned_resource(self, kind: str, resource_id: str, principal: Mapping[str, Any]) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM control_plane_resource_owners WHERE kind=? AND resource_id=? AND organization_id=? AND user_id=?",
+                (kind, resource_id, principal["organization_id"], principal["user_id"])).fetchone()
+            return dict(row) if row else None
+
+    def initialize_website_ownership(self, default_device_id: str) -> None:
+        """One-time upgrade: preserve this single-user installation's history.
+
+        No unknown future resource is ever assigned to the owner on access.
+        The marker and snapshot migration commit atomically.
+        """
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                if not self._connection.execute("SELECT 1 FROM control_plane_meta WHERE key='website_ownership_v1'").fetchone():
+                    self._connection.execute("INSERT OR IGNORE INTO control_plane_resource_owners VALUES('device',?,'local-org','local-owner',?)",
+                                             (default_device_id, default_device_id))
+                    if self._connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").fetchone():
+                        self._connection.execute("INSERT OR IGNORE INTO control_plane_resource_owners SELECT 'session',session_id,'local-org','local-owner',device_id FROM runtime_sessions")
+                    self._connection.execute("INSERT INTO control_plane_meta VALUES('website_ownership_v1',?)", (_now(),))
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._connection.execute("ROLLBACK")
+                raise
 
     def close(self) -> None:
         with self._lock:

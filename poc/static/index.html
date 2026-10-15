@@ -28,6 +28,7 @@
         <button id="deviceManagementButton" class="secondary-button" type="button" hidden>管理设备分配</button>
         <button id="memberManagementButton" class="secondary-button" type="button" hidden>管理组织成员</button>
         <button id="teamManagementButton" class="secondary-button" type="button" hidden>管理团队与分组</button>
+        <button id="projectManagementButton" class="secondary-button" type="button" hidden>管理项目</button>
         <button id="githubIdentityButton" class="secondary-button" type="button" hidden>管理 GitHub 关联</button>
         <p id="accountError" role="status" hidden></p>
       </section>
@@ -293,6 +294,23 @@
     <p id="teamMessage" role="status"></p>
     <div class="dialog-actions"><button id="teamRefresh" class="secondary-button" type="button">刷新</button><button id="teamClose" class="secondary-button" type="button">关闭</button></div>
   </dialog>
+  <dialog id="projectManagementDialog" class="risk-dialog device-management-dialog" aria-labelledby="projectManagementTitle">
+    <h2 id="projectManagementTitle">项目管理</h2>
+    <p>按客户、产品或交付范围整理项目。项目归档保留历史记录，避免引用失效。</p>
+    <p class="dialog-help">所有者和管理员可管理项目。项目成员范围只用于组织标记，不授予任务、截图、回放或设备访问权。</p>
+    <form id="projectCreate" class="device-assignment-card project-card" hidden>
+      <strong>新建项目</strong>
+      <label>项目 ID<input id="projectNewId" aria-label="新项目 ID" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._:\-]*" placeholder="例如 client-onboarding"></label>
+      <label>项目名称<input id="projectNewName" aria-label="新项目名称" required maxlength="256" placeholder="例如 客户入驻"></label>
+      <label>项目说明<textarea id="projectNewDescription" aria-label="新项目说明" maxlength="2000"></textarea></label>
+      <fieldset id="projectNewMembers" class="project-member-picker"></fieldset>
+      <button type="submit" class="primary-button">创建项目</button>
+    </form>
+    <label>查找项目<input id="projectFilter" type="search" placeholder="项目名称、ID 或成员" aria-label="查找项目"></label>
+    <div id="projectList"></div>
+    <p id="projectMessage" role="status"></p>
+    <div class="dialog-actions"><button id="projectRefresh" class="secondary-button" type="button">刷新</button><button id="projectClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
   <dialog id="githubIdentityDialog" class="risk-dialog device-management-dialog" aria-labelledby="githubIdentityTitle">
     <h2 id="githubIdentityTitle">GitHub 身份关联</h2>
     <p>决定哪个 GitHub 账号可以登录哪位组织成员。</p>
@@ -315,6 +333,7 @@
   <script src="/assets/github_identities.js?v=20261015-v1"></script>
   <script src="/assets/members.js?v=20261015-v1"></script>
   <script src="/assets/teams.js?v=20261015-v1"></script>
+  <script src="/assets/projects.js?v=20261015-v1"></script>
   <script src="/assets/device_assignments.js?v=20261015-v1"></script>
   <script src="/assets/account.js?v=20261015-github-login-v1"></script>
   <script src="/assets/app.js?v=20260927-main-chain-cleanup-v1"></script>

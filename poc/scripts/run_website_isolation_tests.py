@@ -23,6 +23,7 @@ def main():
                 unittest.defaultTestLoader.loadTestsFromName('test_device_assignments'),
                 unittest.defaultTestLoader.loadTestsFromName('test_organization_members'),
                 unittest.defaultTestLoader.loadTestsFromName('test_organization_teams'),
+                unittest.defaultTestLoader.loadTestsFromName('test_organization_projects'),
                 unittest.defaultTestLoader.loadTestsFromName('test_github_identity_management'),
                 unittest.defaultTestLoader.loadTestsFromName('test_website_route_isolation.WebsiteRouteIsolationTests'),
                 unittest.defaultTestLoader.loadTestsFromName('test_local_agent_api_client'),

@@ -47,6 +47,21 @@ class ControlPlaneTeamUpdateRequest(StrictAgentRequest):
     member_ids: list[StrictStr] | None = Field(default=None, max_length=500)
 
 
+class ControlPlaneProjectWriteRequest(StrictAgentRequest):
+    project_id: StrictStr = Field(min_length=1, max_length=128)
+    name: StrictStr = Field(min_length=1, max_length=256)
+    description: StrictStr = Field(default="", max_length=2000)
+    member_ids: list[StrictStr] = Field(default_factory=list, max_length=500)
+
+
+class ControlPlaneProjectUpdateRequest(StrictAgentRequest):
+    name: StrictStr | None = Field(default=None, min_length=1, max_length=256)
+    description: StrictStr | None = Field(default=None, max_length=2000)
+    status: Literal["active", "archived"] | None = None
+    member_ids: list[StrictStr] | None = Field(default=None, max_length=500)
+    expected_revision: StrictInt | None = Field(default=None, ge=0)
+
+
 class ControlPlanePrincipalWriteRequest(StrictAgentRequest):
     user_id: StrictStr = Field(min_length=1, max_length=128)
     role: Literal["viewer", "operator", "admin", "owner"]

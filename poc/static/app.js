@@ -42,6 +42,7 @@ let accountMounted = false;
 let deviceManagement = null;
 let memberManagement = null;
 let teamManagement = null;
+let projectManagement = null;
 let githubIdentityManagement = null;
 
 function clearPrivateView() {
@@ -73,6 +74,7 @@ function acceptAccount(value) {
   deviceManagement?.account(value);
   memberManagement?.account(value);
   teamManagement?.account(value);
+  projectManagement?.account(value);
   githubIdentityManagement?.account(value);
   const session = value?.authenticated ? value.session : null;
   const next = session ? `${session.organization_id}/${session.user_id}` : '';
@@ -1381,7 +1383,7 @@ async function reconcileSupervisedSession() {
 }
 
 function refreshPreview() {
-  if (['#deviceManagementDialog','#memberManagementDialog','#githubIdentityDialog','#teamManagementDialog'].some(id=>document.querySelector(id)?.open)) return;
+  if (['#deviceManagementDialog','#memberManagementDialog','#githubIdentityDialog','#teamManagementDialog','#projectManagementDialog'].some(id=>document.querySelector(id)?.open)) return;
   if (!accountReady || !state.device?.devices?.some(item => item.device_id === state.deviceId)) return;
   const preview = document.querySelector("#phonePreview");
   if (preview && state.deviceId) {
@@ -2630,6 +2632,9 @@ async function init() {
       acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
     });
     teamManagement = window.OrganizationTeams?.mount(api, async () => {
+      acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
+    });
+    projectManagement = window.OrganizationProjects?.mount(api, async () => {
       acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
     });
     githubIdentityManagement = window.GitHubIdentities?.mount(api, async () => {

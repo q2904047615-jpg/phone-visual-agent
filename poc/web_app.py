@@ -108,6 +108,8 @@ from agent.interfaces.http_models import (
     DeviceAssignmentRequest,
     ControlPlaneTeamUpdateRequest,
     ControlPlaneTeamWriteRequest,
+    ControlPlaneProjectUpdateRequest,
+    ControlPlaneProjectWriteRequest,
     DevicePairRequest,
     DirectionalSwipeRequest,
     GenericEffectApprovalRequest,
@@ -684,6 +686,12 @@ def _control_plane_write_http_error(error: BaseException) -> HTTPException:
     member_errors = {
         "team_conflict": (409, "团队已被其他操作修改，请刷新后重新选择成员。"),
         "team_permission_denied": (403, "当前角色不能管理团队。"),
+        "project_conflict": (409, "项目已被其他操作修改，请刷新后重试。"),
+        "project_permission_denied": (403, "当前角色不能管理项目。"),
+        "project_member_not_found": (422, "项目成员必须是同一组织内已存在主体。"),
+        "duplicate_project_member_ids": (422, "项目成员不能重复。"),
+        "project_name_required": (422, "项目名称不能为空。"),
+        "project_status_invalid": (422, "项目状态无效。"),
         "github_identity_in_use": (409, "此 GitHub 身份已有其他关联，不能直接覆盖。"),
         "github_identity_conflict": (409, "身份关联已变化，请重新查询或刷新。"),
         "github_subject_invalid": (422, "GitHub 用户 ID 必须是有效的稳定数字 ID。"),
@@ -698,7 +706,7 @@ def _control_plane_write_http_error(error: BaseException) -> HTTPException:
     if code in member_errors:
         status, message = member_errors[code]
         return HTTPException(status, detail={"code": code, "message": message})
-    if code in {"organization_not_found", "team_not_found", "principal_not_found"}:
+    if code in {"organization_not_found", "team_not_found", "principal_not_found", "project_not_found"}:
         return HTTPException(status_code=404, detail={"code": code, "message": "Control Plane 资源不存在。"})
     if code in {"team_already_exists", "principal_already_exists", "idempotency_conflict"}:
         return HTTPException(status_code=409, detail={"code": code, "message": "Control Plane 写入冲突。"})
@@ -1159,6 +1167,61 @@ def control_plane_revoke_identity_session(
                        outcome="replay" if replay else "revoked", request_id=request_id,
                        metadata={"session_id": session_id, "status_code": status_code}, actor=principal["user_id"])
     response.status_code = 200
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/projects")
+def control_plane_projects(organization_id: str, request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        raise HTTPException(404, detail={"code": "organization_not_found", "message": "组织不存在。"})
+    projects = store.list_projects(organization_id)
+    store.record_audit(organization_id=organization_id, resource='projects', outcome='ok', actor=request.state.principal['user_id'],
+                       request_id=_control_plane_request_id(request), metadata={'count': len(projects)})
+    return _control_plane_envelope({'organization_id': organization_id, 'projects': projects})
+
+
+@app.post("/api/control-plane/organizations/{organization_id}/projects")
+def control_plane_create_project(organization_id: str, body: ControlPlaneProjectWriteRequest, request: Request, response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(request, organization_id, 'project.create', 'team.manage', x_control_token, x_control_plane_token, idempotency_key)
+    try:
+        status_code, data, replay = store.create_project(organization_id=organization_id, principal_user_id=principal['user_id'],
+            idempotency_key=key, request_hash=_control_plane_write_request_hash('project.create', organization_id, body.model_dump()),
+            project_id=body.project_id, name=body.name, description=body.description, member_ids=tuple(body.member_ids))
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    if replay:
+        store.record_audit(organization_id=organization_id, resource='project.create', outcome='replay', actor=principal['user_id'],
+                           request_id=_control_plane_request_id(request), metadata={'project_id': body.project_id})
+    response.status_code = 200 if replay else status_code
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+@app.patch("/api/control-plane/organizations/{organization_id}/projects/{project_id}")
+def control_plane_update_project(organization_id: str, project_id: str, body: ControlPlaneProjectUpdateRequest,
+    request: Request, response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(request, organization_id, 'project.update', 'team.manage', x_control_token, x_control_plane_token, idempotency_key)
+    if all(getattr(body, name) is None for name in ('name', 'description', 'status', 'member_ids')):
+        raise HTTPException(422, detail={'code': 'empty_update', 'message': '至少提供一个项目字段。'})
+    try:
+        status_code, data, replay = store.update_project(organization_id=organization_id, principal_user_id=principal['user_id'],
+            idempotency_key=key, request_hash=_control_plane_write_request_hash('project.update', organization_id, {'project_id': project_id, **body.model_dump()}),
+            project_id=project_id, name=body.name, description=body.description, status=body.status,
+            member_ids=tuple(body.member_ids) if body.member_ids is not None else None, expected_revision=body.expected_revision)
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    if replay:
+        store.record_audit(organization_id=organization_id, resource='project.update', outcome='replay', actor=principal['user_id'],
+                           request_id=_control_plane_request_id(request), metadata={'project_id': project_id})
+    response.status_code = 200 if replay else status_code
     return _control_plane_write_envelope(request, data, idempotent_replay=replay)
 
 

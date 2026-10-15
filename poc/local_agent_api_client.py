@@ -61,6 +61,7 @@ class LocalAgentApiClient:
     PAUSE_ROUTE = SESSION_ROUTE + "/pause"
     CONTROL_PLANE_ORGANIZATION_ROUTE = "/api/control-plane/organizations/{organization_id}"
     CONTROL_PLANE_TEAMS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams"
+    CONTROL_PLANE_PROJECTS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/projects"
     CONTROL_PLANE_DEVICES_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/devices"
     CONTROL_PLANE_DEVICE_ASSIGNMENT_ROUTE = CONTROL_PLANE_DEVICES_ROUTE + "/{device_id}/assignment"
     CONTROL_PLANE_PRINCIPALS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/principals"
@@ -72,6 +73,7 @@ class LocalAgentApiClient:
     CONTROL_PLANE_GITHUB_OAUTH_CALLBACK_ROUTE = "/api/control-plane/auth/github/callback"
     CONTROL_PLANE_REVOKE_SESSION_ROUTE = CONTROL_PLANE_IDENTITY_SESSION_ROUTE + "/{session_id}"
     CONTROL_PLANE_TEAM_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/teams/{team_id}"
+    CONTROL_PLANE_PROJECT_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/projects/{project_id}"
     CONTROL_PLANE_QUOTA_ITEM_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas/{quota_key}"
 
     def __init__(
@@ -282,6 +284,32 @@ class LocalAgentApiClient:
             idempotency_key=idempotency_key,
             payload={"team_id": team_id, "name": name, "member_ids": list(member_ids)},
         )
+
+    def control_plane_projects(self, organization_id: str) -> JsonObject:
+        return self._request("GET", self.CONTROL_PLANE_PROJECTS_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True)
+
+    def control_plane_create_project(self, organization_id: str, *, project_id: str, name: str,
+                                     description: str = "", member_ids: list[str] | None = None,
+                                     principal_token: str, idempotency_key: str) -> JsonObject:
+        return self._control_plane_write("POST", self.CONTROL_PLANE_PROJECTS_ROUTE,
+            organization_id=organization_id, principal_token=principal_token, idempotency_key=idempotency_key,
+            payload={"project_id": project_id, "name": name, "description": description,
+                     "member_ids": list(member_ids or [])})
+
+    def control_plane_update_project(self, organization_id: str, project_id: str, *,
+                                     principal_token: str, idempotency_key: str, name: str | None = None,
+                                     description: str | None = None, status: str | None = None,
+                                     member_ids: list[str] | None = None, expected_revision: int | None = None) -> JsonObject:
+        payload: JsonObject = {}
+        if name is not None: payload["name"] = name
+        if description is not None: payload["description"] = description
+        if status is not None: payload["status"] = status
+        if member_ids is not None: payload["member_ids"] = list(member_ids)
+        if expected_revision is not None: payload["expected_revision"] = expected_revision
+        return self._control_plane_write("PATCH", self.CONTROL_PLANE_PROJECT_ITEM_ROUTE,
+            organization_id=organization_id, project_id=project_id, principal_token=principal_token,
+            idempotency_key=idempotency_key, payload=payload)
 
     def control_plane_update_team(self, organization_id: str, team_id: str, *,
                                   principal_token: str, idempotency_key: str,

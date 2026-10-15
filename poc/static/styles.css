@@ -743,4 +743,12 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 #teamManagementDialog > label { display: grid; gap: 8px; margin-top: 18px; }
 #teamManagementDialog details { margin-top: 18px; }
 #teamManagementDialog .dialog-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 18px; }
+.project-card { grid-template-columns: minmax(0, 1fr); }
+.project-member-picker { min-width: 0; margin: 0; border: 1px solid #344158; border-radius: 8px; padding: 12px; max-height: 220px; overflow-y: auto; }
+.project-member-picker label { display: flex; gap: 8px; align-items: center; margin: 9px 0; overflow-wrap: anywhere; }
+.project-member-picker input[type=checkbox] { width: auto; flex-shrink: 0; }
+#projectManagementDialog { box-sizing: border-box; padding: 20px; border: 1px solid #344158; border-radius: 16px; background: #111b2b; color: #ecf2ff; }
+#projectManagementDialog input:not([type=checkbox]), #projectManagementDialog textarea { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #40516c; border-radius: 8px; background: #0b1321; color: #ecf2ff; font: inherit; }
+#projectManagementDialog textarea { min-height: 76px; resize: vertical; }
+#projectManagementDialog > label { display: grid; gap: 8px; margin-top: 18px; }
 @media (max-width: 480px) { .device-assignment-card { grid-template-columns: minmax(0, 1fr); } }

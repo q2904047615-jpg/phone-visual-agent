@@ -78,6 +78,21 @@ class SqliteControlPlaneRepository:
                 team_id TEXT PRIMARY KEY REFERENCES control_plane_teams(team_id),
                 revision INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS control_plane_projects (
+                project_id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active','archived')),
+                member_ids_json TEXT NOT NULL,
+                FOREIGN KEY(organization_id) REFERENCES control_plane_organizations(organization_id)
+            );
+            CREATE TABLE IF NOT EXISTS control_plane_project_versions (
+                project_id TEXT PRIMARY KEY REFERENCES control_plane_projects(project_id),
+                revision INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS control_plane_projects_org
+                ON control_plane_projects(organization_id, project_id);
             CREATE TABLE IF NOT EXISTS control_plane_device_assignment_versions (
                 device_id TEXT PRIMARY KEY,
                 revision INTEGER NOT NULL
@@ -279,6 +294,18 @@ class SqliteControlPlaneRepository:
                 "member_ids": list(json.loads(row["member_ids_json"])),
                 "revision": row['revision'],
             } for row in rows]
+
+    def list_projects(self, organization_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT p.*,COALESCE(v.revision,0) AS revision FROM control_plane_projects p "
+                "LEFT JOIN control_plane_project_versions v ON v.project_id=p.project_id "
+                "WHERE p.organization_id=? ORDER BY p.project_id", (organization_id,)
+            ).fetchall()
+            return [{"project_id": str(row["project_id"]), "organization_id": str(row["organization_id"]),
+                     "name": str(row["name"]), "description": str(row["description"]),
+                     "status": str(row["status"]), "member_ids": list(json.loads(row["member_ids_json"])),
+                     "revision": int(row["revision"])} for row in rows]
 
     def list_principals(self, organization_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -625,6 +652,72 @@ class SqliteControlPlaneRepository:
                                        (organization_id, user_id)).fetchone()
         if not row or not self.member_active(user_id) or 'team.manage' not in ROLE_PERMISSIONS[row['role']]:
             raise ValueError('team_permission_denied')
+
+    def _validate_project_members_locked(self, organization_id: str, member_ids: tuple[str, ...]) -> None:
+        if len(set(member_ids)) != len(member_ids):
+            raise ValueError('duplicate_project_member_ids')
+        for user_id in member_ids:
+            row = self._connection.execute('SELECT 1 FROM control_plane_principals WHERE organization_id=? AND user_id=?',
+                                           (organization_id, user_id)).fetchone()
+            if row is None:
+                raise ValueError('project_member_not_found')
+
+    def create_project(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
+                       request_hash: str, project_id: str, name: str, description: str,
+                       member_ids: tuple[str, ...]) -> tuple[int, dict[str, Any], bool]:
+        def write() -> tuple[int, dict[str, Any]]:
+            self._require_organization_locked(organization_id)
+            self._authorize_team_write(organization_id, principal_user_id)
+            if self._connection.execute('SELECT 1 FROM control_plane_projects WHERE project_id=?', (project_id,)).fetchone():
+                raise ValueError('project_already_exists')
+            if not str(name or '').strip():
+                raise ValueError('project_name_required')
+            self._validate_project_members_locked(organization_id, member_ids)
+            self._connection.execute('INSERT INTO control_plane_projects VALUES(?,?,?,?,?,?)',
+                (project_id, organization_id, name.strip(), str(description or '').strip(), 'active', _json(list(member_ids))))
+            self.record_audit(organization_id=organization_id, resource='project.create', outcome='created', actor=principal_user_id,
+                              metadata={'project_id': project_id, 'name': name.strip(), 'member_ids': list(member_ids), 'revision': 0})
+            return 201, {'project': {'project_id': project_id, 'organization_id': organization_id, 'name': name.strip(),
+                                     'description': str(description or '').strip(), 'status': 'active', 'member_ids': list(member_ids), 'revision': 0}}
+        return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
+            idempotency_key=idempotency_key, operation='project.create', request_hash=request_hash, write=write)
+
+    def update_project(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
+                       request_hash: str, project_id: str, name: str | None, description: str | None,
+                       status: str | None, member_ids: tuple[str, ...] | None,
+                       expected_revision: int | None = None) -> tuple[int, dict[str, Any], bool]:
+        def write() -> tuple[int, dict[str, Any]]:
+            self._require_organization_locked(organization_id)
+            self._authorize_team_write(organization_id, principal_user_id)
+            row = self._connection.execute('SELECT * FROM control_plane_projects WHERE project_id=? AND organization_id=?',
+                                           (project_id, organization_id)).fetchone()
+            if row is None:
+                raise KeyError('project_not_found')
+            revision = self._connection.execute('SELECT revision FROM control_plane_project_versions WHERE project_id=?', (project_id,)).fetchone()
+            revision = int(revision['revision']) if revision else 0
+            if expected_revision is not None and revision != expected_revision:
+                raise ValueError('project_conflict')
+            final_name = str(name).strip() if name is not None else str(row['name'])
+            final_description = str(description).strip() if description is not None else str(row['description'])
+            final_status = status if status is not None else str(row['status'])
+            final_members = tuple(member_ids) if member_ids is not None else tuple(json.loads(row['member_ids_json']))
+            if not final_name:
+                raise ValueError('project_name_required')
+            if final_status not in {'active', 'archived'}:
+                raise ValueError('project_status_invalid')
+            self._validate_project_members_locked(organization_id, final_members)
+            self._connection.execute('UPDATE control_plane_projects SET name=?,description=?,status=?,member_ids_json=? WHERE project_id=? AND organization_id=?',
+                (final_name, final_description, final_status, _json(list(final_members)), project_id, organization_id))
+            next_revision = revision + 1
+            self._connection.execute('INSERT OR REPLACE INTO control_plane_project_versions VALUES(?,?)', (project_id, next_revision))
+            self.record_audit(organization_id=organization_id, resource='project.update', outcome='updated', actor=principal_user_id,
+                              metadata={'project_id': project_id, 'old_name': row['name'], 'name': final_name,
+                                        'old_status': row['status'], 'status': final_status,
+                                        'old_member_ids': json.loads(row['member_ids_json']), 'member_ids': list(final_members), 'revision': next_revision})
+            return 200, {'project': {'project_id': project_id, 'organization_id': organization_id, 'name': final_name,
+                                     'description': final_description, 'status': final_status, 'member_ids': list(final_members), 'revision': next_revision}}
+        return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
+            idempotency_key=idempotency_key, operation='project.update', request_hash=request_hash, write=write)
 
     def create_principal(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
                          request_hash: str, user_id: str, role: str, team_ids: tuple[str, ...]) -> tuple[int, dict[str, Any], bool]:

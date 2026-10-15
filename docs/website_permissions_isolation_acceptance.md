@@ -12,7 +12,7 @@ Cookie 升级为 `agent_principal_v2`（HttpOnly、SameSite=Lax、Path=/api，HT
 
 最终 Python **961 tests，OK，skipped=4**；前端 **50 项通过**（19 单元、31 浏览器）。日志为 `poc/output/website_isolation_integration_full.log` 和 `poc/output/website_isolation_frontend.log`。运行命令为项目 Python 执行 `scripts/run_website_isolation_tests.py --full`，以及 `npm test`。测试使用正式 `web_app.app`、临时数据库和 Mock；本人成功、同组织管理员/跨组织越权、无设备、角色、撤销、流停止、列表审计、SDK 和同源端口均有覆盖。浏览器覆盖未登录、两标签退出、迟到响应、下一账号和过期。没有关闭生产鉴权来通过测试。历史实验本批未重跑。
 
-两名真实 GitHub 用户之间的隔离尚未实测，当前跨用户证据来自离线。第二台真机、设备分配页面、配额并发扣减和计费仍未完成，不代表 GA 完成。尚未证明未覆盖场景无退化。
+两名真实 GitHub 用户之间的隔离尚未实测，当前跨用户证据来自离线。设备分配页面已在后续批次完成实现与单设备网站验收，见 [设备分配验收](device_assignment_acceptance.md)。第二台真机、配额并发扣减和计费仍未完成，不代表 GA 完成。尚未证明未覆盖场景无退化。
 
 ## 本批真实网站验收
 

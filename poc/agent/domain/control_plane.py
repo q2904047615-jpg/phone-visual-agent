@@ -41,8 +41,14 @@ def manageable_member_roles(actor_role: str, target_role: str | None = None) -> 
     return ()
 
 
+def validate_github_subject(subject: str) -> str:
+    if not isinstance(subject, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", subject):
+        raise ValueError("github_subject_invalid")
+    return subject
+
+
 MUTATING_OPERATIONS = frozenset({
-    "task.create", "task.cancel", "team.create", "team.update", "principal.create", "principal.update", "quota.update", "device.assign",
+    "task.create", "task.cancel", "team.create", "team.update", "principal.create", "principal.update", "quota.update", "device.assign", "github_identity.update",
 })
 
 

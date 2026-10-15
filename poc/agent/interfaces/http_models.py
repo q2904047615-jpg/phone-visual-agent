@@ -71,6 +71,11 @@ class DeviceAssignmentRequest(StrictAgentRequest):
     expected_revision: StrictInt = Field(ge=0)
 
 
+class GitHubIdentityWriteRequest(StrictAgentRequest):
+    user_id: StrictStr | None = Field(..., min_length=1, max_length=128)
+    expected_revision: StrictInt = Field(ge=0)
+
+
 class QwenConversationMessage(StrictAgentRequest):
     role: Literal["user", "assistant"]
     content: StrictStr = Field(min_length=1)

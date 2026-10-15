@@ -29,6 +29,7 @@ from agent.domain.control_plane import (
     QuotaLimit,
     ROLE_PERMISSIONS,
     manageable_member_roles,
+    validate_github_subject,
 )
 
 
@@ -81,6 +82,14 @@ class SqliteControlPlaneRepository:
                 user_id TEXT PRIMARY KEY REFERENCES control_plane_principals(user_id),
                 status TEXT NOT NULL CHECK(status IN ('active','disabled')),
                 revision INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS control_plane_github_identities (
+                subject TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                user_id TEXT,
+                login TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES control_plane_principals(user_id)
             );
             CREATE TABLE IF NOT EXISTS control_plane_resource_owners (
                 kind TEXT NOT NULL,
@@ -326,6 +335,24 @@ class SqliteControlPlaneRepository:
                 "expires_at": expires_text,
             }
 
+    def issue_external_identity_session(self, identity) -> dict[str, Any]:
+        """Final mapping check and issuance share the unlink transaction lock."""
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                if identity.provider_id == "github":
+                    binding = self.github_identity(identity.subject)
+                    if (not binding or binding["user_id"] != identity.user_id
+                            or binding["organization_id"] != identity.organization_id
+                            or binding["revision"] != identity.claims.get("binding_revision")):
+                        raise KeyError("external_identity_mapping_changed")
+                session = self.issue_identity_session(organization_id=identity.organization_id, user_id=identity.user_id)
+                self._connection.execute("COMMIT")
+                return session
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
     def authenticate_identity_session(self, token: str) -> dict[str, Any] | None:
         token = str(token or "").strip()
         if not token:
@@ -450,6 +477,19 @@ class SqliteControlPlaneRepository:
                 self._connection.execute("ROLLBACK")
                 raise
 
+    def idempotent_result(self, *, organization_id: str, principal_user_id: str,
+                          idempotency_key: str, operation: str, request_hash: str):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT operation,request_hash,status_code,response_json FROM control_plane_idempotency "
+                "WHERE organization_id=? AND principal_user_id=? AND idempotency_key=?",
+                (organization_id, principal_user_id, idempotency_key)).fetchone()
+            if row is None:
+                return None
+            if row["operation"] != operation or row["request_hash"] != request_hash:
+                raise ValueError("idempotency_conflict")
+            return int(row["status_code"]), json.loads(row["response_json"]), True
+
     def _run_idempotent(self, *, organization_id: str, principal_user_id: str,
                         idempotency_key: str, operation: str, request_hash: str,
                         write: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str, Any], bool]:
@@ -458,16 +498,11 @@ class SqliteControlPlaneRepository:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                row = self._connection.execute(
-                    "SELECT operation,request_hash,status_code,response_json FROM control_plane_idempotency "
-                    "WHERE organization_id=? AND principal_user_id=? AND idempotency_key=?",
-                    (organization_id, principal_user_id, idempotency_key),
-                ).fetchone()
-                if row is not None:
-                    if str(row["operation"]) != operation or str(row["request_hash"]) != request_hash:
-                        raise ValueError("idempotency_conflict")
+                replay = self.idempotent_result(organization_id=organization_id, principal_user_id=principal_user_id,
+                    idempotency_key=idempotency_key, operation=operation, request_hash=request_hash)
+                if replay is not None:
                     self._connection.execute("COMMIT")
-                    return int(row["status_code"]), json.loads(row["response_json"]), True
+                    return replay
                 status_code, response = write()
                 self._connection.execute(
                     "INSERT INTO control_plane_idempotency(organization_id,principal_user_id,idempotency_key,operation,request_hash,status_code,response_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -606,6 +641,9 @@ class SqliteControlPlaneRepository:
             other_owners = [m for m in members if m["user_id"] != user_id and m["role"] == "owner" and m["status"] == "active"]
             if old["role"] == "owner" and old["status"] == "active" and (role != "owner" or status != "active") and not other_owners:
                 raise ValueError("last_owner_required")
+            if (old["role"] == "owner" and old["status"] == "active" and (role != "owner" or status != "active")
+                    and self._linked_owner_exists(organization_id) and not self._linked_owner_exists(organization_id, exclude_user=user_id)):
+                raise ValueError("last_linked_owner_required")
             if status == "disabled" and old["status"] == "active" and unavailable_reason:
                 raise ValueError("member_has_active_work")
             self._connection.execute("UPDATE control_plane_principals SET role=? WHERE user_id=? AND organization_id=?",
@@ -626,6 +664,87 @@ class SqliteControlPlaneRepository:
             return 200, {"principal": updated}
         return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
             idempotency_key=idempotency_key, operation="principal.update", request_hash=self.request_hash(payload), write=write)
+
+    def github_mappings_initialized(self) -> bool:
+        with self._lock:
+            return self._connection.execute("SELECT 1 FROM control_plane_meta WHERE key='github_identity_authority_v1'").fetchone() is not None
+
+    def import_github_mappings(self, mappings: Mapping[str, Mapping[str, str]]) -> bool:
+        """One-time, atomic import. A retained legacy file can never rebind a user."""
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                if self.github_mappings_initialized():
+                    self._connection.execute("COMMIT")
+                    return False
+                for subject, target in mappings.items():
+                    validate_github_subject(subject)
+                    if not self._connection.execute("SELECT 1 FROM control_plane_principals WHERE organization_id=? AND user_id=?",
+                            (target["organization_id"], target["user_id"])).fetchone():
+                        raise ValueError("github_migration_member_not_found")
+                    self._connection.execute("INSERT INTO control_plane_github_identities VALUES(?,?,?,?,0)",
+                        (subject, target["organization_id"], target["user_id"], ""))
+                self._connection.execute("INSERT INTO control_plane_meta VALUES('github_identity_authority_v1',?)", (_now(),))
+                for organization in {m["organization_id"] for m in mappings.values()}:
+                    self.record_audit(organization_id=organization, resource="github_identity.migrate", outcome="imported",
+                        actor="installation", metadata={"count": sum(m["organization_id"] == organization for m in mappings.values())})
+                self._connection.execute("COMMIT")
+                return True
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def github_identity(self, subject: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM control_plane_github_identities WHERE subject=?", (subject,)).fetchone()
+            return dict(row) if row else None
+
+    def list_github_identities(self, organization_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._connection.execute(
+                "SELECT g.*,p.role,COALESCE(m.status,'active') AS status FROM control_plane_github_identities g "
+                "JOIN control_plane_principals p ON p.user_id=g.user_id AND p.organization_id=g.organization_id "
+                "LEFT JOIN control_plane_member_state m ON m.user_id=p.user_id "
+                "WHERE g.organization_id=? ORDER BY g.user_id,g.subject", (organization_id,))]
+
+    def _linked_owner_exists(self, organization_id, *, exclude_subject="", exclude_user="") -> bool:
+        return self._connection.execute(
+            "SELECT 1 FROM control_plane_github_identities g JOIN control_plane_principals p "
+            "ON p.user_id=g.user_id AND p.organization_id=g.organization_id "
+            "LEFT JOIN control_plane_member_state m ON m.user_id=p.user_id "
+            "WHERE p.organization_id=? AND p.role='owner' AND COALESCE(m.status,'active')='active' "
+            "AND g.subject<>? AND p.user_id<>? LIMIT 1", (organization_id, exclude_subject, exclude_user)).fetchone() is not None
+
+    def update_github_identity(self, *, organization_id: str, principal_user_id: str, subject: str,
+                               user_id: str | None, expected_revision: int, idempotency_key: str,
+                               login: str = "") -> tuple[int, dict[str, Any], bool]:
+        validate_github_subject(subject)
+        payload = dict(subject=subject, user_id=user_id, expected_revision=expected_revision)
+        def write():
+            old = self.github_identity(subject)
+            if old and old["user_id"] and (old["organization_id"] != organization_id or user_id not in {None, old["user_id"]}):
+                raise ValueError("github_identity_in_use")
+            revision = old["revision"] if old else 0
+            if revision != expected_revision:
+                raise ValueError("github_identity_conflict")
+            target_id = user_id or (old["user_id"] if old and old["organization_id"] == organization_id else None)
+            member = next((m for m in self.list_principals(organization_id) if m["user_id"] == target_id), None)
+            if not member:
+                raise KeyError("principal_not_found")
+            self._authorize_member_change(organization_id, principal_user_id, member["role"], member["role"])
+            if user_id is None and member["role"] == "owner" and member["status"] == "active" and not self._linked_owner_exists(organization_id, exclude_subject=subject):
+                raise ValueError("last_linked_owner_required")
+            self._connection.execute("INSERT INTO control_plane_github_identities VALUES(?,?,?,?,?) "
+                "ON CONFLICT(subject) DO UPDATE SET organization_id=excluded.organization_id,user_id=excluded.user_id,login=excluded.login,revision=excluded.revision",
+                (subject, organization_id, user_id, login if user_id else old["login"], revision+1))
+            if user_id is None:
+                self._connection.execute("UPDATE control_plane_identity_sessions SET revoked_at=? WHERE organization_id=? AND user_id=? AND revoked_at IS NULL",
+                    (_now(), organization_id, target_id))
+            self.record_audit(organization_id=organization_id, resource="github_identity.update", outcome="linked" if user_id else "unlinked",
+                actor=principal_user_id, metadata={"subject": subject, "user_id": target_id, "revision": revision+1})
+            return 200, {"identity": self.github_identity(subject)}
+        return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
+            idempotency_key=idempotency_key, operation="github_identity.update", request_hash=self.request_hash(payload), write=write)
 
     def upsert_quota(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
                      request_hash: str, quota_key: str, period: str, max_runs: int | None,

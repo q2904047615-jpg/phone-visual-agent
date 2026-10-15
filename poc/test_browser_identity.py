@@ -25,8 +25,9 @@ class BrowserIdentityTests(unittest.TestCase):
                 self.exchange_count += 1
                 return httpx.Response(200, json={'access_token': 'github-upstream-only'})
             return httpx.Response(200, json={'app': {'client_id': 'test-client'}, 'user': {'id': 42}})
+        self.repo.import_github_mappings({'42': {'organization_id':'local-org', 'user_id':'local-owner'}})
         provider = GitHubOAuthProvider(client_id='test-client', client_secret='test-secret',
-            mappings={'42': GitHubIdentityMapping('local-org', 'local-owner')}, transport=httpx.MockTransport(upstream))
+            mapping_resolver=self.repo.github_identity, transport=httpx.MockTransport(upstream))
         self.addCleanup(provider.close)
         registry = web_app.ExternalIdentityProviderRegistry()
         registry.register(provider)

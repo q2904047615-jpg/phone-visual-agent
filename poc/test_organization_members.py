@@ -36,7 +36,11 @@ class OrganizationMemberTests(unittest.TestCase):
             json={'role':role,'status':status,'expected_revision':revision})
 
     def create(self, user, role, actor='local-owner'):
-        return self.client.post(self.base, headers=self.auth(actor,'create-'+user),json={'user_id':user,'role':role})
+        response = self.client.post(self.base, headers=self.auth(actor,'create-'+user),json={'user_id':user,'role':role})
+        if response.status_code == 201 and role == 'owner':
+            self.repo.update_github_identity(organization_id='local-org',principal_user_id='local-owner',
+                subject='43',user_id=user,expected_revision=0,idempotency_key='fixture-owner-link')
+        return response
 
     def test_owner_admin_and_member_hierarchy_on_old_and_new_routes(self):
         for role in ['owner','admin']:

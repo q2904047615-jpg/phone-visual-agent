@@ -74,7 +74,7 @@ window.OrganizationMembers = {
         saved = true;
         if (epoch !== generation) return;
         createPending = null; newId.value = '';
-        await load(); tell('成员已创建。首次登录前，还需由部署人员关联 GitHub 身份，并分配可用设备。');
+        await load(); tell('成员已创建。请从“管理 GitHub 关联”关联身份，并分配可用设备。');
       } catch (error) { if (epoch === generation) tell(`${saved ? '已创建，但刷新失败' : '未创建'}：${error.message}`); }
       finally { save.disabled = newId.disabled = newRole.disabled = false; }
     });

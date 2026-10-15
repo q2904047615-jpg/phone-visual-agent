@@ -103,6 +103,7 @@ from agent.interfaces.http_models import (
     ControlPlaneIdentitySessionRequest,
     ControlPlanePrincipalWriteRequest,
     ControlPlanePrincipalUpdateRequest,
+    GitHubIdentityWriteRequest,
     ControlPlaneQuotaWriteRequest,
     DeviceAssignmentRequest,
     ControlPlaneTeamUpdateRequest,
@@ -220,7 +221,7 @@ _OAUTH_BROWSER_COOKIE = "agent_oauth_browser"
 _AUTH_COOKIE_PATH = "/api/control-plane/auth"
 _GITHUB_OAUTH_STATE_TTL_SECONDS = 600
 try:
-    _github_oauth_provider = GitHubOAuthProvider.from_environment()
+    _github_oauth_provider = GitHubOAuthProvider.from_environment(identity_store=getattr(runtime, "control_plane_repository", None))
 except GitHubOAuthConfigurationError as exc:
     # A partial deployment configuration must fail closed for external login
     # without preventing the local phone Runtime from starting.
@@ -681,9 +682,15 @@ def _control_plane_write_request_hash(operation: str, organization_id: str, body
 def _control_plane_write_http_error(error: BaseException) -> HTTPException:
     code = str(error.args[0]) if isinstance(error, KeyError) and error.args else str(error)
     member_errors = {
+        "github_identity_in_use": (409, "此 GitHub 身份已有其他关联，不能直接覆盖。"),
+        "github_identity_conflict": (409, "身份关联已变化，请重新查询或刷新。"),
+        "github_subject_invalid": (422, "GitHub 用户 ID 必须是有效的稳定数字 ID。"),
+        "github_login_invalid": (422, "请输入有效的 GitHub 用户名。"),
+        "github_user_not_found": (404, "GitHub 账号不存在或不可公开查询。"),
         "member_permission_denied": (403, "当前角色不能管理此成员或授予该角色。"),
         "member_conflict": (409, "成员已被其他操作修改，请刷新后重试。"),
         "last_owner_required": (409, "组织必须保留至少一名启用的所有者。"),
+        "last_linked_owner_required": (409, "组织必须保留至少一名已关联 GitHub 的启用所有者。"),
         "member_has_active_work": (409, "成员有未结束任务或正在处理的请求，请先处理后再停用。"),
     }
     if code in member_errors:
@@ -844,11 +851,11 @@ def control_plane_external_identity_session(
                            request_id=_control_plane_request_id(request), metadata={"provider_id": body.provider_id}, actor=actor)
         raise HTTPException(status_code=401, detail={"code": "external_identity_rejected", "message": "外部身份断言未通过验证。"}) from error
     try:
-        session = store.issue_identity_session(
-            organization_id=identity.organization_id,
-            user_id=identity.user_id,
-        )
+        session = store.issue_external_identity_session(identity)
     except KeyError as error:
+        if error.args[0] == "external_identity_mapping_changed":
+            store.record_audit(organization_id=identity.organization_id, resource="identity.external", outcome="mapping_changed", actor=actor)
+            raise HTTPException(401, detail={"code":"external_identity_mapping_changed", "message":"身份关联已变更，请重新登录。"}) from error
         if error.args[0] == "principal_disabled":
             store.record_audit(organization_id=identity.organization_id, resource="identity.external", outcome="principal_disabled",
                 actor=actor, metadata={"user_id": identity.user_id})
@@ -1000,11 +1007,11 @@ def _complete_github_oauth_callback(
                            request_id=_control_plane_request_id(request), metadata={"provider_id": provider.provider_id}, actor="external:github")
         raise HTTPException(status_code=401, detail={"code": "external_identity_rejected", "message": "GitHub OAuth 身份未通过验证。"}) from exc
     try:
-        session = store.issue_identity_session(
-            organization_id=identity.organization_id,
-            user_id=identity.user_id,
-        )
+        session = store.issue_external_identity_session(identity)
     except KeyError as exc:
+        if exc.args[0] == "external_identity_mapping_changed":
+            store.record_audit(organization_id=identity.organization_id, resource="identity.external.oauth", outcome="mapping_changed", actor="external:github")
+            raise HTTPException(401, detail={"code":"external_identity_mapping_changed", "message":"身份关联已变更，请重新登录。"}) from exc
         if exc.args[0] == "principal_disabled":
             store.record_audit(organization_id=identity.organization_id, resource="identity.external.oauth", outcome="principal_disabled",
                 actor="external:github", metadata={"user_id": identity.user_id})
@@ -1286,6 +1293,69 @@ def control_plane_update_principal(organization_id: str, user_id: str, body: Con
             actor=principal["user_id"], request_id=_control_plane_request_id(request), metadata={"user_id": user_id})
         raise _control_plane_write_http_error(error) from error
     return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/github-identities")
+def control_plane_github_identities(organization_id: str, request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token")):
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    identities = store.list_github_identities(organization_id)
+    role = request.state.principal["role"]
+    store.record_audit(organization_id=organization_id, resource="github_identity.list", outcome="ok",
+        actor=request.state.principal["user_id"], metadata={"count":len(identities)})
+    return _control_plane_envelope({"identities":[{**i, "manageable":bool(manageable_member_roles(role, i["role"]))} for i in identities],
+        "github_available": isinstance(control_plane_identity_registry.get("github"), GitHubOAuthProvider)})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/github-identities/lookup")
+def control_plane_github_lookup(organization_id: str, request: Request, login: str | None = None, subject: str | None = None,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token")):
+    verify_local_request(request, x_control_token)
+    if (login is None) == (subject is None):
+        raise HTTPException(422, detail={"code":"github_lookup_input", "message":"请提供用户名或稳定用户 ID 中的一项。"})
+    try:
+        profile = _github_browser_provider().public_user(login=login, subject=subject)
+    except ExternalIdentityProviderUnavailable as error:
+        raise HTTPException(503, detail={"code":"github_lookup_unavailable", "message":str(error)}) from error
+    except (ValueError, KeyError) as error:
+        raise _control_plane_write_http_error(error) from error
+    binding = _control_plane_store().github_identity(profile["subject"])
+    foreign = bool(binding and binding["user_id"] and binding["organization_id"] != organization_id)
+    return _control_plane_envelope({"profile":profile, "linked":bool(binding and binding["user_id"]),
+        "user_id":binding["user_id"] if binding and not foreign else None,
+        "revision":binding["revision"] if binding and not foreign else 0,
+        "external_binding":foreign})
+
+
+@app.put("/api/control-plane/organizations/{organization_id}/github-identities/{subject}")
+def control_plane_update_github_identity(organization_id: str, subject: str, body: GitHubIdentityWriteRequest,
+    request: Request, x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+    store, principal, key = _control_plane_write_context(request, organization_id, "github_identity.update", "identity.manage",
+        x_control_token, x_control_plane_token, idempotency_key)
+    try:
+        replay = store.idempotent_result(organization_id=organization_id, principal_user_id=principal["user_id"],
+            idempotency_key=key, operation="github_identity.update", request_hash=store.request_hash({"subject":subject, **body.model_dump()}))
+        if replay:
+            return _control_plane_write_envelope(request, replay[1], idempotent_replay=True)
+        # Verify account facts outside SQLite's write transaction. Identity and
+        # target-role authority are rechecked atomically by the repository.
+        profile = _github_browser_provider().public_user(subject=subject) if body.user_id is not None else {}
+        with website_access.assignment_lock:
+            store, principal, key = _control_plane_write_context(request, organization_id, "github_identity.update", "identity.manage",
+                x_control_token, x_control_plane_token, idempotency_key)
+            _, data, repeated = store.update_github_identity(organization_id=organization_id, principal_user_id=principal["user_id"],
+                subject=subject, user_id=body.user_id, expected_revision=body.expected_revision, idempotency_key=key,
+                login=profile.get("login", ""))
+    except ExternalIdentityProviderUnavailable as error:
+        raise HTTPException(503, detail={"code":"github_lookup_unavailable", "message":str(error)}) from error
+    except (ValueError, KeyError) as error:
+        store.record_audit(organization_id=organization_id, resource="github_identity.update", outcome=str(error.args[0]),
+            actor=principal["user_id"], metadata={"subject":subject})
+        raise _control_plane_write_http_error(error) from error
+    return _control_plane_write_envelope(request, data, idempotent_replay=repeated)
 
 
 @app.put("/api/control-plane/organizations/{organization_id}/quotas/{quota_key}")

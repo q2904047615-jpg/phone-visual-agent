@@ -47,7 +47,7 @@ class GitHubOAuthProviderTests(unittest.TestCase):
         provider = GitHubOAuthProvider(
             client_id="client-123",
             client_secret="secret-value",
-            mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+            mapping_resolver={"42": {"organization_id":"local-org", "user_id":"local-owner", "revision":0}}.get,
             transport=httpx.MockTransport(handler),
         )
         try:
@@ -82,7 +82,7 @@ class GitHubOAuthProviderTests(unittest.TestCase):
         provider = GitHubOAuthProvider(
             client_id="client-123",
             client_secret="secret-value",
-            mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+            mapping_resolver={"42": {"organization_id":"local-org", "user_id":"local-owner", "revision":0}}.get,
             transport=httpx.MockTransport(handler),
         )
         try:
@@ -106,7 +106,7 @@ class GitHubOAuthProviderTests(unittest.TestCase):
         provider = GitHubOAuthProvider(
             client_id="client-123",
             client_secret="secret-value",
-            mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+            mapping_resolver={"42": {"organization_id":"local-org", "user_id":"local-owner", "revision":0}}.get,
             transport=httpx.MockTransport(outage),
         )
         try:
@@ -120,13 +120,15 @@ class GitHubOAuthProviderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             mapping_path = Path(directory) / "github.json"
             mapping_path.write_text(json.dumps({"42": {"organization_id": "local-org", "user_id": "local-owner"}}), encoding="utf-8")
+            repository = SqliteControlPlaneRepository(Path(directory) / "runtime.sqlite3")
             provider = GitHubOAuthProvider.from_environment({
                 "GITHUB_OAUTH_CLIENT_ID": "client-123",
                 "GITHUB_OAUTH_CLIENT_SECRET": "secret-value",
                 "GITHUB_OAUTH_IDENTITY_MAP_FILE": str(mapping_path),
-            }, transport=httpx.MockTransport(lambda request: httpx.Response(404, request=request)))
+            }, identity_store=repository, transport=httpx.MockTransport(lambda request: httpx.Response(404, request=request)))
             self.assertIsNotNone(provider)
             provider.close()
+            repository.close()
 
     def test_authorization_url_and_code_exchange_use_pkce_and_fixed_redirect(self) -> None:
         seen: dict[str, object] = {}
@@ -139,7 +141,7 @@ class GitHubOAuthProviderTests(unittest.TestCase):
         provider = GitHubOAuthProvider(
             client_id="client-123",
             client_secret="secret-value",
-            mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+            mapping_resolver={"42": {"organization_id":"local-org", "user_id":"local-owner", "revision":0}}.get,
             transport=httpx.MockTransport(handler),
         )
         verifier = "v" * 64
@@ -164,6 +166,7 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
     def test_mapped_identity_issues_session_and_mapping_miss_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = SqliteControlPlaneRepository(Path(directory) / "runtime.sqlite3")
+            repository.import_github_mappings({"42":{"organization_id":"local-org", "user_id":"local-owner"}})
 
             def handler(request: httpx.Request) -> httpx.Response:
                 token = json.loads(request.content)["access_token"]
@@ -174,7 +177,7 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
             provider = GitHubOAuthProvider(
                 client_id="client-123",
                 client_secret="secret-value",
-                mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+                mapping_resolver=repository.github_identity,
                 transport=httpx.MockTransport(handler),
             )
             registry = web_app.ExternalIdentityProviderRegistry()
@@ -209,6 +212,7 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
     def test_browser_authorization_code_flow_consumes_state_and_issues_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = SqliteControlPlaneRepository(Path(directory) / "runtime.sqlite3")
+            repository.import_github_mappings({"42":{"organization_id":"local-org", "user_id":"local-owner"}})
             seen: dict[str, object] = {}
 
             def handler(request: httpx.Request) -> httpx.Response:
@@ -222,7 +226,7 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
             provider = GitHubOAuthProvider(
                 client_id="client-123",
                 client_secret="secret-value",
-                mappings={"42": GitHubIdentityMapping("local-org", "local-owner")},
+                mapping_resolver=repository.github_identity,
                 transport=httpx.MockTransport(handler),
             )
             registry = web_app.ExternalIdentityProviderRegistry()

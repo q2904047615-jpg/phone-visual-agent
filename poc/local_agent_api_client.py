@@ -190,6 +190,27 @@ class LocalAgentApiClient:
             path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
         )
 
+    def control_plane_github_identities(self, organization_id: str) -> JsonObject:
+        return self._request("GET", "/api/control-plane/organizations/{organization_id}/github-identities",
+            path_params={"organization_id":self._resource_id(organization_id)}, read_only=True)
+
+    def control_plane_github_lookup(self, organization_id: str, *, login: str) -> JsonObject:
+        return self._request("GET", "/api/control-plane/organizations/{organization_id}/github-identities/lookup",
+            path_params={"organization_id":self._resource_id(organization_id)}, query_params={"login":login}, read_only=True)
+
+    def control_plane_update_github_identity(self, organization_id: str, subject: str, *, user_id: str | None,
+                                            expected_revision: int, idempotency_key: str) -> JsonObject:
+        from agent.domain.control_plane import validate_github_subject
+        validate_github_subject(subject)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            self._raise_contract("expected_revision 必须是非负整数。")
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 128:
+            self._raise_contract("必须提供有效的 Idempotency-Key。")
+        return self._request("PUT", "/api/control-plane/organizations/{organization_id}/github-identities/{subject}",
+            path_params={"organization_id":self._resource_id(organization_id), "subject":subject},
+            payload={"user_id": self._resource_id(user_id) if user_id is not None else None, "expected_revision":expected_revision},
+            extra_headers={"Idempotency-Key":idempotency_key}, read_only=False)
+
     def control_plane_update_principal(self, organization_id: str, user_id: str, *, role: str,
                                        status: str, expected_revision: int, idempotency_key: str) -> JsonObject:
         if role not in {"viewer", "operator", "admin", "owner"} or status not in {"active", "disabled"}:

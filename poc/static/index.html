@@ -27,6 +27,7 @@
         <button id="accountRetryButton" class="secondary-button" type="button" hidden>重新检查</button>
         <button id="deviceManagementButton" class="secondary-button" type="button" hidden>管理设备分配</button>
         <button id="memberManagementButton" class="secondary-button" type="button" hidden>管理组织成员</button>
+        <button id="githubIdentityButton" class="secondary-button" type="button" hidden>管理 GitHub 关联</button>
         <p id="accountError" role="status" hidden></p>
       </section>
       <div class="sidebar-note">
@@ -268,14 +269,33 @@
       <strong>添加成员</strong>
       <label>成员 ID<input id="memberNewId" aria-label="新成员 ID" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._:\-]*" placeholder="例如 alice"></label>
       <label>角色<select id="memberNewRole" aria-label="新成员角色"></select></label>
-      <p class="dialog-help">成员 ID 创建后不可更改。创建成员不会发送邀请；首次登录前须关联 GitHub 身份，再按需分配设备。</p>
+      <p class="dialog-help">成员 ID 创建后不可更改。创建成员不会发送邀请；请从“管理 GitHub 关联”关联身份，再按需分配设备。</p>
       <button type="submit" class="primary-button">创建成员</button>
     </form>
     <div id="memberList"></div>
     <p id="memberMessage" role="status"></p>
     <div class="dialog-actions"><button id="memberRefresh" class="secondary-button" type="button">刷新</button><button id="memberClose" class="secondary-button" type="button">关闭</button></div>
   </dialog>
+  <dialog id="githubIdentityDialog" class="risk-dialog device-management-dialog" aria-labelledby="githubIdentityTitle">
+    <h2 id="githubIdentityTitle">GitHub 身份关联</h2>
+    <p>决定哪个 GitHub 账号可以登录哪位组织成员。</p>
+    <p class="dialog-help">所有者可管理全部成员，管理员只管理操作员和只读成员。更换成员须先解除旧关联；解除会撤销该成员全部登录，但保留历史数据和设备归属，已开始的任务不会自动取消。组织必须保留一名可登录的所有者。</p>
+    <form id="githubIdentityLookup" class="device-assignment-card">
+      <label>查询方式<select id="githubIdentityKind" aria-label="GitHub 查询方式"><option value="login">GitHub 用户名</option><option value="subject">GitHub 稳定 ID</option></select></label>
+      <label>账号<input id="githubIdentityQuery" aria-label="GitHub 账号" required maxlength="39" placeholder="例如 octocat"></label>
+      <button type="submit" class="secondary-button">查询账号</button>
+    </form>
+    <form id="githubIdentityResult" class="device-assignment-card" hidden>
+      <p id="githubIdentityProfile"></p>
+      <label>关联到成员<select id="githubIdentityMember" aria-label="关联到成员" required></select></label>
+      <button id="githubIdentitySave" type="submit" class="primary-button">确认关联</button>
+    </form>
+    <div id="githubIdentityList"></div>
+    <p id="githubIdentityMessage" role="status"></p>
+    <div class="dialog-actions"><button id="githubIdentityRefresh" type="button" class="secondary-button">刷新</button><button id="githubIdentityClose" type="button" class="secondary-button">关闭</button></div>
+  </dialog>
   <script src="/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"></script>
+  <script src="/assets/github_identities.js?v=20261015-v1"></script>
   <script src="/assets/members.js?v=20261015-v1"></script>
   <script src="/assets/device_assignments.js?v=20261015-v1"></script>
   <script src="/assets/account.js?v=20261015-github-login-v1"></script>

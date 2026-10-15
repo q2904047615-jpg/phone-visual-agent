@@ -46,7 +46,7 @@ test('owner creates, changes role, disables and restores in narrow layout withou
   await page.getByLabel('新成员 ID',{exact:true}).fill('new-user');
   await page.getByLabel('新成员角色',{exact:true}).selectOption('viewer');
   await page.getByRole('button',{name:'创建成员',exact:true}).click();
-  await page.getByText('成员已创建。首次登录前，还需由部署人员关联 GitHub 身份，并分配可用设备。',{exact:true}).waitFor();
+  await page.getByText('成员已创建。请从“管理 GitHub 关联”关联身份，并分配可用设备。',{exact:true}).waitFor();
   const row=page.locator('[data-member="new-user"]');
   for(const [role,status] of [['operator','active'],['operator','disabled'],['viewer','active']]) {
     await row.getByLabel('new-user 角色',{exact:true}).selectOption(role);

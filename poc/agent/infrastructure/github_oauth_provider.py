@@ -13,14 +13,15 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Callable, Mapping, MutableMapping
 from urllib.parse import quote, urlencode
 import base64
 import hashlib
+import re
 
 import httpx
 
-from agent.domain.control_plane import ExternalIdentity
+from agent.domain.control_plane import ExternalIdentity, validate_github_subject
 
 
 GITHUB_PROVIDER_ID = "github"
@@ -93,7 +94,7 @@ class GitHubOAuthProvider:
         *,
         client_id: str,
         client_secret: str,
-        mappings: Mapping[str, GitHubIdentityMapping],
+        mapping_resolver: Callable[[str], Mapping[str, Any] | None],
         transport: httpx.BaseTransport | None = None,
         timeout_seconds: float = 10.0,
         base_url: str = GITHUB_API_BASE_URL,
@@ -109,7 +110,7 @@ class GitHubOAuthProvider:
         if not self.redirect_uri or not self.redirect_uri.startswith(("http://", "https://")) \
                 or "?" in self.redirect_uri or "#" in self.redirect_uri:
             raise GitHubOAuthConfigurationError("GitHub OAuth redirect_uri 必须是无查询参数的 HTTP(S) URL。")
-        self._mappings = dict(mappings)
+        self._mapping_resolver = mapping_resolver
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
@@ -129,6 +130,7 @@ class GitHubOAuthProvider:
         environ: Mapping[str, str] | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
+        identity_store=None,
     ) -> "GitHubOAuthProvider | None":
         values = os.environ if environ is None else environ
         client_id = str(values.get("GITHUB_OAUTH_CLIENT_ID", "")).strip()
@@ -137,14 +139,23 @@ class GitHubOAuthProvider:
         redirect_uri = str(values.get("GITHUB_OAUTH_REDIRECT_URI", DEFAULT_GITHUB_REDIRECT_URI)).strip()
         if not client_id and not client_secret and not mapping_path:
             return None
-        if not client_id or not client_secret or not mapping_path:
+        if not client_id or not client_secret or identity_store is None:
             raise GitHubOAuthConfigurationError(
-                "GitHub OAuth 需要同时配置 GITHUB_OAUTH_CLIENT_ID、GITHUB_OAUTH_CLIENT_SECRET 和 GITHUB_OAUTH_IDENTITY_MAP_FILE。"
+                "GitHub OAuth 需要 client_id、client_secret 及持久化身份存储。"
             )
+        if not identity_store.github_mappings_initialized():
+            if not mapping_path:
+                raise GitHubOAuthConfigurationError("首次启用 GitHub OAuth 需提供旧映射文件以建立初始管理员身份。")
+            mappings = _read_mapping_file(Path(mapping_path))
+            try:
+                identity_store.import_github_mappings({subject: {"organization_id": m.organization_id, "user_id": m.user_id}
+                    for subject, m in mappings.items()})
+            except (ValueError, KeyError) as exc:
+                raise GitHubOAuthConfigurationError("GitHub 身份迁移失败，请检查稳定 ID 和组织成员。") from exc
         return cls(
             client_id=client_id,
             client_secret=client_secret,
-            mappings=_read_mapping_file(Path(mapping_path)),
+            mapping_resolver=identity_store.github_identity,
             transport=transport,
             redirect_uri=redirect_uri,
         )
@@ -152,6 +163,35 @@ class GitHubOAuthProvider:
     def close(self) -> None:
         self._client.close()
         self._oauth_client.close()
+
+    def public_user(self, *, login: str | None = None, subject: str | None = None) -> dict[str, str]:
+        """Public lookup proves the account exists, not that the admin owns it."""
+        if subject is not None:
+            path = "/user/" + validate_github_subject(subject)
+        elif isinstance(login, str) and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login):
+            path = "/users/" + quote(login, safe="")
+        else:
+            raise ValueError("github_login_invalid")
+        try:
+            response = self._client.get(path, headers={"Accept":"application/vnd.github+json", "X-GitHub-Api-Version":GITHUB_API_VERSION})
+        except httpx.TransportError as exc:
+            raise ExternalIdentityProviderUnavailable("GitHub 账号查询暂时不可用。") from exc
+        if response.status_code == 404:
+            raise KeyError("github_user_not_found")
+        if response.status_code != 200:
+            raise ExternalIdentityProviderUnavailable("GitHub 账号查询受限或暂时不可用。")
+        try:
+            data = response.json()
+            if (not isinstance(data, dict) or type(data.get("id")) is not int or data["id"] <= 0
+                    or data.get("type") != "User" or not isinstance(data.get("login"),str)
+                    or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", data["login"])):
+                raise ValueError("invalid profile")
+            resolved = validate_github_subject(str(data["id"]))
+            if subject is not None and subject != resolved:
+                raise ValueError("unexpected id")
+        except (ValueError, KeyError) as exc:
+            raise ExternalIdentityProviderUnavailable("GitHub 未返回有效的个人账号。") from exc
+        return {"subject":resolved, "login":data["login"], "profile_url":"https://github.com/"+data["login"]}
 
     def authorization_url(self, *, state: str, code_challenge: str) -> str:
         if not state or len(state) > 256:
@@ -276,20 +316,22 @@ class GitHubOAuthProvider:
             raise ValueError("GitHub OAuth provider 未返回稳定用户 ID。")
         self._check_expiry(payload)
         subject = str(user["id"])
-        mapping = self._mappings.get(subject)
-        if mapping is None:
+        validate_github_subject(subject)
+        mapping = self._mapping_resolver(subject)
+        if mapping is None or not mapping.get("user_id"):
             raise ExternalIdentityMappingNotFound("GitHub OAuth 用户尚未完成身份映射。")
         # Keep claims limited to non-authoritative display/audit facts.  The
         # local role, organization and permissions always come from SQLite.
         claims: MutableMapping[str, Any] = {"login": str(user.get("login", ""))[:128]}
+        claims["binding_revision"] = mapping["revision"]
         scopes = payload.get("scopes")
         if isinstance(scopes, list) and all(isinstance(item, str) for item in scopes):
             claims["scopes"] = list(scopes)
         return ExternalIdentity(
             provider_id=self.provider_id,
             subject=subject,
-            organization_id=mapping.organization_id,
-            user_id=mapping.user_id,
+            organization_id=mapping["organization_id"],
+            user_id=mapping["user_id"],
             claims=claims,
         )
 

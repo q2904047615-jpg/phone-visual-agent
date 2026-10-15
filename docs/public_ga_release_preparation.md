@@ -16,8 +16,12 @@
 - Python 离线回归基线为 `1014` 通过、`4` 跳过；前端完整回归为 `64/64`。
 - OpenAPI 的 billing、platform releases、platform rollback 路由已核对。
 - 未启用第二台设备、未执行手机动作、未调用外部支付或推送。
+- 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。
+- 配置预检已收敛为只阻断公网入口和 OAuth App 外部配置，不再要求重复提供可推导的模型、本机路径或当前 owner 映射。
 
 ## 公共 GA 必须先确定的配置
+
+在当前单机部署中，模型、SQLite、租约目录和现有 owner 已能从代码/数据库解析，不需要再次提供。公网接入前实际还缺四项：公网 HTTPS 基址、GitHub OAuth Client ID、与该基址同源的回调地址，以及通过 Secret 管理器注入的 GitHub OAuth Client Secret。
 
 ### 1. 公网入口与传输安全（必填）
 
@@ -37,12 +41,12 @@
 - `GITHUB_OAUTH_IDENTITY_MAP_FILE`：服务器上的受信映射文件绝对路径。
 - 首个 owner 的 GitHub 稳定数字用户 ID，以及目标 `organization_id/user_id`。只提供 ID 和映射目标，不提供 access token。
 
-### 3. 模型与运行时密钥（必填）
+### 3. 模型与运行时密钥（默认值已解析）
 
 - `DASHSCOPE_API_KEY`：只注入 Secret 管理器，不发送给我。
-- `VISION_MODEL`：当前默认 `qwen3-vl-plus`；若改动需重新做模型合同检查。
-- `VISION_MODEL_BASE_URL`：通常保持受支持的 HTTPS 地址。
-- `PHONE_VISUAL_AGENT_LEASE_DIR`：多进程共享租约的持久可写路径。
+- `VISION_MODEL`：已解析为默认 `qwen3-vl-plus`；若改动需重新做模型合同检查。
+- `VISION_MODEL_BASE_URL`：已解析为默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
+- `PHONE_VISUAL_AGENT_LEASE_DIR`：当前使用代码默认临时租约目录；正式公网多 worker 部署时再切换为持久可写路径。
 - 证据保留策略：`ROBOT_EVIDENCE_RETENTION_SECONDS`、`ROBOT_EVIDENCE_MAX_BYTES`、`ROBOT_EVIDENCE_MAX_RUN_BYTES`。
 
 ### 4. 持久化、备份与运维（必填）

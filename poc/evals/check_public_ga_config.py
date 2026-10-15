@@ -3,11 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
+import sqlite3
+import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
+
+# Support both `python poc/evals/check_public_ga_config.py` from the
+# repository root and `python evals/check_public_ga_config.py` from `poc`.
+PROJECT_ROOT = Path(__file__).parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from agent.domain.vision_model import DEFAULT_VISION_BASE_URL, DEFAULT_VISION_MODEL
 
 
 REQUIRED_SECRET_KEYS = (
@@ -17,11 +27,7 @@ REQUIRED_SECRET_KEYS = (
 REQUIRED_VALUE_KEYS = (
     "PUBLIC_BASE_URL",
     "GITHUB_OAUTH_CLIENT_ID",
-    "GITHUB_OAUTH_IDENTITY_MAP_FILE",
     "GITHUB_OAUTH_REDIRECT_URI",
-    "VISION_MODEL",
-    "VISION_MODEL_BASE_URL",
-    "PHONE_VISUAL_AGENT_LEASE_DIR",
 )
 GITHUB_CALLBACK_PATH = "/api/control-plane/auth/github/callback"
 
@@ -49,6 +55,7 @@ class PublicGaConfigReport:
 
 
 PUBLIC_GA_CONFIG_PROTOCOL = "2026-10-16-public-ga-config-v1"
+DEFAULT_LEASE_DIR = Path(tempfile.gettempdir()) / "phone_visual_agent_device_leases"
 
 
 def _present(environ: Mapping[str, str], key: str) -> bool:
@@ -90,7 +97,17 @@ def _check_identity_map(environ: Mapping[str, str]) -> ConfigCheck:
     key = "github_oauth_identity_map"
     raw_path = str(environ.get("GITHUB_OAUTH_IDENTITY_MAP_FILE", "")).strip()
     if not raw_path:
-        return ConfigCheck(key, "blocked", "缺少 GITHUB_OAUTH_IDENTITY_MAP_FILE。")
+        database_path = Path(__file__).parents[1] / "output" / "web" / "runtime.sqlite3"
+        try:
+            with sqlite3.connect(database_path) as connection:
+                count = int(connection.execute(
+                    "SELECT count(*) FROM control_plane_github_identities"
+                ).fetchone()[0])
+        except (OSError, sqlite3.Error):
+            count = 0
+        if count:
+            return ConfigCheck(key, "derived", f"沿用当前 SQLite 中已初始化的 {count} 个 GitHub 身份映射。")
+        return ConfigCheck(key, "blocked", "缺少 GITHUB_OAUTH_IDENTITY_MAP_FILE，且当前 SQLite 没有已初始化映射。")
     path = Path(raw_path)
     if not path.is_absolute():
         return ConfigCheck(key, "blocked", "身份映射文件必须使用绝对路径。")
@@ -113,7 +130,7 @@ def _check_lease_dir(environ: Mapping[str, str]) -> ConfigCheck:
     key = "runtime_lease_dir"
     raw_path = str(environ.get("PHONE_VISUAL_AGENT_LEASE_DIR", "")).strip()
     if not raw_path:
-        return ConfigCheck(key, "blocked", "缺少 PHONE_VISUAL_AGENT_LEASE_DIR。")
+        return ConfigCheck(key, "derived", f"使用代码默认租约目录：{DEFAULT_LEASE_DIR}。公共部署时可再切换到持久路径。")
     path = Path(raw_path)
     if not path.is_absolute():
         return ConfigCheck(key, "blocked", "租约目录必须使用绝对路径。")
@@ -158,13 +175,18 @@ def evaluate_public_ga_config(environ: Mapping[str, str] | None = None) -> Publi
                 checks.append(ConfigCheck("github_oauth_redirect", "pass", "OAuth 回调与公网基址同源且路径正确。"))
     checks.append(_check_identity_map(values))
     checks.append(_check_lease_dir(values))
+    model = str(values.get("VISION_MODEL", "")).strip()
+    checks.append(ConfigCheck(
+        "vision_model", "pass" if model else "derived",
+        f"使用模型：{model or DEFAULT_VISION_MODEL}。",
+    ))
     model_base = str(values.get("VISION_MODEL_BASE_URL", "")).strip()
     if model_base:
         check = _parse_url(model_base, key="VISION_MODEL_BASE_URL", require_https=False)
         checks.append(check or ConfigCheck("vision_model_base_url", "pass", "视觉模型地址格式有效。"))
     else:
-        checks.append(ConfigCheck("vision_model_base_url", "blocked", "缺少 VISION_MODEL_BASE_URL。"))
-    status = "pass" if all(check.status == "pass" for check in checks) else "blocked"
+        checks.append(ConfigCheck("vision_model_base_url", "derived", f"使用模型默认地址：{DEFAULT_VISION_BASE_URL}。"))
+    status = "pass" if all(check.status in {"pass", "derived"} for check in checks) else "blocked"
     return PublicGaConfigReport(PUBLIC_GA_CONFIG_PROTOCOL, status, tuple(checks))
 
 

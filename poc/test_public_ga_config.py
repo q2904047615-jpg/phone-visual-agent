@@ -68,6 +68,18 @@ class PublicGaConfigTests(unittest.TestCase):
         self.assertTrue(any(item.check_id == "github_oauth_identity_map" and item.status == "blocked" for item in report.checks))
         self.assertTrue(any(item.check_id == "runtime_lease_dir" and item.status == "blocked" for item in report.checks))
 
+    def test_model_and_lease_defaults_are_derived(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            values = self._config(Path(temporary))
+            values.pop("VISION_MODEL")
+            values.pop("VISION_MODEL_BASE_URL")
+            values.pop("PHONE_VISUAL_AGENT_LEASE_DIR")
+            report = evaluate_public_ga_config(values)
+        self.assertEqual("pass", report.status)
+        self.assertEqual("derived", next(item.status for item in report.checks if item.check_id == "vision_model"))
+        self.assertEqual("derived", next(item.status for item in report.checks if item.check_id == "vision_model_base_url"))
+        self.assertEqual("derived", next(item.status for item in report.checks if item.check_id == "runtime_lease_dir"))
+
 
 if __name__ == "__main__":
     unittest.main()

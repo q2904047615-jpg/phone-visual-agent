@@ -719,6 +719,6 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 .account-panel small { opacity: .8; }
 .account-panel p { margin: 0; font-size: 13px; }
 .account-panel [hidden] { display: none !important; }
-#top[hidden], #accessNotice[hidden] { display: none !important; }
+#top[hidden], #accessNotice[hidden], #manualMotionStatus[hidden] { display: none !important; }
 .access-notice { margin: auto; padding: 48px 24px; max-width: 640px; }
 .access-notice p { color: #aab7ce; line-height: 1.8; }

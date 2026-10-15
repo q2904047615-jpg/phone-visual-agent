@@ -44,6 +44,7 @@ test('logged-out page clears old private storage and never requests devices or p
   await page.getByText('未登录', { exact: true }).waitFor();
   assert.equal(await page.locator('#top').isVisible(), false);
   assert.equal(await page.locator('#accessNotice').isVisible(), true);
+  assert.equal(await page.locator('#manualMotionStatus').isVisible(), false);
   assert.equal(await page.evaluate(() => sessionStorage.length), 0);
   assert.equal(state.requests.includes('/api/device'), false);
   assert.equal(state.requests.includes('/api/preview.jpg'), false);
@@ -59,9 +60,12 @@ test('logout clears private content across tabs; stale requests and next user ca
   await other.locator('#top:not([hidden])').waitFor();
   for (const tab of [page, other]) await tab.evaluate(() => {
     state.chatConversation = [{ role: 'user', content: 'alice-private-content' }];
+    state.manualMotion = { status: 'running', error: 'alice-private-content', profile: { kind: 'swipe' } };
     sessionStorage.setItem('visual-agent-test-org%2Falice:task-outcome:fixture-phone', 'alice-private-content');
     render();
+    renderManualMotionStatus();
   });
+  assert.equal(await page.locator('#manualMotionStatus').isVisible(), true);
   state.delayNextDevice = true;
   const pending = page.evaluate(() => refreshDevice()).catch(() => {});
   while (!state.delayed) await new Promise(resolve => setTimeout(resolve, 10));
@@ -70,6 +74,7 @@ test('logout clears private content across tabs; stale requests and next user ca
   for (const tab of [page, other]) {
     await tab.getByText('未登录', { exact: true }).waitFor();
     assert.equal(await tab.locator('#top').isVisible(), false);
+    assert.equal(await tab.locator('#manualMotionStatus').isVisible(), false);
     assert.equal(await tab.locator('body').innerText().then(text => text.includes('alice-private-content')), false);
     assert.equal(await tab.evaluate(() => Object.keys(sessionStorage).some(key => key.startsWith('visual-agent-'))), false);
   }

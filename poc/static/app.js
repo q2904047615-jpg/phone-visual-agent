@@ -47,6 +47,9 @@ function clearPrivateView() {
   document.querySelector('#top').hidden = true;
   document.querySelector('#accessNotice').hidden = false;
   document.querySelector('#phonePreview').removeAttribute('src');
+  document.querySelector('#manualMotionStatus').hidden = true;
+  document.querySelector('#manualMotionStatusLabel').textContent = '';
+  document.querySelector('#manualMotionStatusDetail').textContent = '';
   document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
   for (const url of state.capabilityEvidenceUrls) URL.revokeObjectURL(url);
   clearInterval(state.luckyBagMonitorTimer);

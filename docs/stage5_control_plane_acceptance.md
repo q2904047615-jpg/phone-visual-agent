@@ -11,6 +11,7 @@
 - **通知页**：SQLite 持久化用户作用域通知。只从有意义的 Control Plane 写入审计生成，正文不复制任务、截图、令牌或认证断言；列表按 `organization_id + user_id` 过滤，支持标为已读。
 - **多设备离线合同**：保留按 `device_id` 的租约、fencing epoch、设备锁、控制器/校准隔离和共享机械窗口锁。当前真实注册表仍只启用 `device-local-01`。
 - **Runtime 配额与计费**：启动时按组织/主体原子预留 daily Run 和声明的物理动作预算；终态把实际物理动作、Qwen token 和 CNY 微单位估算结算到 SQLite，重复结算只返回已有账单，失败前退出释放预留。新增 billing 只读路由，不接支付或外部云账单。
+- **网站计费入口**：owner 可在控制面打开只读“计费账本”，按组织隔离显示会话状态、模型、Token、物理动作、定价版本和 CNY 估算；无 `billing.read` 的成员不显示入口。
 - **平台 GA 回滚**：SQLite 记录 active/previous/rolled_back 发布版本；回滚先生成计划并检查活动任务，提交前要求目标版本已由受控重载加载、无活动任务、所有者显式确认和幂等键。流程不会自动 checkout 或覆盖 Git 工作树。
 
 ## 验证
@@ -22,6 +23,7 @@
 - 本批代码已受控重载为 commit `398e15f`，当前监听 PID `4004`；启动自检 `verified=true`，`/api/session` 返回 `ready=true`，OpenAPI 的 billing、platform/releases、platform/rollback 路由方法与源码一致。SQLite 已创建 reservation/usage、billing ledger 和 platform releases 表，初始账单为 0、发布记录 1 条。
 - 所有验证使用临时数据库、Mock 或浏览器路由夹具；本批没有手机动作、第二台真机或付费模型调用。
 - Runtime/回滚定向合同：`poc.test_runtime_quota_billing` 3 项通过，领域/客户端静态合同合计 23 项通过；当前 Windows 沙箱对部分历史 `tempfile.TemporaryDirectory` 清理存在权限错误，未把该环境错误归因于本批代码。匿名访问 billing/releases/device 均被预期的主体会话门禁返回 401；未执行手机动作。
+- 前端新增计费账本模块已通过 Node 语法检查；既有 npm 单元/浏览器命令在当前沙箱被 Node `spawn EPERM` 阻断，未冒充为通过。
 
 ## 仍未完成的阶段 5 / GA 证据
 

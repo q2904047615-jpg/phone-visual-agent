@@ -31,6 +31,7 @@
         <button id="projectManagementButton" class="secondary-button" type="button" hidden>管理项目</button>
         <button id="githubIdentityButton" class="secondary-button" type="button" hidden>管理 GitHub 关联</button>
         <button id="quotaManagementButton" class="secondary-button" type="button" hidden>管理配额</button>
+        <button id="billingViewerButton" class="secondary-button" type="button" hidden>查看计费</button>
         <button id="auditViewerButton" class="secondary-button" type="button" hidden>查看审计</button>
         <button id="notificationButton" class="secondary-button" type="button" hidden>查看通知</button>
         <p id="accountError" role="status" hidden></p>
@@ -335,10 +336,17 @@
   <dialog id="quotaManagementDialog" class="risk-dialog device-management-dialog" aria-labelledby="quotaManagementTitle">
     <h2 id="quotaManagementTitle">组织配额</h2>
     <p>查看本组织当前的运行、物理动作和模型 Token 配额。配额写入带幂等键，保存失败不会改变旧值。</p>
-    <p class="dialog-help">当前版本记录配额与使用量投影；运行时扣减和计费接入仍按 GA 计划单独验收。</p>
+    <p class="dialog-help">运行时会按实际 Run、物理动作和模型 Token 结算；这里显示本地 CNY 估算账本，不代表云厂商最终账单。</p>
     <div id="quotaList"></div>
     <p id="quotaMessage" role="status"></p>
     <div class="dialog-actions"><button id="quotaRefresh" class="secondary-button" type="button">刷新</button><button id="quotaClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
+  <dialog id="billingViewerDialog" class="risk-dialog device-management-dialog" aria-labelledby="billingViewerTitle">
+    <h2 id="billingViewerTitle">计费账本</h2>
+    <p>只显示当前组织的运行成本估算。账本按会话幂等结算，不保存令牌，也不调用支付服务。</p>
+    <div id="billingList"></div>
+    <p id="billingMessage" role="status"></p>
+    <div class="dialog-actions"><button id="billingRefresh" class="secondary-button" type="button">刷新</button><button id="billingClose" class="secondary-button" type="button">关闭</button></div>
   </dialog>
   <dialog id="auditViewerDialog" class="risk-dialog device-management-dialog" aria-labelledby="auditViewerTitle">
     <h2 id="auditViewerTitle">操作审计</h2>
@@ -361,6 +369,7 @@
   <script src="/assets/teams.js?v=20261015-v1"></script>
   <script src="/assets/projects.js?v=20261015-v1"></script>
   <script src="/assets/quotas.js?v=20261015-v1"></script>
+  <script src="/assets/billing.js?v=20261016-v1"></script>
   <script src="/assets/audit.js?v=20261015-v1"></script>
   <script src="/assets/notifications.js?v=20261015-v1"></script>
   <script src="/assets/device_assignments.js?v=20261015-v1"></script>

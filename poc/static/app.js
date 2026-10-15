@@ -45,6 +45,7 @@ let teamManagement = null;
 let projectManagement = null;
 let githubIdentityManagement = null;
 let quotaManagement = null;
+let billingViewer = null;
 let auditViewer = null;
 let notificationViewer = null;
 
@@ -80,6 +81,7 @@ function acceptAccount(value) {
   projectManagement?.account(value);
   githubIdentityManagement?.account(value);
   quotaManagement?.account(value);
+  billingViewer?.account(value);
   auditViewer?.account(value);
   notificationViewer?.account(value);
   const session = value?.authenticated ? value.session : null;
@@ -2649,6 +2651,7 @@ async function init() {
     quotaManagement = window.OrganizationQuotas?.mount(api, async () => {
       acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
     });
+    billingViewer = window.OrganizationBilling?.mount(api);
     auditViewer = window.OrganizationAudit?.mount(api);
     notificationViewer = window.OrganizationNotifications?.mount(api);
     if (window.AgentAccount) await window.AgentAccount.mount(api, acceptAccount);

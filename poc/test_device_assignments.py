@@ -83,6 +83,15 @@ class DeviceAssignmentTests(identity_fixture.BrowserIdentityTests):
         self.assertEqual(409,self.assign(None,0,'stale').status_code)
         self.assertEqual(1,self.repo.device_assignments('local-org')[0]['revision'])
 
+    def test_omitted_assignee_or_idempotency_key_cannot_unassign(self):
+        path=self.base+f'/{self.device}/assignment'
+        missing_user=self.client.put(path,headers={**self.auth(),'Idempotency-Key':'missing-user'},json={'expected_revision':0})
+        self.assertEqual(422,missing_user.status_code)
+        missing_key=self.client.put(path,headers=self.auth(),json={'user_id':None,'expected_revision':0})
+        self.assertEqual(422,missing_key.status_code)
+        self.assertEqual('local-owner',self.repo.device_assignments('local-org')[0]['user_id'])
+        self.assertEqual(0,self.repo.device_assignments('local-org')[0]['revision'])
+
     def test_active_and_paused_work_cannot_be_reassigned(self):
         for manager, method, value in [
             (web_app,'_active_session_status',[{'device_id':self.device,'status':'recovery_required'}]),

@@ -61,7 +61,7 @@ class ControlPlaneQuotaWriteRequest(StrictAgentRequest):
 
 
 class DeviceAssignmentRequest(StrictAgentRequest):
-    user_id: StrictStr | None = Field(default=None, min_length=1, max_length=128)
+    user_id: StrictStr | None = Field(..., min_length=1, max_length=128)
     expected_revision: StrictInt = Field(ge=0)
 
 

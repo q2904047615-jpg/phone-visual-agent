@@ -68,6 +68,9 @@ class LocalAgentApiClient:
     CONTROL_PLANE_PRINCIPALS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/principals"
     CONTROL_PLANE_QUOTAS_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/quotas"
     CONTROL_PLANE_AUDIT_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/audit"
+    CONTROL_PLANE_BILLING_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/billing"
+    CONTROL_PLANE_PLATFORM_RELEASES_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/platform/releases"
+    CONTROL_PLANE_PLATFORM_ROLLBACK_ROUTE = CONTROL_PLANE_ORGANIZATION_ROUTE + "/platform/rollback"
     CONTROL_PLANE_IDENTITY_SESSION_ROUTE = "/api/control-plane/auth/sessions"
     CONTROL_PLANE_EXTERNAL_SESSION_ROUTE = "/api/control-plane/auth/external-sessions"
     CONTROL_PLANE_GITHUB_OAUTH_START_ROUTE = "/api/control-plane/auth/github/start"
@@ -235,6 +238,32 @@ class LocalAgentApiClient:
         return self._request(
             "GET", self.CONTROL_PLANE_QUOTAS_ROUTE,
             path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
+        )
+
+    def control_plane_billing(self, organization_id: str, *, limit: int = 100) -> JsonObject:
+        if isinstance(limit, bool) or limit < 1 or limit > 100:
+            self._raise_contract("limit 必须在 1-100。")
+        return self._request("GET", self.CONTROL_PLANE_BILLING_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)},
+            query_params={"limit": str(limit)}, read_only=True)
+
+    def control_plane_platform_releases(self, organization_id: str) -> JsonObject:
+        return self._request("GET", self.CONTROL_PLANE_PLATFORM_RELEASES_ROUTE,
+            path_params={"organization_id": self._resource_id(organization_id)}, read_only=True)
+
+    def control_plane_platform_rollback(self, organization_id: str, *, target_revision: str,
+                                        expected_active_revision: str, principal_token: str,
+                                        idempotency_key: str, reason: str = "",
+                                        confirm: bool = False) -> JsonObject:
+        if not target_revision or not expected_active_revision or not principal_token or not idempotency_key:
+            self._raise_contract("平台回滚必须提供目标版本、当前版本、主体令牌和幂等键。")
+        return self._control_plane_write(
+            "POST", self.CONTROL_PLANE_PLATFORM_ROLLBACK_ROUTE,
+            organization_id=organization_id, principal_token=principal_token,
+            idempotency_key=idempotency_key,
+            payload={"target_revision": target_revision,
+                     "expected_active_revision": expected_active_revision,
+                     "reason": reason, "confirm": bool(confirm)},
         )
 
     def control_plane_audit(self, organization_id: str, *, after_sequence: int = 0,

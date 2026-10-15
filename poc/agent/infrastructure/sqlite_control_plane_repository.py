@@ -33,7 +33,7 @@ from agent.domain.control_plane import (
 )
 
 
-CONTROL_PLANE_SCHEMA_VERSION = "control-plane-sqlite-v1"
+CONTROL_PLANE_SCHEMA_VERSION = "control-plane-sqlite-v2"
 LOCAL_ORGANIZATION_ID = "local-org"
 IDENTITY_SESSION_TTL_SECONDS = 3600
 
@@ -152,6 +152,71 @@ class SqliteControlPlaneRepository:
                 PRIMARY KEY(organization_id, quota_key),
                 FOREIGN KEY(organization_id) REFERENCES control_plane_organizations(organization_id)
             );
+            CREATE TABLE IF NOT EXISTS control_plane_quota_usage (
+                organization_id TEXT NOT NULL,
+                quota_key TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                runs INTEGER NOT NULL DEFAULT 0,
+                physical_actions INTEGER NOT NULL DEFAULT 0,
+                model_tokens INTEGER NOT NULL DEFAULT 0,
+                reserved_runs INTEGER NOT NULL DEFAULT 0,
+                reserved_physical_actions INTEGER NOT NULL DEFAULT 0,
+                reserved_model_tokens INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(organization_id, quota_key, period_start),
+                FOREIGN KEY(organization_id, quota_key) REFERENCES control_plane_quotas(organization_id, quota_key)
+            );
+            CREATE TABLE IF NOT EXISTS control_plane_quota_reservations (
+                reservation_id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL UNIQUE,
+                quota_key TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('reserved','settled','released')),
+                reserved_runs INTEGER NOT NULL,
+                reserved_physical_actions INTEGER NOT NULL,
+                reserved_model_tokens INTEGER NOT NULL,
+                actual_runs INTEGER NOT NULL DEFAULT 0,
+                actual_physical_actions INTEGER NOT NULL DEFAULT 0,
+                actual_model_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                settled_at TEXT,
+                FOREIGN KEY(organization_id, quota_key) REFERENCES control_plane_quotas(organization_id, quota_key)
+            );
+            CREATE INDEX IF NOT EXISTS control_plane_quota_reservations_org
+                ON control_plane_quota_reservations(organization_id, period_start, status);
+            CREATE TABLE IF NOT EXISTS control_plane_billing_ledger (
+                billing_id TEXT PRIMARY KEY,
+                reservation_id TEXT NOT NULL UNIQUE REFERENCES control_plane_quota_reservations(reservation_id),
+                organization_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                physical_actions INTEGER NOT NULL,
+                cost_micros INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                pricing_version TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(organization_id) REFERENCES control_plane_organizations(organization_id)
+            );
+            CREATE INDEX IF NOT EXISTS control_plane_billing_org_created
+                ON control_plane_billing_ledger(organization_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS control_plane_platform_releases (
+                release_id TEXT PRIMARY KEY,
+                revision TEXT NOT NULL UNIQUE,
+                previous_revision TEXT,
+                status TEXT NOT NULL CHECK(status IN ('active','previous','rolled_back')),
+                created_at TEXT NOT NULL,
+                rolled_back_at TEXT,
+                reason TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS control_plane_platform_releases_status
+                ON control_plane_platform_releases(status, created_at DESC);
             CREATE TABLE IF NOT EXISTS control_plane_audit (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 occurred_at TEXT NOT NULL,
@@ -211,7 +276,7 @@ class SqliteControlPlaneRepository:
             CREATE INDEX IF NOT EXISTS control_plane_oauth_states_expiry
                 ON control_plane_oauth_states(provider_id, expires_at, consumed_at);
             INSERT INTO control_plane_meta(key, value)
-                VALUES ('schema_version', 'control-plane-sqlite-v1')
+                VALUES ('schema_version', 'control-plane-sqlite-v2')
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value;
             """
         )
@@ -338,18 +403,255 @@ class SqliteControlPlaneRepository:
 
     def list_quotas(self, organization_id: str) -> list[dict[str, Any]]:
         with self._lock:
+            period_values = self._current_period_values()
             rows = self._connection.execute(
                 "SELECT * FROM control_plane_quotas WHERE organization_id=? ORDER BY quota_key", (organization_id,)
             ).fetchall()
-            return [{
-                "quota_key": str(row["quota_key"]),
-                "organization_id": str(row["organization_id"]),
-                "period": str(row["period"]),
-                "max_runs": row["max_runs"],
-                "max_physical_actions": row["max_physical_actions"],
-                "max_model_tokens": row["max_model_tokens"],
-                "usage": {"runs": 0, "physical_actions": 0, "model_tokens": 0},
-            } for row in rows]
+            result = []
+            for row in rows:
+                key = str(row["quota_key"])
+                period = str(row["period"])
+                period_start = period_values[period]
+                usage = self._usage_locked(organization_id, key, period_start)
+                result.append({
+                    "quota_key": key,
+                    "organization_id": str(row["organization_id"]),
+                    "period": period,
+                    "period_start": period_start,
+                    "max_runs": row["max_runs"],
+                    "max_physical_actions": row["max_physical_actions"],
+                    "max_model_tokens": row["max_model_tokens"],
+                    "usage": {"runs": usage["runs"], "physical_actions": usage["physical_actions"], "model_tokens": usage["model_tokens"]},
+                    "reserved": {"runs": usage["reserved_runs"], "physical_actions": usage["reserved_physical_actions"], "model_tokens": usage["reserved_model_tokens"]},
+                    "remaining": {
+                        "runs": None if row["max_runs"] is None else max(0, int(row["max_runs"]) - usage["runs"] - usage["reserved_runs"]),
+                        "physical_actions": None if row["max_physical_actions"] is None else max(0, int(row["max_physical_actions"]) - usage["physical_actions"] - usage["reserved_physical_actions"]),
+                        "model_tokens": None if row["max_model_tokens"] is None else max(0, int(row["max_model_tokens"]) - usage["model_tokens"] - usage["reserved_model_tokens"]),
+                    },
+                })
+            return result
+
+    @staticmethod
+    def _current_period_values(now: datetime | None = None) -> dict[str, str]:
+        value = now or datetime.now(timezone.utc)
+        return {"daily": value.strftime("%Y-%m-%d"), "monthly": value.strftime("%Y-%m")}
+
+    def _usage_locked(self, organization_id: str, quota_key: str, period_start: str) -> dict[str, int]:
+        row = self._connection.execute(
+            "SELECT runs,physical_actions,model_tokens,reserved_runs,reserved_physical_actions,reserved_model_tokens "
+            "FROM control_plane_quota_usage WHERE organization_id=? AND quota_key=? AND period_start=?",
+            (organization_id, quota_key, period_start),
+        ).fetchone()
+        if row is None:
+            return {"runs": 0, "physical_actions": 0, "model_tokens": 0, "reserved_runs": 0, "reserved_physical_actions": 0, "reserved_model_tokens": 0}
+        return {key: int(row[key] or 0) for key in ("runs", "physical_actions", "model_tokens", "reserved_runs", "reserved_physical_actions", "reserved_model_tokens")}
+
+    def _ensure_usage_locked(self, organization_id: str, quota_key: str, period_start: str) -> None:
+        self._connection.execute(
+            "INSERT OR IGNORE INTO control_plane_quota_usage(organization_id,quota_key,period_start,updated_at) VALUES(?,?,?,?)",
+            (organization_id, quota_key, period_start, _now()),
+        )
+
+    def reserve_runtime_quota(self, *, organization_id: str, user_id: str, session_id: str,
+                              quota_key: str = "daily", requested_physical_actions: int = 0,
+                              requested_model_tokens: int = 0) -> dict[str, Any]:
+        """Atomically reserve one Run and its declared Runtime action budget."""
+        if isinstance(requested_physical_actions, bool) or int(requested_physical_actions) < 0:
+            raise ValueError("requested_physical_actions 必须是非负整数。")
+        if isinstance(requested_model_tokens, bool) or int(requested_model_tokens) < 0:
+            raise ValueError("requested_model_tokens 必须是非负整数。")
+        with self._lock:
+            existing = self._connection.execute(
+                "SELECT * FROM control_plane_quota_reservations WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["organization_id"] != organization_id or existing["user_id"] != user_id:
+                    raise ValueError("quota_reservation_conflict")
+                return self._reservation_dict(existing)
+            quota = self._connection.execute(
+                "SELECT * FROM control_plane_quotas WHERE organization_id=? AND quota_key=?", (organization_id, quota_key)
+            ).fetchone()
+            if quota is None:
+                raise KeyError("quota_not_found")
+            period_start = self._current_period_values()[str(quota["period"])]
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._connection.execute(
+                    "SELECT * FROM control_plane_quota_reservations WHERE session_id=?", (session_id,)
+                ).fetchone()
+                if existing is not None:
+                    if existing["organization_id"] != organization_id or existing["user_id"] != user_id:
+                        raise ValueError("quota_reservation_conflict")
+                    self._connection.execute("COMMIT")
+                    return self._reservation_dict(existing)
+                self._ensure_usage_locked(organization_id, quota_key, period_start)
+                usage = self._usage_locked(organization_id, quota_key, period_start)
+                proposed = {
+                    "runs": usage["runs"] + usage["reserved_runs"] + 1,
+                    "physical_actions": usage["physical_actions"] + usage["reserved_physical_actions"] + int(requested_physical_actions),
+                    "model_tokens": usage["model_tokens"] + usage["reserved_model_tokens"] + int(requested_model_tokens),
+                }
+                limits = {"runs": quota["max_runs"], "physical_actions": quota["max_physical_actions"], "model_tokens": quota["max_model_tokens"]}
+                exceeded = [key for key, ceiling in limits.items() if ceiling is not None and proposed[key] > int(ceiling)]
+                if exceeded:
+                    raise RuntimeError("quota_exceeded:" + ",".join(exceeded))
+                reservation_id = uuid.uuid4().hex
+                created_at = _now()
+                self._connection.execute(
+                    "INSERT INTO control_plane_quota_reservations(reservation_id,organization_id,user_id,session_id,quota_key,period_start,status,reserved_runs,reserved_physical_actions,reserved_model_tokens,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (reservation_id, organization_id, user_id, session_id, quota_key, period_start, "reserved", 1, int(requested_physical_actions), int(requested_model_tokens), created_at),
+                )
+                self._connection.execute(
+                    "UPDATE control_plane_quota_usage SET reserved_runs=reserved_runs+1,reserved_physical_actions=reserved_physical_actions+?,reserved_model_tokens=reserved_model_tokens+?,updated_at=? WHERE organization_id=? AND quota_key=? AND period_start=?",
+                    (int(requested_physical_actions), int(requested_model_tokens), created_at, organization_id, quota_key, period_start),
+                )
+                self.record_audit(organization_id=organization_id, resource="runtime.quota", outcome="reserved", actor=user_id,
+                                  metadata={"session_id": session_id, "quota_key": quota_key, "requested_physical_actions": int(requested_physical_actions)})
+                row = self._connection.execute("SELECT * FROM control_plane_quota_reservations WHERE reservation_id=?", (reservation_id,)).fetchone()
+                self._connection.execute("COMMIT")
+                return self._reservation_dict(row)
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _reservation_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {key: row[key] for key in row.keys()}
+
+    def release_runtime_quota(self, session_id: str, *, reason: str = "") -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM control_plane_quota_reservations WHERE session_id=?", (session_id,)).fetchone()
+            if row is None or row["status"] != "reserved":
+                return self._reservation_dict(row) if row is not None else None
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                ledger = self._connection.execute("SELECT * FROM control_plane_billing_ledger WHERE session_id=?", (session_id,)).fetchone()
+                if ledger is not None:
+                    self._connection.execute("COMMIT")
+                    refreshed = self._connection.execute("SELECT * FROM control_plane_quota_reservations WHERE session_id=?", (session_id,)).fetchone()
+                    return {"reservation": self._reservation_dict(refreshed), "billing": {key: ledger[key] for key in ledger.keys()}, "idempotent": True}
+                now = _now()
+                self._connection.execute(
+                    "UPDATE control_plane_quota_usage SET reserved_runs=MAX(0,reserved_runs-?),reserved_physical_actions=MAX(0,reserved_physical_actions-?),reserved_model_tokens=MAX(0,reserved_model_tokens-?),updated_at=? WHERE organization_id=? AND quota_key=? AND period_start=?",
+                    (row["reserved_runs"], row["reserved_physical_actions"], row["reserved_model_tokens"], now, row["organization_id"], row["quota_key"], row["period_start"]),
+                )
+                self._connection.execute("UPDATE control_plane_quota_reservations SET status='released',settled_at=? WHERE reservation_id=?", (now, row["reservation_id"]))
+                self.record_audit(organization_id=row["organization_id"], resource="runtime.quota", outcome="released", actor=row["user_id"],
+                                  metadata={"session_id": session_id, "reason": str(reason or "")[:160]})
+                row = self._connection.execute("SELECT * FROM control_plane_quota_reservations WHERE reservation_id=?", (row["reservation_id"],)).fetchone()
+                self._connection.execute("COMMIT")
+                return self._reservation_dict(row)
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def settle_runtime_usage(self, *, session_id: str, status: str, physical_actions: int,
+                             prompt_tokens: int, completion_tokens: int, total_tokens: int,
+                             model: str, cost_micros: int, pricing_version: str) -> dict[str, Any]:
+        """Settle a reservation exactly once and append one billing record."""
+        values = (physical_actions, prompt_tokens, completion_tokens, total_tokens, cost_micros)
+        if any(isinstance(value, bool) or int(value) < 0 for value in values):
+            raise ValueError("Runtime 用量必须是非负整数。")
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM control_plane_quota_reservations WHERE session_id=?", (session_id,)).fetchone()
+            if row is None:
+                raise KeyError("quota_reservation_not_found")
+            ledger = self._connection.execute("SELECT * FROM control_plane_billing_ledger WHERE session_id=?", (session_id,)).fetchone()
+            if ledger is not None:
+                return {"reservation": self._reservation_dict(row), "billing": {key: ledger[key] for key in ledger.keys()}, "idempotent": True}
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                now = _now()
+                usage = self._usage_locked(row["organization_id"], row["quota_key"], row["period_start"])
+                self._connection.execute(
+                    "UPDATE control_plane_quota_usage SET runs=runs+?,physical_actions=physical_actions+?,model_tokens=model_tokens+?,reserved_runs=MAX(0,reserved_runs-?),reserved_physical_actions=MAX(0,reserved_physical_actions-?),reserved_model_tokens=MAX(0,reserved_model_tokens-?),updated_at=? WHERE organization_id=? AND quota_key=? AND period_start=?",
+                    (1, int(physical_actions), int(total_tokens), row["reserved_runs"], row["reserved_physical_actions"], row["reserved_model_tokens"], now, row["organization_id"], row["quota_key"], row["period_start"]),
+                )
+                billing_id = uuid.uuid4().hex
+                self._connection.execute(
+                    "INSERT INTO control_plane_billing_ledger(billing_id,reservation_id,organization_id,user_id,session_id,status,model,prompt_tokens,completion_tokens,total_tokens,physical_actions,cost_micros,currency,pricing_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (billing_id, row["reservation_id"], row["organization_id"], row["user_id"], session_id, str(status or "unknown")[:64], str(model or "unknown")[:128], int(prompt_tokens), int(completion_tokens), int(total_tokens), int(physical_actions), int(cost_micros), "CNY", str(pricing_version or "")[:128], now),
+                )
+                self._connection.execute(
+                    "UPDATE control_plane_quota_reservations SET status='settled',actual_runs=1,actual_physical_actions=?,actual_model_tokens=?,settled_at=? WHERE reservation_id=?",
+                    (int(physical_actions), int(total_tokens), now, row["reservation_id"]),
+                )
+                self.record_audit(organization_id=row["organization_id"], resource="runtime.billing", outcome="settled", actor=row["user_id"],
+                                  metadata={"session_id": session_id, "status": str(status or "unknown")[:64], "cost_micros": int(cost_micros), "total_tokens": int(total_tokens), "physical_actions": int(physical_actions)})
+                result_row = self._connection.execute("SELECT * FROM control_plane_quota_reservations WHERE reservation_id=?", (row["reservation_id"],)).fetchone()
+                billing_row = self._connection.execute("SELECT * FROM control_plane_billing_ledger WHERE billing_id=?", (billing_id,)).fetchone()
+                self._connection.execute("COMMIT")
+                return {"reservation": self._reservation_dict(result_row), "billing": {key: billing_row[key] for key in billing_row.keys()}, "idempotent": False}
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def list_billing(self, organization_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM control_plane_billing_ledger WHERE organization_id=? ORDER BY created_at DESC,billing_id DESC LIMIT ?", (organization_id, int(limit))).fetchall()
+            return [{key: row[key] for key in row.keys()} for row in rows]
+
+    def ensure_platform_release(self, revision: str, *, previous_revision: str | None = None) -> dict[str, Any]:
+        resolved = str(revision or "").strip()
+        if not resolved or len(resolved) > 128:
+            raise ValueError("platform revision 无效。")
+        with self._lock:
+            active = self._connection.execute("SELECT * FROM control_plane_platform_releases WHERE status='active' ORDER BY created_at DESC LIMIT 1").fetchone()
+            existing = self._connection.execute("SELECT * FROM control_plane_platform_releases WHERE revision=?", (resolved,)).fetchone()
+            if existing is not None and existing["status"] == "active":
+                return {key: existing[key] for key in existing.keys()}
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                now = _now()
+                if active is not None and active["revision"] != resolved:
+                    self._connection.execute("UPDATE control_plane_platform_releases SET status='previous' WHERE release_id=?", (active["release_id"],))
+                release_id = existing["release_id"] if existing is not None else uuid.uuid4().hex
+                self._connection.execute(
+                    "INSERT INTO control_plane_platform_releases(release_id,revision,previous_revision,status,created_at,reason) VALUES(?,?,?,?,?,?) ON CONFLICT(revision) DO UPDATE SET previous_revision=excluded.previous_revision,status='active',created_at=excluded.created_at,rolled_back_at=NULL",
+                    (release_id, resolved, previous_revision or (active["revision"] if active is not None else None), "active", now, "service_loaded"),
+                )
+                row = self._connection.execute("SELECT * FROM control_plane_platform_releases WHERE revision=?", (resolved,)).fetchone()
+                self._connection.execute("COMMIT")
+                return {key: row[key] for key in row.keys()}
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+
+    def list_platform_releases(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM control_plane_platform_releases ORDER BY created_at DESC,release_id DESC LIMIT ?", (int(limit),)).fetchall()
+            return [{key: row[key] for key in row.keys()} for row in rows]
+
+    def plan_platform_rollback(self, *, target_revision: str, active_session_ids: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+        with self._lock:
+            active = self._connection.execute("SELECT revision,previous_revision FROM control_plane_platform_releases WHERE status='active' ORDER BY created_at DESC LIMIT 1").fetchone()
+            target = self._connection.execute("SELECT revision FROM control_plane_platform_releases WHERE revision=?", (str(target_revision).strip(),)).fetchone()
+            if active is None:
+                raise KeyError("platform_active_revision_missing")
+            if target is None:
+                raise KeyError("platform_revision_not_found")
+            blockers = tuple(sorted(str(item) for item in active_session_ids if str(item).strip()))
+            return {"target_revision": str(target["revision"]), "active_revision": str(active["revision"]), "previous_revision": active["previous_revision"], "blocked_by_sessions": list(blockers), "ready": not blockers and str(target["revision"]) != str(active["revision"])}
+
+    def commit_platform_rollback(self, *, target_revision: str, reason: str = "") -> dict[str, Any]:
+        with self._lock:
+            active = self._connection.execute("SELECT * FROM control_plane_platform_releases WHERE status='active' ORDER BY created_at DESC LIMIT 1").fetchone()
+            target = self._connection.execute("SELECT * FROM control_plane_platform_releases WHERE revision=?", (str(target_revision).strip(),)).fetchone()
+            if active is None or target is None:
+                raise KeyError("platform_revision_not_found")
+            if active["revision"] == target["revision"]:
+                raise ValueError("platform_rollback_same_revision")
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                now = _now()
+                self._connection.execute("UPDATE control_plane_platform_releases SET status='rolled_back',rolled_back_at=?,reason=? WHERE release_id=?", (now, str(reason or "")[:256], active["release_id"]))
+                self._connection.execute("UPDATE control_plane_platform_releases SET status='active',previous_revision=?,reason=? WHERE release_id=?", (active["revision"], str(reason or "")[:256], target["release_id"]))
+                row = self._connection.execute("SELECT * FROM control_plane_platform_releases WHERE release_id=?", (target["release_id"],)).fetchone()
+                self._connection.execute("COMMIT")
+                return {key: row[key] for key in row.keys()}
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
 
     @staticmethod
     def request_hash(payload: Mapping[str, Any]) -> str:
@@ -549,6 +851,17 @@ class SqliteControlPlaneRepository:
             if row["operation"] != operation or row["request_hash"] != request_hash:
                 raise ValueError("idempotency_conflict")
             return int(row["status_code"]), json.loads(row["response_json"]), True
+
+    def save_idempotent_result(self, *, organization_id: str, principal_user_id: str,
+                               idempotency_key: str, operation: str, request_hash: str,
+                               status_code: int, response: Mapping[str, Any]) -> None:
+        """Persist a response for a route whose external reload must precede commit."""
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO control_plane_idempotency(organization_id,principal_user_id,idempotency_key,operation,request_hash,status_code,response_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (organization_id, principal_user_id, idempotency_key, operation, request_hash,
+                 int(status_code), _json(response), _now()),
+            )
 
     def _run_idempotent(self, *, organization_id: str, principal_user_id: str,
                         idempotency_key: str, operation: str, request_hash: str,
@@ -906,10 +1219,8 @@ class SqliteControlPlaneRepository:
                 "ON CONFLICT(organization_id,quota_key) DO UPDATE SET period=excluded.period,max_runs=excluded.max_runs,max_physical_actions=excluded.max_physical_actions,max_model_tokens=excluded.max_model_tokens",
                 (organization_id, quota_key, quota.period, quota.max_runs, quota.max_physical_actions, quota.max_model_tokens),
             )
-            return 200, {"quota": {"quota_key": quota_key, "organization_id": organization_id, "period": quota.period,
-                                    "max_runs": quota.max_runs, "max_physical_actions": quota.max_physical_actions,
-                                    "max_model_tokens": quota.max_model_tokens,
-                                    "usage": {"runs": 0, "physical_actions": 0, "model_tokens": 0}}}
+            quota_view = next(item for item in self.list_quotas(organization_id) if item["quota_key"] == quota_key)
+            return 200, {"quota": quota_view}
         return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
                                     idempotency_key=idempotency_key, operation="quota.update",
                                     request_hash=request_hash, write=write)

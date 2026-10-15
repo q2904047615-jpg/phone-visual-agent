@@ -17,6 +17,7 @@ from agent.domain import (
     DeviceTaskRegistryPort,
     require_session_device,
 )
+from agent.application.runtime_quota_billing import RuntimeQuotaBilling, RuntimeQuotaExceeded
 
 
 class UniversalAgentOrchestratorPort(Protocol):
@@ -74,6 +75,9 @@ class StartUniversalAgentSessionCommand:
     initial_observation_attempts: int = 0
     recovery_parent_session_id: str | None = None
     recovery_mode: str = ''
+    organization_id: str = 'local-org'
+    principal_user_id: str = 'local-owner'
+    quota_key: str = 'daily'
 
 
 @dataclass(frozen=True)
@@ -101,7 +105,7 @@ class UniversalAgentSessionApplicationService:
     def __init__(self, *, orchestrator_provider: Callable[[], UniversalAgentOrchestratorPort],
         sessions: AgentSessionRepository, ensure_device_ready: Callable[[str], None],
         exclusive_device_session: Callable[[str], AbstractContextManager[None]], begin_new_task: Callable[[str],
-        None]) -> None:
+        None], runtime_quota_billing: RuntimeQuotaBilling | None = None) -> None:
         self._orchestrator_provider = orchestrator_provider
         self._sessions = sessions
         self._ensure_device_ready = ensure_device_ready
@@ -112,6 +116,18 @@ class UniversalAgentSessionApplicationService:
         # session check and then race for the same device.
         self._start_guard = threading.RLock()
         self._starting_devices: set[str] = set()
+        self._runtime_quota_billing = runtime_quota_billing
+
+    def _settle_if_terminal(self, session: AgentSession) -> None:
+        if self._runtime_quota_billing is None:
+            return
+        terminal = getattr(self._orchestrator(), 'TERMINAL_STATUSES', frozenset({'succeeded', 'failed', 'cancelled', 'blocked'}))
+        if getattr(session, 'status', '') in terminal:
+            self._runtime_quota_billing.settle(
+                session=session,
+                organization_id=str(getattr(session, "organization_id", "local-org") or "local-org"),
+                user_id=str(getattr(session, "principal_user_id", "local-owner") or "local-owner"),
+            )
 
     def _orchestrator(self) -> UniversalAgentOrchestratorPort:
         return self._orchestrator_provider()
@@ -167,8 +183,16 @@ class UniversalAgentSessionApplicationService:
             orchestrator = self._orchestrator()
             self._require_start_available(orchestrator, command.device_id)
             self._ensure_device_ready(command.device_id)
-            command.run_dir.mkdir(parents=True, exist_ok=True)
+            if self._runtime_quota_billing is not None:
+                self._runtime_quota_billing.reserve(
+                    organization_id=command.organization_id,
+                    user_id=command.principal_user_id,
+                    session_id=command.session_id,
+                    requested_physical_actions=command.max_physical_actions,
+                    quota_key=command.quota_key,
+                )
             try:
+                command.run_dir.mkdir(parents=True, exist_ok=True)
                 with self._exclusive_device_session(command.device_id):
                     self._require_start_available(orchestrator, command.device_id)
                     self._begin_new_task(command.device_id)
@@ -188,6 +212,9 @@ class UniversalAgentSessionApplicationService:
                         initial_observation_attempts=command.initial_observation_attempts,
                         recovery_parent_session_id=command.recovery_parent_session_id,
                         recovery_mode=command.recovery_mode,
+                        organization_id=command.organization_id,
+                        principal_user_id=command.principal_user_id,
+                        quota_key=command.quota_key,
                     )
             except Exception as exc:
                 # The orchestrator attaches a session when initial observation or
@@ -200,6 +227,10 @@ class UniversalAgentSessionApplicationService:
                         self._sessions.add(failed_session)
                     except Exception:
                         pass
+                    if getattr(failed_session, 'status', '') in getattr(orchestrator, 'TERMINAL_STATUSES', frozenset()):
+                        self._settle_if_terminal(failed_session)
+                elif self._runtime_quota_billing is not None:
+                    self._runtime_quota_billing.release(command.session_id, reason=type(exc).__name__)
                 raise
             self._sessions.add(session)
             automatic_progress = {
@@ -210,9 +241,15 @@ class UniversalAgentSessionApplicationService:
             }
             # The initial observation may leave the session in another transient
             # state. The loop handles awaiting confirmations and terminal states.
-            if command.auto_advance and session.status not in orchestrator.TERMINAL_STATUSES:
-                with self._exclusive_device_session(command.device_id):
-                    automatic_progress = orchestrator.run_autonomous_safe_loop(session)
+            try:
+                if command.auto_advance and session.status not in orchestrator.TERMINAL_STATUSES:
+                    with self._exclusive_device_session(command.device_id):
+                        automatic_progress = orchestrator.run_autonomous_safe_loop(session)
+            except Exception:
+                if session.status in orchestrator.TERMINAL_STATUSES:
+                    self._settle_if_terminal(session)
+                raise
+            self._settle_if_terminal(session)
             return StartUniversalAgentSessionResult(session=session, automatic_progress=automatic_progress)
         finally:
             with self._start_guard:
@@ -227,6 +264,7 @@ class UniversalAgentSessionApplicationService:
         orchestrator = self._orchestrator()
         response = self._exclusive_operation(session, lambda: orchestrator.approve_effects(session, confirmation))
         reject_if(response.physical_actions not in {0, 1}, AgentSessionCommandError("一次效果确认产生了超过一个物理动作。"))
+        self._settle_if_terminal(session)
         return response
 
     def confirm(self, session: AgentSession, *, confirmed: bool, confirmation: Mapping[str,
@@ -235,13 +273,17 @@ class UniversalAgentSessionApplicationService:
         orchestrator = self._orchestrator()
         self._ensure_ready_or_invalidate(orchestrator, session)
         reject_if(confirmed is not True or confirmation is None, AgentSessionCommandError('执行一个动作前必须提交完整且明确的确认作用域。'))
-        return self._exclusive_operation(session, lambda: orchestrator.confirm_one(session, confirmation))
+        response = self._exclusive_operation(session, lambda: orchestrator.confirm_one(session, confirmation))
+        self._settle_if_terminal(session)
+        return response
 
     def refresh(self, session: AgentSession, *, requested_device_id: str) -> AgentSessionOperationResult:
         self._ensure_recoverable(session)
         require_session_device(session, requested_device_id)
         self._ensure_device_ready(session.device_id)
-        return self._exclusive_operation(session, lambda: self._orchestrator().refresh_decision(session))
+        response = self._exclusive_operation(session, lambda: self._orchestrator().refresh_decision(session))
+        self._settle_if_terminal(session)
+        return response
 
     def run_automatic(self, session: AgentSession, *, requested_device_id: str, confirmed: bool,
         confirmation: Mapping[str, Any] | None, max_physical_actions: int | None=None,
@@ -251,15 +293,19 @@ class UniversalAgentSessionApplicationService:
         orchestrator = self._orchestrator()
         self._ensure_ready_or_invalidate(orchestrator, session)
         reject_if(confirmed is True or confirmation is not None, AgentSessionCommandError('安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。'))
-        return self._exclusive_operation(session, lambda: orchestrator.run_autonomous_safe_loop(session,
+        response = self._exclusive_operation(session, lambda: orchestrator.run_autonomous_safe_loop(session,
             max_physical_actions=max_physical_actions, max_observations=max_observations))
+        self._settle_if_terminal(session)
+        return response
 
     def cancel(self, session_id: str, *, requested_device_id: str) -> AgentSessionOperationResult:
         with self._sessions.locked(session_id) as session:
             self._ensure_recoverable(session)
             require_session_device(session, requested_device_id)
             self._orchestrator().cancel(session)
-            return AgentSessionOperationResult(session=session)
+            result = AgentSessionOperationResult(session=session)
+        self._settle_if_terminal(session)
+        return result
 
     def reconcile_recovered(
         self,
@@ -310,6 +356,7 @@ class UniversalAgentSessionApplicationService:
             resolution=resolution,
         )
         if not resume:
+            self._settle_if_terminal(reconciled)
             return RecoveryReconciliationResult(session=reconciled)
         goal = snapshot.get("goal") if isinstance(snapshot.get("goal"), Mapping) else {}
         entities = goal.get("entities") if isinstance(goal, Mapping) else {}
@@ -336,6 +383,9 @@ class UniversalAgentSessionApplicationService:
             recovery_parent_session_id=session_id,
             recovery_mode="fresh_observation_after_unknown_effect" if external_effect == "unknown"
                 else "fresh_observation_after_not_dispatched",
+            organization_id=str(snapshot.get("organization_id") or "local-org"),
+            principal_user_id=str(snapshot.get("principal_user_id") or "local-owner"),
+            quota_key=str(snapshot.get("quota_key") or "daily"),
         )
         started = self.start(command)
         return RecoveryReconciliationResult(session=reconciled, replacement=started.session)

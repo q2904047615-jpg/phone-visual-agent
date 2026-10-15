@@ -167,11 +167,12 @@ def evaluate_device_registry(path: Path, *, real_evidence: bool = False) -> GARe
                        "等待真实第二机位及独立校准证据。" if physical_status != "pass" else "真实多设备证据已登记。"),
         ReadinessCheck("users_teams_permissions", "partial", "用户/团队/角色权限、主体会话、会话撤销和写入权限已接入本机 Control Plane；外部 provider 和运行时授权尚未接入。",
                        ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
-        ReadinessCheck("quotas_billing", "partial", "配额计算、写入和幂等持久化已验证，计费与运行时扣减尚未接入；本批不新增隐式阻断。",
-                       ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
+        ReadinessCheck("quotas_billing", "pass", "Runtime 启动原子预留、终态用量结算、释放、结算幂等和 CNY 估算账本已接入；未调用支付或外部计费服务。",
+                       ("poc/test_runtime_quota_billing.py", "poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
         ReadinessCheck("api_sdk", "partial", "API/SDK 版本、幂等、错误封套、主体会话、撤销和本机读写路由已验证，具体外部身份 provider 尚未配置。",
                        ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py", "docs/control_plane_offline_contract.md")),
-        ReadinessCheck("version_rollback", "partial", "工具/能力晋级已有回滚合同，平台版本回滚尚未形成 GA 发布流程。"),
+        ReadinessCheck("version_rollback", "pass", "平台发布版本账本、活动任务阻断、目标版本已加载校验和显式提交回滚合同已接入；不会自动改写 Git 工作树。",
+                       ("poc/test_runtime_quota_billing.py", "poc/web_app.py")),
     )
     return GAReadinessReport(
         protocol_version=GA_READINESS_PROTOCOL,

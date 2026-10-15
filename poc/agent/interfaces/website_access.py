@@ -97,6 +97,8 @@ def permission_for(path, method):
         tail = path.split("/{organization_id}", 1)[1]
         if tail.startswith("/devices"): return "device.manage"
         if tail.startswith("/quotas"): return "quota.read" if method == "GET" else "quota.manage"
+        if tail.startswith("/billing"): return "billing.read"
+        if tail.startswith("/platform"): return "identity.manage"
         if tail == "/audit": return "audit.read"
         if tail.startswith("/notifications"): return "audit.read"
         if tail.startswith("/principals"): return "identity.manage"

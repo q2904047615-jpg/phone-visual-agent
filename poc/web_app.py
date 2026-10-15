@@ -26,6 +26,7 @@ from agent.application import (
     AgentDeviceRuntimeError,
     AgentSessionCommandError,
     AgentSessionRecoveryRequiredError,
+    RuntimeQuotaExceeded,
     StartUniversalAgentSessionCommand,
 )
 from agent.application.async_task_registry import AsyncTaskRegistry
@@ -105,6 +106,7 @@ from agent.interfaces.http_models import (
     ControlPlanePrincipalUpdateRequest,
     GitHubIdentityWriteRequest,
     ControlPlaneQuotaWriteRequest,
+    ControlPlanePlatformRollbackRequest,
     DeviceAssignmentRequest,
     ControlPlaneTeamUpdateRequest,
     ControlPlaneTeamWriteRequest,
@@ -831,6 +833,93 @@ def control_plane_audit(
     page = store.read_audit(organization_id, after_sequence=after_sequence, limit=limit,
                             actor=request.state.principal["user_id"])
     return _control_plane_envelope({"organization_id": organization_id, **page})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/billing")
+def control_plane_billing(
+    organization_id: str,
+    request: Request,
+    limit: int = 100,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    if isinstance(limit, bool) or limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit 必须在 1-100。")
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    entries = store.list_billing(organization_id, limit=limit)
+    store.record_audit(organization_id=organization_id, resource="billing", outcome="ok",
+                       request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"],
+                       metadata={"method": "GET", "count": len(entries)})
+    return _control_plane_envelope({"organization_id": organization_id, "entries": entries})
+
+
+@app.get("/api/control-plane/organizations/{organization_id}/platform/releases")
+def control_plane_platform_releases(
+    organization_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    store = _control_plane_store()
+    if store.get_organization(organization_id) is None:
+        raise HTTPException(status_code=404, detail="组织不存在。")
+    releases = store.list_platform_releases()
+    return _control_plane_envelope({"organization_id": organization_id, "releases": releases})
+
+
+@app.post("/api/control-plane/organizations/{organization_id}/platform/rollback")
+def control_plane_platform_rollback(
+    organization_id: str,
+    body: ControlPlanePlatformRollbackRequest,
+    request: Request,
+    response: Response,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    store, principal, key = _control_plane_write_context(
+        request, organization_id, "platform.rollback", "identity.manage",
+        x_control_token, x_control_plane_token, idempotency_key,
+    )
+    if principal["role"] != "owner":
+        raise HTTPException(status_code=403, detail={"code": "owner_required", "message": "平台版本回滚仅允许组织所有者。"})
+    request_hash = _control_plane_write_request_hash("platform.rollback", organization_id, body.model_dump())
+    try:
+        replay = store.idempotent_result(organization_id=organization_id, principal_user_id=principal["user_id"],
+                                         idempotency_key=key, operation="platform.rollback", request_hash=request_hash)
+    except ValueError as error:
+        raise _control_plane_write_http_error(error) from error
+    if replay:
+        response.status_code = 200
+        return _control_plane_write_envelope(request, replay[1], idempotent_replay=True)
+    blockers = _api_reload_blockers()
+    active_ids = [str(item.get("session_id") or item.get("task_id") or "") for item in blockers]
+    try:
+        plan = store.plan_platform_rollback(target_revision=body.target_revision, active_session_ids=active_ids)
+    except (KeyError, ValueError) as error:
+        raise _control_plane_write_http_error(error) from error
+    if plan["active_revision"] != body.expected_active_revision:
+        raise HTTPException(status_code=409, detail={"code": "platform_revision_conflict", "message": "当前活动版本已变化，请重新读取发布记录。", "plan": plan})
+    if not plan["ready"]:
+        store.record_audit(organization_id=organization_id, resource="platform.rollback", outcome="blocked",
+                           request_id=_control_plane_request_id(request), actor=principal["user_id"], metadata={"plan": plan})
+        return _control_plane_envelope({"plan": plan, "applied": False})
+    if body.confirm is not True:
+        return _control_plane_envelope({"plan": plan, "applied": False, "requires_confirmation": True})
+    loaded_revision = _current_code_revision(ROOT.parent)
+    if loaded_revision != body.target_revision:
+        raise HTTPException(status_code=409, detail={"code": "rollback_target_not_loaded", "message": "目标版本尚未由受控重载加载；先完成停机检查与重载，再提交回滚确认。", "loaded_revision": loaded_revision, "plan": plan})
+    result = store.commit_platform_rollback(target_revision=body.target_revision, reason=body.reason)
+    store.record_audit(organization_id=organization_id, resource="platform.rollback", outcome="committed",
+                       request_id=_control_plane_request_id(request), actor=principal["user_id"], metadata={"revision": body.target_revision})
+    response.status_code = 200
+    payload = {"plan": plan, "release": result, "applied": True}
+    store.save_idempotent_result(organization_id=organization_id, principal_user_id=principal["user_id"],
+                                 idempotency_key=key, operation="platform.rollback", request_hash=request_hash,
+                                 status_code=200, response=payload)
+    return _control_plane_write_envelope(request, payload, idempotent_replay=False)
 
 
 @app.get("/api/control-plane/organizations/{organization_id}/notifications")
@@ -2628,6 +2717,7 @@ COMMON_OPERATION_ERRORS = (
     EvidenceStoreError,
     UniversalAgentOrchestratorError,
     VisionAgentError,
+    RuntimeQuotaExceeded,
 )
 
 CAPABILITY_ACCEPTANCE_ERRORS = (CapabilityAcceptanceError, *COMMON_OPERATION_ERRORS)
@@ -3063,6 +3153,8 @@ def start_generic_supervised_session(
                 conversation=tuple(item.model_dump() for item in body.conversation),
                 max_physical_actions=body.max_physical_actions,
                 max_observations=body.max_observations,
+                organization_id=str((getattr(request.state, "principal", None) or {}).get("organization_id") or LOCAL_ORGANIZATION_ID),
+                principal_user_id=str((getattr(request.state, "principal", None) or {}).get("user_id") or "local-owner"),
             )
         )
         session = started.session

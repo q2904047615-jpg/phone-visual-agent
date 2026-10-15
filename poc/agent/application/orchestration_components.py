@@ -329,7 +329,8 @@ class SessionLifecycleCoordinator:
         adapter: Any, evidence_store: Any, vision_usage: VisionSessionUsageLedger,
         execution_budget: TaskExecutionBudget,
         recovery_parent_session_id: str | None = None,
-        recovery_mode: str = '') -> UniversalAgentSessionState:
+        recovery_mode: str = '', organization_id: str = 'local-org',
+        principal_user_id: str = 'local-owner', quota_key: str = 'daily') -> UniversalAgentSessionState:
         """Assemble and validate the session before its first observation."""
         visual_paths = tuple(Path(item) for item in visual_reference_paths)
         # Reference assets are an internal visual-prompt input, never goal text or action authority.
@@ -345,6 +346,7 @@ class SessionLifecycleCoordinator:
             execution_budget=execution_budget,
             recovery_parent_session_id=recovery_parent_session_id,
             recovery_mode=recovery_mode,
+            organization_id=organization_id, principal_user_id=principal_user_id, quota_key=quota_key,
             local_exact_input_authority=exact_input_text is not None,
             exact_input_text=exact_input_text,
             exact_action_kind=exact_action_kind or host.required_action_kind,
@@ -363,7 +365,8 @@ class SessionLifecycleCoordinator:
         initial_physical_actions: int = 0,
         initial_observation_attempts: int = 0,
         recovery_parent_session_id: str | None = None,
-        recovery_mode: str = '') -> UniversalAgentSessionState:
+        recovery_mode: str = '', organization_id: str = 'local-org',
+        principal_user_id: str = 'local-owner', quota_key: str = 'daily') -> UniversalAgentSessionState:
         budget = TaskExecutionBudget(max_physical_actions=max_physical_actions, max_observations=max_observations)
         reject_if(type(initial_physical_actions) is not int or initial_physical_actions < 0
             or initial_physical_actions > max_physical_actions,
@@ -388,7 +391,8 @@ class SessionLifecycleCoordinator:
                     conversation=conversation, adapter=adapter, evidence_store=store,
                     vision_usage=ledger, execution_budget=budget,
                     recovery_parent_session_id=recovery_parent_session_id,
-                    recovery_mode=recovery_mode)
+                    recovery_mode=recovery_mode, organization_id=organization_id,
+                    principal_user_id=principal_user_id, quota_key=quota_key)
                 session.physical_actions = initial_physical_actions
                 try:
                     host._observe_and_decide(session)

@@ -582,7 +582,8 @@ class UniversalAgentOrchestrator:
         initial_physical_actions: int = 0,
         initial_observation_attempts: int = 0,
         recovery_parent_session_id: str | None = None,
-        recovery_mode: str = '') -> UniversalAgentSessionState:
+        recovery_mode: str = '', organization_id: str = 'local-org',
+        principal_user_id: str = 'local-owner', quota_key: str = 'daily') -> UniversalAgentSessionState:
         return self._lifecycle_coordinator.start(self, session_id=session_id, raw_goal=raw_goal,
             exact_input_text=exact_input_text, exact_action_kind=exact_action_kind,
             exact_target_label=exact_target_label, device_id=device_id, run_dir=run_dir,
@@ -591,7 +592,8 @@ class UniversalAgentOrchestrator:
             initial_physical_actions=initial_physical_actions,
             initial_observation_attempts=initial_observation_attempts,
             recovery_parent_session_id=recovery_parent_session_id,
-            recovery_mode=recovery_mode)
+            recovery_mode=recovery_mode, organization_id=organization_id,
+            principal_user_id=principal_user_id, quota_key=quota_key)
 
     def _terminate(self, session: UniversalAgentSessionState, *, status: str, message: str) -> None:
         return self._lifecycle_coordinator.terminate(self, session, status=status, message=message)

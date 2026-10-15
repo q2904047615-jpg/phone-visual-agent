@@ -65,6 +65,9 @@ class UniversalAgentSessionState:
     created_at: str = field(default_factory=lambda: datetime.now().astimezone().isoformat(timespec='seconds'))
     recovery_parent_session_id: str | None = None
     recovery_mode: str = ''
+    organization_id: str = 'local-org'
+    principal_user_id: str = 'local-owner'
+    quota_key: str = 'daily'
 
     @property
     def controller_decision(self) -> CanonicalSelectionReceipt | None:
@@ -107,6 +110,9 @@ class UniversalAgentSessionState:
         return {'session_id': self.session_id, 'raw_goal': self.raw_goal, 'device_id': self.device_id,
             'recovery_parent_session_id': self.recovery_parent_session_id,
             'recovery_mode': self.recovery_mode,
+            'organization_id': self.organization_id,
+            'principal_user_id': self.principal_user_id,
+            'quota_key': self.quota_key,
             'lease_epoch': self.lease_epoch,
             'created_at': self.created_at, 'status': self.status, 'step_number': self.step_number,
             'physical_actions': self.physical_actions,

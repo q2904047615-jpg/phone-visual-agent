@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from agent.application import UniversalAgentSessionApplicationService
+from agent.application.runtime_quota_billing import RuntimeQuotaBilling
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
 from agent.domain.action_catalog import PROMOTABLE_ACTION_KINDS
@@ -126,6 +127,7 @@ class Runtime:
         runtime_database = Path(output_dir) / "runtime.sqlite3"
         self.agent_session_repository = SqliteAgentSessionRepository(runtime_database)
         self.control_plane_repository = SqliteControlPlaneRepository(runtime_database)
+        self.control_plane_repository.ensure_platform_release(self.loaded_code_revision)
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
             qwen_observer=self.model_gateway,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
@@ -152,6 +154,7 @@ class Runtime:
             ensure_device_ready=self.ensure_device_ready,
             exclusive_device_session=self.exclusive_device_session,
             begin_new_task=self._begin_new_task_for_device,
+            runtime_quota_billing=RuntimeQuotaBilling(self.control_plane_repository),
         )
         self.capability_acceptance_manager = CapabilityAcceptanceManager(
             provisional_controller_factory=self.device_controllers.provisional_controller,

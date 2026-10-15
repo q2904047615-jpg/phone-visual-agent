@@ -5,7 +5,10 @@
 ## 范围
 
 - `ControlPlaneOrganization`、`ControlPlaneTeam`、`ControlPlanePrincipal`：组织、团队、用户、角色和团队归属必须在同一组织内，角色权限只提供可审计的静态映射。
-- `QuotaLimit`、`QuotaUsage`、`evaluate_quota()`：按 daily/monthly 统计运行次数、物理动作和模型 token，返回纯函数式允许/超额结果及剩余量，不修改账本。
+- `QuotaLimit`、`QuotaUsage`、`evaluate_quota()`：按 daily/monthly 统计运行次数、物理动作和模型 token，返回纯函数式允许/超额结果及剩余量。
+- `QuotaReservation`、Runtime quota bridge：Runtime 启动时原子预留 Run 和声明的物理动作预算；终态按实际物理动作和模型 token 结算，失败前退出可释放预留，重复结算只生成一条账单。
+- `BillingRecord`：把现有 Qwen 用量账本中的 token、模型、定价版本和 CNY 微单位估算写入 SQLite；它是审计/成本投影，不是支付或外部云账单。
+- `PlatformRollbackPlan`：发布版本账本、活动任务阻断、目标版本已加载校验和显式回滚提交；回滚合同不会自动 checkout 或覆盖 Git 工作树。
 - `ApiRequestEnvelope`、`ApiResponseEnvelope`、`ApiError`：请求 ID、幂等键、组织/用户作用域、操作名、版本化响应和可重试错误。
 - `SdkContractManifest`：SDK 版本、API 版本、支持操作、错误码和写操作幂等声明。
 
@@ -23,15 +26,16 @@ GitHub provider 只有在以下环境变量同时存在时才启用：`GITHUB_OA
 
 当前完成的是浏览器授权码合同、PKCE/state 防重放、身份映射和离线回归；没有提交真实 GitHub client secret/access token，因此线上 GitHub 登录仍标记为“待凭据实测”，不能把 MockTransport 或离线 HTTP 合同当成真实 OAuth 验收。
 
-当前身份认证仍支持本机控制令牌引导的主体会话；外部 provider 只负责验证外部身份和映射主体，不替代本地角色、权限或会话撤销。尚未接入并发配额扣减、计费、Runtime admission、Policy 或设备执行链。因此它不会替现有风险边界新增确认，也不会把配额或权限结果变成任务 `blocked`。第二台真机、多设备调度和 GA 发布仍不在本批范围内。
+当前身份认证仍支持本机控制令牌引导的主体会话；外部 provider 只负责验证外部身份和映射主体，不替代本地角色、权限或会话撤销。Runtime admission 已接入 daily 配额的原子预留/释放/终态结算；计费写入 CNY 微单位估算账本，不调用支付或外部计费服务。平台回滚通过 `/platform/releases` 和 `/platform/rollback` 提供可审计计划，只有目标代码已由受控重载加载且无活动任务时才允许提交状态。第二台真机、多设备并行动作和真实支付/云账单仍不在本批范围内。
 
 ## 验证
 
 ```text
 python -m unittest poc.test_control_plane_contract -v
 python -m unittest poc.test_control_plane_api -v
+python -m unittest poc.test_runtime_quota_billing -v
 python -m unittest poc.test_github_oauth_provider -v
 python -m unittest poc.test_local_agent_api_client -v
 ```
 
-当前验证证明数据隔离、权限映射、配额计算、API/SDK 版本封套，以及 GitHub 授权 URL、PKCE code exchange、state 原子消费/重放拒绝、Check a token 请求、应用核对、过期/错误 token、未映射主体、上游故障、配置 fail-closed 和外部会话签发/审计可稳定回放；这不等于使用真实 GitHub 凭据的线上 OAuth 登录或 GA 发布已完成。
+当前验证证明数据隔离、权限映射、配额计算、Runtime 预留/结算/释放幂等、计费账本、平台回滚计划和 API/SDK 版本封套，以及 GitHub 授权 URL、PKCE code exchange、state 原子消费/重放拒绝、Check a token 请求、应用核对、过期/错误 token、未映射主体、上游故障、配置 fail-closed 和外部会话签发/审计可稳定回放；这不等于第二台真机、多设备并行或真实支付/云账单验收已完成。

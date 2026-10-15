@@ -193,6 +193,88 @@ class QuotaDecision:
     remaining: Mapping[str, int | None]
 
 
+@dataclass(frozen=True)
+class QuotaReservation:
+    """A durable Runtime admission reservation.
+
+    ``reserved_*`` is held while a Run is active; settlement replaces it with
+    the measured usage.  The contract is deliberately provider agnostic and
+    uses integer units so SQLite can make the decision atomically.
+    """
+
+    reservation_id: str
+    organization_id: str
+    user_id: str
+    session_id: str
+    quota_key: str
+    period_start: str
+    reserved_runs: int = 1
+    reserved_physical_actions: int = 0
+    reserved_model_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.reservation_id, "reservation_id"),
+                            (self.organization_id, "organization_id"),
+                            (self.user_id, "user_id"),
+                            (self.session_id, "session_id"),
+                            (self.quota_key, "quota_key"),
+                            (self.period_start, "period_start")):
+            _require_id(value, name)
+        for value, name in ((self.reserved_runs, "reserved_runs"),
+                            (self.reserved_physical_actions, "reserved_physical_actions"),
+                            (self.reserved_model_tokens, "reserved_model_tokens")):
+            _require_nonnegative(value, name)
+
+
+@dataclass(frozen=True)
+class BillingRecord:
+    """Immutable projection of one settled Runtime Run."""
+
+    billing_id: str
+    organization_id: str
+    user_id: str
+    session_id: str
+    status: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    physical_actions: int
+    cost_micros: int
+    currency: str = "CNY"
+    pricing_version: str = ""
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.billing_id, "billing_id"), (self.organization_id, "organization_id"),
+                            (self.user_id, "user_id"), (self.session_id, "session_id"),
+                            (self.status, "status"), (self.currency, "currency")):
+            _require_id(value, name)
+        for value, name in ((self.prompt_tokens, "prompt_tokens"), (self.completion_tokens, "completion_tokens"),
+                            (self.total_tokens, "total_tokens"), (self.physical_actions, "physical_actions"),
+                            (self.cost_micros, "cost_micros")):
+            _require_nonnegative(value, name)
+
+
+@dataclass(frozen=True)
+class PlatformRollbackPlan:
+    """Reviewable platform rollback plan; it never mutates Git by itself."""
+
+    target_revision: str
+    active_revision: str
+    previous_revision: str | None
+    blocked_by_sessions: tuple[str, ...] = ()
+    ready: bool = False
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.target_revision, "target_revision"), (self.active_revision, "active_revision")):
+            if not str(value or "").strip() or len(str(value).strip()) > 128:
+                raise ValueError(f"{name} 必须是 1-128 位非空 revision。")
+        if self.previous_revision is not None and (not str(self.previous_revision).strip() or len(str(self.previous_revision).strip()) > 128):
+            raise ValueError("previous_revision 必须是 1-128 位非空 revision。")
+        if any(not str(item or "").strip() for item in self.blocked_by_sessions):
+            raise ValueError("blocked_by_sessions 不能包含空值。")
+
+
 def evaluate_quota(limit: QuotaLimit, usage: QuotaUsage, *, requested_runs: int = 0,
                    requested_physical_actions: int = 0, requested_model_tokens: int = 0) -> QuotaDecision:
     """Return a pure offline quota decision; it does not mutate usage or block Runtime."""
@@ -336,5 +418,5 @@ __all__ = [
     "API_CONTRACT_VERSION", "CONTROL_PLANE_PROTOCOL", "EXTERNAL_IDENTITY_PROTOCOL", "SDK_CONTRACT_VERSION", "ROLE_PERMISSIONS",
     "ApiError", "ApiRequestEnvelope", "ApiResponseEnvelope", "ControlPlaneOrganization",
     "ControlPlanePrincipal", "ControlPlaneSnapshot", "ControlPlaneTeam", "QuotaDecision", "QuotaLimit",
-    "QuotaUsage", "SdkContractManifest", "ExternalIdentity", "ExternalIdentityProvider", "GITHUB_OAUTH_BROWSER_PROTOCOL", "evaluate_quota",
+    "QuotaUsage", "QuotaReservation", "BillingRecord", "PlatformRollbackPlan", "SdkContractManifest", "ExternalIdentity", "ExternalIdentityProvider", "GITHUB_OAUTH_BROWSER_PROTOCOL", "evaluate_quota",
 ]

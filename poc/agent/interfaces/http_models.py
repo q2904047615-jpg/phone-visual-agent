@@ -82,6 +82,13 @@ class ControlPlaneQuotaWriteRequest(StrictAgentRequest):
     max_model_tokens: StrictInt | None = Field(default=None, ge=0)
 
 
+class ControlPlanePlatformRollbackRequest(StrictAgentRequest):
+    target_revision: StrictStr = Field(min_length=1, max_length=128)
+    expected_active_revision: StrictStr = Field(min_length=1, max_length=128)
+    reason: StrictStr = Field(default="", max_length=256)
+    confirm: StrictBool = False
+
+
 class DeviceAssignmentRequest(StrictAgentRequest):
     user_id: StrictStr | None = Field(..., min_length=1, max_length=128)
     expected_revision: StrictInt = Field(ge=0)

@@ -12,6 +12,35 @@ import threading
 # serializing ordinary requests or execution on independent devices.
 assignment_lock = threading.RLock()
 inflight_devices = Counter()
+inflight_member_writes = Counter()
+
+
+@contextmanager
+def member_access(store, request):
+    """Recheck after body parsing and close the suspend/admission race."""
+    if not getattr(request.state, "principal", None):
+        yield
+        return
+    with assignment_lock:
+        principal = store.authenticate_identity_session(identity_token(request))
+        if principal is None:
+            reject(store, request, None, "identity_required", 401)
+        permission = permission_for(request.scope["route"].path, request.method)
+        if permission and permission not in principal["permissions"]:
+            reject(store, request, principal, "permission_denied")
+        request.state.principal = principal
+        key = (principal["organization_id"], principal["user_id"])
+        writing = request.method not in {"GET", "HEAD", "OPTIONS"}
+        if writing:
+            inflight_member_writes[key] += 1
+    try:
+        yield
+    finally:
+        if writing:
+            with assignment_lock:
+                inflight_member_writes[key] -= 1
+                if not inflight_member_writes[key]:
+                    del inflight_member_writes[key]
 
 
 @contextmanager
@@ -21,6 +50,9 @@ def device_access(store, request, device_ids):
         principal = store.authenticate_identity_session(identity_token(request))
         if principal is None:
             reject(store, request, None, "identity_required", 401)
+        permission = "device.read" if request.method == "GET" else "device.execute"
+        if permission not in principal["permissions"]:
+            reject(store, request, principal, "permission_denied")
         for device_id in devices:
             require_device(store, request, principal, device_id)
         inflight_devices.update(devices)

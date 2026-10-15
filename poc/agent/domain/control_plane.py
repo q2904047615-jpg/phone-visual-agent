@@ -30,8 +30,19 @@ ROLE_PERMISSIONS: Mapping[str, frozenset[str]] = {
     "owner": _PERMISSIONS,
 }
 QUOTA_PERIODS = frozenset({"daily", "monthly"})
+
+
+def manageable_member_roles(actor_role: str, target_role: str | None = None) -> tuple[str, ...]:
+    """The single authority for member administration (approved 2026-10-15)."""
+    if actor_role == "owner":
+        return ("viewer", "operator", "admin", "owner")
+    if actor_role == "admin" and target_role in {None, "viewer", "operator"}:
+        return ("viewer", "operator")
+    return ()
+
+
 MUTATING_OPERATIONS = frozenset({
-    "task.create", "task.cancel", "team.create", "team.update", "principal.create", "quota.update", "device.assign",
+    "task.create", "task.cancel", "team.create", "team.update", "principal.create", "principal.update", "quota.update", "device.assign",
 })
 
 

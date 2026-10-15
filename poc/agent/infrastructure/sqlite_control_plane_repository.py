@@ -28,6 +28,7 @@ from agent.domain.control_plane import (
     ControlPlaneTeam,
     QuotaLimit,
     ROLE_PERMISSIONS,
+    manageable_member_roles,
 )
 
 
@@ -74,6 +75,11 @@ class SqliteControlPlaneRepository:
             );
             CREATE TABLE IF NOT EXISTS control_plane_device_assignment_versions (
                 device_id TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS control_plane_member_state (
+                user_id TEXT PRIMARY KEY REFERENCES control_plane_principals(user_id),
+                status TEXT NOT NULL CHECK(status IN ('active','disabled')),
                 revision INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS control_plane_resource_owners (
@@ -248,13 +254,17 @@ class SqliteControlPlaneRepository:
     def list_principals(self, organization_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM control_plane_principals WHERE organization_id=? ORDER BY user_id", (organization_id,)
+                "SELECT p.*,COALESCE(m.status,'active') AS status,COALESCE(m.revision,0) AS revision "
+                "FROM control_plane_principals p LEFT JOIN control_plane_member_state m ON m.user_id=p.user_id "
+                "WHERE p.organization_id=? ORDER BY p.user_id", (organization_id,)
             ).fetchall()
             return [{
                 "user_id": str(row["user_id"]),
                 "organization_id": str(row["organization_id"]),
                 "role": str(row["role"]),
                 "team_ids": list(json.loads(row["team_ids_json"])),
+                "status": row["status"], "revision": row["revision"],
+                "permissions": sorted(ROLE_PERMISSIONS[row["role"]]),
             } for row in rows]
 
     def list_quotas(self, organization_id: str) -> list[dict[str, Any]]:
@@ -292,6 +302,8 @@ class SqliteControlPlaneRepository:
             ).fetchone()
             if row is None:
                 raise KeyError("principal_not_found")
+            if not self.member_active(user_id):
+                raise KeyError("principal_disabled")
             issued_at = datetime.now(timezone.utc)
             expires_at = issued_at.timestamp() + ttl_seconds
             issued_text = issued_at.isoformat(timespec="milliseconds")
@@ -327,7 +339,7 @@ class SqliteControlPlaneRepository:
                 "WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?",
                 (self._token_hash(token), now),
             ).fetchone()
-            if row is None:
+            if row is None or not self.member_active(row["user_id"]):
                 return None
             return {
                 "session_id": str(row["session_id"]),
@@ -545,6 +557,7 @@ class SqliteControlPlaneRepository:
         def write() -> tuple[int, dict[str, Any]]:
             self._require_organization_locked(organization_id)
             principal = ControlPlanePrincipal(user_id=user_id, organization_id=organization_id, role=role, team_ids=team_ids)
+            self._authorize_member_change(organization_id, principal_user_id, None, role)
             if self._connection.execute("SELECT 1 FROM control_plane_principals WHERE user_id=?", (user_id,)).fetchone() is not None:
                 raise ValueError("principal_already_exists")
             for team_id in principal.team_ids:
@@ -554,12 +567,65 @@ class SqliteControlPlaneRepository:
                 "INSERT INTO control_plane_principals(user_id,organization_id,role,team_ids_json) VALUES(?,?,?,?)",
                 (user_id, organization_id, role, _json(list(principal.team_ids))),
             )
+            self.record_audit(organization_id=organization_id, resource="principal.create", outcome="created",
+                actor=principal_user_id, metadata={"user_id": user_id, "role": role})
             return 201, {"principal": {"user_id": user_id, "organization_id": organization_id,
                                         "role": role, "team_ids": list(principal.team_ids),
                                         "permissions": sorted(principal.permissions())}}
         return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
                                     idempotency_key=idempotency_key, operation="principal.create",
                                     request_hash=request_hash, write=write)
+
+    def member_active(self, user_id: str) -> bool:
+        with self._lock:
+            row = self._connection.execute("SELECT status FROM control_plane_member_state WHERE user_id=?", (user_id,)).fetchone()
+            return row is None or row["status"] == "active"
+
+    def _authorize_member_change(self, organization_id, actor_id, target_role, role):
+        actor = self._connection.execute(
+            "SELECT role FROM control_plane_principals WHERE organization_id=? AND user_id=?",
+            (organization_id, actor_id)).fetchone()
+        if (not actor or not self.member_active(actor_id)
+                or role not in manageable_member_roles(actor["role"], target_role)):
+            raise ValueError("member_permission_denied")
+
+    def update_principal(self, *, organization_id: str, principal_user_id: str, user_id: str,
+                         role: str, status: str, expected_revision: int, idempotency_key: str,
+                         unavailable_reason: str = "") -> tuple[int, dict[str, Any], bool]:
+        payload = dict(user_id=user_id, role=role, status=status, expected_revision=expected_revision)
+        def write():
+            members = self.list_principals(organization_id)
+            old = next((m for m in members if m["user_id"] == user_id), None)
+            if old is None:
+                raise KeyError("principal_not_found")
+            self._authorize_member_change(organization_id, principal_user_id, old["role"], role)
+            if status not in {"active", "disabled"}:
+                raise ValueError("member_status_invalid")
+            if old["revision"] != expected_revision:
+                raise ValueError("member_conflict")
+            other_owners = [m for m in members if m["user_id"] != user_id and m["role"] == "owner" and m["status"] == "active"]
+            if old["role"] == "owner" and old["status"] == "active" and (role != "owner" or status != "active") and not other_owners:
+                raise ValueError("last_owner_required")
+            if status == "disabled" and old["status"] == "active" and unavailable_reason:
+                raise ValueError("member_has_active_work")
+            self._connection.execute("UPDATE control_plane_principals SET role=? WHERE user_id=? AND organization_id=?",
+                                     (role, user_id, organization_id))
+            self._connection.execute("INSERT INTO control_plane_member_state VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET status=excluded.status,revision=excluded.revision",
+                                     (user_id, status, expected_revision + 1))
+            if status == "disabled":
+                self._connection.execute("UPDATE control_plane_identity_sessions SET revoked_at=? WHERE user_id=? AND organization_id=? AND revoked_at IS NULL",
+                                         (_now(), user_id, organization_id))
+            # Keep the organization's designated owner consistent with its active owners.
+            if (role != "owner" or status != "active") and other_owners:
+                self._connection.execute("UPDATE control_plane_organizations SET owner_user_id=? WHERE organization_id=? AND owner_user_id=?",
+                                         (other_owners[0]["user_id"], organization_id, user_id))
+            self.record_audit(organization_id=organization_id, resource="principal.update", outcome="updated",
+                actor=principal_user_id, metadata={"user_id": user_id, "old_role": old["role"], "role": role,
+                    "old_status": old["status"], "status": status, "revision": expected_revision + 1})
+            updated = next(m for m in self.list_principals(organization_id) if m["user_id"] == user_id)
+            return 200, {"principal": updated}
+        return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
+            idempotency_key=idempotency_key, operation="principal.update", request_hash=self.request_hash(payload), write=write)
 
     def upsert_quota(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
                      request_hash: str, quota_key: str, period: str, max_runs: int | None,
@@ -633,9 +699,9 @@ class SqliteControlPlaneRepository:
             row = next((x for x in self.device_assignments(organization_id) if x["device_id"] == device_id), None)
             if row is None:
                 raise KeyError("device_not_found")
-            if user_id is not None and not self._connection.execute(
+            if user_id is not None and (not self.member_active(user_id) or not self._connection.execute(
                 "SELECT 1 FROM control_plane_principals WHERE organization_id=? AND user_id=?", (organization_id, user_id)
-            ).fetchone():
+            ).fetchone()):
                 raise ValueError("assignee_not_found")
             if row["revision"] != expected_revision:
                 raise ValueError("assignment_conflict")

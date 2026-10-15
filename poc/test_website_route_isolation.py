@@ -148,7 +148,7 @@ class WebsiteRouteIsolationTests(identity_fixture.BrowserIdentityTests):
 
     def test_stream_rechecks_revocation_without_capturing_another_frame(self):
         token=self.identities['alice']
-        request=Request({'type':'http','headers':[(b'x-control-plane-token',token.encode())]})
+        request=Request({'type':'http','method':'GET','headers':[(b'x-control-plane-token',token.encode())]})
         with patch.object(web_app.runtime,'controller_for_device'),patch.object(web_app.runtime,'capture_preview',return_value=(b'fixture-frame',False)) as capture,patch.object(web_app.time,'sleep'):
             response=web_app.preview_mjpg('alice-device',request)
             self.assertIn(b'fixture-frame',asyncio.run(response.body_iterator.__anext__()))

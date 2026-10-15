@@ -24,7 +24,11 @@ window.DeviceAssignments = {
           const current = document.createElement('p'); current.textContent = `当前使用者：${device.user_id || '未分配'}`;
           const select = document.createElement('select'); select.setAttribute('aria-label', `${device.device_id} 使用者`);
           select.add(new Option('未分配（暂停使用）', ''));
-          for (const person of members.data.principals) select.add(new Option(`${person.user_id} · ${person.role}`, person.user_id));
+          for (const person of members.data.principals) {
+            if (person.status === 'disabled' && person.user_id !== device.user_id) continue;
+            const option = new Option(`${person.user_id} · ${person.role}${person.status === 'disabled' ? '（已停用）' : ''}`, person.user_id);
+            option.disabled = person.status === 'disabled'; select.add(option);
+          }
           select.value = device.user_id || '';
           const save = document.createElement('button'); save.type = 'submit'; save.className = 'primary-button'; save.textContent = '保存分配';
           save.disabled = !device.registered;

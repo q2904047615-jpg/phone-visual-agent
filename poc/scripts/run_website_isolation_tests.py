@@ -21,6 +21,7 @@ def main():
             suite = unittest.defaultTestLoader.discover('.', pattern='test_*.py') if '--full' in sys.argv else unittest.TestSuite([
                 unittest.defaultTestLoader.loadTestsFromName('test_website_access_policy'),
                 unittest.defaultTestLoader.loadTestsFromName('test_device_assignments'),
+                unittest.defaultTestLoader.loadTestsFromName('test_organization_members'),
                 unittest.defaultTestLoader.loadTestsFromName('test_website_route_isolation.WebsiteRouteIsolationTests'),
                 unittest.defaultTestLoader.loadTestsFromName('test_local_agent_api_client'),
             ])

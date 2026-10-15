@@ -190,6 +190,19 @@ class LocalAgentApiClient:
             path_params={"organization_id": self._resource_id(organization_id)}, read_only=True,
         )
 
+    def control_plane_update_principal(self, organization_id: str, user_id: str, *, role: str,
+                                       status: str, expected_revision: int, idempotency_key: str) -> JsonObject:
+        if role not in {"viewer", "operator", "admin", "owner"} or status not in {"active", "disabled"}:
+            self._raise_contract("成员角色或状态无效。")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            self._raise_contract("expected_revision 必须是非负整数。")
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 128:
+            self._raise_contract("必须提供有效的 Idempotency-Key。")
+        return self._request("PUT", self.CONTROL_PLANE_PRINCIPALS_ROUTE + "/{user_id}",
+            path_params={"organization_id": self._resource_id(organization_id), "user_id": self._resource_id(user_id)},
+            payload={"role": role, "status": status, "expected_revision": expected_revision},
+            extra_headers={"Idempotency-Key": idempotency_key}, read_only=False)
+
     def control_plane_quotas(self, organization_id: str) -> JsonObject:
         return self._request(
             "GET", self.CONTROL_PLANE_QUOTAS_ROUTE,

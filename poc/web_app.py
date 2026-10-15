@@ -50,6 +50,7 @@ from agent.infrastructure import (
     GitHubOAuthProvider,
 )
 from agent.domain.control_plane import (
+    manageable_member_roles,
     API_CONTRACT_VERSION,
     CONTROL_PLANE_PROTOCOL,
     EXTERNAL_IDENTITY_PROTOCOL,
@@ -101,6 +102,7 @@ from agent.interfaces.http_models import (
     ControlPlaneExternalIdentityRequest,
     ControlPlaneIdentitySessionRequest,
     ControlPlanePrincipalWriteRequest,
+    ControlPlanePrincipalUpdateRequest,
     ControlPlaneQuotaWriteRequest,
     DeviceAssignmentRequest,
     ControlPlaneTeamUpdateRequest,
@@ -505,11 +507,12 @@ async def _authorize_website_request(request: Request):
     devices = getattr(request.state, "website_devices", set())
     # A stream checks each frame; holding a lease for the entire stream would
     # make merely watching a phone prevent reassignment forever.
-    if devices and request.url.path != "/api/preview.mjpg":
-        with website_access.device_access(store, request, devices):
+    with website_access.member_access(store, request):
+        if devices and request.url.path != "/api/preview.mjpg":
+            with website_access.device_access(store, request, devices):
+                yield
+        else:
             yield
-    else:
-        yield
 
 
 app = FastAPI(
@@ -677,6 +680,15 @@ def _control_plane_write_request_hash(operation: str, organization_id: str, body
 
 def _control_plane_write_http_error(error: BaseException) -> HTTPException:
     code = str(error.args[0]) if isinstance(error, KeyError) and error.args else str(error)
+    member_errors = {
+        "member_permission_denied": (403, "当前角色不能管理此成员或授予该角色。"),
+        "member_conflict": (409, "成员已被其他操作修改，请刷新后重试。"),
+        "last_owner_required": (409, "组织必须保留至少一名启用的所有者。"),
+        "member_has_active_work": (409, "成员有未结束任务或正在处理的请求，请先处理后再停用。"),
+    }
+    if code in member_errors:
+        status, message = member_errors[code]
+        return HTTPException(status, detail={"code": code, "message": message})
     if code in {"organization_not_found", "team_not_found", "principal_not_found"}:
         return HTTPException(status_code=404, detail={"code": code, "message": "Control Plane 资源不存在。"})
     if code in {"team_already_exists", "principal_already_exists", "idempotency_conflict"}:
@@ -759,7 +771,10 @@ def control_plane_principals(
     principals = store.list_principals(organization_id)
     store.record_audit(organization_id=organization_id, resource="principals", outcome="ok",
                        request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET", "count": len(principals)})
-    return _control_plane_envelope({"organization_id": organization_id, "principals": principals})
+    role = request.state.principal["role"]
+    return _control_plane_envelope({"organization_id": organization_id,
+        "create_roles": manageable_member_roles(role),
+        "principals": [{**p, "editable_roles": manageable_member_roles(role, p["role"])} for p in principals]})
 
 
 @app.get("/api/control-plane/organizations/{organization_id}/quotas")
@@ -834,6 +849,10 @@ def control_plane_external_identity_session(
             user_id=identity.user_id,
         )
     except KeyError as error:
+        if error.args[0] == "principal_disabled":
+            store.record_audit(organization_id=identity.organization_id, resource="identity.external", outcome="principal_disabled",
+                actor=actor, metadata={"user_id": identity.user_id})
+            raise HTTPException(403, detail={"code": "principal_disabled", "message": "此组织成员已停用，请联系管理员。"}) from error
         store.record_audit(organization_id=identity.organization_id, resource="identity.external", outcome="principal_not_found",
                            request_id=_control_plane_request_id(request), metadata={"provider_id": identity.provider_id, "user_id": identity.user_id}, actor=actor)
         raise HTTPException(status_code=404, detail={"code": "principal_not_found", "message": "外部身份映射的主体不存在。"}) from error
@@ -986,6 +1005,10 @@ def _complete_github_oauth_callback(
             user_id=identity.user_id,
         )
     except KeyError as exc:
+        if exc.args[0] == "principal_disabled":
+            store.record_audit(organization_id=identity.organization_id, resource="identity.external.oauth", outcome="principal_disabled",
+                actor="external:github", metadata={"user_id": identity.user_id})
+            raise HTTPException(403, detail={"code": "principal_disabled", "message": "此组织成员已停用，请联系管理员。"}) from exc
         store.record_audit(organization_id=identity.organization_id, resource="identity.external.oauth", outcome="principal_not_found",
                            request_id=_control_plane_request_id(request), metadata={"provider_id": identity.provider_id, "user_id": identity.user_id}, actor="external:github")
         raise HTTPException(status_code=404, detail={"code": "principal_not_found", "message": "GitHub 身份映射的主体不存在。"}) from exc
@@ -1221,11 +1244,47 @@ def control_plane_create_principal(
             team_ids=tuple(body.team_ids),
         )
     except (KeyError, ValueError) as error:
+        store.record_audit(organization_id=organization_id, resource="principal.create", outcome=str(error.args[0]),
+            actor=principal["user_id"], request_id=_control_plane_request_id(request), metadata={"user_id": body.user_id})
         raise _control_plane_write_http_error(error) from error
-    store.record_audit(organization_id=organization_id, resource="principal.create",
-                       outcome="replay" if replay else "created", request_id=_control_plane_request_id(request),
-                       metadata={"user_id": body.user_id, "status_code": status_code})
+    if replay:
+        store.record_audit(organization_id=organization_id, resource="principal.create", outcome="replay",
+            request_id=_control_plane_request_id(request), actor=principal["user_id"], metadata={"user_id": body.user_id})
     response.status_code = 200 if replay else status_code
+    return _control_plane_write_envelope(request, data, idempotent_replay=replay)
+
+
+def _member_unavailable(store, organization_id, user_id, actor_id):
+    # Own update counts once; other in-flight writes must settle before disabling.
+    if website_access.inflight_member_writes[(organization_id, user_id)] > int(user_id == actor_id):
+        return "member_inflight"
+    principal = {"organization_id": organization_id, "user_id": user_id}
+    for item in _active_session_status(runtime):
+        if store.owned_resource("session", item["session_id"], principal):
+            return "member_has_active_work"
+    for item in store.device_assignments(organization_id):
+        if item["user_id"] == user_id and _device_assignment_unavailable(item["device_id"]):
+            return "member_has_active_work"
+    return ""
+
+
+@app.put("/api/control-plane/organizations/{organization_id}/principals/{user_id}")
+def control_plane_update_principal(organization_id: str, user_id: str, body: ControlPlanePrincipalUpdateRequest,
+    request: Request, x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+    x_control_plane_token: str | None = Header(default=None, alias="X-Control-Plane-Token"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+    store, principal, key = _control_plane_write_context(request, organization_id, "principal.update", "identity.manage",
+        x_control_token, x_control_plane_token, idempotency_key)
+    try:
+        with website_access.assignment_lock:
+            reason = _member_unavailable(store, organization_id, user_id, principal["user_id"]) if body.status == "disabled" else ""
+            _, data, replay = store.update_principal(organization_id=organization_id, principal_user_id=principal["user_id"],
+                user_id=user_id, role=body.role, status=body.status, expected_revision=body.expected_revision,
+                idempotency_key=key, unavailable_reason=reason)
+    except (KeyError, ValueError) as error:
+        store.record_audit(organization_id=organization_id, resource="principal.update", outcome=str(error.args[0]),
+            actor=principal["user_id"], request_id=_control_plane_request_id(request), metadata={"user_id": user_id})
+        raise _control_plane_write_http_error(error) from error
     return _control_plane_write_envelope(request, data, idempotent_replay=replay)
 
 

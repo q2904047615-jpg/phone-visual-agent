@@ -1402,7 +1402,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             self.assertLogs("web_app", level="WARNING") as logs,
         ):
             from starlette.requests import Request
-            request = Request({'type':'http','headers':[(b'x-control-plane-token',self.headers['X-Control-Plane-Token'].encode())]})
+            request = Request({'type':'http','method':'GET','headers':[(b'x-control-plane-token',self.headers['X-Control-Plane-Token'].encode())]})
             response = web_app.preview_mjpg("phone-mjpg", request)
             first = asyncio.run(response.body_iterator.__anext__())
             with self.assertRaises(StopAsyncIteration):

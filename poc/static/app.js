@@ -40,6 +40,7 @@ let accountPermissions = [];
 let accountEpoch = 0;
 let accountMounted = false;
 let deviceManagement = null;
+let memberManagement = null;
 
 function clearPrivateView() {
   accountEpoch++;
@@ -68,6 +69,7 @@ function clearPrivateView() {
 
 function acceptAccount(value) {
   deviceManagement?.account(value);
+  memberManagement?.account(value);
   const session = value?.authenticated ? value.session : null;
   const next = session ? `${session.organization_id}/${session.user_id}` : '';
   if (accountMounted && !accountReady && next) { window.location.replace('/'); return; }
@@ -1375,7 +1377,7 @@ async function reconcileSupervisedSession() {
 }
 
 function refreshPreview() {
-  if (document.querySelector('#deviceManagementDialog')?.open) return;
+  if (document.querySelector('#deviceManagementDialog')?.open || document.querySelector('#memberManagementDialog')?.open) return;
   if (!accountReady || !state.device?.devices?.some(item => item.device_id === state.deviceId)) return;
   const preview = document.querySelector("#phonePreview");
   if (preview && state.deviceId) {
@@ -2620,6 +2622,9 @@ async function init() {
     state.token = session.token;
     state.mock = session.mock;
     deviceManagement = window.DeviceAssignments?.mount(api, async () => { await refreshDevice(); render(); refreshPreview(); });
+    memberManagement = window.OrganizationMembers?.mount(api, async () => {
+      acceptAccount((await api('/api/control-plane/auth/browser-session', {cache:'no-store'})).data);
+    });
     if (window.AgentAccount) await window.AgentAccount.mount(api, acceptAccount);
     accountMounted = true;
     if (!accountReady) return;

@@ -52,6 +52,12 @@ class ControlPlanePrincipalWriteRequest(StrictAgentRequest):
     team_ids: list[StrictStr] = Field(default_factory=list, max_length=500)
 
 
+class ControlPlanePrincipalUpdateRequest(StrictAgentRequest):
+    role: Literal["viewer", "operator", "admin", "owner"]
+    status: Literal["active", "disabled"]
+    expected_revision: StrictInt = Field(ge=0)
+
+
 class ControlPlaneQuotaWriteRequest(StrictAgentRequest):
     quota_key: StrictStr = Field(min_length=1, max_length=128)
     period: Literal["daily", "monthly"]

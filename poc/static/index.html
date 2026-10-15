@@ -26,6 +26,7 @@
         <button id="accountLogoutButton" class="secondary-button" type="button" hidden>退出登录</button>
         <button id="accountRetryButton" class="secondary-button" type="button" hidden>重新检查</button>
         <button id="deviceManagementButton" class="secondary-button" type="button" hidden>管理设备分配</button>
+        <button id="memberManagementButton" class="secondary-button" type="button" hidden>管理组织成员</button>
         <p id="accountError" role="status" hidden></p>
       </section>
       <div class="sidebar-note">
@@ -258,7 +259,24 @@
     <p id="deviceAssignmentMessage" role="status"></p>
     <div class="dialog-actions"><button id="deviceAssignmentRefresh" class="secondary-button" type="button">刷新</button><button id="deviceAssignmentClose" class="secondary-button" type="button">关闭</button></div>
   </dialog>
+  <dialog id="memberManagementDialog" class="risk-dialog device-management-dialog" aria-labelledby="memberManagementTitle">
+    <h2 id="memberManagementTitle">组织成员与角色</h2>
+    <p>设置谁能使用网站，以及可以执行哪些操作。</p>
+    <p class="dialog-help">只读成员查看自己的数据；操作员可执行任务；管理员管理普通成员和设备；所有者可管理全部角色。管理权限不授予他人的任务、回放或截图访问权。</p>
+    <p class="dialog-help">组织至少保留一名启用的所有者。停用前须先处理未结束任务；停用保留历史数据和设备归属，恢复后需重新登录。</p>
+    <form id="memberCreate" class="device-assignment-card" hidden>
+      <strong>添加成员</strong>
+      <label>成员 ID<input id="memberNewId" aria-label="新成员 ID" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9._:\-]*" placeholder="例如 alice"></label>
+      <label>角色<select id="memberNewRole" aria-label="新成员角色"></select></label>
+      <p class="dialog-help">成员 ID 创建后不可更改。创建成员不会发送邀请；首次登录前须关联 GitHub 身份，再按需分配设备。</p>
+      <button type="submit" class="primary-button">创建成员</button>
+    </form>
+    <div id="memberList"></div>
+    <p id="memberMessage" role="status"></p>
+    <div class="dialog-actions"><button id="memberRefresh" class="secondary-button" type="button">刷新</button><button id="memberClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
   <script src="/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"></script>
+  <script src="/assets/members.js?v=20261015-v1"></script>
   <script src="/assets/device_assignments.js?v=20261015-v1"></script>
   <script src="/assets/account.js?v=20261015-github-login-v1"></script>
   <script src="/assets/app.js?v=20260927-main-chain-cleanup-v1"></script>

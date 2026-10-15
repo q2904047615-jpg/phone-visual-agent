@@ -71,6 +71,7 @@ window.AgentAccount = {
       oauth_state_invalid: '登录请求已过期或服务已重启，请重新登录。',
       oauth_browser_mismatch: '请在发起登录的浏览器中完成授权。',
       external_identity_mapping_not_found: '此 GitHub 账号尚未关联网站账号，请联系管理员。',
+      principal_disabled: '此组织成员已停用，请联系管理员恢复后重新登录。',
       external_provider_unavailable: 'GitHub 暂时无法连接，请稍后重试。',
     };
     if (failure) showError(messages[failure] || '登录未完成，请重试或联系管理员。');

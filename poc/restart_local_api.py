@@ -46,7 +46,12 @@ def main() -> int:
     command_line = str(info.get("CommandLine") or "")
     executable = Path(str(info.get("ExecutablePath") or "")).resolve()
     expected_python = (expected_poc / ".venv" / "Scripts" / "python.exe").resolve()
-    if name != "python.exe" or executable != expected_python or "uvicorn" not in command_line or "web_app:app" not in command_line:
+    # The managed service may run from the checkout's global interpreter when
+    # the virtual environment is unavailable. The command-line and checkout
+    # guard remain mandatory; accepting this exact interpreter is still safer
+    # than killing an unknown Python listener.
+    allowed_pythons = {expected_python, Path(sys.executable).resolve()}
+    if name != "python.exe" or executable not in allowed_pythons or "uvicorn" not in command_line or "web_app:app" not in command_line:
         raise RuntimeError(f"拒绝停止非本工作树 API 进程 PID {pid}。")
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=True)
     return 0

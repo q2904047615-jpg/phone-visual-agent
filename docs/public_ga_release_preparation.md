@@ -11,7 +11,7 @@
 ## 本批已完成
 
 - 单设备软件 GA 评估报告已经可以持久化，`offline_ga_status=pass`。
-- 服务运行在本批干净 revision `527085fa3d34e61125581e5f0eb72d3265e0c6b9`，启动自检 `verified=true`，`/api/session` 为 `ready=true`。
+- 服务运行在最近一次干净 revision（以 `/api/session` 返回的 `revision` 为准），启动自检 `verified=true`，`/api/session` 为 `ready=true`。
 - SQLite active release 与 Git HEAD 一致；配额预留、计费账本、活动 Runtime 均为 `0`。
 - Python 离线回归基线为 `1014` 通过、`4` 跳过；前端完整回归为 `64/64`。
 - OpenAPI 的 billing、platform releases、platform rollback 路由已核对。
@@ -66,7 +66,7 @@
 
 ## 配置完成后的公共 GA 门禁
 
-1. 在部署环境运行配置预检，确认所有必填项存在且不打印 secret。
+1. 在部署环境运行 `python poc/evals/check_public_ga_config.py`，确认所有必填项存在且不打印 secret；当前配置缺失时应返回阻断状态。
 2. 通过 HTTPS 反向代理完成 GitHub OAuth 登录、退出、过期和回调重放拒绝检查。
 3. 核对 Secure/HttpOnly/SameSite Cookie、同源策略、跨组织隔离和无主体访问拒绝。
 4. 用干净 revision 启动并核对 `/api/session`、OpenAPI、SQLite active release 和备份恢复点。

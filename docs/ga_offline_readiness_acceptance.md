@@ -18,7 +18,7 @@
 ## 验证证据
 
 - `poc/test_ga_readiness.py`：3/3 通过。
-- 本轮之前的完整 Python 离线回归：1014 通过、4 skipped；前端 npm 在当前 Windows 沙箱被 Node `spawn EPERM` 阻断，不能计为前端完整回归通过。
+- 完整 Python 离线回归基线：1014 通过、4 skipped；本轮前端 npm 完整回归：64/64 通过（19 个单元 + 45 个浏览器合同）。
 - 只读评估报告：`poc/output/web/ga_readiness_20261014/report.json`，其中 `offline_ga_status=pass`，`physical_multi_device_status=blocked_registry_not_ready`。
 - 服务当前为 PID `20412`、监听 `127.0.0.1:8765`，`/api/session` 返回 `ready=true`；新 billing、platform releases、platform rollback 路由已在 OpenAPI 中登记。
 - 本批没有手机动作、第二台真机、付费模型调用、外部支付或 GitHub 推送。
@@ -27,7 +27,7 @@
 
 - 第二台真机的独立校准、并行运行、同设备互斥和动作后业务证据。
 - 真实云厂商账单、支付结算和生产发布平台的版本切换。
-- 前端 npm 完整回归仍受本机 Node 子进程权限限制，需在具备子进程权限的环境补跑。
+- 浏览器合同需要创建 Edge 子进程；普通受限沙箱仍会返回 `spawn EPERM`，项目脚本已消除 Node 测试 worker 的额外进程，最终 64 项在允许浏览器子进程的受控环境完成。
 
 ## 回滚
 

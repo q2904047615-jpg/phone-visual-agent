@@ -5,8 +5,8 @@
   "description": "Local frontend contract tests for the phone visual agent console.",
   "scripts": {
     "test": "npm run test:unit && npm run test:browser",
-    "test:unit": "node --test test_frontend_protocol.js test_touch_calibration_page.js",
-    "test:browser": "node --test test_frontend_browser_contract.js && node --test test_phase2_console_browser_contract.js && node --test test_account_browser.js && node --test test_website_isolation_browser.js && node --test test_device_assignments_browser.js && node --test test_members_browser.js && node --test test_github_identities_browser.js && node --test test_teams_browser.js && node --test test_projects_browser.js && node --test test_control_plane_admin_browser.js"
+    "test:unit": "node --test --test-isolation=none test_frontend_protocol.js test_touch_calibration_page.js",
+    "test:browser": "node --test --test-isolation=none test_frontend_browser_contract.js && node --test --test-isolation=none test_phase2_console_browser_contract.js && node --test --test-isolation=none test_account_browser.js && node --test --test-isolation=none test_website_isolation_browser.js && node --test --test-isolation=none test_device_assignments_browser.js && node --test --test-isolation=none test_members_browser.js && node --test --test-isolation=none test_github_identities_browser.js && node --test --test-isolation=none test_teams_browser.js && node --test --test-isolation=none test_projects_browser.js && node --test --test-isolation=none test_control_plane_admin_browser.js"
   },
   "devDependencies": {
     "playwright": "1.62.1"

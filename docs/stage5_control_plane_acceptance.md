@@ -20,7 +20,7 @@
 - Python 完整离线回归：1014 项通过，4 项跳过。
 - 前端 `billing.js`、`app.js` Node 语法检查通过；本轮 npm 单元/浏览器命令被 Windows 沙箱的 Node `spawn EPERM` 阻断，不能计为前端完整回归通过。
 - 服务已受控重载：监听 PID `7364`，OpenAPI 包含配额、审计和通知路由；typed client 核对配额 2 项、审计首批 50 条。
-- 本批代码已受控重载为 `398e15f`，网站计费入口为 `a8c00d9`，当前监听 PID `1052`；启动自检 `verified=true`，`/api/session` 返回 `ready=true`，OpenAPI 的 billing、platform/releases、platform/rollback 路由方法与源码一致。SQLite 已创建 reservation/usage、billing ledger 和 platform releases 表，初始账单为 0、发布记录 1 条。
+- 本批代码已受控重载为 `398e15f`，网站计费入口为 `a8c00d9`，当前监听 PID `1052`；启动自检 `verified=true`，`/api/session` 返回 `ready=true`，OpenAPI 的 billing、platform/releases、platform/rollback 路由方法与源码一致。SQLite 已创建 reservation/usage、billing ledger 和 platform releases 表，当前账单为 0、发布记录 3 条（active 1 条）。
 - 所有验证使用临时数据库、Mock 或浏览器路由夹具；本批没有手机动作、第二台真机或付费模型调用。
 - Runtime/回滚定向合同：`poc.test_runtime_quota_billing` 3 项通过，领域/客户端静态合同合计 23 项通过；当前 Windows 沙箱对部分历史 `tempfile.TemporaryDirectory` 清理存在权限错误，未把该环境错误归因于本批代码。匿名访问 billing/releases/device 均被预期的主体会话门禁返回 401；未执行手机动作。
 - 前端新增计费账本模块已通过 Node 语法检查；既有 npm 单元/浏览器命令在当前沙箱被 Node `spawn EPERM` 阻断，未冒充为通过。

@@ -1,6 +1,6 @@
 # 网站权限与用户数据隔离：实施及验收台账
 
-日期：2026-10-15。当前结论：**已验证可行（正式路由离线合同），待重载后完成真实网站验收**。下方“首批历史记录”仅保留问题追溯，不代表当前状态。
+日期：2026-10-15。当前结论：**已验证可行：正式权限接线、离线回归和单账号真实网站验收已完成**。跨用户真实账号验收尚未进行。下方“首批历史记录”仅保留问题追溯，不代表当前状态。
 
 ## 当前实施结果
 
@@ -12,7 +12,22 @@ Cookie 升级为 `agent_principal_v2`（HttpOnly、SameSite=Lax、Path=/api，HT
 
 最终 Python **961 tests，OK，skipped=4**；前端 **50 项通过**（19 单元、31 浏览器）。日志为 `poc/output/website_isolation_integration_full.log` 和 `poc/output/website_isolation_frontend.log`。运行命令为项目 Python 执行 `scripts/run_website_isolation_tests.py --full`，以及 `npm test`。测试使用正式 `web_app.app`、临时数据库和 Mock；本人成功、同组织管理员/跨组织越权、无设备、角色、撤销、流停止、列表审计、SDK 和同源端口均有覆盖。浏览器覆盖未登录、两标签退出、迟到响应、下一账号和过期。没有关闭生产鉴权来通过测试。历史实验本批未重跑。
 
-当前待备份 SQLite、受控加载与真实 GitHub 登录/历史资源读取/退出撤销验收。两名真实 GitHub 用户之间的隔离尚未实测，当前跨用户证据来自离线。第二台真机、设备分配页面、配额并发扣减和计费仍未完成，不代表 GA 完成。
+两名真实 GitHub 用户之间的隔离尚未实测，当前跨用户证据来自离线。第二台真机、设备分配页面、配额并发扣减和计费仍未完成，不代表 GA 完成。尚未证明未覆盖场景无退化。
+
+## 本批真实网站验收
+
+代码提交 `fe2ae6b` 完成正式接线；`e446240` 修正现场发现的未启动固定测试面板可见问题，并补充退出后面板内容清理断言，随后重新运行全部 50 项前端回归通过。API 已加载上述代码；刷新触发受保护重载返回 HTTP 200、revision=`e4462406d432dc5d2e496186e888922a2187753c+dirty`。`+dirty` 来自保留的既有未跟踪 Playwright 日志，当时受跟踪代码无改动，不能据此用于能力晋级。验收监听 PID 7368、端口 8765。
+
+SQLite 在线备份及脱敏报告位于 `poc/output/web/website_isolation_20261015/`：`before_ownership_migration.sqlite3` 完整性检查为 ok，`report.json` 记录本批证据。迁移标记已持久化；本库原有一个已取消的零动作会话 `api-scope` 与唯一默认设备归 `local-org/local-owner`。
+
+- bootstrap/OpenAPI 一致，新访问协议 `2026-10-15-private-user-v1`、`identity_required=true`；匿名设备访问 401，旧 POST 任意主体签发路由不存在。
+- 真实网页入口 → GitHub → 返回工作台显示 `local-owner` 成功；刷新及项目 API 重载后保持登录。只返回 `device-local-01`，controller/camera 在线、busy=false、active_tasks=[]、manual_motion_tests=[]。
+- 本人已有 `api-scope` 读取成功，状态 cancelled；事件分页返回 2 项、has_more=true、协议 `2026-10-14-runtime-event-replay-v1`。旧交接文档的三 App 会话 `28a351…` 不在当前库中，访问返回 404，未计作通过。
+- Cookie 为 HttpOnly、SameSite=Lax、Path=/api；当前本机 HTTP 的 Secure=false，JavaScript 无法读取主体令牌。HTTPS 部署行为仍以离线合同为证据。
+- 两个真实浏览器标签同时退出，工作台和固定测试面板隐藏、截图 src 移除、私有会话缓存为 0、主体 Cookie 数量为 0。退出 HTTP 200；内存中保留的旧令牌再次请求返回 401。
+- 真实会话 `13be2d31a2224d2b9b5942e97ecfb8a1` 于北京时间 16:12:08 签发、16:19:24 撤销。审计 84/85 记录 OAuth 开始/签发，87/88 记录撤销权限通过/撤销，89 记录无效身份拒绝。
+
+验收没有发起手机任务、物理动作、付费模型请求或接入第二台真机；没有操作卖家 `main.exe`。当前测试浏览器留在退出状态。
 
 回滚使用本批精确 Git commit；重载前 SQLite 在线备份，新增表可保留，不覆盖之后产生的数据。撤回至旧版本会重新失去隔离保护，因此应先停止对外访问。不操作卖家 `main.exe`，不执行手机动作或付费模型调用。
 

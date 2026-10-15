@@ -12,8 +12,8 @@
 
 - 单设备软件 GA 评估报告已经可以持久化，`offline_ga_status=pass`。
 - 服务运行在最近一次干净 revision（以 `/api/session` 返回的 `revision` 为准），启动自检 `verified=true`，`/api/session` 为 `ready=true`。
-- SQLite active release 与 Git HEAD 一致；未结算配额预留和活动 Runtime 均为 `0`，SQLite 保留 `6` 条离线回归产生的历史计费账本，未调用支付服务。
-- Python 离线回归基线为 `1014` 通过、`4` 跳过；前端完整回归为 `64/64`。
+- SQLite active release 与 Git HEAD 一致；未结算配额预留和活动 Runtime 均为 `0`，SQLite 保留离线回归产生的历史计费账本，未调用支付服务。
+- 本批 Python 离线回归为 `1019` 通过、`4` 跳过；前端完整回归基线为 `64/64`。
 - OpenAPI 的 billing、platform releases、platform rollback 路由已核对。
 - 未启用第二台设备、未执行手机动作、未调用外部支付或推送。
 - 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。

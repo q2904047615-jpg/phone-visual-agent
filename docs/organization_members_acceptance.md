@@ -2,6 +2,8 @@
 
 日期：2026-10-15。最新主方案阶段 5 的组织成员/角色管理子项，不接第二台真机。
 
+**已验证可行：内部实现、完整离线回归、服务加载及单账号真实网站验收完成。** 跨用户角色与撤销结论来自隔离测试，不冒充两名真实 GitHub 用户验收。
+
 ## 范围与合同
 
 网站新增“管理组织成员”，支持查看组织成员、创建稳定成员 ID、修改角色、停用和恢复。角色中文说明、当前状态、失败原因、刷新和重试均在管理窗口内显示，390px 可使用。无设备的管理员仍可进入管理。
@@ -26,9 +28,26 @@
 
 新增验收覆盖：owner/admin/operator/viewer、旧创建入口提权、跨组织、最后所有者及组织指针转移、全部会话撤销/恢复、停用成员 OAuth 浏览器拒绝、任务历史和设备归属保持、停用成员不可分配设备、旧令牌角色即时生效、派发前重查、暂停任务/在途请求、CAS/幂等/重开库/审计、SQLite 独立连接竞争、官方 SDK、390px 界面、失败重试、退出后迟到响应清理。
 
-完整离线验证：Python `scripts/run_website_isolation_tests.py --full` **986 tests，OK，4 skipped**；前端 `npm test` **55 项通过**（19 单元、36 浏览器）。离线 runner 强制 Mock 且使用临时 Runtime 数据库，不操作真实手机。真实网站结果在加载验收后补记。
+完整离线验证：Python `scripts/run_website_isolation_tests.py --full` **986 tests，OK，4 skipped**；前端 `npm test` **55 项通过**（19 单元、36 浏览器）。离线 runner 强制 Mock 且使用临时 Runtime 数据库，不操作真实手机。
 
 初轮回归发现两个直接调用流式取图的旧测试请求缺少 HTTP method/route 元数据。设备复查改为直接检查 device.read/device.execute，测试补充真实 GET method；保留撤销后停止取图和后续取图异常用例，不降低生产权限校验。
+
+## 真实网站结果
+
+代码提交 `e34bb740c83571c4f0dfa15b37d53d49d148bf2b` 已经通过空闲检查重载。最终监听为 `127.0.0.1:8765`、PID 9076；版本 `0.2.0-trial-upstream`、官方客户端 bootstrap/OpenAPI 校验成功，新成员 PUT 路由已加载。加载 revision 的 `+dirty` 来自保留既有未跟踪 Playwright 日志，受跟踪代码无未提交变更。
+
+使用当前真实 GitHub `local-org/local-owner` 会话，通过网页控件完成：
+
+1. 最后一名所有者尝试降为 viewer 返回 409/last_owner_required；原角色、状态和 revision=0 保持。
+2. 创建 `acceptance-member-20261015`，初始 viewer/active；改为 operator/active（revision=1）、停用（2）、恢复为 viewer/active（3）、最终停用（4），每次刷新显示与 API 一致。
+3. 390px 视口管理窗口 clientWidth/scrollWidth 都为 320，无横向溢出。设备使用者下拉不包含停用验收成员。
+4. 退出后成员入口隐藏、列表清空、任务页面隐藏；再次真实 GitHub 登录成功，原 owner 和停用成员仍显示正确。
+5. 再次 API 重载后状态保持：local-owner 为 owner/active/revision=0；验收成员 viewer/disabled/revision=4。唯一设备仍为 local-owner/revision=2，无分配变更。
+6. status 确认 controller/camera 在线、busy=false、无活动任务/固定测试；doctor ready=true、blockers=[]、4 帧本地诊断、physical_actions=0。本人历史 api-scope 仍 cancelled，任务表未新增、physical_actions=0。
+
+SQLite 只读复核：审计 106 记录最后所有者拒绝、109 创建、112/116/120/124 记录四次成员变化，actor 均为 local-owner，旧/新角色和状态齐全。测试成员未关联 GitHub、未分配设备，最终停用保留审计。当前页面保留真实 owner 登录和成员管理窗口。
+
+备份、日志和脱敏报告位于 `poc/output/web/organization_members_20261015/`：`before_members.sqlite3`（integrity_check=ok）、`member-regression.log`、`member-frontend.log`、`member-targeted.log`、`report.json`。定向日志属于中间验证，最终结论以完整回归日志为准。没有手机动作、付费模型调用、第二台真机或卖家 main.exe 操作。
 
 ## 加载与回滚
 

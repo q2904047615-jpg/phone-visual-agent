@@ -17,8 +17,8 @@
 
 ## 真实网站验收
 
-代码 `40533e0` 已加载，样式修复提交后再重载。当前 GitHub `local-owner` 完成真实创建项目 `acceptance-project-20261015` → 修改名称/说明 → 归档；记录为 revision=1，归档状态在退出、重新登录和 API 重载后保持。过期版本覆盖测试返回 409（离线证据）。
+代码 `40533e0`、样式/台账 `6eed984` 已提交并加载，最终 API PID **4000**。当前 GitHub `local-owner` 完成真实创建项目 `acceptance-project-20261015` → 修改名称/说明 → 归档；记录为 revision=1，归档状态在退出、重新登录和 API 重载后保持。过期版本覆盖测试返回 409（离线证据）。官方客户端 bootstrap/OpenAPI 通过，服务版本保持 0.2.0-trial-upstream。
 
-修复前发现 390px 对话框宽度 623px，判为验收失败；加入 `min(640px, calc(100vw - 32px))` 后页面相关测试通过，重新加载后需再次核对真实宽度。项目测试截图、SQLite 备份和日志位于 `poc/output/web/project_management_20261015/`。
+修复前发现 390px 对话框宽度 623px，判为验收失败；加入 `min(640px, calc(100vw - 32px))` 后页面相关测试通过，重新加载后的真实核对为 clientWidth=scrollWidth=320。退出登录清空项目列表和管理入口，重新 GitHub 登录后项目恢复；390px 与桌面宽度均无横向溢出。项目测试截图、SQLite 备份、脱敏报告和日志位于 `poc/output/web/project_management_20261015/`。
 
 真实状态边界：唯一设备仍归 `local-owner`、controller/camera 在线、无活动任务、doctor ready、物理动作 0；未接第二台真机、未调用付费模型、未操作卖家 `main.exe`。双真实账号、多 API worker 和项目与 Runtime Task 的业务绑定不在本批完成证据内，不宣称阶段 5 或 GA 完成。

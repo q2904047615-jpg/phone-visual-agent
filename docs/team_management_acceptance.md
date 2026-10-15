@@ -30,7 +30,15 @@ SQLite 团队 member_ids 是运行时成员归属来源，成员列表和现有�
 
 ## 加载与真实验收
 
-待本批代码提交、备份和受控重载后填写。当前离线通过不代表已加载或真实页面已验收。
+**已验证可行：本批实现、离线回归、加载和单真实账号网站验收完成。** 代码 `834eef3`、样式 `8299215` 均本地提交，最终重载 PID **18940**。重载请求 revision=`8299215eb1d2cb6f76e829a8a52f17e923f9ab44+dirty`，受跟踪代码干净，dirty 仅为保留的既有未跟踪 Playwright 日志；不据此进行真机能力晋级。官方客户端 bootstrap/OpenAPI 验证通过，版本 0.2.0-trial-upstream。
+
+当前真实 local-owner 通过页面完成创建（含本人）→改名并加入已停用验收成员→移除两名成员并改名“验收留存（空组）”，版本依次 0→1→2。本人原有 local-team 始终保留；最终原成员分组、角色、状态及成员版本恢复/保持原值。测试组 ID=`team-9be86547-1e3b-4924-8f60-185bc487d902`，作为空组保留，不删除原团队。过期 expected_revision=0 写入返回 409/team_conflict，未覆盖当前组。
+
+真实退出登录清空团队列表/分组概览并隐藏入口，再次 GitHub 登录成功；第二次 API 重载后团队名、空成员名单、revision=2 仍在。390×844 下对话框 clientWidth=scrollWidth=320，1280×900 桌面无横向溢出，截图已检查。真实跨账号权限拒绝没有第二账号实测，依据隔离回归，不混作真实证据。
+
+SQLite 写入审计 **161/166/172** 记录创建和两次更新，actor 均 local-owner，包含实际成员及更新前后信息。最终只读预检 consistent=true、teams=2、members=2、issues=[]。唯一设备仍归 local-owner/revision=2；原验收成员仍 viewer/disabled/revision=4，本人 owner/active/revision=0。controller/camera 在线，busy=false、无活动任务及手动动作，doctor ready=true、blockers=[]、physical_actions=0，原历史 api-scope 仍 cancelled/0 物理动作。
+
+证据目录 `poc/output/web/team_management_20261015/`（忽略入库）：`before_teams.sqlite3` 在线备份 integrity_check=ok、完整/定向测试日志、`team-mobile-final.png`、`team-desktop.png`、`report.json`。未接第二台真机、未执行手机动作或付费模型调用、未操作卖家 main.exe。真实 OAuth 重新登录沿用本会话授权。未推送 GitHub。
 
 ## 尚未验证的范围
 

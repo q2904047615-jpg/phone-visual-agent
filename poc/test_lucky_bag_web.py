@@ -15,6 +15,7 @@ class _FakeMonitor:
 
     def start(self, *, profile, goal):
         self.record = SimpleNamespace(
+            monitor_id='monitor-1',
             profile=profile,
             goal=goal,
             snapshot=lambda: {

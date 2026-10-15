@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from agent.interfaces import website_access
 from fastapi.responses import FileResponse, Response, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -211,7 +212,7 @@ except Exception as exc:
 control_plane_identity_registry = ExternalIdentityProviderRegistry()
 _github_oauth_provider = None
 _github_oauth_pending_verifiers: dict[str, tuple[str, float, str]] = {}
-_BROWSER_SESSION_COOKIE = "agent_principal"
+_BROWSER_SESSION_COOKIE = website_access.PRINCIPAL_COOKIE
 _OAUTH_BROWSER_COOKIE = "agent_oauth_browser"
 _AUTH_COOKIE_PATH = "/api/control-plane/auth"
 _GITHUB_OAUTH_STATE_TTL_SECONDS = 600
@@ -493,12 +494,20 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
     _GENERIC_START_TASKS.shutdown()
 
 
+async def _authorize_website_request(request: Request):
+    if request.url.path in {"/", "/api/session"}:
+        return
+    await website_access.authorize(request, _control_plane_store(), verify_local_origin,
+                                   runtime.device_controllers.default_device_id)
+
+
 app = FastAPI(
     title="多 App 机械臂网页控制平台",
     version=_SERVICE_VERSION,
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
+    dependencies=[Depends(_authorize_website_request)],
 )
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
@@ -513,7 +522,7 @@ async def disable_static_cache(request: Request, call_next):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
-    if path.startswith("/api/control-plane/auth/"):
+    if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -528,6 +537,8 @@ def verify_local_origin(request: Request) -> None:
             raise HTTPException(status_code=403, detail="来源地址无效。")
         if origin_host not in {"127.0.0.1", "localhost"}:
             raise HTTPException(status_code=403, detail="只允许本机网页请求。")
+        if origin.rstrip("/") != str(request.base_url).rstrip("/"):
+            raise HTTPException(status_code=403, detail="只允许同源网页请求。")
 
 
 def verify_local_request(request: Request, token: str | None) -> None:
@@ -542,12 +553,37 @@ def _control_plane_store() -> SqliteControlPlaneRepository:
     store = getattr(runtime, "control_plane_repository", None)
     if not isinstance(store, SqliteControlPlaneRepository):
         raise HTTPException(status_code=503, detail="Control Plane 持久化尚未就绪。")
+    if not store.website_ownership_initialized():
+        legacy = [("trial", item["trial_id"], item["device_id"])
+                  for item in runtime.capability_acceptance_manager.snapshots()]
+        legacy += [("monitor", item.monitor_id, item.profile.device_id) for item in _LUCKY_BAG_MONITOR.list()]
+        legacy += [("ad_test", item.test_id, item.profile.device_id) for item in _QISHUI_AD_TEST_MONITOR.list()]
+        legacy += [("motion", item["motion_id"], item["profile"]["device_id"]) for item in _MANUAL_MOTION_MONITOR.list()]
+        store.initialize_website_ownership(runtime.device_controllers.default_device_id, legacy_resources=legacy)
     return store
 
 
 def _control_plane_request_id(request: Request) -> str:
     value = str(request.headers.get("x-request-id") or "").strip()
     return value[:128] if value else uuid.uuid4().hex
+
+
+def _claim_website_resource(request: Request, kind: str, resource_id: str, device_id: str):
+    if getattr(getattr(request, "state", None), "principal", None):
+        website_access.claim(_control_plane_store(), request, kind, resource_id, device_id)
+
+
+def _website_visible(request: Request | None, kind: str, resource_id: str) -> bool:
+    if not getattr(getattr(request, "state", None), "principal", None):
+        return True  # Trusted in-process callers, never an HTTP identity fallback.
+    return website_access.visible(_control_plane_store(), request, kind, resource_id)
+
+
+def _website_model_status(value: Mapping[str, Any]) -> dict[str, Any]:
+    # Process-wide last-request diagnostics have no user ownership. Per-run
+    # model usage and context remain available through the owned task/ledger.
+    return {key: item for key, item in value.items()
+            if not key.startswith("last_") and key not in {"usage_totals", "successful_call_count"}}
 
 
 def _control_plane_envelope(data: Any) -> dict[str, Any]:
@@ -578,6 +614,7 @@ def _control_plane_write_context(
     verify_local_request(request, x_control_token)
     store = _control_plane_store()
     request_id = _control_plane_request_id(request)
+    x_control_plane_token = x_control_plane_token or website_access.identity_token(request)
     if not x_control_plane_token:
         store.record_audit(organization_id=organization_id, resource=operation, outcome="identity_required",
                            request_id=request_id, metadata={"permission": permission}, actor="anonymous")
@@ -655,6 +692,8 @@ def session() -> dict[str, Any]:
         "startup_error": runtime.startup_error if not ready else None,
         "version": app.version,
         "reload_supported": True,
+        "identity_required": True,
+        "website_access_protocol": "2026-10-15-private-user-v1",
     }
 
 
@@ -669,7 +708,7 @@ def control_plane_organization(
     organization = store.get_organization(organization_id)
     store.record_audit(
         organization_id=organization_id, resource="organization", outcome="found" if organization else "not_found",
-        request_id=_control_plane_request_id(request), metadata={"method": "GET"},
+        request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET"},
     )
     if organization is None:
         raise HTTPException(status_code=404, detail="组织不存在。")
@@ -686,11 +725,11 @@ def control_plane_teams(
     store = _control_plane_store()
     if store.get_organization(organization_id) is None:
         store.record_audit(organization_id=organization_id, resource="teams", outcome="not_found",
-                           request_id=_control_plane_request_id(request), metadata={"method": "GET"})
+                           request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET"})
         raise HTTPException(status_code=404, detail="组织不存在。")
     teams = store.list_teams(organization_id)
     store.record_audit(organization_id=organization_id, resource="teams", outcome="ok",
-                       request_id=_control_plane_request_id(request), metadata={"method": "GET", "count": len(teams)})
+                       request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET", "count": len(teams)})
     return _control_plane_envelope({"organization_id": organization_id, "teams": teams})
 
 
@@ -704,11 +743,11 @@ def control_plane_principals(
     store = _control_plane_store()
     if store.get_organization(organization_id) is None:
         store.record_audit(organization_id=organization_id, resource="principals", outcome="not_found",
-                           request_id=_control_plane_request_id(request), metadata={"method": "GET"})
+                           request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET"})
         raise HTTPException(status_code=404, detail="组织不存在。")
     principals = store.list_principals(organization_id)
     store.record_audit(organization_id=organization_id, resource="principals", outcome="ok",
-                       request_id=_control_plane_request_id(request), metadata={"method": "GET", "count": len(principals)})
+                       request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET", "count": len(principals)})
     return _control_plane_envelope({"organization_id": organization_id, "principals": principals})
 
 
@@ -722,11 +761,11 @@ def control_plane_quotas(
     store = _control_plane_store()
     if store.get_organization(organization_id) is None:
         store.record_audit(organization_id=organization_id, resource="quotas", outcome="not_found",
-                           request_id=_control_plane_request_id(request), metadata={"method": "GET"})
+                           request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET"})
         raise HTTPException(status_code=404, detail="组织不存在。")
     quotas = store.list_quotas(organization_id)
     store.record_audit(organization_id=organization_id, resource="quotas", outcome="ok",
-                       request_id=_control_plane_request_id(request), metadata={"method": "GET", "count": len(quotas)})
+                       request_id=_control_plane_request_id(request), actor=request.state.principal["user_id"], metadata={"method": "GET", "count": len(quotas)})
     return _control_plane_envelope({"organization_id": organization_id, "quotas": quotas})
 
 
@@ -745,35 +784,10 @@ def control_plane_audit(
         raise HTTPException(status_code=404, detail="组织不存在。")
     request_id = _control_plane_request_id(request)
     store.record_audit(organization_id=organization_id, resource="audit", outcome="ok",
-                       request_id=request_id, metadata={"method": "GET", "after_sequence": after_sequence, "limit": limit})
-    page = store.read_audit(organization_id, after_sequence=after_sequence, limit=limit)
+                       request_id=request_id, actor=request.state.principal["user_id"], metadata={"method": "GET", "after_sequence": after_sequence, "limit": limit})
+    page = store.read_audit(organization_id, after_sequence=after_sequence, limit=limit,
+                            actor=request.state.principal["user_id"])
     return _control_plane_envelope({"organization_id": organization_id, **page})
-
-
-@app.post("/api/control-plane/auth/sessions")
-def control_plane_identity_session(
-    body: ControlPlaneIdentitySessionRequest,
-    request: Request,
-    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
-) -> dict[str, Any]:
-    """Bootstrap a durable principal session from the local service identity."""
-    verify_local_request(request, x_control_token)
-    store = _control_plane_store()
-    try:
-        session = store.issue_identity_session(
-            organization_id=body.organization_id,
-            user_id=body.user_id,
-        )
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail={"code": str(error), "message": "主体不存在。"}) from error
-    store.record_audit(
-        organization_id=body.organization_id,
-        resource="identity_session",
-        outcome="issued",
-        request_id=_control_plane_request_id(request),
-        metadata={"user_id": body.user_id, "session_id": session["session_id"]},
-    )
-    return _control_plane_write_envelope(request, {"session": session}, idempotent_replay=False)
 
 
 @app.post("/api/control-plane/auth/external-sessions")
@@ -996,6 +1010,7 @@ def control_plane_github_oauth_callback(
         error_code = exc.detail.get("code", "login_failed") if isinstance(exc.detail, dict) else "login_failed"
         response = RedirectResponse("/?login_error=" + error_code, status_code=303)
         response.delete_cookie(_OAUTH_BROWSER_COOKIE, path=_AUTH_COOKIE_PATH)
+        response.delete_cookie("agent_principal", path=_AUTH_COOKIE_PATH)
         return response
     if not browser:
         return result
@@ -1010,8 +1025,9 @@ def control_plane_github_oauth_callback(
     response = RedirectResponse("/?login=success", status_code=303)
     ttl = max(0, int((datetime.fromisoformat(session["expires_at"]) - datetime.now(timezone.utc)).total_seconds()))
     response.set_cookie(_BROWSER_SESSION_COOKIE, session["principal_token"], max_age=ttl,
-                        path=_AUTH_COOKIE_PATH, httponly=True, samesite="lax", secure=request.url.scheme == "https")
+                        path="/api", httponly=True, samesite="lax", secure=request.url.scheme == "https")
     response.delete_cookie(_OAUTH_BROWSER_COOKIE, path=_AUTH_COOKIE_PATH)
+    response.delete_cookie("agent_principal", path=_AUTH_COOKIE_PATH)
     return response
 
 
@@ -1022,11 +1038,11 @@ def control_plane_browser_session(request: Request, response: Response,
     token = request.cookies.get(_BROWSER_SESSION_COOKIE, "")
     principal = _control_plane_store().authenticate_identity_session(token)
     if token and not principal:
-        response.delete_cookie(_BROWSER_SESSION_COOKIE, path=_AUTH_COOKIE_PATH)
+        response.delete_cookie(_BROWSER_SESSION_COOKIE, path="/api")
     return _control_plane_envelope({
         "authenticated": principal is not None,
         "github_available": isinstance(control_plane_identity_registry.get("github"), GitHubOAuthProvider),
-        "session": ({key: principal[key] for key in ("user_id", "organization_id", "role", "expires_at")}
+        "session": ({key: principal[key] for key in ("user_id", "organization_id", "role", "expires_at", "permissions")}
                     if principal else None),
     })
 
@@ -1042,8 +1058,9 @@ def control_plane_browser_logout(request: Request, response: Response,
             principal["session_id"], request, response, x_control_token, token,
             "browser-logout-" + principal["session_id"],
         )
-    response.delete_cookie(_BROWSER_SESSION_COOKIE, path=_AUTH_COOKIE_PATH)
+    response.delete_cookie(_BROWSER_SESSION_COOKIE, path="/api")
     response.delete_cookie(_OAUTH_BROWSER_COOKIE, path=_AUTH_COOKIE_PATH)
+    response.delete_cookie("agent_principal", path=_AUTH_COOKIE_PATH)
     return _control_plane_envelope({"authenticated": False})
 
 
@@ -1059,6 +1076,7 @@ def control_plane_revoke_identity_session(
     verify_local_request(request, x_control_token)
     store = _control_plane_store()
     request_id = _control_plane_request_id(request)
+    x_control_plane_token = x_control_plane_token or website_access.identity_token(request)
     if not x_control_plane_token:
         store.record_audit(organization_id="unknown", resource="identity.session.revoke", outcome="identity_required",
                            request_id=request_id, metadata={"session_id": session_id}, actor="anonymous")
@@ -1254,7 +1272,7 @@ def reload_api(
             detail={
                 "code": "active_tasks",
                 "error": "仍有活动任务，API 未重载。请先停止任务后再刷新。",
-                "blockers": blockers,
+                "blockers": [{"kind": item.get("kind", "task")} for item in blockers],
             },
         )
     if not _schedule_api_reload():
@@ -1448,9 +1466,11 @@ def _device_capability_snapshot(
     )
 
 
-def _public_device_statuses(active_runtime: Runtime) -> list[dict[str, Any]]:
+def _public_device_statuses(active_runtime: Runtime, request: Request | None = None) -> list[dict[str, Any]]:
     devices = []
     for descriptor in active_runtime.device_controllers.descriptors():
+        if not _website_visible(request, "device", descriptor["device_id"]):
+            continue
         public_status = dict(
             active_runtime.controller_for_device(descriptor["device_id"]).device_status()
         )
@@ -1619,6 +1639,9 @@ def start_qishui_ad_test(
     goal = build_qishui_ad_test_goal(profile)
     try:
         record = _QISHUI_AD_TEST_MONITOR.start(profile=profile, goal=goal)
+        _claim_website_resource(request, "ad_test", record.test_id, body.device_id)
+        if record.session_id:
+            _claim_website_resource(request, "session", record.session_id, body.device_id)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
@@ -1736,6 +1759,7 @@ def start_lucky_bag_monitor(
     goal = build_lucky_bag_goal(profile)
     try:
         record = _LUCKY_BAG_MONITOR.start(profile=profile, goal=goal)
+        _claim_website_resource(request, "monitor", record.monitor_id, body.device_id)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
@@ -1763,7 +1787,7 @@ def list_lucky_bag_monitors(
                 "monitor": record.snapshot(),
                 "profile": _lucky_bag_profile_payload(record.profile),
             }
-            for record in records
+            for record in records if _website_visible(request, "monitor", record.monitor_id)
         ],
     }
 
@@ -1897,6 +1921,7 @@ def start_manual_motion(
             duration_seconds=body.duration_seconds,
         )
         record = _MANUAL_MOTION_MONITOR.start(profile)
+        _claim_website_resource(request, "motion", record["motion_id"], body.device_id)
     except (ValueError, DeviceTaskRegistryError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"motion": record, "physical_actions": 0, "qwen_called": False}
@@ -1929,12 +1954,24 @@ def stop_manual_motion(
 
 
 @app.get("/api/device")
-def device() -> dict[str, Any]:
+def device(request: Request = None) -> dict[str, Any]:
     if isinstance(runtime, RuntimeUnavailable):
         raise HTTPException(status_code=503, detail={
             "code": "runtime_not_ready", "error": runtime.startup_error,
         })
-    status = dict(runtime.controller.device_status())
+    devices = _public_device_statuses(runtime, request)
+    if not devices:
+        return {"devices": [], "default_device_id": "", "active_tasks": [], "manual_motion_tests": [],
+                "generic_supervised_execution": {"active_sessions": []}}
+    default_owned = _website_visible(request, "device", runtime.device_controllers.default_device_id)
+    status = dict(runtime.controller.device_status()) if default_owned else dict(devices[0])
+    if not default_owned:
+        sessions = [item for item in _active_session_status(runtime)
+                    if _website_visible(request, "session", item["session_id"])]
+        return {**status, "devices": devices, "default_device_id": devices[0]["device_id"],
+                "active_tasks": sessions, "manual_motion_tests": [item for item in _MANUAL_MOTION_MONITOR.list()
+                if _website_visible(request, "motion", item["motion_id"])],
+                "generic_supervised_execution": {"active_sessions": sessions}}
     status.pop("readiness", None)
     (
         default_device_id,
@@ -1943,9 +1980,9 @@ def device() -> dict[str, Any]:
         text_transport_status,
         enabled_physical_actions,
     ) = _device_capability_snapshot(runtime)
-    status["default_device_id"] = default_device_id
-    status["devices"] = _public_device_statuses(runtime)
-    status["vision_agent"] = runtime.vision_provider.status()
+    status["default_device_id"] = default_device_id if default_owned else devices[0]["device_id"]
+    status["devices"] = devices
+    status["vision_agent"] = _website_model_status(runtime.vision_provider.status())
     status["execution_architecture"] = _execution_architecture_status(
         runtime,
         hardware_capabilities=hardware_capabilities,
@@ -1953,9 +1990,15 @@ def device() -> dict[str, Any]:
         text_transport_status=text_transport_status,
         enabled_physical_actions=enabled_physical_actions,
     )
-    active_sessions = _active_session_status(runtime)
+    status["execution_architecture"]["universal_agent"]["observer"] = _website_model_status(
+        status["execution_architecture"]["universal_agent"]["observer"])
+    for gateway in status["execution_architecture"]["model_gateway"].get("gateways", []):
+        gateway["provider_status"] = _website_model_status(gateway.get("provider_status", {}))
+    active_sessions = [item for item in _active_session_status(runtime)
+                       if _website_visible(request, "session", item["session_id"])]
     status["active_tasks"] = [dict(item) for item in active_sessions]
-    status["manual_motion_tests"] = _MANUAL_MOTION_MONITOR.list()
+    status["manual_motion_tests"] = [item for item in _MANUAL_MOTION_MONITOR.list()
+                                     if _website_visible(request, "motion", item["motion_id"])]
     status["generic_supervised_execution"] = {
         "enabled": True,
         "automatic_loop_enabled": True,
@@ -2324,6 +2367,7 @@ def start_capability_acceptance(
                 candidate_action=body.action,
                 text=body.text,
             )
+        _claim_website_resource(request, "trial", trial.trial_id, body.device_id)
         return {
             "mode": "capability_acceptance_single_action",
             "physical_actions": 0,
@@ -2343,7 +2387,8 @@ def list_capability_acceptance(
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
-    return {"trials": runtime.capability_acceptance_manager.snapshots()}
+    return {"trials": [item for item in runtime.capability_acceptance_manager.snapshots()
+                       if _website_visible(request, "trial", item["trial_id"])]}
 
 
 @app.get("/api/capability-acceptance/{trial_id}")
@@ -2599,6 +2644,7 @@ def start_generic_supervised_async(body: GenericSupervisedStartRequest, request:
     x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
     task_id = uuid.uuid4().hex
+    _claim_website_resource(request, "start", task_id, body.device_id)
     try:
         active = _GENERIC_START_TASKS.active_for("device_id", body.device_id)
         if active is not None:
@@ -2681,6 +2727,7 @@ def start_generic_supervised_session(
 
     verify_local_request(request, x_control_token)
     session_id = uuid.uuid4().hex
+    _claim_website_resource(request, "session", session_id, body.device_id)
     run_dir = WEB_OUTPUT_DIR / (
         "generic_supervised_"
         + datetime.now().strftime("%Y%m%d_%H%M%S_")
@@ -3229,6 +3276,25 @@ def stop_all(
     x_control_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
+    if getattr(request.state, "principal", None):
+        stopped = []
+        motions = []
+        for descriptor in runtime.device_controllers.descriptors():
+            device_id = descriptor["device_id"]
+            if _website_visible(request, "device", device_id):
+                runtime.controller_for_device(device_id).request_stop()
+                stopped.append(device_id)
+                motions.extend(_MANUAL_MOTION_MONITOR.stop_all(device_id=device_id))
+        trials = []
+        for item in runtime.capability_acceptance_manager.snapshots():
+            if _website_visible(request, "trial", item["trial_id"]):
+                trial = runtime.capability_acceptance_manager.get(item["trial_id"])
+                if not trial.read_only_recovered and not trial.report_path.exists():
+                    trial.controller.request_stop()
+                    trials.append(trial.trial_id)
+        return {"stop_requested": True, "stopped_device_ids": stopped, "queued_cancelled": [],
+                "capability_stop_requested": trials, "manual_motion_stop_requested": motions,
+                "note": "已请求停止当前账号的设备任务。"}
     stopped_devices = runtime.device_controllers.request_stop_all()
     # Tests and embedding callers may replace the default controller after the
     # registry was built; keep that explicit runtime handle covered as well.
@@ -3273,7 +3339,7 @@ def preview_jpg(device_id: str) -> Response:
 
 
 @app.get("/api/preview.mjpg")
-def preview_mjpg(device_id: str) -> StreamingResponse:
+def preview_mjpg(device_id: str, request: Request) -> StreamingResponse:
     try:
         runtime.controller_for_device(device_id)
     except (
@@ -3285,6 +3351,9 @@ def preview_mjpg(device_id: str) -> StreamingResponse:
 
     def generate() -> Iterator[bytes]:
         while True:
+            principal = _control_plane_store().authenticate_identity_session(website_access.identity_token(request))
+            if principal is None or _control_plane_store().owned_resource("device", device_id, principal) is None:
+                return
             try:
                 frame, _cached = runtime.capture_preview(device_id, quality=68)
             except Exception as exc:

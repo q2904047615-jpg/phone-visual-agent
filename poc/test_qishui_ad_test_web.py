@@ -15,6 +15,7 @@ class _FakeMonitor:
 
     def start(self, *, profile, goal):
         self.record = SimpleNamespace(
+            session_id='session-1',
             test_id="test-1", profile=profile, goal=goal, phase="manual_observe",
             snapshot=lambda: {
                 "test_id": "test-1", "feature_id": "qishui_ad_test",

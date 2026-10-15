@@ -22,9 +22,10 @@ class ControlPlaneApiTests(unittest.TestCase):
         cls.repository = SqliteControlPlaneRepository(Path(cls.temp_dir.name) / "runtime.sqlite3")
         cls.repository_patch = patch.object(web_app.runtime, "control_plane_repository", cls.repository)
         cls.repository_patch.start()
-        cls.client_context = TestClient(web_app.app)
+        cls.client_context = TestClient(web_app.app, base_url='http://127.0.0.1')
         cls.client = cls.client_context.__enter__()
-        cls.headers = {"X-Control-Token": web_app.CONTROL_TOKEN}
+        identity = cls.repository.issue_identity_session(organization_id='local-org', user_id='local-owner')
+        cls.headers = {"X-Control-Token": web_app.CONTROL_TOKEN, "X-Control-Plane-Token": identity['principal_token']}
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -49,7 +50,7 @@ class ControlPlaneApiTests(unittest.TestCase):
                 body = response.json()
                 self.assertEqual("2026-10-14-control-plane-v1", body["control_plane_protocol"])
                 self.assertEqual("2026-10-14-api-v1", body["api_version"])
-        self.assertEqual(403, self.client.get("/api/control-plane/organizations/local-org").status_code)
+        self.assertEqual(401, self.client.get("/api/control-plane/organizations/local-org").status_code)
         spec = self.client.get("/openapi.json").json()["paths"]
         control_plane_paths = {path: methods for path, methods in spec.items() if path.startswith("/api/control-plane/")}
         self.assertTrue(control_plane_paths)
@@ -61,7 +62,7 @@ class ControlPlaneApiTests(unittest.TestCase):
             "/api/control-plane/organizations/{organization_id}/audit",
         }
         self.assertTrue(all("get" in set(control_plane_paths[path]) for path in read_paths))
-        self.assertEqual({"post"}, set(control_plane_paths["/api/control-plane/auth/sessions"]))
+        self.assertNotIn('/api/control-plane/auth/sessions',control_plane_paths)
 
     def test_audit_is_durable_and_redacts_sensitive_metadata(self) -> None:
         response = self.client.get(
@@ -74,7 +75,7 @@ class ControlPlaneApiTests(unittest.TestCase):
         entry = page["entries"][-1]
         self.assertEqual("cp-test-001", entry["request_id"])
         self.assertEqual("teams", entry["resource"])
-        self.assertEqual("local-control-token", entry["actor"])
+        self.assertEqual("local-owner", entry["actor"])
         self.assertNotIn("token", entry["metadata"])
 
     def test_unknown_organization_is_not_projected(self) -> None:
@@ -82,16 +83,10 @@ class ControlPlaneApiTests(unittest.TestCase):
             "/api/control-plane/organizations/missing-org/teams",
             headers=self.headers,
         )
-        self.assertEqual(404, response.status_code)
+        self.assertEqual(403, response.status_code)
 
     def test_identity_session_and_idempotent_writes(self) -> None:
-        auth = self.client.post(
-            "/api/control-plane/auth/sessions",
-            headers=self.headers,
-            json={"organization_id": "local-org", "user_id": "local-owner"},
-        )
-        self.assertEqual(200, auth.status_code, auth.text)
-        session = auth.json()["data"]["session"]
+        session = self.repository.issue_identity_session(organization_id='local-org', user_id='local-owner')
         principal_token = session["principal_token"]
         self.assertNotIn(principal_token, self.repository.database_path.read_bytes().decode("utf-8", errors="ignore"))
         base_headers = {

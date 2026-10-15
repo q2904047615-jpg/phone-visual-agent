@@ -1,6 +1,6 @@
 /* Account state comes only from the server. No principal tokens in JS/storage. */
 window.AgentAccount = {
-  async mount(api) {
+  async mount(api, onChange = () => {}) {
     const status = document.querySelector('#accountStatus');
     const detail = document.querySelector('#accountDetail');
     const login = document.querySelector('#githubLoginButton');
@@ -28,12 +28,14 @@ window.AgentAccount = {
         current = result.data;
         retry.hidden = true;
         render();
+        onChange(current);
         return true;
       } catch (e) {
         status.textContent = '登录状态暂时无法确认';
         login.disabled = true;
         retry.hidden = false;
         showError(`无法检查登录状态：${e.message}`);
+        onChange(null);
         return false;
       }
     };
@@ -55,6 +57,8 @@ window.AgentAccount = {
       busy = true; render(); showError('');
       try {
         await api('/api/control-plane/auth/browser-logout', { method: 'POST', body: '{}' });
+        localStorage.setItem('agent-account-change', String(Date.now()));
+        localStorage.removeItem('agent-account-change');
         await refresh();
       } catch (e) { showError(`退出失败，请重试：${e.message}`); }
       finally { busy = false; render(); }
@@ -76,6 +80,9 @@ window.AgentAccount = {
     }
     await refresh();
     window.addEventListener('focus', () => { if (!busy) refresh(); });
+    window.addEventListener('storage', event => { if (event.key === 'agent-account-change') refresh(); });
+    window.addEventListener('agent-identity-invalid', () => { onChange(null); refresh(); });
     setInterval(() => { if (!document.hidden && !busy) refresh(); }, 30000);
+    return current;
   },
 };

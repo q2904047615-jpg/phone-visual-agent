@@ -109,6 +109,27 @@ class _BaseApiEndToEndTests(unittest.TestCase):
         cls.temp_dir.cleanup()
         cls.no_browser_patcher.stop()
     def setUp(self) -> None:
+        from agent.infrastructure.sqlite_control_plane_repository import SqliteControlPlaneRepository
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.identity_store = SqliteControlPlaneRepository(Path(temporary.name) / 'identity.sqlite3')
+        self.addCleanup(self.identity_store.close)
+        repository_patch = patch.object(web_app.runtime, 'control_plane_repository', self.identity_store)
+        repository_patch.start(); self.addCleanup(repository_patch.stop)
+        self.identity_store.initialize_website_ownership(web_app.runtime.device_controllers.default_device_id)
+        identity = self.identity_store.issue_identity_session(organization_id='local-org', user_id='local-owner')
+        self.principal = self.identity_store.authenticate_identity_session(identity['principal_token'])
+        self.client.headers['X-Control-Plane-Token'] = identity['principal_token']
+        self.headers = {'X-Control-Token': web_app.CONTROL_TOKEN, 'X-Control-Plane-Token': identity['principal_token']}
+        # These are explicitly provisioned fake devices, not live assignments.
+        for device_id in ('phone-01', 'phone-02', 'phone-a', 'phone-b', 'phone-camera-lease', 'phone-mjpg'):
+            self.identity_store.claim_resource('device', device_id, self.principal, device_id=device_id)
+        original_add = web_app.runtime.agent_session_repository.add
+        def add_owned_fixture(session):
+            self.identity_store.claim_resource('session', session.session_id, self.principal, device_id=session.device_id)
+            return original_add(session)
+        add_patch = patch.object(web_app.runtime.agent_session_repository, 'add', side_effect=add_owned_fixture)
+        add_patch.start(); self.addCleanup(add_patch.stop)
         self.device_registry_patcher = patch.object(
             web_app.runtime,
             "device_task_registry",
@@ -122,6 +143,7 @@ class _BaseApiEndToEndTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.device_registry_patcher.stop()
     def _universal_api_orchestrator(self, *, device_id="phone-01"):
+        self.identity_store.claim_resource('device',device_id,self.principal,device_id=device_id)
         from test_universal_agent_orchestrator import CountingQwen, FixtureAdapter
         from test_single_visual_loop import Observation
         from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
@@ -132,6 +154,8 @@ class _BaseApiEndToEndTests(unittest.TestCase):
             evidence_store_factory=FileSystemAgentEvidenceStore, device_registry=DeviceTaskRegistry())
         return orchestrator, None, qwen, adapter
     def _fake_capability_manager(self, *, device_id="capability-api-device"):
+        self.identity_store.claim_resource('device',device_id,self.principal,device_id=device_id)
+        self.identity_store.claim_resource('trial','trial-api-001',self.principal,device_id=device_id)
         calls = []
 
         class Session:

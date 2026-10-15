@@ -632,7 +632,11 @@ class SqliteControlPlaneRepository:
                 (kind, resource_id, principal["organization_id"], principal["user_id"])).fetchone()
             return dict(row) if row else None
 
-    def initialize_website_ownership(self, default_device_id: str) -> None:
+    def website_ownership_initialized(self) -> bool:
+        with self._lock:
+            return self._connection.execute("SELECT 1 FROM control_plane_meta WHERE key='website_ownership_v1'").fetchone() is not None
+
+    def initialize_website_ownership(self, default_device_id: str, *, legacy_resources=()) -> None:
         """One-time upgrade: preserve this single-user installation's history.
 
         No unknown future resource is ever assigned to the owner on access.
@@ -646,6 +650,9 @@ class SqliteControlPlaneRepository:
                                              (default_device_id, default_device_id))
                     if self._connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").fetchone():
                         self._connection.execute("INSERT OR IGNORE INTO control_plane_resource_owners SELECT 'session',session_id,'local-org','local-owner',device_id FROM runtime_sessions")
+                    for kind, resource_id, device_id in legacy_resources:
+                        self._connection.execute("INSERT OR IGNORE INTO control_plane_resource_owners VALUES(?,?,'local-org','local-owner',?)",
+                                                 (kind, resource_id, device_id))
                     self._connection.execute("INSERT INTO control_plane_meta VALUES('website_ownership_v1',?)", (_now(),))
                 self._connection.execute("COMMIT")
             except BaseException:

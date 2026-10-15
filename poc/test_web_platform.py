@@ -134,10 +134,10 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertEqual(response.json()["status"]["controller_online"], True)
 
     def test_read_only_session_routes_require_control_token(self) -> None:
-        missing_task = self.client.get("/api/agent/generic-supervised/start-async/missing")
-        self.assertEqual(403, missing_task.status_code)
-        missing_session = self.client.get("/api/agent/generic-supervised/missing")
-        self.assertEqual(403, missing_session.status_code)
+        missing_task = self.client.get("/api/agent/generic-supervised/start-async/missing", headers={'X-Control-Plane-Token': ''})
+        self.assertEqual(401, missing_task.status_code)
+        missing_session = self.client.get("/api/agent/generic-supervised/missing", headers={'X-Control-Plane-Token': ''})
+        self.assertEqual(401, missing_session.status_code)
 
     def test_browser_reload_schedules_api_reload_only_without_active_work(self) -> None:
         with (
@@ -1324,7 +1324,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             second = self.client.get("/api/preview.jpg?device_id=phone-b")
 
         self.assertEqual(422, missing.status_code)
-        self.assertEqual(404, unknown.status_code)
+        self.assertEqual(403, unknown.status_code)
         self.assertEqual(b"jpeg-phone-a", first.content)
         self.assertEqual(b"jpeg-phone-b", second.content)
         self.assertEqual([72], phone_a.calls)
@@ -1401,7 +1401,9 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             patch.object(web_app.time, "sleep"),
             self.assertLogs("web_app", level="WARNING") as logs,
         ):
-            response = web_app.preview_mjpg("phone-mjpg")
+            from starlette.requests import Request
+            request = Request({'type':'http','headers':[(b'x-control-plane-token',self.headers['X-Control-Plane-Token'].encode())]})
+            response = web_app.preview_mjpg("phone-mjpg", request)
             first = asyncio.run(response.body_iterator.__anext__())
             with self.assertRaises(StopAsyncIteration):
                 asyncio.run(response.body_iterator.__anext__())

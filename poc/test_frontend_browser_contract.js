@@ -333,6 +333,12 @@ function createServer({
       json(response, 200, { reloading: true });
       return;
     }
+    if (url.pathname === '/api/control-plane/auth/browser-session') {
+      json(response, 200, { data: { authenticated: true, github_available: true, session: {
+        user_id: 'local-owner', organization_id: 'local-org', role: 'owner',
+        permissions: ['task.create', 'device.execute'], expires_at: '2030-01-01T00:00:00Z',
+      } } }); return;
+    }
     if (url.pathname === "/api/session") {
       json(response, 200, {
         token: runtimeSession.token,
@@ -576,7 +582,7 @@ async function launchFixturePage(server, { deviceId = "phone-01" } = {}) {
   try {
     const browser = await chromium.launch(launchOptions);
     const page = await browser.newPage();
-    await page.addInitScript(value => localStorage.setItem("visual-agent-device-id", value), deviceId);
+    await page.addInitScript(value => localStorage.setItem("visual-agent-local-org%2Flocal-owner:device-id", value), deviceId);
     await page.goto(`http://127.0.0.1:${address.port}/`);
     return { browser, page };
   } catch (error) {

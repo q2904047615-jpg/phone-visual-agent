@@ -127,6 +127,9 @@ async function launchOfflinePage(session, options = {}) {
         body: options.body ? JSON.parse(options.body) : null,
       });
       if (requestPath === "/api/session") return response({ token: "offline-token", mock: true });
+      if (requestPath === '/api/control-plane/auth/browser-session') return response({ data: {
+        authenticated: true, github_available: true, session: { user_id: 'local-owner', organization_id: 'local-org',
+          permissions: ['task.create', 'device.execute'], expires_at: '2030-01-01T00:00:00Z' } } });
       if (requestPath === "/api/device") {
         return response({
           controller_online: true,
@@ -161,6 +164,9 @@ async function launchOfflinePage(session, options = {}) {
   await page.route("**/assets/app.js?*", route => route.fulfill({
     path: path.join(staticRoot, "app.js"),
     contentType: "text/javascript",
+  }));
+  await page.route('**/assets/account.js*', route => route.fulfill({
+    path: path.join(staticRoot, 'account.js'), contentType: 'text/javascript',
   }));
   await page.route("**/assets/styles.css?*", route => route.fulfill({
     path: path.join(staticRoot, "styles.css"),

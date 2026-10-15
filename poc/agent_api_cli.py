@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, Mapping
 
@@ -133,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         with LocalAgentApiClient(
             base_url=args.base_url,
             timeout_seconds=args.timeout,
+            principal_token=os.environ.get('AGENT_PRINCIPAL_TOKEN', ''),
         ) as client:
             if args.command == "bootstrap":
                 result = {"ok": True, **client.bootstrap()}

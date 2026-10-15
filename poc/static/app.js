@@ -5,7 +5,7 @@ const state = {
   token: "",
   mock: false,
   device: {},
-  deviceId: localStorage.getItem("visual-agent-device-id") || "device-local-01",
+  deviceId: "device-local-01",
   sessionDeviceId: "",
   chatConversation: [],
   supervisedSession: null,
@@ -29,10 +29,68 @@ const state = {
   luckyBagMonitorDetail: "",
 };
 
-const taskOutcomeStoragePrefix = "visual-agent-task-outcome:";
-const pageExitPauseMarkerKey = "visual-agent-page-exit-pause";
-const pageExitStopMarkerKey = "visual-agent-page-exit-stop";
-const pageReloadApiAttemptKey = "visual-agent-api-reload-attempt";
+let taskOutcomeStoragePrefix = "visual-agent-task-outcome:";
+let pageExitPauseMarkerKey = "visual-agent-page-exit-pause";
+let pageExitStopMarkerKey = "visual-agent-page-exit-stop";
+let pageReloadApiAttemptKey = "visual-agent-api-reload-attempt";
+let devicePreferenceKey = "visual-agent-device-id";
+let accountKey = "";
+let accountReady = false;
+let accountPermissions = [];
+let accountEpoch = 0;
+let accountMounted = false;
+
+function clearPrivateView() {
+  accountEpoch++;
+  accountReady = false;
+  pageExitPauseSent = true;
+  document.querySelector('#top').hidden = true;
+  document.querySelector('#accessNotice').hidden = false;
+  document.querySelector('#phonePreview').removeAttribute('src');
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+  for (const url of state.capabilityEvidenceUrls) URL.revokeObjectURL(url);
+  clearInterval(state.luckyBagMonitorTimer);
+  Object.assign(state, { device: {}, supervisedSession: null, chatConversation: [], manualMotion: null,
+    pendingStartTicket: null, lastTaskOutcome: null, taskAttemptStatus: null, pendingConfirmationGrant: null,
+    capabilityTrial: null, capabilityEvidenceUrls: [], pendingPromotionGrant: null, luckyBagProfile: null,
+    luckyBagMonitorId: '', luckyBagMonitorStatus: '', luckyBagMonitorDetail: '' });
+  document.querySelector('#agentText').value = '';
+  document.querySelector('#chatMessages').replaceChildren();
+  document.querySelector('#traceList').replaceChildren();
+  for (const storage of [localStorage, sessionStorage]) {
+    for (const key of Object.keys(storage)) if (key.startsWith('visual-agent-')) storage.removeItem(key);
+  }
+}
+
+function acceptAccount(value) {
+  const session = value?.authenticated ? value.session : null;
+  const next = session ? `${session.organization_id}/${session.user_id}` : '';
+  if (accountMounted && !accountReady && next) { window.location.replace('/'); return; }
+  if (accountReady && (next !== accountKey || JSON.stringify(session?.permissions) !== JSON.stringify(accountPermissions))) {
+    clearPrivateView();
+    window.location.replace('/');
+    return;
+  }
+  if (!next) { clearPrivateView(); return; }
+  accountKey = next;
+  accountPermissions = session.permissions || [];
+  accountReady = true;
+  pageExitPauseSent = false;
+  const prefix = `visual-agent-${encodeURIComponent(next)}:`;
+  for (const storage of [localStorage, sessionStorage]) {
+    for (const key of Object.keys(storage)) {
+      if (key.startsWith('visual-agent-') && !key.startsWith(prefix)) storage.removeItem(key);
+    }
+  }
+  taskOutcomeStoragePrefix = prefix + 'task-outcome:';
+  pageExitPauseMarkerKey = prefix + 'page-exit-pause';
+  pageExitStopMarkerKey = prefix + 'page-exit-stop';
+  pageReloadApiAttemptKey = prefix + 'api-reload-attempt';
+  devicePreferenceKey = prefix + 'device-id';
+  state.deviceId = localStorage.getItem(devicePreferenceKey) || state.deviceId;
+  document.querySelector('#top').hidden = false;
+  document.querySelector('#accessNotice').hidden = true;
+}
 let pageExitPauseSent = false;
 
 const statusNames = {
@@ -75,6 +133,7 @@ const semanticActionNames = {
 };
 
 async function api(path, options = {}, timeoutMs = 0) {
+  const epoch = accountEpoch;
   const headers = { ...(options.headers || {}) };
   if (state.token) headers["X-Control-Token"] = state.token;
   if (options.body) headers["Content-Type"] = "application/json";
@@ -87,6 +146,10 @@ async function api(path, options = {}, timeoutMs = 0) {
       ...(controller ? { signal: controller.signal } : {}),
     });
     const data = await response.json().catch(() => ({}));
+    if (epoch !== accountEpoch && !path.startsWith('/api/control-plane/auth/')) {
+      throw new Error('账号状态已变更，请重新打开工作台。');
+    }
+    if (response.status === 401) window.dispatchEvent(new Event('agent-identity-invalid'));
     if (!response.ok) {
       const detail = data.detail;
       const parsedDetail = parseStructuredError(detail);
@@ -162,6 +225,7 @@ function activePagePauseSnapshot() {
 }
 
 function pauseActiveTasksForPageExit() {
+  if (!accountReady) return;
   if (pageExitPauseSent) return;
   const snapshot = activePagePauseSnapshot();
   if (!snapshot) return;
@@ -1190,7 +1254,7 @@ function render() {
       state.deviceId = lockedDeviceId;
     } else if (!enabledIds.includes(state.deviceId)) {
       state.deviceId = String(state.device.default_device_id || enabledIds[0]);
-      localStorage.setItem("visual-agent-device-id", state.deviceId);
+      localStorage.setItem(devicePreferenceKey, state.deviceId);
     }
   }
   deviceSelect.value = state.deviceId;
@@ -1227,9 +1291,19 @@ function render() {
   renderAction();
   renderCapabilityAcceptance();
   renderManualMotionStatus();
+  if (accountReady && !accountPermissions.includes('task.create')) {
+    document.querySelectorAll('#top button, #top textarea, #top input').forEach(item => { item.disabled = true; });
+    document.querySelector('#commandHint').textContent = '当前账号为只读权限';
+  }
+  if (accountReady && registeredDevices.length === 0) {
+    deviceSelect.replaceChildren(); state.deviceId = '';
+    document.querySelector('#startSupervisedAgent').disabled = true;
+    document.querySelector('#commandHint').textContent = '尚未分配设备，请联系管理员';
+  }
 }
 
 async function refreshDevice() {
+  if (!accountReady) return;
   const [device, runtimeSession] = await Promise.all([
     api("/api/device"),
     api("/api/session"),
@@ -1288,6 +1362,7 @@ async function reconcileSupervisedSession() {
 }
 
 function refreshPreview() {
+  if (!accountReady || !state.device?.devices?.some(item => item.device_id === state.deviceId)) return;
   const preview = document.querySelector("#phonePreview");
   if (preview && state.deviceId) {
     preview.src = `/api/preview.jpg?device_id=${encodeURIComponent(state.deviceId)}&t=${Date.now()}`;
@@ -2173,6 +2248,7 @@ function clearCapabilityEvidenceUrls() {
 }
 
 async function loadCapabilityEvidence() {
+  const epoch = accountEpoch;
   clearCapabilityEvidenceUrls();
   const view = capabilityView();
   const container = document.querySelector("#capabilityEvidence");
@@ -2192,7 +2268,9 @@ async function loadCapabilityEvidence() {
           { headers: { "X-Control-Token": state.token } },
         );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const url = URL.createObjectURL(await response.blob());
+        const blob = await response.blob();
+        if (epoch !== accountEpoch) return;
+        const url = URL.createObjectURL(blob);
         state.capabilityEvidenceUrls.push(url);
         items.push({ phase, index, path: paths[index], url });
       } catch (_error) {
@@ -2200,6 +2278,7 @@ async function loadCapabilityEvidence() {
       }
     }
   }
+  if (epoch !== accountEpoch) return;
   container.hidden = !items.length;
   container.innerHTML = items.map(item => `<figure>
     ${item.url ? `<img src="${item.url}" alt="${item.phase === "before" ? "动作前" : "动作后"}证据 ${item.index + 1}">` : ""}
@@ -2526,8 +2605,11 @@ async function init() {
     let session = await api("/api/session");
     state.token = session.token;
     state.mock = session.mock;
+    if (window.AgentAccount) await window.AgentAccount.mount(api, acceptAccount);
+    accountMounted = true;
+    if (!accountReady) return;
     await settlePageExitPause();
-    if (isBrowserReload) {
+    if (isBrowserReload && accountKey === 'local-org/local-owner') {
       const reloadResult = await reloadApiAfterBrowserRefresh(session);
       session = reloadResult.session || session;
       state.token = session.token;
@@ -2536,7 +2618,6 @@ async function init() {
     const mode = document.querySelector("#modeBadge");
     mode.textContent = session.mock ? "模拟模式 · 无实机动作" : "实机接口已连接";
     mode.classList.toggle("live-mode", !session.mock);
-    if (window.AgentAccount) await window.AgentAccount.mount(api);
     await refreshDevice();
     if (!isBrowserReload) {
       await restoreLuckyBagMonitor();
@@ -2598,7 +2679,7 @@ document.querySelector("#deviceId").addEventListener("change", async event => {
     return;
   }
   state.deviceId = requestedDeviceId;
-  localStorage.setItem("visual-agent-device-id", state.deviceId);
+  localStorage.setItem(devicePreferenceKey, state.deviceId);
   state.supervisedSession = null;
   state.sessionDeviceId = "";
   state.pendingConfirmationGrant = null;
@@ -2630,4 +2711,8 @@ document.querySelector("#promotionDialog").addEventListener("close", event => {
   if (event.target.returnValue === "default" && grant) promoteCapability(grant);
 });
 
+window.addEventListener('pagehide', () => { document.querySelector('#top').hidden = true; });
+window.addEventListener('pageshow', event => {
+  if (event.persisted) { clearPrivateView(); window.location.reload(); }
+});
 init();

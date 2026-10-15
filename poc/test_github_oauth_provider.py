@@ -182,7 +182,7 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
             with patch.object(web_app.runtime, "control_plane_repository", repository), \
                  patch.object(web_app, "control_plane_identity_registry", registry), \
                  patch.dict(os.environ, {"ROBOT_WEB_NO_BROWSER": "1"}):
-                with TestClient(web_app.app) as client:
+                with TestClient(web_app.app, base_url='http://127.0.0.1') as client:
                     issued = client.post(
                         "/api/control-plane/auth/external-sessions",
                         headers={"Origin": "http://127.0.0.1"},
@@ -230,7 +230,7 @@ class GitHubOAuthControlPlaneRegressionTests(unittest.TestCase):
             with patch.object(web_app.runtime, "control_plane_repository", repository), \
                  patch.object(web_app, "control_plane_identity_registry", registry), \
                  patch.dict(os.environ, {"ROBOT_WEB_NO_BROWSER": "1"}):
-                with TestClient(web_app.app) as client:
+                with TestClient(web_app.app, base_url='http://127.0.0.1') as client:
                     start = client.get(
                         "/api/control-plane/auth/github/start",
                         headers={"Origin": "http://127.0.0.1", "X-Control-Token": web_app.CONTROL_TOKEN},

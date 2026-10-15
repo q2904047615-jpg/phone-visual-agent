@@ -78,6 +78,7 @@ class LocalAgentApiClient:
         base_url: str = "http://127.0.0.1:8765",
         timeout_seconds: float = 180.0,
         transport: httpx.BaseTransport | None = None,
+        principal_token: str = "",
     ) -> None:
         normalized = base_url.rstrip("/")
         if normalized not in {"http://127.0.0.1:8765", "http://localhost:8765"}:
@@ -100,6 +101,7 @@ class LocalAgentApiClient:
             transport=transport,
         )
         self._token = ""
+        self._principal_token = principal_token
         self._openapi: JsonObject | None = None
         self._service_version = ""
 
@@ -188,13 +190,6 @@ class LocalAgentApiClient:
             path_params={"organization_id": self._resource_id(organization_id)},
             query_params={"after_sequence": str(after_sequence), "limit": str(limit)},
             read_only=True,
-        )
-
-    def control_plane_identity_session(self, organization_id: str, user_id: str) -> JsonObject:
-        return self._request(
-            "POST", self.CONTROL_PLANE_IDENTITY_SESSION_ROUTE,
-            payload={"organization_id": self._resource_id(organization_id), "user_id": self._resource_id(user_id)},
-            read_only=False,
         )
 
     def control_plane_external_identity_session(self, provider_id: str, assertion: Mapping[str, Any]) -> JsonObject:
@@ -582,6 +577,8 @@ class LocalAgentApiClient:
         read_only: bool,
     ) -> JsonObject:
         headers = {"X-Control-Token": token} if token else {}
+        if self._principal_token:
+            headers["X-Control-Plane-Token"] = self._principal_token
         headers.update(dict(extra_headers or {}))
         try:
             kwargs: dict[str, Any] = {"headers": headers}
@@ -655,6 +652,10 @@ class LocalAgentApiClient:
     @staticmethod
     def _classify_http_error(status_code: int, payload: Any) -> str:
         text = str(payload).lower()
+        if status_code == 401:
+            return "identity_error"
+        if status_code == 403 and any(code in text for code in ("permission_denied", "device_forbidden", "organization_forbidden")):
+            return "authorization_error"
         if status_code in {403, 405, 422}:
             return "client_contract_error"
         if status_code == 404:

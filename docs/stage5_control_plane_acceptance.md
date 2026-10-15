@@ -16,9 +16,9 @@
 
 ## 验证
 
-- Python 定向 Control Plane/项目回归：18 项通过。
-- Python 完整离线回归：1010 项通过，4 项跳过。
-- 前端完整回归：64 项通过（19 个单元 + 45 个浏览器合同）；新增配额、审计、通知浏览器合同通过。
+- Python 定向 Control Plane/Runtime 回归：23 项通过（含 Runtime 配额/计费/回滚合同 3 项）。
+- Python 完整离线回归：1014 项通过，4 项跳过。
+- 前端 `billing.js`、`app.js` Node 语法检查通过；本轮 npm 单元/浏览器命令被 Windows 沙箱的 Node `spawn EPERM` 阻断，不能计为前端完整回归通过。
 - 服务已受控重载：监听 PID `7364`，OpenAPI 包含配额、审计和通知路由；typed client 核对配额 2 项、审计首批 50 条。
 - 本批代码已受控重载为 `398e15f`，网站计费入口为 `a8c00d9`，当前监听 PID `1052`；启动自检 `verified=true`，`/api/session` 返回 `ready=true`，OpenAPI 的 billing、platform/releases、platform/rollback 路由方法与源码一致。SQLite 已创建 reservation/usage、billing ledger 和 platform releases 表，初始账单为 0、发布记录 1 条。
 - 所有验证使用临时数据库、Mock 或浏览器路由夹具；本批没有手机动作、第二台真机或付费模型调用。

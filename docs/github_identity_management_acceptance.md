@@ -2,6 +2,8 @@
 
 日期：2026-10-15。最新主方案阶段 5 的身份关联管理子项。用户明确批准权限层级、唯一关联、解绑撤销登录和保留可登录所有者；用户目前只有当前 GitHub 账号，新增/解绑双用户全流程使用隔离测试，真实验收限当前账号。不接第二台真机。
 
+**已验证可行：实现、完整离线回归、服务加载与约定的单账号真实网站验收完成。** 双真实账号流程尚未验收，不计作 GA 完成。
+
 ## 实现与边界
 
 网站“管理 GitHub 关联”支持按用户名或稳定 ID 查询、展示公开账号和主页、选择组织成员后确认关联、查看本组织关联、确认解除及错误重试。查询不自动授权，公开账号存在不代表管理员拥有该账号；真正登录仍须完成 GitHub OAuth。查询方式参考 [GitHub 官方用户 API](https://docs.github.com/en/rest/users/users#get-a-user-using-their-id)，不以可变用户名作为关联主键。
@@ -32,7 +34,20 @@ Python `scripts/run_website_isolation_tests.py --full`：**997 tests，OK，4 sk
 
 ## 加载与真实结果
 
-加载前备份 Runtime SQLite，确认当前服务空闲，只重载本项目 API。真实结果将在加载验收完成后补记；现阶段离线通过不冒充真实结果。
+代码提交 `92d27b28c80551a0762479eca6c298c0d0534cee` 已加载。最终监听 `127.0.0.1:8765`、PID 13624；版本 `0.2.0-trial-upstream`，官方客户端 bootstrap/OpenAPI 核对新增 list/lookup/update 路由成功。加载 revision 的 `+dirty` 来自保留原有未跟踪 Playwright 日志，受跟踪代码已提交。
+
+真实网站使用现有 GitHub `q2904047615-jpg`、稳定 ID `279507169`，本地成员 `local-org/local-owner`：
+
+1. 空闲检查通过后重载，旧映射原子迁入 SQLite，唯一关联保持 local-owner/revision=0，当前会话可用。
+2. 网页按稳定 ID 查询成功，展示真实 GitHub 用户名、ID 和当前成员；确认原关联后显示用户名并更新 revision=1。随后按用户名查询也返回同一稳定 ID。
+3. 通过页面确认解除唯一 owner 关联，返回 409/last_linked_owner_required，关联和会话保持，不会锁号。
+4. 390px 下窗口 clientWidth/scrollWidth 均为 320。退出后关联入口隐藏、列表和查询资料清空；重新真实 GitHub OAuth 登录成功，回到 local-owner。
+5. 再次 API 重载，关联和 revision=1 持久化。原 owner 仍 active/角色 owner/revision=0，前批验收成员仍 disabled/viewer/revision=4；设备仍归 local-owner/revision=2，无分配变化。
+6. 本人历史 api-scope 仍 cancelled，任务表未新增且 physical_actions=0；status controller/camera 在线、busy=false、无活动任务/固定测试；doctor ready=true、blockers=[]、本地采集 4 帧、physical_actions=0。
+
+SQLite 只读报告确认迁移完成标记及审计：135 导入一条身份、140 更新原关联、145 拒绝解除最后可登录 owner；业务变更 actor 为 local-owner。原映射文件未修改，迁移后它不再参与身份解析。
+
+备份及证据位于 `poc/output/web/github_identity_management_20261015/`：`before_github_identity.sqlite3`（integrity_check=ok）、`github-link-full.log`、`github-link-frontend.log`、`github-link-targeted.log`、`github-link-browser-final.log`、`report.json`。没有真实新增其他人的关联、没有解除当前唯一账号；相应成功流程已有隔离证据。没有接第二台真机、发起手机动作/付费模型调用或操作卖家 main.exe，当前页面留在已登录的关联管理窗口。
 
 ## 回滚与剩余目标
 

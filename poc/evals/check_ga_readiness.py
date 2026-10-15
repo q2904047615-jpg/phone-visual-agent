@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Support both `python poc/evals/check_ga_readiness.py` from the repository
+# root and `python -m evals.check_ga_readiness` from `poc`.
+PROJECT_ROOT = Path(__file__).parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.domain.ga_readiness import evaluate_device_registry
 

@@ -5,9 +5,9 @@
 ## 2026-10-16 发布收尾
 
 - GA 评估报告目录已补齐最小写权限；本次报告已重新生成并可读取。
-- 服务从干净 revision `0fcce41bbba69e81211924f61f06098c5fc9325d` 启动，当前 PID `22004`，启动自检 `verified=true`，`/api/session` 返回 `ready=true`。
-- SQLite active release 已切换到干净 revision，上一条 `+dirty` 版本保留为 previous；配额预留、计费账本和活动 Runtime 均为 `0`。
-- 工作树无代码改动；既有 Playwright 证据日志仍保留在原路径并只在本地 Git 忽略。
+- 服务已从最终干净 revision `ece8a127f32cba9460e79d2ee5af02ea8b7c2c11` 启动，当前 PID `28540`，启动自检 `verified=true`，`/api/session` 返回 `ready=true`。
+- SQLite active release 已切换到该 revision，上一条版本保留为 previous；当前配额预留为 `0`，历史计费账本保留，未调用支付服务。
+- 工作树无未提交代码改动；备份、恢复和回滚演练证据均保留在本地 Git 忽略的 `poc/output/web/ga_readiness_20261014/`。
 
 ## 结论
 
@@ -25,16 +25,17 @@
 ## 验证证据
 
 - `poc/test_ga_readiness.py`：3/3 通过。
-- 完整 Python 离线回归基线：1014 通过、4 skipped；本轮前端 npm 完整回归：64/64 通过（19 个单元 + 45 个浏览器合同）。
+- 完整 Python 离线回归：`1021` 通过、`4 skipped`；本轮前端 npm 完整回归：`64/64` 通过（19 个单元 + 45 个浏览器合同）。
 - 只读评估报告：`poc/output/web/ga_readiness_20261014/report.json`，其中 `offline_ga_status=pass`，`physical_multi_device_status=blocked_registry_not_ready`。
-- 服务当前为 PID `22004`、监听 `127.0.0.1:8765`，`/api/session` 返回 `ready=true`；新 billing、platform releases、platform rollback 路由已在 OpenAPI 中登记。
+- 服务当前为 PID `28540`、监听 `127.0.0.1:8765`，`/api/session` 返回 `ready=true`；billing、platform releases、platform rollback 路由已在 OpenAPI 中登记。
+- `poc/output/web/ga_readiness_20261014/runtime.sqlite3.backup` 和 `runtime.sqlite3.restore-check` 均通过 `integrity=ok`；`rollback_rehearsal.json` 通过活动会话阻断、无活动会话就绪和显式回滚三步演练。
 - 本批没有手机动作、第二台真机、付费模型调用、外部支付或 GitHub 推送。
 
 ## 尚未完成
 
 - 第二台真机的独立校准、并行运行、同设备互斥和动作后业务证据。
 - 真实云厂商账单、支付结算和生产发布平台的版本切换。
-- 浏览器合同需要创建 Edge 子进程；普通受限沙箱仍会返回 `spawn EPERM`，项目脚本已消除 Node 测试 worker 的额外进程，最终 64 项在允许浏览器子进程的受控环境完成。
+- 普通受限沙箱仍可能因 Edge 子进程权限返回 `spawn EPERM`；本轮在允许浏览器子进程的受控环境完成 `64/64`，不把受限沙箱失败归因于产品合同。
 
 ## 可暂缓项的范围
 
@@ -49,4 +50,4 @@
 
 ## 回滚
 
-本批代码提交为 `8b5ec5d`，可精确回退评估器和对应测试；报告和文档可单独回退。不会回滚设备注册表，不覆盖 Runtime SQLite，也不会恢复旧的 Qwen 终态权威。
+本批最终代码提交为 `ece8a12`（上一备份工具提交为 `01690d5`），可精确回退本批评估/备份工具和文档；报告和本地证据可单独删除。不会回滚设备注册表，不覆盖 Runtime SQLite，也不会恢复旧的 Qwen 终态权威。

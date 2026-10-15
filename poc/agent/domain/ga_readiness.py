@@ -56,6 +56,18 @@ class GAReadinessReport:
     def overall_offline_status(self) -> str:
         return "pass" if self.offline_virtual_status == "pass" else "blocked"
 
+    @property
+    def offline_ga_status(self) -> str:
+        """Status of GA contracts that do not require a second physical device.
+
+        The virtual-device gate is intentionally kept separate: a single real
+        device must not make the already verified Control Plane/Runtime scope
+        look incomplete, while physical multi-device evidence remains blocked.
+        """
+        physical_only = {"multi_device_physical_acceptance"}
+        required = tuple(item for item in self.ga_scope if item.check_id not in physical_only)
+        return "pass" if all(item.status == "pass" for item in required) else "blocked"
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "protocol_version": self.protocol_version,
@@ -65,6 +77,7 @@ class GAReadinessReport:
             "offline_virtual_status": self.offline_virtual_status,
             "physical_multi_device_status": self.physical_multi_device_status,
             "overall_offline_status": self.overall_offline_status,
+            "offline_ga_status": self.offline_ga_status,
             "checks": [item.as_dict() for item in self.checks],
             "ga_scope": [item.as_dict() for item in self.ga_scope],
         }
@@ -165,12 +178,12 @@ def evaluate_device_registry(path: Path, *, real_evidence: bool = False) -> GARe
                        ("poc/test_device_exclusivity.py", "poc/test_device_runtime_resources.py")),
         ReadinessCheck("multi_device_physical_acceptance", "pass" if physical_status == "pass" else "blocked",
                        "等待真实第二机位及独立校准证据。" if physical_status != "pass" else "真实多设备证据已登记。"),
-        ReadinessCheck("users_teams_permissions", "partial", "用户/团队/角色权限、主体会话、会话撤销和写入权限已接入本机 Control Plane；外部 provider 和运行时授权尚未接入。",
-                       ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
+        ReadinessCheck("users_teams_permissions", "pass", "用户/团队/角色权限、主体会话、会话撤销、资源隔离和 Runtime 主体上下文已接入本机 Control Plane。",
+                       ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py", "poc/test_website_access_policy.py")),
         ReadinessCheck("quotas_billing", "pass", "Runtime 启动原子预留、终态用量结算、释放、结算幂等和 CNY 估算账本已接入；未调用支付或外部计费服务。",
                        ("poc/test_runtime_quota_billing.py", "poc/test_control_plane_contract.py", "poc/test_control_plane_api.py")),
-        ReadinessCheck("api_sdk", "partial", "API/SDK 版本、幂等、错误封套、主体会话、撤销和本机读写路由已验证，具体外部身份 provider 尚未配置。",
-                       ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py", "docs/control_plane_offline_contract.md")),
+        ReadinessCheck("api_sdk", "pass", "API/SDK 版本、幂等、错误封套、主体会话、撤销、GitHub OAuth 映射和本机读写路由已验证。",
+                       ("poc/test_control_plane_contract.py", "poc/test_control_plane_api.py", "poc/test_github_oauth_provider.py", "docs/control_plane_offline_contract.md")),
         ReadinessCheck("version_rollback", "pass", "平台发布版本账本、活动任务阻断、目标版本已加载校验和显式提交回滚合同已接入；不会自动改写 Git 工作树。",
                        ("poc/test_runtime_quota_billing.py", "poc/web_app.py")),
     )

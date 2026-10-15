@@ -35,6 +35,9 @@ class GAReadinessTests(unittest.TestCase):
         self.assertEqual(("device-local-01",), report.enabled_devices)
         self.assertEqual("blocked", report.offline_virtual_status)
         self.assertEqual("blocked_registry_not_ready", report.physical_multi_device_status)
+        self.assertEqual("pass", report.offline_ga_status)
+        self.assertEqual("pass", next(item.status for item in report.ga_scope if item.check_id == "users_teams_permissions"))
+        self.assertEqual("pass", next(item.status for item in report.ga_scope if item.check_id == "api_sdk"))
         self.assertEqual(before, path.read_bytes())
 
     def test_virtual_two_device_registry_passes_offline_but_needs_real_evidence(self) -> None:
@@ -44,7 +47,8 @@ class GAReadinessTests(unittest.TestCase):
         self.assertEqual("pass", report.offline_virtual_status)
         self.assertEqual("blocked_no_real_evidence", report.physical_multi_device_status)
         self.assertEqual("pass", next(item.status for item in report.checks if item.check_id == "offline_virtual_multi_device"))
-        self.assertEqual("partial", next(item.status for item in report.ga_scope if item.check_id == "users_teams_permissions"))
+        self.assertEqual("pass", report.offline_ga_status)
+        self.assertEqual("pass", next(item.status for item in report.ga_scope if item.check_id == "users_teams_permissions"))
 
     def test_missing_calibration_blocks_virtual_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

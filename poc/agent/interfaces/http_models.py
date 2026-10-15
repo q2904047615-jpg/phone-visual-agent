@@ -42,6 +42,7 @@ class ControlPlaneTeamWriteRequest(StrictAgentRequest):
 
 
 class ControlPlaneTeamUpdateRequest(StrictAgentRequest):
+    expected_revision: StrictInt | None = Field(default=None, ge=0)
     name: StrictStr | None = Field(default=None, min_length=1, max_length=256)
     member_ids: list[StrictStr] | None = Field(default=None, max_length=500)
 

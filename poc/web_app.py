@@ -682,6 +682,8 @@ def _control_plane_write_request_hash(operation: str, organization_id: str, body
 def _control_plane_write_http_error(error: BaseException) -> HTTPException:
     code = str(error.args[0]) if isinstance(error, KeyError) and error.args else str(error)
     member_errors = {
+        "team_conflict": (409, "团队已被其他操作修改，请刷新后重新选择成员。"),
+        "team_permission_denied": (403, "当前角色不能管理团队。"),
         "github_identity_in_use": (409, "此 GitHub 身份已有其他关联，不能直接覆盖。"),
         "github_identity_conflict": (409, "身份关联已变化，请重新查询或刷新。"),
         "github_subject_invalid": (422, "GitHub 用户 ID 必须是有效的稳定数字 ID。"),
@@ -1185,9 +1187,9 @@ def control_plane_create_team(
         )
     except (KeyError, ValueError) as error:
         raise _control_plane_write_http_error(error) from error
-    store.record_audit(organization_id=organization_id, resource="team.create",
-                       outcome="replay" if replay else "created", request_id=_control_plane_request_id(request),
-                       metadata={"team_id": body.team_id, "status_code": status_code})
+    if replay:
+        store.record_audit(organization_id=organization_id, resource="team.create", outcome="replay",
+                           actor=principal['user_id'], request_id=_control_plane_request_id(request), metadata={"team_id": body.team_id})
     response.status_code = 200 if replay else status_code
     return _control_plane_write_envelope(request, data, idempotent_replay=replay)
 
@@ -1213,16 +1215,17 @@ def control_plane_update_team(
             organization_id=organization_id,
             principal_user_id=principal["user_id"],
             idempotency_key=key,
-            request_hash=_control_plane_write_request_hash("team.update", organization_id, body.model_dump()),
+            request_hash=_control_plane_write_request_hash("team.update", organization_id, {"team_id": team_id, **body.model_dump()}),
             team_id=team_id,
             name=body.name,
             member_ids=tuple(body.member_ids) if body.member_ids is not None else None,
+            expected_revision=body.expected_revision,
         )
     except (KeyError, ValueError) as error:
         raise _control_plane_write_http_error(error) from error
-    store.record_audit(organization_id=organization_id, resource="team.update",
-                       outcome="replay" if replay else "updated", request_id=_control_plane_request_id(request),
-                       metadata={"team_id": team_id, "status_code": status_code})
+    if replay:
+        store.record_audit(organization_id=organization_id, resource="team.update", outcome="replay",
+                           actor=principal['user_id'], request_id=_control_plane_request_id(request), metadata={"team_id": team_id})
     response.status_code = 200 if replay else status_code
     return _control_plane_write_envelope(request, data, idempotent_replay=replay)
 

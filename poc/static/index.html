@@ -27,6 +27,7 @@
         <button id="accountRetryButton" class="secondary-button" type="button" hidden>重新检查</button>
         <button id="deviceManagementButton" class="secondary-button" type="button" hidden>管理设备分配</button>
         <button id="memberManagementButton" class="secondary-button" type="button" hidden>管理组织成员</button>
+        <button id="teamManagementButton" class="secondary-button" type="button" hidden>管理团队与分组</button>
         <button id="githubIdentityButton" class="secondary-button" type="button" hidden>管理 GitHub 关联</button>
         <p id="accountError" role="status" hidden></p>
       </section>
@@ -276,6 +277,22 @@
     <p id="memberMessage" role="status"></p>
     <div class="dialog-actions"><button id="memberRefresh" class="secondary-button" type="button">刷新</button><button id="memberClose" class="secondary-button" type="button">关闭</button></div>
   </dialog>
+  <dialog id="teamManagementDialog" class="risk-dialog device-management-dialog" aria-labelledby="teamManagementTitle">
+    <h2 id="teamManagementTitle">团队与成员分组</h2>
+    <p>按业务或协作需要组织成员，一名成员可加入多个团队。</p>
+    <p class="dialog-help">所有者和管理员可管理本组织团队。分组不改变角色、登录资格或设备归属，也不共享他人的任务、截图和回放。</p>
+    <form id="teamCreate" class="device-assignment-card team-card" hidden>
+      <strong>新建团队</strong>
+      <label>团队名称<input id="teamNewName" aria-label="新团队名称" required maxlength="256" placeholder="例如 客户运营"></label>
+      <fieldset id="teamNewMembers" class="team-member-picker"></fieldset>
+      <button type="submit" class="primary-button">创建团队</button>
+    </form>
+    <label>查找团队<input id="teamFilter" type="search" placeholder="团队名称或成员 ID" aria-label="查找团队"></label>
+    <div id="teamList"></div>
+    <details><summary>查看所有成员的分组</summary><div id="teamMemberSummary"></div></details>
+    <p id="teamMessage" role="status"></p>
+    <div class="dialog-actions"><button id="teamRefresh" class="secondary-button" type="button">刷新</button><button id="teamClose" class="secondary-button" type="button">关闭</button></div>
+  </dialog>
   <dialog id="githubIdentityDialog" class="risk-dialog device-management-dialog" aria-labelledby="githubIdentityTitle">
     <h2 id="githubIdentityTitle">GitHub 身份关联</h2>
     <p>决定哪个 GitHub 账号可以登录哪位组织成员。</p>
@@ -297,6 +314,7 @@
   <script src="/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"></script>
   <script src="/assets/github_identities.js?v=20261015-v1"></script>
   <script src="/assets/members.js?v=20261015-v1"></script>
+  <script src="/assets/teams.js?v=20261015-v1"></script>
   <script src="/assets/device_assignments.js?v=20261015-v1"></script>
   <script src="/assets/account.js?v=20261015-github-login-v1"></script>
   <script src="/assets/app.js?v=20260927-main-chain-cleanup-v1"></script>

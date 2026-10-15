@@ -74,6 +74,10 @@ class SqliteControlPlaneRepository:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS control_plane_team_versions (
+                team_id TEXT PRIMARY KEY REFERENCES control_plane_teams(team_id),
+                revision INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS control_plane_device_assignment_versions (
                 device_id TEXT PRIMARY KEY,
                 revision INTEGER NOT NULL
@@ -232,13 +236,27 @@ class SqliteControlPlaneRepository:
                 (organization.organization_id, quota_key, quota.period, quota.max_runs, quota.max_physical_actions, quota.max_model_tokens),
             )
 
-    @staticmethod
-    def _organization(row: sqlite3.Row) -> dict[str, Any]:
+    def _member_teams(self, organization_id: str, user_id: str) -> list[str]:
+        return [row['team_id'] for row in self._connection.execute(
+            'SELECT team_id,member_ids_json FROM control_plane_teams WHERE organization_id=? ORDER BY team_id',
+            (organization_id,)) if user_id in json.loads(row['member_ids_json'])]
+
+    def _sync_member_team_projection(self, organization_id: str) -> None:
+        # Keep the old column for rollback readers; it has no independent writer.
+        for row in self._connection.execute('SELECT user_id FROM control_plane_principals WHERE organization_id=?', (organization_id,)).fetchall():
+            self._connection.execute('UPDATE control_plane_principals SET team_ids_json=? WHERE user_id=?',
+                (_json(self._member_teams(organization_id, row['user_id'])), row['user_id']))
+
+    def _team_revision(self, team_id: str) -> int:
+        row = self._connection.execute('SELECT revision FROM control_plane_team_versions WHERE team_id=?', (team_id,)).fetchone()
+        return row['revision'] if row else 0
+
+    def _organization(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "organization_id": str(row["organization_id"]),
             "name": str(row["name"]),
             "owner_user_id": str(row["owner_user_id"]),
-            "team_ids": list(json.loads(row["team_ids_json"])),
+            "team_ids": [team['team_id'] for team in self.list_teams(row['organization_id'])],
         }
 
     def get_organization(self, organization_id: str) -> dict[str, Any] | None:
@@ -251,13 +269,15 @@ class SqliteControlPlaneRepository:
     def list_teams(self, organization_id: str) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM control_plane_teams WHERE organization_id=? ORDER BY team_id", (organization_id,)
+                "SELECT t.*,COALESCE(v.revision,0) AS revision FROM control_plane_teams t "
+                "LEFT JOIN control_plane_team_versions v ON v.team_id=t.team_id WHERE t.organization_id=? ORDER BY t.team_id", (organization_id,)
             ).fetchall()
             return [{
                 "team_id": str(row["team_id"]),
                 "organization_id": str(row["organization_id"]),
                 "name": str(row["name"]),
                 "member_ids": list(json.loads(row["member_ids_json"])),
+                "revision": row['revision'],
             } for row in rows]
 
     def list_principals(self, organization_id: str) -> list[dict[str, Any]]:
@@ -271,7 +291,7 @@ class SqliteControlPlaneRepository:
                 "user_id": str(row["user_id"]),
                 "organization_id": str(row["organization_id"]),
                 "role": str(row["role"]),
-                "team_ids": list(json.loads(row["team_ids_json"])),
+                "team_ids": self._member_teams(row['organization_id'], row['user_id']),
                 "status": row["status"], "revision": row["revision"],
                 "permissions": sorted(ROLE_PERMISSIONS[row["role"]]),
             } for row in rows]
@@ -373,7 +393,7 @@ class SqliteControlPlaneRepository:
                 "organization_id": str(row["organization_id"]),
                 "user_id": str(row["user_id"]),
                 "role": str(row["role"]),
-                "team_ids": list(json.loads(row["team_ids_json"])),
+                "team_ids": self._member_teams(row['organization_id'], row['user_id']),
                 "permissions": sorted(ROLE_PERMISSIONS[str(row["role"])]),
                 "issued_at": str(row["issued_at"]),
                 "expires_at": str(row["expires_at"]),
@@ -537,6 +557,7 @@ class SqliteControlPlaneRepository:
                     request_hash: str, team_id: str, name: str, member_ids: tuple[str, ...]) -> tuple[int, dict[str, Any], bool]:
         def write() -> tuple[int, dict[str, Any]]:
             self._require_organization_locked(organization_id)
+            self._authorize_team_write(organization_id, principal_user_id)
             team = ControlPlaneTeam(team_id=team_id, organization_id=organization_id, name=name, member_ids=member_ids)
             self._validate_member_ids_locked(organization_id, team.member_ids)
             exists = self._connection.execute("SELECT 1 FROM control_plane_teams WHERE team_id=?", (team.team_id,)).fetchone()
@@ -556,23 +577,30 @@ class SqliteControlPlaneRepository:
                     "UPDATE control_plane_organizations SET team_ids_json=? WHERE organization_id=?",
                     (_json(team_ids), organization_id),
                 )
+            self._sync_member_team_projection(organization_id)
+            self.record_audit(organization_id=organization_id, resource='team.create', outcome='created',
+                              actor=principal_user_id, metadata={'team_id': team_id, 'member_ids': list(team.member_ids), 'revision': 0})
             return 201, {"team": {"team_id": team.team_id, "organization_id": organization_id,
-                                    "name": team.name, "member_ids": list(team.member_ids)}}
+                                    "name": team.name, "member_ids": list(team.member_ids), "revision": 0}}
         return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
                                     idempotency_key=idempotency_key, operation="team.create",
                                     request_hash=request_hash, write=write)
 
     def update_team(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
                     request_hash: str, team_id: str, name: str | None,
-                    member_ids: tuple[str, ...] | None) -> tuple[int, dict[str, Any], bool]:
+                    member_ids: tuple[str, ...] | None, expected_revision: int | None = None) -> tuple[int, dict[str, Any], bool]:
         def write() -> tuple[int, dict[str, Any]]:
             self._require_organization_locked(organization_id)
+            self._authorize_team_write(organization_id, principal_user_id)
             row = self._connection.execute(
                 "SELECT name,member_ids_json FROM control_plane_teams WHERE team_id=? AND organization_id=?",
                 (team_id, organization_id),
             ).fetchone()
             if row is None:
                 raise KeyError("team_not_found")
+            revision = self._team_revision(team_id)
+            if expected_revision is not None and revision != expected_revision:
+                raise ValueError('team_conflict')
             final_name = name if name is not None else str(row["name"])
             final_members = tuple(member_ids) if member_ids is not None else tuple(json.loads(row["member_ids_json"]))
             team = ControlPlaneTeam(team_id=team_id, organization_id=organization_id, name=final_name, member_ids=final_members)
@@ -581,11 +609,22 @@ class SqliteControlPlaneRepository:
                 "UPDATE control_plane_teams SET name=?,member_ids_json=? WHERE team_id=? AND organization_id=?",
                 (team.name, _json(list(team.member_ids)), team_id, organization_id),
             )
+            self._connection.execute('INSERT OR REPLACE INTO control_plane_team_versions VALUES(?,?)', (team_id, revision+1))
+            self._sync_member_team_projection(organization_id)
+            self.record_audit(organization_id=organization_id, resource='team.update', outcome='updated', actor=principal_user_id,
+                metadata={'team_id': team_id, 'old_name': row['name'], 'name': team.name,
+                          'old_member_ids': json.loads(row['member_ids_json']), 'member_ids': list(team.member_ids), 'revision': revision+1})
             return 200, {"team": {"team_id": team.team_id, "organization_id": organization_id,
-                                    "name": team.name, "member_ids": list(team.member_ids)}}
+                                    "name": team.name, "member_ids": list(team.member_ids), "revision": revision+1}}
         return self._run_idempotent(organization_id=organization_id, principal_user_id=principal_user_id,
                                     idempotency_key=idempotency_key, operation="team.update",
                                     request_hash=request_hash, write=write)
+
+    def _authorize_team_write(self, organization_id: str, user_id: str) -> None:
+        row = self._connection.execute('SELECT role FROM control_plane_principals WHERE organization_id=? AND user_id=?',
+                                       (organization_id, user_id)).fetchone()
+        if not row or not self.member_active(user_id) or 'team.manage' not in ROLE_PERMISSIONS[row['role']]:
+            raise ValueError('team_permission_denied')
 
     def create_principal(self, *, organization_id: str, principal_user_id: str, idempotency_key: str,
                          request_hash: str, user_id: str, role: str, team_ids: tuple[str, ...]) -> tuple[int, dict[str, Any], bool]:
@@ -602,6 +641,10 @@ class SqliteControlPlaneRepository:
                 "INSERT INTO control_plane_principals(user_id,organization_id,role,team_ids_json) VALUES(?,?,?,?)",
                 (user_id, organization_id, role, _json(list(principal.team_ids))),
             )
+            for team_id in principal.team_ids:
+                members = json.loads(self._connection.execute('SELECT member_ids_json FROM control_plane_teams WHERE team_id=?', (team_id,)).fetchone()[0])
+                self._connection.execute('UPDATE control_plane_teams SET member_ids_json=? WHERE team_id=?', (_json(members + [user_id]), team_id))
+                self._connection.execute('INSERT OR REPLACE INTO control_plane_team_versions VALUES(?,?)', (team_id, self._team_revision(team_id)+1))
             self.record_audit(organization_id=organization_id, resource="principal.create", outcome="created",
                 actor=principal_user_id, metadata={"user_id": user_id, "role": role})
             return 201, {"principal": {"user_id": user_id, "organization_id": organization_id,

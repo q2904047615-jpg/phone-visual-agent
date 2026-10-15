@@ -285,8 +285,11 @@ class LocalAgentApiClient:
 
     def control_plane_update_team(self, organization_id: str, team_id: str, *,
                                   principal_token: str, idempotency_key: str,
-                                  name: str | None = None, member_ids: list[str] | None = None) -> JsonObject:
+                                  name: str | None = None, member_ids: list[str] | None = None,
+                                  expected_revision: int | None = None) -> JsonObject:
         payload: JsonObject = {}
+        if expected_revision is not None:
+            payload['expected_revision'] = expected_revision
         if name is not None:
             payload["name"] = name
         if member_ids is not None:

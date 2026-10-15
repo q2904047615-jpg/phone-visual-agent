@@ -729,4 +729,10 @@ h1 { font-size: clamp(29px, 3vw, 40px); letter-spacing: -1.5px; }
 .device-assignment-card label, .device-assignment-card input { min-width: 0; max-width: 100%; }
 .device-assignment-card label { display: grid; gap: 8px; }
 .device-assignment-card[hidden] { display: none; }
+.team-card { grid-template-columns: minmax(0, 1fr); }
+.team-member-picker { min-width: 0; margin: 0; border: 1px solid #344158; border-radius: 8px; padding: 12px; max-height: 240px; overflow-y: auto; }
+.team-member-picker .team-member-option { display: flex; align-items: center; gap: 8px; margin: 10px 0; overflow-wrap: anywhere; }
+.team-member-picker .team-member-option[hidden] { display: none; }
+.team-member-option input { width: auto; flex-shrink: 0; }
+#teamMemberSummary { overflow-wrap: anywhere; }
 @media (max-width: 480px) { .device-assignment-card { grid-template-columns: minmax(0, 1fr); } }

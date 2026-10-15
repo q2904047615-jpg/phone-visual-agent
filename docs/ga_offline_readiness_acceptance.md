@@ -20,7 +20,7 @@
 - `poc/test_ga_readiness.py`：3/3 通过。
 - 本轮之前的完整 Python 离线回归：1014 通过、4 skipped；前端 npm 在当前 Windows 沙箱被 Node `spawn EPERM` 阻断，不能计为前端完整回归通过。
 - 只读评估报告：`poc/output/web/ga_readiness_20261014/report.json`，其中 `offline_ga_status=pass`，`physical_multi_device_status=blocked_registry_not_ready`。
-- 服务仍为 PID `1052`、监听 `127.0.0.1:8765`，`/api/session` 返回 `ready=true`；新 billing、platform releases、platform rollback 路由已在 OpenAPI 中登记。
+- 服务当前为 PID `20412`、监听 `127.0.0.1:8765`，`/api/session` 返回 `ready=true`；新 billing、platform releases、platform rollback 路由已在 OpenAPI 中登记。
 - 本批没有手机动作、第二台真机、付费模型调用、外部支付或 GitHub 推送。
 
 ## 尚未完成

@@ -1,8 +1,8 @@
 """Control Plane contracts for the GA transition.
 
-These contracts define organization, team, permission, quota, API and SDK
-semantics.  The current online integration is a read-only local projection;
-they are intentionally not Runtime admission or Policy authority.
+These contracts define organization, team, permission, quota, API, billing,
+rollback and SDK semantics. Runtime admission consumes only the explicit
+quota reservation contract; policy and payment authority remain separate.
 """
 
 from __future__ import annotations

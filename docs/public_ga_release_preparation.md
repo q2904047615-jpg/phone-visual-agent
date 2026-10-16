@@ -4,9 +4,9 @@
 
 ## 当前结论
 
-**有条件可行。** 单设备软件 GA 的代码、离线回归、干净 revision、报告和本机服务状态已经通过；公共互联网 GA 还不能直接上线。当前服务仍绑定 `127.0.0.1:8765`，来源校验只接受 `127.0.0.1`/`localhost`，这是本机安全边界，不应通过端口映射或临时代理绕过。
+**有条件可行。** 单设备软件 GA、DNS、HTTPS、受控反向代理和 GitHub OAuth 浏览器登录子项已经通过；完整公共 GA 仍受 `DASHSCOPE_API_KEY`、生产运维合同、第二台真机和多 worker 物理证据限制。应用继续只绑定 `127.0.0.1:8765`，公网请求由受控代理转发，来源校验只额外允许精确配置的 HTTPS origin。
 
-公共上线需要先确定 HTTPS 公网入口、反向代理信任边界和 GitHub OAuth 回调地址，再实施对应的受信来源配置和部署验收。没有这些配置时，保持本机监听是正确状态。
+公网登录与会话验收的逐项证据见 [公网 GitHub OAuth 与会话验收记录](public_ga_oauth_acceptance.md)。
 
 ## 本批锁定的公网入口
 
@@ -15,7 +15,7 @@
 - `PUBLIC_BASE_URL=https://agent.jianlizhineng.cn`
 - `GITHUB_OAUTH_REDIRECT_URI=https://agent.jianlizhineng.cn/api/control-plane/auth/github/callback`
 
-该子域名不会覆盖现有的 `jianlizhineng.cn` 网站。当前只把它作为部署目标写入准备合同；DNS、证书和反向代理尚未修改，服务仍保持 `127.0.0.1:8765` 本机监听。
+该子域名不会覆盖现有的 `jianlizhineng.cn` 网站。DNS、证书和反向代理已经在线，服务仍保持 `127.0.0.1:8765` 本机监听。
 
 ## 本批已完成
 
@@ -28,11 +28,12 @@
 - 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。
 - 配置预检已收敛为只阻断公网入口和 OAuth App 外部配置，不再要求重复提供可推导的模型、本机路径或当前 owner 映射。
 - `PUBLIC_BASE_URL=https://agent.jianlizhineng.cn` 的隔离 HTTP 回归已通过：配置的公网 origin 可访问，其他 origin 返回 `403`；该回归使用临时 SQLite，不代表公网 DNS/HTTPS 已验收。
+- 公网真实验收已完成：GitHub OAuth 回调、`local-owner/local-org` 身份映射、刷新保持、退出登录和服务端会话撤销均通过；详见 [公网 GitHub OAuth 与会话验收记录](public_ga_oauth_acceptance.md)。
 - 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标；目标仍有 `-wal/-shm` sidecar 时会拒绝覆盖，需先停写入并完成 checkpoint。
 
-## 公共 GA 必须先确定的配置
+## 公共 GA 配置合同（实现与验证状态）
 
-在当前单机部署中，模型、SQLite、租约目录和现有 owner 已能从代码/数据库解析，不需要再次提供。公网接入前实际还缺四项：公网 HTTPS 基址、GitHub OAuth Client ID、与该基址同源的回调地址，以及通过 Secret 管理器注入的 GitHub OAuth Client Secret。
+在当前单机部署中，公网 HTTPS 基址、GitHub OAuth Client ID/回调/Secret、SQLite、租约目录和现有 owner 已在部署环境核对。当前预检只剩 `DASHSCOPE_API_KEY` Secret，以及持久化租约、备份和日志保留等生产运维合同。
 
 ### 1. 公网入口与传输安全（必填）
 
@@ -42,7 +43,7 @@
 - 代理是否传递并且只信任 `Host`、`X-Forwarded-Proto` 等头部。不能让公网客户端伪造这些头部。
 - 公网入口的来源策略：只允许该 HTTPS origin，不能继续使用“任意 Origin”或把本机控制令牌当作用户身份。
 
-当前代码的 `verify_local_origin` 已支持显式 `PUBLIC_BASE_URL` 公网 HTTPS origin：未配置时继续只允许本机同源请求，配置后只额外允许该精确公网 origin，其他来源仍拒绝。公共部署前仍必须针对上述域名完成一次受控来源配置、Cookie `Secure` 行为和跨站拒绝验收。
+当前代码的 `verify_local_origin` 已支持显式 `PUBLIC_BASE_URL` 公网 HTTPS origin：未配置时继续只允许本机同源请求，配置后只额外允许该精确公网 origin，其他来源仍拒绝。本次线上验收已覆盖 HTTPS 公网来源、Secure/HttpOnly 会话 Cookie、刷新保持和退出撤销；逐项证据见 [公网 GitHub OAuth 与会话验收记录](public_ga_oauth_acceptance.md)。
 
 ### 2. GitHub OAuth（必填）
 
@@ -111,13 +112,11 @@ python poc/evals/runtime_sqlite_backup.py restore `
 
 ## 现在仍需要你或部署环境提供的配置
 
-域名目标已经确定，后续只剩部署侧配置，不需要再选择域名：
+公网 DNS、HTTPS、反向代理和 GitHub OAuth 已完成并通过真实浏览器验收。当前剩余：
 
-1. 为 `agent.jianlizhineng.cn` 配置 DNS（A/AAAA 或 CNAME）并确认指向受控公网反向代理。
-2. 在该反向代理配置 HTTPS 证书，并把 `/` 和 `/api/` 按部署方案转发到本机 API；应用继续只监听回环地址。
-3. 在 GitHub OAuth App 中把 callback URL 精确设置为 `https://agent.jianlizhineng.cn/api/control-plane/auth/github/callback`，提供 Client ID；Client Secret 只注入部署环境的 Secret 管理器。
-4. 在部署环境注入 `DASHSCOPE_API_KEY`、`GITHUB_OAUTH_CLIENT_SECRET`，并确认持久 SQLite、身份映射文件、租约目录和备份目录的绝对路径及可写权限。
-5. 确定进程管理、日志脱敏、备份保留周期和恢复演练负责人；这些属于上线运维配置，不能由本地代码自动推断。
+1. 在部署环境注入 `DASHSCOPE_API_KEY`，再运行模型真实调用和完整预检。
+2. 将租约目录、SQLite 备份目录和日志保留策略固化为持久化生产路径，并完成恢复演练负责人核对。
+3. 具备资源后再验收第二台真机、多 worker 并发、第二个真实 GitHub 账号、真实账单/支付和外部通知。
 
 以下内容目前不需要提供：第二台真机、第二个 GitHub 账号、根域名替换、支付账号或外部通知账号。
 

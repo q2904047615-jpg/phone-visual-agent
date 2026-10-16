@@ -1,4 +1,4 @@
-"""The production screenshot -> Qwen decision -> one action -> screenshot loop."""
+"""The production screenshot -> Model Gateway suggestion -> one action -> screenshot loop."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ class UniversalAgentOrchestrator:
 
     TERMINAL_STATUSES = TERMINAL_SESSION_STATUSES
 
-    def __init__(self, *, qwen_observer: Any,
+    def __init__(self, *, model_gateway: Any,
         adapter_factory: Callable[[str], GenericSingleActionAdapterPort],
         evidence_store_factory: AgentEvidenceStoreFactory, trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None=None, device_registry: DeviceTaskRegistryPort,
@@ -86,8 +86,8 @@ class UniversalAgentOrchestrator:
         policy: PlatformPolicy | None=None, verifier: Any | None=None,
         session_persister: Callable[[UniversalAgentSessionState], None] | None=None) -> None:
         self.required_action_kind = required_action_kind
-        self.qwen_observer = qwen_observer
-        self.planner = planner or ModelAssistedPlanner(qwen_observer)
+        self.model_gateway = model_gateway
+        self.planner = planner or ModelAssistedPlanner(model_gateway)
         self.policy = policy or PlatformPolicy()
         self.verifier = verifier or PlatformVerifier()
         self.adapter_factory = adapter_factory
@@ -102,7 +102,7 @@ class UniversalAgentOrchestrator:
         self._lifecycle_coordinator = SessionLifecycleCoordinator()
 
     def _vision_usage_scope(self, ledger: VisionSessionUsageLedger | None):
-        provider = getattr(self.qwen_observer, 'provider', None)
+        provider = getattr(self.model_gateway, 'provider', None)
         factory = getattr(provider, 'session_usage_scope', None)
         return factory(ledger) if callable(factory) else nullcontext()
 
@@ -265,9 +265,9 @@ class UniversalAgentOrchestrator:
     def _decide(self, session: UniversalAgentSessionState, *, frames: list[Any] | tuple[Any, ...],
         observation: Any, model_decision: Mapping[str, Any]) -> Any:
         # Keep the default Model Gateway binding live when tests or a runtime
-        # reload replace the provider on the compatibility facade.
-        if isinstance(self.planner, ModelAssistedPlanner) and self.planner.model_gateway is not self.qwen_observer:
-            self.planner.model_gateway = self.qwen_observer
+        # reload replace the provider on the running Runtime.
+        if isinstance(self.planner, ModelAssistedPlanner) and self.planner.model_gateway is not self.model_gateway:
+            self.planner.model_gateway = self.model_gateway
         context = self._task_context(session)
         available = session.observation_action_kinds
         reject_if(not available, UniversalAgentOrchestratorError('当前观察缺少已签发动作集合。'))

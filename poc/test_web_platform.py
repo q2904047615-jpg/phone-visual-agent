@@ -21,7 +21,15 @@ from test_support.web_platform import (
 
 
 class ApiEndToEndTests(_BaseApiEndToEndTests):
-    def test_unified_qwen_chat_only_does_not_create_phone_task(self) -> None:
+    def test_retired_qwen_entry_route_is_not_a_production_alias(self) -> None:
+        response = self.client.post(
+            "/api/qwen/chat",
+            headers=self.headers,
+            json={"text": "你好", "device_id": "device-local-01"},
+        )
+        self.assertEqual(404, response.status_code, response.text)
+
+    def test_unified_agent_chat_only_does_not_create_phone_task(self) -> None:
         route = json.dumps({
             "route": "chat_only",
             "reply": "我是 Qwen。",
@@ -29,7 +37,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         })
         with patch.object(web_app.runtime.vision_provider, "_chat", return_value=route) as chat:
             response = self.client.post(
-                "/api/qwen/chat",
+                "/api/agent/chat",
                 headers=self.headers,
                 json={"text": "你是谁？", "device_id": "device-local-01"},
             )
@@ -40,7 +48,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
         self.assertEqual("我是 Qwen。", body["reply"])
         chat.assert_called_once()
 
-    def test_unified_qwen_phone_task_returns_start_ticket(self) -> None:
+    def test_unified_agent_phone_task_returns_start_ticket(self) -> None:
         route = json.dumps({
             "route": "phone_task",
             "reply": "我需要先查看当前手机画面。",
@@ -55,7 +63,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             ) as starter,
         ):
             response = self.client.post(
-                "/api/qwen/chat",
+                "/api/agent/chat",
                 headers=self.headers,
                 json={"text": "打开手机设置", "device_id": "device-local-01"},
             )
@@ -982,7 +990,7 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             2,
             error=VisionAgentError("第二步 Qwen 当前截图解析失败"),
         )
-        orchestrator.qwen_observer = qwen
+        orchestrator.model_gateway = qwen
         with (
             patch.object(web_app, "_require_supervised_device_ready"),
             patch.object(

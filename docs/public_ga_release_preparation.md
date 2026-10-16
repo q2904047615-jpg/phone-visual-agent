@@ -22,7 +22,7 @@
 - 单设备软件 GA 评估报告已经可以持久化，`offline_ga_status=pass`。
 - 服务运行在最近一次干净 revision（以 `/api/session` 返回的 `revision` 为准），启动自检 `verified=true`，`/api/session` 为 `ready=true`。
 - SQLite active release 与 Git HEAD 一致；未结算配额预留和活动 Runtime 均为 `0`，SQLite 保留离线回归产生的历史计费账本，未调用支付服务。
-- 本批 Python 离线回归为 `1021` 通过、`4` 跳过；前端完整回归基线为 `64/64`。
+- 本批迁移后的 Python 全量离线回归为 `1029` 通过、`4` 跳过；前端 `npm test` 为 `63/63`（19 个单元 + 44 个浏览器合同）。
 - OpenAPI 的 billing、platform releases、platform rollback 路由已核对。
 - 未启用第二台设备、未执行手机动作、未调用外部支付或推送。
 - 已从当前 SQLite 沿用 1 个 GitHub owner 映射：`279507169 -> local-org/local-owner`；模型、模型地址和本机租约目录均使用代码默认值。
@@ -109,15 +109,17 @@ python poc/evals/runtime_sqlite_backup.py restore `
 2. 通过 HTTPS 反向代理完成 GitHub OAuth 登录、退出、过期和回调重放拒绝检查。
 3. 核对 Secure/HttpOnly/SameSite Cookie、同源策略、跨组织隔离和无主体访问拒绝。
 4. 用干净 revision 启动并核对 `/api/session`、OpenAPI、SQLite active release 和备份恢复点；备份恢复点使用上述在线备份工具验证。
-5. 在受控浏览器环境复跑前端 `64/64`，复跑 Python 全量离线回归 `1021`/`4 skipped`。
+5. 在受控浏览器环境复跑前端 `63/63`，复跑 Python 全量离线回归 `1029`/`4 skipped`。
 6. 用平台回滚合同做一次无活动任务的演练；不自动 checkout、不覆盖用户数据。
 
 ## 现在仍需要你或部署环境提供的配置
 
-公网 DNS、HTTPS、反向代理、GitHub OAuth、单机持久化备份和模型真实调用已完成并通过验收。当前剩余：
+公网 DNS、HTTPS、反向代理、GitHub OAuth、单机持久化备份、模型真实调用以及旧 Qwen 网页入口退役均已完成并通过相应子项验收。当前剩余：
 
 1. 如需外部告警，再接入通知供应商；当前 systemd/journald 本机监控与备份调度已完成并通过演练。
-3. 具备资源后再验收第二台真机、多 worker 并发、第二个真实 GitHub 账号、真实账单/支付和外部通知。
+2. 具备资源后再验收第二台真机、多 worker 并发、第二个真实 GitHub 账号、真实账单/支付和外部通知。
+
+入口迁移证据见 [架构迁移与旧入口退役验收记录](architecture_migration_acceptance.md)。当前网页入口为 `/api/agent/chat`；`/api/qwen/chat` 已移除，不保留兼容别名或第二套入口权威。
 
 以下内容目前不需要提供：第二台真机、第二个 GitHub 账号、根域名替换、支付账号或外部通知账号。
 

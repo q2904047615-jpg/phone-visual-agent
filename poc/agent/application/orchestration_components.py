@@ -1,8 +1,8 @@
-"""P0 orchestration collaborators.
+"""Runtime orchestration collaborators.
 
-The public orchestrator remains the compatibility facade.  These collaborators
-own the four lifecycle responsibilities while calling the facade's shared
-protocol helpers, so canonical action semantics and persistence stay unchanged.
+These collaborators own the four lifecycle responsibilities while calling the
+orchestrator's shared protocol helpers, so canonical action semantics and
+persistence have one Runtime authority.
 """
 
 from collections.abc import Mapping

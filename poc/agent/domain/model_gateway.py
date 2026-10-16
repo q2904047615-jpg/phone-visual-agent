@@ -14,8 +14,14 @@ from .validation import reject_if
 
 
 class ModelGateway(Protocol):
-    """Minimal provider adapter consumed by Planner."""
+    """Provider adapter consumed by the entry router and Planner.
 
+    ``chat`` is the provider-neutral free-form/structured entry contract;
+    ``decide`` remains the observation-to-planning suggestion contract.  Both
+    return suggestions only; Runtime, Policy and Verifier retain authority.
+    """
+
+    def chat(self, *args: Any, **kwargs: Any) -> Any: ...
     def decide(self, **kwargs: Any) -> Any: ...
 
     def status(self) -> Mapping[str, Any]: ...

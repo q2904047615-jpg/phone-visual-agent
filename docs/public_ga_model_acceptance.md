@@ -11,7 +11,7 @@
 - `phone-agent.service`：重载后 `active`，`/api/session` 返回 `ready=true`、`mock=false`。
 - 公共 GA 配置预检：`status=pass`；`required_secrets`、公网基址、GitHub 回调、身份映射和持久租约目录均通过；模型解析为 `qwen3-vl-plus`。
 - 服务端 `DashScopeVisionProvider` 真实文本调用：`result=pass`、模型 `qwen3-vl-plus`、`successful_call_count=1`、`network_attempts=1`、`finish_reason=stop`，响应长度 9 字符；未记录回复正文或 API Key。
-- 通过网站 `/api/qwen/chat` 的无主体请求返回 `401 identity_required`，证明控制令牌不能绕过网站用户会话；这不是模型调用失败。
+- 通过网站 `/api/agent/chat` 的无主体请求返回 `401 identity_required`，证明控制令牌不能绕过网站用户会话；这不是模型调用失败。旧 `/api/qwen/chat` 已在后续入口迁移批次移除。
 - 本次没有读取摄像头、没有启动 Runtime Task、没有发送手机动作、没有调用支付或通知服务。
 
 ## 仍未完成

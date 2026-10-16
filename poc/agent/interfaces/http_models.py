@@ -99,7 +99,7 @@ class GitHubIdentityWriteRequest(StrictAgentRequest):
     expected_revision: StrictInt = Field(ge=0)
 
 
-class QwenConversationMessage(StrictAgentRequest):
+class AgentConversationMessage(StrictAgentRequest):
     role: Literal["user", "assistant"]
     content: StrictStr = Field(min_length=1)
 
@@ -111,7 +111,7 @@ class GenericSupervisedStartRequest(StrictAgentRequest):
     exact_target_label: StrictStr = Field(default="")
     device_id: StrictStr = Field(min_length=1, max_length=128)
     auto_advance: StrictBool = True
-    conversation: list[QwenConversationMessage] = Field(default_factory=list)
+    conversation: list[AgentConversationMessage] = Field(default_factory=list)
     max_physical_actions: StrictInt = Field(default=DEFAULT_DEVICE_ACTION_BUDGET, ge=1)
     max_observations: StrictInt = Field(default=DEFAULT_OBSERVATION_BUDGET, ge=1)
 
@@ -127,19 +127,19 @@ class GenericRecoveryReconciliationRequest(StrictAgentRequest):
     resume: StrictBool = False
 
 
-class QwenChatRequest(StrictAgentRequest):
-    """A natural-language message added to an existing Qwen task session."""
+class AgentChatRequest(StrictAgentRequest):
+    """A natural-language message added to an existing Agent task session."""
 
     device_id: StrictStr = Field(min_length=1, max_length=128)
     text: StrictStr = Field(min_length=1)
 
 
-class QwenDraftChatRequest(StrictAgentRequest):
-    """One multimodal Qwen message; Qwen returns natural reply and optional action together."""
+class AgentEntryRequest(StrictAgentRequest):
+    """One Agent entry message; the Model Gateway suggests routing only."""
 
     text: StrictStr = Field(min_length=1)
     device_id: StrictStr = Field(default="device-local-01", min_length=1, max_length=128)
-    conversation: list[QwenConversationMessage] = Field(default_factory=list)
+    conversation: list[AgentConversationMessage] = Field(default_factory=list)
     max_physical_actions: StrictInt = Field(default=DEFAULT_DEVICE_ACTION_BUDGET, ge=1)
     max_observations: StrictInt = Field(default=DEFAULT_OBSERVATION_BUDGET, ge=1)
 

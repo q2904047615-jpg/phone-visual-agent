@@ -102,7 +102,7 @@ class LoopHarness(unittest.TestCase):
         registry = DeviceTaskRegistry(lease_directory=Path(self.temp.name)/'leases')
         self.addCleanup(lambda: registry.release('device-1','session-1'))
         loop = UniversalAgentOrchestrator(required_action_kind=kwargs.pop('required_action_kind', ''),
-            qwen_observer=observer, adapter_factory=lambda _:adapter,
+            model_gateway=observer, adapter_factory=lambda _:adapter,
             evidence_store_factory=FileSystemAgentEvidenceStore, trusted_observation_factory=Observation,
             device_registry=registry)
         session = loop.start(session_id='session-1',raw_goal=goal,device_id='device-1',

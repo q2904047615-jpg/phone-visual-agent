@@ -406,7 +406,7 @@ function conversationMessageHtml(role, text, meta = "", variant = "") {
   </article>`;
 }
 
-function cleanConversationForQwen(value) {
+function cleanConversationForAgent(value) {
   if (!Array.isArray(value)) return [];
   return value.filter(item => {
     if (!item || !["user", "assistant"].includes(item.role)) return false;
@@ -422,7 +422,7 @@ function renderConversation() {
   const view = sessionView();
   const raw = view?.raw || state.supervisedSession || {};
   const messages = [];
-  const conversation = cleanConversationForQwen(view
+  const conversation = cleanConversationForAgent(view
     ? (Array.isArray(raw.conversation) ? raw.conversation : [])
     : state.chatConversation);
 
@@ -2040,15 +2040,15 @@ function isDeviceBusyConflict(error) {
   const message = String(error?.message || error?.detail || "");
   return Number(error?.status) === 409 || /已有活动任务|活动任务/.test(message);
 }
-async function sendUnifiedQwenMessage(text) {
+async function sendUnifiedAgentMessage(text) {
   const message = String(text || "").trim();
   if (!message || state.busy) return false;
   const active = sessionView();
   if (!active && luckyBagMonitorIsActive()) {
-    toast("消息未发送：福袋监控正在占用当前手机。请先暂停或停止福袋监控，再发送普通 Qwen 任务。", true);
+    toast("消息未发送：福袋监控正在占用当前手机。请先暂停或停止福袋监控，再发送普通 Agent 任务。", true);
     return false;
   }
-  const previousConversation = cleanConversationForQwen(active
+  const previousConversation = cleanConversationForAgent(active
     ? (Array.isArray(active.raw?.conversation) ? active.raw.conversation : [])
     : state.chatConversation);
   const optimisticConversation = [
@@ -2105,7 +2105,7 @@ async function sendUnifiedQwenMessage(text) {
   };
   try {
     const response = await withVisionProgress("与 Agent 平台对话并判断是否需要操作手机", () =>
-      api("/api/qwen/chat", {
+      api("/api/agent/chat", {
         method: "POST",
         body: JSON.stringify({
           text: message,
@@ -2172,9 +2172,9 @@ async function sendUnifiedQwenMessage(text) {
 async function startSupervisedAgent() {
   const input = document.querySelector("#agentText");
   const text = String(input?.value || "").trim();
-  if (!text) return toast("请输入要发送给 Qwen 的内容。", true);
+  if (!text) return toast("请输入要发送给 Agent 平台的内容。", true);
   if (input) input.value = "";
-  return sendUnifiedQwenMessage(text);
+  return sendUnifiedAgentMessage(text);
 }
 
 async function startCapabilityTrial() {
@@ -2684,9 +2684,9 @@ async function init() {
 
 async function handleComposerSend() {
   const text = document.querySelector("#agentText").value.trim();
-  if (!text) return toast("请输入要发送给 Qwen 的内容。", true);
+  if (!text) return toast("请输入要发送给 Agent 平台的内容。", true);
   document.querySelector("#agentText").value = "";
-  await sendUnifiedQwenMessage(text);
+  await sendUnifiedAgentMessage(text);
 }
 
 document.querySelector("#startSupervisedAgent").addEventListener("click", handleComposerSend);

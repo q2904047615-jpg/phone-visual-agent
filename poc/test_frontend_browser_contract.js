@@ -403,7 +403,7 @@ function createServer({
       json(response, 200, { feature_id: "lucky_bag", monitor: clone(entry.monitor) });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/api/qwen/chat") {
+    if (request.method === "POST" && url.pathname === "/api/agent/chat") {
       requests.startTokens.push(String(request.headers["x-control-token"] || ""));
       if (enforceToken && request.headers["x-control-token"] !== runtimeSession.token) {
         json(response, 403, { detail: "控制令牌无效。" });
@@ -603,7 +603,7 @@ test("task budget fields submit configured limits", { timeout: 30000 }, async ()
     await page.locator("#agentActionBudget").fill("123");
     await page.locator("#agentObservationBudget").fill("456");
     await page.locator("#agentText").fill("打开系统设置");
-    const response = page.waitForResponse(response => response.url().endsWith("/api/qwen/chat"));
+    const response = page.waitForResponse(response => response.url().endsWith("/api/agent/chat"));
     await page.locator("#startSupervisedAgent").click();
     await response;
     assert.equal(requests.start.at(-1).max_physical_actions, 123);

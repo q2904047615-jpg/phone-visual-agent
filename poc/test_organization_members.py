@@ -87,9 +87,9 @@ class OrganizationMemberTests(unittest.TestCase):
         self.assertEqual('local-owner',self.repo.device_assignments('local-org')[0]['user_id'])
 
     def test_role_change_applies_to_existing_token_and_dispatch_recheck(self):
-        req=Request({'type':'http','method':'POST','path':'/api/qwen/chat','query_string':b'',
+        req=Request({'type':'http','method':'POST','path':'/api/agent/chat','query_string':b'',
             'headers':[(k.lower().encode(),v.encode()) for k,v in self.auth('alice').items()],
-            'route':SimpleNamespace(path='/api/qwen/chat')})
+            'route':SimpleNamespace(path='/api/agent/chat')})
         req.state.principal=self.repo.authenticate_identity_session(self.tokens['alice'])
         self.assertEqual(200,self.update(role='viewer').status_code)
         self.assertNotIn('task.create',self.repo.authenticate_identity_session(self.tokens['alice'])['permissions'])
@@ -97,7 +97,7 @@ class OrganizationMemberTests(unittest.TestCase):
             with website_access.member_access(self.repo,req): self.fail('stale request dispatched')
         self.assertEqual(403,caught.exception.status_code)
         self.assertEqual(200,self.client.get('/api/control-plane/organizations/local-org',headers=self.auth('alice')).status_code)
-        self.assertEqual(403,self.client.post('/api/qwen/chat',headers=self.auth('alice'),json={'text':'hello'}).status_code)
+        self.assertEqual(403,self.client.post('/api/agent/chat',headers=self.auth('alice'),json={'text':'hello'}).status_code)
 
     def test_revision_idempotency_durability_and_audit(self):
         self.assertEqual(200,self.update(role='viewer').status_code)
@@ -122,9 +122,9 @@ class OrganizationMemberTests(unittest.TestCase):
             self.assertEqual(409,r.status_code,r.text)
             self.assertEqual('member_has_active_work',r.json()['detail']['code'])
         self.assertIsNotNone(self.repo.authenticate_identity_session(self.tokens['alice']))
-        req=Request({'type':'http','method':'POST','path':'/api/qwen/chat','query_string':b'',
+        req=Request({'type':'http','method':'POST','path':'/api/agent/chat','query_string':b'',
             'headers':[(k.lower().encode(),v.encode()) for k,v in self.auth('alice').items()],
-            'route':SimpleNamespace(path='/api/qwen/chat')})
+            'route':SimpleNamespace(path='/api/agent/chat')})
         req.state.principal=principal
         with website_access.member_access(self.repo,req):
             self.assertEqual(409,self.update(status='disabled',key='inflight').status_code)

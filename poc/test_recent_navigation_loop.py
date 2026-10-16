@@ -130,8 +130,8 @@ class RecentNavigationTests(LoopHarness):
         self.assertEqual('open_recent_apps', raw['model_decision']['action'])
         self.assertEqual('home', s.qwen_decision.proposal.action.action)
         self.assertEqual(LOCAL_NAVIGATION_SOURCE, s.snapshot()['qwen_decision']['decision_source'])
-        self.assertEqual(1, loop.qwen_observer.status()['local_navigation_action_count'])
-        self.assertEqual(0, loop.qwen_observer.status()['model_action_count'])
+        self.assertEqual(1, loop.model_gateway.status()['local_navigation_action_count'])
+        self.assertEqual(0, loop.model_gateway.status()['model_action_count'])
         self.assertEqual([], s.history)
 
     def test_post_action_observation_failure_requires_new_observation_before_navigation(self):

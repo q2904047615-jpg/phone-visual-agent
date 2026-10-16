@@ -149,7 +149,7 @@ class _BaseApiEndToEndTests(unittest.TestCase):
         from agent.application.universal_agent_orchestrator import UniversalAgentOrchestrator
         qwen = CountingQwen()
         adapter = FixtureAdapter(device_id=device_id)
-        orchestrator = UniversalAgentOrchestrator(qwen_observer=qwen,
+        orchestrator = UniversalAgentOrchestrator(model_gateway=qwen,
             adapter_factory=lambda _: adapter, trusted_observation_factory=Observation,
             evidence_store_factory=FileSystemAgentEvidenceStore, device_registry=DeviceTaskRegistry())
         return orchestrator, None, qwen, adapter

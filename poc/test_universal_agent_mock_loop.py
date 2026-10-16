@@ -267,7 +267,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         )
         qwen = CountingQwen()
         orchestrator = UniversalAgentOrchestrator(
-            qwen_observer=qwen,
+            model_gateway=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
             evidence_store_factory=FileSystemAgentEvidenceStore,

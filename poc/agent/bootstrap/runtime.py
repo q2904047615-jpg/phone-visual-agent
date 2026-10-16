@@ -129,7 +129,7 @@ class Runtime:
         self.control_plane_repository = SqliteControlPlaneRepository(runtime_database)
         self.control_plane_repository.ensure_platform_release(self.loaded_code_revision)
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
-            qwen_observer=self.model_gateway,
+            model_gateway=self.model_gateway,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=lambda: self.capture_agent_frame(device_id),
                 observer=self.generic_scene_observer,
@@ -225,7 +225,7 @@ class Runtime:
     ) -> UniversalAgentOrchestrator:
         return UniversalAgentOrchestrator(
             required_action_kind=candidate_action,
-            qwen_observer=self.model_gateway,
+            model_gateway=self.model_gateway,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=lambda: self.capture_agent_frame(device_id, controller=provisional_controller),
                 observer=self.generic_scene_observer,

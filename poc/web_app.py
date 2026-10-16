@@ -24,6 +24,8 @@ from fastapi.responses import FileResponse, Response, StreamingResponse, Redirec
 from fastapi.staticfiles import StaticFiles
 
 from agent.application import (
+    AgentEntryRouteError,
+    AgentEntryRouter,
     AgentDeviceRuntimeError,
     AgentSessionCommandError,
     AgentSessionRecoveryRequiredError,
@@ -122,8 +124,8 @@ from agent.interfaces.http_models import (
     GenericRecoveryReconciliationRequest,
     GenericSupervisedStartRequest,
     GenericSupervisedStepRequest,
-    QwenChatRequest,
-    QwenDraftChatRequest,
+    AgentChatRequest,
+    AgentEntryRequest,
     MachinePositionRequest,
     ManualMotionStartRequest,
 )
@@ -451,34 +453,6 @@ def _schedule_api_reload() -> bool:
             daemon=True,
         ).start()
         return True
-
-
-_QWEN_ROUTER_SYSTEM_PROMPT = """你是本项目网页中的 Qwen 统一入口。
-先根据用户消息和已有对话判断本轮是否需要操作手机：
-- chat_only：只回答问题，不需要读取手机画面，也不启动手机任务；
-- phone_task：用户明确要求手机完成目标，或必须读取手机当前画面才能继续。
-只返回 JSON，不要 Markdown：
-{"route":"chat_only或phone_task","reply":"给用户的自然语言回答","reason":"简短判断"}
-不要声称已经查看手机或已经执行动作。phone_task 只表示准备进入手机任务，不能声称任务已完成。
-"""
-
-_QWEN_ROUTER_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "qwen_entry_route",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "route": {"type": "string", "enum": ["chat_only", "phone_task"]},
-                "reply": {"type": "string"},
-                "reason": {"type": "string"},
-            },
-            "required": ["route", "reply", "reason"],
-        },
-    },
-}
 
 
 @asynccontextmanager
@@ -3293,13 +3267,13 @@ def get_generic_supervised_events(
     }
 
 
-@app.post("/api/qwen/chat")
-def unified_qwen_chat(
-    body: QwenDraftChatRequest,
+@app.post("/api/agent/chat")
+def unified_agent_chat(
+    body: AgentEntryRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Let Qwen route a message to text chat or the explicit phone loop."""
+    """Let the Model Gateway suggest chat-only or Runtime task routing."""
 
     verify_local_request(request, x_control_token)
     if isinstance(runtime, RuntimeUnavailable):
@@ -3316,31 +3290,17 @@ def unified_qwen_chat(
             for item in body.conversation
         ]
         conversation.append({"role": "user", "content": text})
-        router_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _QWEN_ROUTER_SYSTEM_PROMPT},
-            *conversation,
-        ]
         gateway = runtime.model_gateway_registry.default()
-        with gateway.call_scope(stage="qwen_entry_route"):
-            raw_route = gateway._chat(
-                router_messages,
-                max_tokens=512,
-                response_format=_QWEN_ROUTER_RESPONSE_FORMAT,
-            )
-        try:
-            route = json.loads(raw_route)
-        except (TypeError, ValueError) as exc:
-            raise VisionAgentError(f"Qwen 入口路由不是有效 JSON：{exc}") from exc
-        if not isinstance(route, dict) or route.get("route") not in {"chat_only", "phone_task"}:
-            raise VisionAgentError("Qwen 入口路由缺少有效 route。")
-        reply = str(route.get("reply") or "").strip()
-        if route["route"] == "chat_only":
+        route = AgentEntryRouter(gateway).route(text=text, conversation=conversation[:-1])
+        route_body = route.to_dict()
+        if route.route == "chat_only":
             return {
-                "mode": "qwen_text_conversation",
-                "reply": reply,
-                "conversation": [*conversation, {"role": "assistant", "content": reply}],
+                "mode": "agent_text_conversation",
+                "reply": route.reply,
+                "conversation": [*conversation, {"role": "assistant", "content": route.reply}],
                 "phone_task_started": False,
-                "route": route["route"],
+                "route": route.route,
+                "route_contract": route_body,
             }
         start_body = GenericSupervisedStartRequest(
             text=text,
@@ -3352,23 +3312,24 @@ def unified_qwen_chat(
         )
         started = start_generic_supervised_async(start_body, request, x_control_token)
         return {
-            "mode": "qwen_multimodal_conversation",
+            "mode": "agent_multimodal_conversation",
             "task_id": started["task_id"],
             "status": started["status"],
-            "reply": reply,
+            "reply": route.reply,
             "conversation": conversation,
             "phone_task_started": True,
-            "route": route["route"],
+            "route": route.route,
+            "route_contract": route_body,
         }
     except HTTPException:
         raise
-    except VisionAgentError as exc:
+    except AgentEntryRouteError as exc:
         raise HTTPException(
             status_code=503,
             detail={
                 "success": False,
-                "code": "qwen_entry_route_failed",
-                "phase": "qwen_entry_route",
+                "code": "agent_entry_route_failed",
+                "phase": "agent_entry_route",
                 "error": str(exc),
             },
         ) from exc
@@ -3377,9 +3338,9 @@ def unified_qwen_chat(
 
 
 @app.post("/api/agent/generic-supervised/{session_id}/chat")
-def unified_qwen_chat_in_session(
+def unified_agent_chat_in_session(
     session_id: str,
-    body: QwenChatRequest,
+    body: AgentChatRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
@@ -3397,7 +3358,7 @@ def unified_qwen_chat_in_session(
                 session, requested_device_id=body.device_id)
             snapshot = refreshed.session.snapshot()
         result = {
-            "mode": "qwen_multimodal_conversation",
+            "mode": "agent_multimodal_conversation",
             "reply": snapshot.get("qwen_reply", ""),
             "session": snapshot,
         }

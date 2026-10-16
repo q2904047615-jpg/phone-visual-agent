@@ -156,8 +156,8 @@ async def authorize(request: Request, store, verify_origin, default_device_id):
     device_id = request.path_params.get("device_id") or request.query_params.get("device_id") or body.get("device_id")
     if path in {"/api/agent/generic-scene", "/api/features/lucky-bag", "/api/features/qishui-ad-test"}:
         device_id = default_device_id
-    if path == "/api/qwen/chat" and not device_id:
-        device_id = "device-local-01"  # Same default as QwenDraftChatRequest.
+    if path == "/api/agent/chat" and not device_id:
+        device_id = "device-local-01"  # Same default as AgentEntryRequest.
     if device_id:
         require_device(store, request, principal, str(device_id))
         if request.method != "GET" and "device.execute" not in principal["permissions"]:

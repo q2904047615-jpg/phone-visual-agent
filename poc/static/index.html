@@ -76,7 +76,7 @@
           <div><p class="eyebrow">PHONE TASK</p><h2>手机任务状态</h2></div>
         </div>
         <strong id="taskRunStatusLabel" class="task-run-status-label">当前没有任务</strong>
-        <p id="taskRunStatusDetail" class="task-run-status-detail">发送消息后，Qwen 才会决定是否需要读取画面或控制手机。</p>
+        <p id="taskRunStatusDetail" class="task-run-status-detail">发送消息后，Agent 平台会判断是否需要读取画面或控制手机。</p>
         <div class="task-run-status-meta">
           <span>会话：<code id="taskRunSessionId">未创建</code></span>
           <span>最近更新：<code id="taskRunUpdatedAt">—</code></span>
@@ -86,12 +86,12 @@
         </div>
       </section>
 
-      <section class="agent-workspace" aria-label="Qwen 任务工作台">
+      <section class="agent-workspace" aria-label="Agent 任务工作台">
         <section class="chat-panel">
           <div class="chat-panel-head">
             <div>
-              <p class="eyebrow">QWEN CONVERSATION</p>
-              <h2>和 Qwen 对话</h2>
+              <p class="eyebrow">AGENT CONVERSATION</p>
+              <h2>和 Agent 对话</h2>
             </div>
             <span id="sessionBadge" class="pill neutral">未开始</span>
           </div>
@@ -105,9 +105,9 @@
           </div>
 
           <div class="chat-composer">
-            <label class="composer-label" for="agentText">和 Qwen 对话</label>
+            <label class="composer-label" for="agentText">和 Agent 对话</label>
             <textarea id="agentText" rows="4"
-              placeholder="直接输入任何问题、任务或画面补充；Qwen 会自行决定是否操作手机。"></textarea>
+              placeholder="直接输入任何问题、任务或画面补充；Agent 平台会判断是否操作手机。"></textarea>
             <div class="composer-footer">
               <div class="composer-tools">
                 <button id="useLuckyBagPreset" class="template-button" type="button">抖音福袋监控</button>

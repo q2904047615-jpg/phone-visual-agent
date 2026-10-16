@@ -142,7 +142,7 @@ async function launchOfflinePage(session, options = {}) {
         });
       }
       if (requestPath === "/api/capability-acceptance") return response({ trials: [] });
-      if (requestPath === "/api/qwen/chat" && options.method === "POST") {
+      if (requestPath === "/api/agent/chat" && options.method === "POST") {
         return response({ task_id: "offline-start", status: "running" });
       }
       if (requestPath === "/api/agent/generic-supervised/start-async/offline-start") {

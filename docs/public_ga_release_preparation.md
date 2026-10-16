@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-**有条件可行。** 单设备软件 GA、DNS、HTTPS、受控反向代理和 GitHub OAuth 浏览器登录子项已经通过；完整公共 GA 仍受 `DASHSCOPE_API_KEY`、生产运维合同、第二台真机和多 worker 物理证据限制。应用继续只绑定 `127.0.0.1:8765`，公网请求由受控代理转发，来源校验只额外允许精确配置的 HTTPS origin。
+**有条件可行。** 单设备软件 GA、DNS、HTTPS、受控反向代理、GitHub OAuth 浏览器登录和服务端模型调用子项已经通过；完整公共 GA 仍受生产运维合同、第二台真机和多 worker 物理证据限制。应用继续只绑定 `127.0.0.1:8765`，公网请求由受控代理转发，来源校验只额外允许精确配置的 HTTPS origin。
 
 公网登录与会话验收的逐项证据见 [公网 GitHub OAuth 与会话验收记录](public_ga_oauth_acceptance.md)。
 
@@ -31,10 +31,11 @@
 - 公网真实验收已完成：GitHub OAuth 回调、`local-owner/local-org` 身份映射、刷新保持、退出登录和服务端会话撤销均通过；详见 [公网 GitHub OAuth 与会话验收记录](public_ga_oauth_acceptance.md)。
 - 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标；目标仍有 `-wal/-shm` sidecar 时会拒绝覆盖，需先停写入并完成 checkpoint。
 - 线上运维收尾已完成：服务重载后租约固定到 `/opt/phone-agent/state/leases`，备份固定到 `/opt/phone-agent/state/backups`；线上备份和独立恢复检查均为 `integrity=ok`。逐项证据见 [公共 GA 运维收尾验收记录](public_ga_ops_acceptance.md)。
+- `DASHSCOPE_API_KEY` 已注入并完成一次真实 `qwen3-vl-plus` 文本调用；一次网络请求成功、`finish_reason=stop`，未启动手机任务。逐项证据见 [公共 GA 模型真实调用验收记录](public_ga_model_acceptance.md)。
 
 ## 公共 GA 配置合同（实现与验证状态）
 
-在当前单机部署中，公网 HTTPS 基址、GitHub OAuth Client ID/回调/Secret、SQLite、租约目录和现有 owner 已在部署环境核对。当前预检只剩 `DASHSCOPE_API_KEY` Secret，以及持久化租约、备份和日志保留等生产运维合同。
+在当前单机部署中，公网 HTTPS 基址、GitHub OAuth Client ID/回调/Secret、SQLite、模型密钥、租约目录和现有 owner 已在部署环境核对。当前配置预检为 `pass`；剩余是日志保留、监控调度等生产运维合同及多设备物理证据。
 
 ### 1. 公网入口与传输安全（必填）
 
@@ -56,7 +57,7 @@
 
 ### 3. 模型与运行时密钥（默认值已解析）
 
-- `DASHSCOPE_API_KEY`：只注入 Secret 管理器，不发送给我。
+- `DASHSCOPE_API_KEY`：已由部署负责人注入服务器 Secret 环境，并通过真实模型调用验收；不保存到代码、浏览器或聊天。
 - `VISION_MODEL`：已解析为默认 `qwen3-vl-plus`；若改动需重新做模型合同检查。
 - `VISION_MODEL_BASE_URL`：已解析为默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
 - `PHONE_VISUAL_AGENT_LEASE_DIR`：线上已固定为 `/opt/phone-agent/state/leases`，由服务用户 `ubuntu` 持有并可写；多 worker 仍需独立并发验收。
@@ -113,10 +114,9 @@ python poc/evals/runtime_sqlite_backup.py restore `
 
 ## 现在仍需要你或部署环境提供的配置
 
-公网 DNS、HTTPS、反向代理、GitHub OAuth 和单机持久化备份已完成并通过验收。当前剩余：
+公网 DNS、HTTPS、反向代理、GitHub OAuth、单机持久化备份和模型真实调用已完成并通过验收。当前剩余：
 
-1. 在部署环境注入 `DASHSCOPE_API_KEY`，再运行模型真实调用和完整预检。
-2. 确定日志保留周期、监控告警和定期备份调度负责人；持久租约、备份和恢复演练已完成。
+1. 确定日志保留周期、监控告警和定期备份调度负责人；持久租约、备份和恢复演练已完成。
 3. 具备资源后再验收第二台真机、多 worker 并发、第二个真实 GitHub 账号、真实账单/支付和外部通知。
 
 以下内容目前不需要提供：第二台真机、第二个 GitHub 账号、根域名替换、支付账号或外部通知账号。

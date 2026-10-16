@@ -30,6 +30,7 @@
 - `PUBLIC_BASE_URL=https://agent.jianlizhineng.cn` 的隔离 HTTP 回归已通过：配置的公网 origin 可访问，其他 origin 返回 `403`；该回归使用临时 SQLite，不代表公网 DNS/HTTPS 已验收。
 - 公网真实验收已完成：GitHub OAuth 回调、`local-owner/local-org` 身份映射、刷新保持、退出登录和服务端会话撤销均通过；详见 [公网 GitHub OAuth 与会话验收记录](public_ga_oauth_acceptance.md)。
 - 已补齐 WAL 安全的 SQLite 在线备份、完整性校验和显式恢复工具：`poc/evals/runtime_sqlite_backup.py`。备份使用 SQLite online backup API，不直接复制主库文件；恢复默认写入新路径，只有显式 `--replace` 才替换已有目标；目标仍有 `-wal/-shm` sidecar 时会拒绝覆盖，需先停写入并完成 checkpoint。
+- 线上运维收尾已完成：服务重载后租约固定到 `/opt/phone-agent/state/leases`，备份固定到 `/opt/phone-agent/state/backups`；线上备份和独立恢复检查均为 `integrity=ok`。逐项证据见 [公共 GA 运维收尾验收记录](public_ga_ops_acceptance.md)。
 
 ## 公共 GA 配置合同（实现与验证状态）
 
@@ -58,7 +59,7 @@
 - `DASHSCOPE_API_KEY`：只注入 Secret 管理器，不发送给我。
 - `VISION_MODEL`：已解析为默认 `qwen3-vl-plus`；若改动需重新做模型合同检查。
 - `VISION_MODEL_BASE_URL`：已解析为默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
-- `PHONE_VISUAL_AGENT_LEASE_DIR`：当前使用代码默认临时租约目录；正式公网多 worker 部署时再切换为持久可写路径。
+- `PHONE_VISUAL_AGENT_LEASE_DIR`：线上已固定为 `/opt/phone-agent/state/leases`，由服务用户 `ubuntu` 持有并可写；多 worker 仍需独立并发验收。
 - 证据保留策略：`ROBOT_EVIDENCE_RETENTION_SECONDS`、`ROBOT_EVIDENCE_MAX_BYTES`、`ROBOT_EVIDENCE_MAX_RUN_BYTES`。
 
 ### 4. 持久化、备份与运维（必填）
@@ -68,7 +69,7 @@
 - 进程管理方式（Windows 服务、计划任务、容器或其他）以及停止/重启权限。
 - 监控和日志保留位置；日志必须继续脱敏，不保存 OAuth code、state、verifier、access token、client secret 或主体 token。
 
-在域名准备好之前，这部分可以先用本地临时目录做离线演练。示例（命令只输出路径、页数和 `integrity=ok`，不会输出密钥）：
+备份和恢复已在线演练通过；后续仍需按运维负责人确定的频率和保留周期设置调度。命令只输出路径、页数和 `integrity=ok`，不会输出密钥：
 
 ```powershell
 python poc/evals/runtime_sqlite_backup.py verify `
@@ -112,10 +113,10 @@ python poc/evals/runtime_sqlite_backup.py restore `
 
 ## 现在仍需要你或部署环境提供的配置
 
-公网 DNS、HTTPS、反向代理和 GitHub OAuth 已完成并通过真实浏览器验收。当前剩余：
+公网 DNS、HTTPS、反向代理、GitHub OAuth 和单机持久化备份已完成并通过验收。当前剩余：
 
 1. 在部署环境注入 `DASHSCOPE_API_KEY`，再运行模型真实调用和完整预检。
-2. 将租约目录、SQLite 备份目录和日志保留策略固化为持久化生产路径，并完成恢复演练负责人核对。
+2. 确定日志保留周期、监控告警和定期备份调度负责人；持久租约、备份和恢复演练已完成。
 3. 具备资源后再验收第二台真机、多 worker 并发、第二个真实 GitHub 账号、真实账单/支付和外部通知。
 
 以下内容目前不需要提供：第二台真机、第二个 GitHub 账号、根域名替换、支付账号或外部通知账号。

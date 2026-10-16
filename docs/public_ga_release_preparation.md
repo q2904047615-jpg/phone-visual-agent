@@ -35,7 +35,7 @@
 
 ## 公共 GA 配置合同（实现与验证状态）
 
-在当前单机部署中，公网 HTTPS 基址、GitHub OAuth Client ID/回调/Secret、SQLite、模型密钥、租约目录和现有 owner 已在部署环境核对。当前配置预检为 `pass`；剩余是日志保留、监控调度等生产运维合同及多设备物理证据。
+在当前单机部署中，公网 HTTPS 基址、GitHub OAuth Client ID/回调/Secret、SQLite、模型密钥、租约目录和现有 owner 已在部署环境核对。当前配置预检为 `pass`；日志保留、健康检查和 SQLite 备份调度已通过，剩余是第二台真机、多 worker 等物理证据。
 
 ### 1. 公网入口与传输安全（必填）
 
@@ -68,7 +68,7 @@
 - Runtime SQLite 的持久路径，不放在临时目录或容器临时层。
 - 备份目录、频率、保留周期和恢复演练负责人。
 - 进程管理方式（Windows 服务、计划任务、容器或其他）以及停止/重启权限。
-- 监控和日志保留位置；日志必须继续脱敏，不保存 OAuth code、state、verifier、access token、client secret 或主体 token。
+- 监控和日志保留位置：当前由 systemd/journald 管理，14 天、1GB journal 上限，健康检查每 5 分钟运行；日志必须继续脱敏，不保存 OAuth code、state、verifier、access token、client secret 或主体 token。
 
 备份和恢复已在线演练通过；后续仍需按运维负责人确定的频率和保留周期设置调度。命令只输出路径、页数和 `integrity=ok`，不会输出密钥：
 
@@ -116,7 +116,7 @@ python poc/evals/runtime_sqlite_backup.py restore `
 
 公网 DNS、HTTPS、反向代理、GitHub OAuth、单机持久化备份和模型真实调用已完成并通过验收。当前剩余：
 
-1. 确定日志保留周期、监控告警和定期备份调度负责人；持久租约、备份和恢复演练已完成。
+1. 如需外部告警，再接入通知供应商；当前 systemd/journald 本机监控与备份调度已完成并通过演练。
 3. 具备资源后再验收第二台真机、多 worker 并发、第二个真实 GitHub 账号、真实账单/支付和外部通知。
 
 以下内容目前不需要提供：第二台真机、第二个 GitHub 账号、根域名替换、支付账号或外部通知账号。

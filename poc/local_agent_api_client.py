@@ -296,6 +296,11 @@ class LocalAgentApiClient:
     def control_plane_browser_session(self) -> JsonObject:
         return self._request("GET", "/api/control-plane/auth/browser-session", read_only=True)
 
+    def control_plane_github_oauth_callback(self, *, state: str, code: str) -> JsonObject:
+        """Complete the existing JSON flow; browser redirects remain UI-owned."""
+        return self._request("GET", "/api/control-plane/auth/github/callback",
+                             query_params={"state": state, "code": code}, read_only=False)
+
     def control_plane_browser_logout(self) -> JsonObject:
         return self._request("POST", "/api/control-plane/auth/browser-logout", read_only=False)
 

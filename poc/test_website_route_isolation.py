@@ -146,6 +146,23 @@ class WebsiteRouteIsolationTests(identity_fixture.BrowserIdentityTests):
         self.assertEqual(200,self.client.get(route,headers=self.auth('alice')).status_code)
         self.assertEqual(404,self.client.get(route,headers=self.auth('bob')).status_code)
 
+    def test_async_start_rechecks_revocation_before_dispatch(self):
+        queued = []
+        with patch.object(web_app._GENERIC_START_TASKS, 'submit', side_effect=lambda task_id, operation: queued.append(operation)):
+            response = self.client.post('/api/agent/generic-supervised/start-async', headers=self.auth('alice'),
+                                        json={'text':'fixture','device_id':'alice-device','auto_advance':False})
+        self.assertEqual(200, response.status_code, response.text)
+        task_id = response.json()['task_id']
+        self.addCleanup(web_app._GENERIC_START_TASKS.remove, task_id)
+        principal = self.repo.authenticate_identity_session(self.identities['alice'])
+        self.repo.revoke_identity_session(principal['session_id'])
+        with patch.object(web_app.runtime.universal_agent_session_service, 'start') as dispatch:
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as denied:
+                queued[0]()
+            self.assertEqual(401, denied.exception.status_code)
+            dispatch.assert_not_called()
+
     def test_stream_rechecks_revocation_without_capturing_another_frame(self):
         token=self.identities['alice']
         request=Request({'type':'http','method':'GET','headers':[(b'x-control-plane-token',token.encode())]})

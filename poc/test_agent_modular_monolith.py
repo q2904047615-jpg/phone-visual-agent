@@ -268,6 +268,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             "eval_qwen_visual_decision.py",
             "eval_task_sequences.py",
             "local_agent_api_client.py",
+            "multi_worker_api.py",  # Stateless HTTP interface; no Runtime construction.
+            "single_executor.py",  # OS-leased composition root; no domain decisions.
             "run_xy_calibration.py",
             "touch_calibration_server.py",
             "web_app.py",

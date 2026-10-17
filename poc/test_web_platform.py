@@ -21,6 +21,24 @@ from test_support.web_platform import (
 
 
 class ApiEndToEndTests(_BaseApiEndToEndTests):
+    def test_reload_keeps_the_selected_composition_root(self) -> None:
+        for mode, entry in (("1", "single_executor:create_app"), ("0", "web_app:app")):
+            with self.subTest(mode=mode), patch.dict(web_app.os.environ, {
+                "PHONE_AGENT_EXECUTOR_MODE": mode, "ROBOT_API_PORT": "8767",
+            }), patch.object(web_app.time, "sleep"), patch.object(web_app.os, "chdir"), patch.object(web_app.os, "execv") as execute:
+                web_app._replace_api_process()
+                args = execute.call_args.args[1]
+                self.assertIn(entry, args)
+                self.assertEqual(mode == "1", "--factory" in args)
+                self.assertEqual("8767", args[args.index("--port") + 1])
+
+    def test_reload_detects_queued_starts_before_run_exists(self) -> None:
+        with patch.object(web_app, "_GENERIC_START_TASKS", SimpleNamespace(
+            active_tasks=lambda: [{"task_id": "queued-1", "status": "queued"}]
+        )):
+            blockers = web_app._api_reload_blockers()
+        self.assertIn({"kind": "async_start", "task_id": "queued-1", "status": "queued"}, blockers)
+
     def test_retired_qwen_entry_route_is_not_a_production_alias(self) -> None:
         response = self.client.post(
             "/api/qwen/chat",

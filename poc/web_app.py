@@ -391,6 +391,10 @@ def _api_reload_blockers() -> list[dict[str, Any]]:
     """Return active work that must settle before replacing this API process."""
 
     blockers: list[dict[str, Any]] = []
+    queued_starts = getattr(_GENERIC_START_TASKS, "active_tasks", None)
+    if callable(queued_starts):
+        blockers.extend({"kind": "async_start", "task_id": item.get("task_id"),
+                         "status": item.get("status")} for item in queued_starts())
     if not isinstance(runtime, RuntimeUnavailable):
         blockers.extend(
             {
@@ -432,7 +436,8 @@ def _replace_api_process() -> None:
             sys.executable,
             "-m",
             "uvicorn",
-            "web_app:app",
+            *(["single_executor:create_app", "--factory"]
+              if os.environ.get("PHONE_AGENT_EXECUTOR_MODE") == "1" else ["web_app:app"]),
             "--host",
             os.environ.get("ROBOT_API_HOST", "127.0.0.1"),
             "--port",
@@ -468,13 +473,15 @@ async def lifespan(_app: FastAPI) -> Iterator[None]:
             1.0, lambda: webbrowser.open(f"http://127.0.0.1:{_TRIAL_PORT}/")
         ).start()
     yield
+    # In single-executor mode this joins running starts before their Runtime
+    # repositories/controllers are closed; the OS owner lease remains held.
+    _GENERIC_START_TASKS.shutdown()
     if _github_oauth_provider is not None:
         _github_oauth_provider.close()
     _MANUAL_MOTION_MONITOR.shutdown()
     runtime.shutdown()
     _LUCKY_BAG_MONITOR.shutdown()
     _QISHUI_AD_TEST_MONITOR.shutdown()
-    _GENERIC_START_TASKS.shutdown()
 
 
 async def _authorize_website_request(request: Request):
@@ -3056,11 +3063,24 @@ def cancel_capability_acceptance(
         ) from exc
 
 
+def _execute_queued_generic_start(body, request, control_token):
+    # A queued closure can outlive the request's identity/device leases. Reuse
+    # the same authority at dispatch, rather than trusting cached principal data.
+    import asyncio
+    store = _control_plane_store()
+    asyncio.run(website_access.authorize(request, store, verify_local_origin,
+                                        runtime.device_controllers.default_device_id))
+    with website_access.member_access(store, request):
+        with website_access.device_access(store, request, request.state.website_devices):
+            return start_generic_supervised_session(body, request, control_token)
+
+
 @app.post("/api/agent/generic-supervised/start-async")
 def start_generic_supervised_async(body: GenericSupervisedStartRequest, request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token")) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
     task_id = uuid.uuid4().hex
+    request.state.start_session_id = uuid.uuid4().hex
     _claim_website_resource(request, "start", task_id, body.device_id)
     try:
         active = _GENERIC_START_TASKS.active_for("device_id", body.device_id)
@@ -3076,11 +3096,12 @@ def start_generic_supervised_async(body: GenericSupervisedStartRequest, request:
             )
         _GENERIC_START_TASKS.reserve(
             task_id,
-            metadata={"task_id": task_id, "device_id": body.device_id},
+            metadata={"task_id": task_id, "device_id": body.device_id,
+                      "session_id": request.state.start_session_id},
         )
         _GENERIC_START_TASKS.submit(
             task_id,
-            lambda: start_generic_supervised_session(body, request, x_control_token),
+            lambda: _execute_queued_generic_start(body, request, x_control_token),
         )
     except OverflowError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -3143,7 +3164,7 @@ def start_generic_supervised_session(
     """
 
     verify_local_request(request, x_control_token)
-    session_id = uuid.uuid4().hex
+    session_id = getattr(request.state, "start_session_id", None) or uuid.uuid4().hex
     _claim_website_resource(request, "session", session_id, body.device_id)
     run_dir = WEB_OUTPUT_DIR / (
         "generic_supervised_"

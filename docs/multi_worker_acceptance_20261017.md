@@ -85,6 +85,15 @@ python -m uvicorn single_executor:create_app --factory --host 127.0.0.1 --port 8
 python -m uvicorn multi_worker_api:create_app --factory --host 127.0.0.1 --port 8765 --workers 2 --proxy-headers --forwarded-allow-ips 127.0.0.1
 ```
 
+切换前分别在两套服务环境运行只读预检；它不会导入 Runtime、连接公网或打印 Secret：
+
+```text
+python evals/check_multi_worker_deployment.py --role owner --output /var/lib/phone-agent/preflight-owner.json
+python evals/check_multi_worker_deployment.py --role ingress --output /var/lib/phone-agent/preflight-ingress.json
+```
+
+owner 预检必须看到 `owner_mode=pass`；入口预检必须看到 `executor_url=pass`、`port_separation=pass` 和 `ingress_mode=pass`。如果已有 `runtime.sqlite3` 却没有 `dispatch.sqlite3`，预检会阻断，必须先由 owner 初始化派发库并完成备份。
+
 1. 在预发布环境复用部署 OS、Nginx 和服务账号；核对精确 Git 版本及现有状态路径、权限、端口。
 2. 停止接收新任务，等待执行及异步启动退出，列出 unresolved Run；一致性备份 Runtime、证据、配置和派发数据库。运行中的 SQLite 使用 backup API，不能只复制主文件而遗漏 WAL。
 3. 停止原 `web_app:app` 服务后再启动唯一执行进程，然后启动 API 入口。旧入口不参与新 owner 锁，禁止同时运行两种模式。

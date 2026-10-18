@@ -1,6 +1,6 @@
 # 多 API 入口与单 Runtime 执行进程验收
 
-日期：2026-10-17（Asia/Shanghai）。本批只在隔离环境实施和验收，不修改公网部署。
+日期：2026-10-17（Asia/Shanghai）；公网加载补充：2026-10-19（Asia/Shanghai）。
 
 ## 结论与适用范围
 
@@ -64,7 +64,20 @@ npm test
 
 最终计数和压力规模在本文件的“最终结果”中登记。默认压力样本为 4 个并发客户端完成 100 轮创建/读取；本次最终全量回归在命令前设置 `$env:MULTI_WORKER_SOAK_ROUNDS='1000'`，扩展为 1,000 轮。这不是生产长时间压力测试。
 
-## 启动与上线步骤（尚未在公网执行）
+## 启动与上线步骤（2026-10-19 已在公网执行）
+
+### 2026-10-19 公网加载实测
+
+已按本节步骤完成远程切换：
+
+- 版本：`33e5da1`，当前目录 `/opt/phone-agent/releases/20261019-33e5da1/poc`。
+- 唯一执行进程：`single_executor:create_app`，`127.0.0.1:8767`，systemd `phone-agent-executor.service`。
+- API 入口：`multi_worker_api:create_app`，`127.0.0.1:8765`、`--workers 2`，systemd `phone-agent.service`。
+- 状态目录：`/opt/phone-agent/state/runtime`；Runtime SQLite 在线备份和完整性检查通过；`dispatch.sqlite3` 已初始化且完整性通过。
+- 本机 owner、入口和公网 `/api/session` 均返回 `ready=true`、`mock=false`、`startup_error=null`、`identity_required=true`；两个端口均监听，最近 10 分钟服务 warning/alert 为 0。
+- 旧 current 链接、systemd 单元和环境文件已保存到 `/opt/phone-agent/state/backups/`，可按本节回滚说明撤回。
+
+这次只完成服务切换和只读健康核对，没有执行手机动作或模型调用。真实浏览器登录、刷新、退出和基础聊天仍需连接用户 Edge 会话后单独验收；当前会话没有运行中的 Edge 进程，因此不把它们记为通过。
 
 前提：同一主机、同一服务账号、同一现有 Runtime 数据目录、共享本机 SQLite；Nginx 继续代理 API 入口。先确认真实部署路径，不把新空目录冒充原状态目录。
 

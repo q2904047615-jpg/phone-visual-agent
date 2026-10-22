@@ -26,6 +26,46 @@ const requests = {
   restore: [], previewDevices: [], assets: [], startTokens: [],
 };
 
+test("machine position controls select a position and refresh its preview", { timeout: 30000 }, async () => {
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  let position = 1;
+  let online = true;
+  const submitted = [];
+  try {
+    await page.route("**/api/device", route => route.fulfill({ json: {
+      controller_online: online, camera_online: false, busy: false,
+      default_device_id: "phone-01",
+      devices: [{ device_id: "phone-01", machine_position: position, controller_online: online }],
+      generic_supervised_execution: { active_sessions: [] },
+    } }));
+    await page.route("**/api/device/phone-01/machine-position", async route => {
+      assert.equal(route.request().method(), "POST");
+      const body = route.request().postDataJSON();
+      submitted.push(body);
+      position = body.machine_position;
+      await route.fulfill({ json: { device_id: "phone-01", machine_position: position } });
+    });
+    await page.evaluate(async () => { await refreshDevice(); render(); });
+    assert.equal(await page.locator("#machinePositionButtons button").count(), 10);
+    for (const target of [2, 10]) {
+      await page.getByRole("button", { name: `切换到${target}号机位`, exact: true }).click();
+      await page.waitForFunction(n => document.querySelector(`[aria-label="切换到${n}号机位"]`)?.getAttribute("aria-pressed") === "true", target);
+    }
+    assert.deepEqual(submitted, [{ machine_position: 2 }, { machine_position: 10 }]);
+    assert.ok(requests.previewDevices.includes("phone-01"));
+    online = false;
+    await page.evaluate(async () => { await refreshDevice(); render(); });
+    assert.equal(await page.getByRole("button", { name: "切换到2号机位", exact: true }).isDisabled(), true);
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  } finally {
+    await browser.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }

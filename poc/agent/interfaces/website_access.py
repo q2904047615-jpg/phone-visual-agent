@@ -117,7 +117,8 @@ async def authorize(request: Request, store, verify_origin, default_device_id):
     path = request.scope["route"].path
     if path in {"/", "/api/session", "/api/control-plane/auth/github/start",
                 "/api/control-plane/auth/github/callback", "/api/control-plane/auth/external-sessions",
-                "/api/control-plane/auth/browser-session", "/api/control-plane/auth/browser-logout"}:
+                "/api/control-plane/auth/browser-session", "/api/control-plane/auth/browser-logout",
+                "/api/device-connector/v1/poll", "/api/device-connector/v1/result"}:
         return
     verify_origin(request)
     principal = store.authenticate_identity_session(identity_token(request))

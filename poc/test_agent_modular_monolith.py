@@ -262,6 +262,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parent
         expected = {
             "agent_api_cli.py",
+            "device_connector.py",  # CLI only; delivery and transport live in infrastructure.
             "start_verified.py",  # Verified local API launch tool, not a domain entry.
             "restart_local_api.py",  # Safe local API restart tool, not a domain entry.
             "capture_click_burst.py",
@@ -280,6 +281,13 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             if not path.name.startswith("test_")
         }
         self.assertEqual(expected, actual)
+
+    def test_connector_cli_does_not_own_delivery_or_runtime(self) -> None:
+        source = (Path(__file__).resolve().parent / "device_connector.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        self.assertFalse(any(isinstance(node, ast.ClassDef) for node in ast.walk(tree)))
+        for forbidden in ("sqlite3", "web_app", "AgentRuntime", "sign_message", "RobotController"):
+            self.assertNotIn(forbidden, source)
 
     def test_companion_ime_runtime_is_permanently_removed(self) -> None:
         self.assertFalse((Path(__file__).resolve().parent.parent / 'android' / 'companion-ime').exists(),

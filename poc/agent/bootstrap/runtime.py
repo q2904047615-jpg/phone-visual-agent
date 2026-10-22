@@ -27,6 +27,7 @@ from agent.infrastructure import (
     FileSystemAgentEvidenceStore,
     SqliteAgentSessionRepository,
     SqliteControlPlaneRepository,
+    ConnectorCommandStore,
     SHARED_DEVICE_LEASE_DIR,
 )
 from agent.infrastructure.adb_keyboard_transport import AdbKeyboardRuntimeRegistry
@@ -93,14 +94,21 @@ class Runtime:
         self.hardware_mode = (not self.mock_mode) and seller_gui.IS_WINDOWS
         self.loaded_code_revision = code_revision_provider()
         cleanup_evidence_runs(output_dir)
+        runtime_database = Path(output_dir) / "runtime.sqlite3"
+        self.connector_store = ConnectorCommandStore(
+            Path(os.environ.get("PHONE_AGENT_CONNECTOR_DB", Path(output_dir) / "connector.sqlite3")),
+        )
         self.device_controllers = InfrastructureDeviceControllerRegistry(
             device_registry_path,
             promotable_actions=PROMOTABLE_ACTION_KINDS,
             mock=self.mock_mode,
+            connector_store=self.connector_store,
         )
         self.controller: RobotController = self.device_controllers.controller(
             self.device_controllers.default_device_id
         )
+        self.hardware_mode = self.hardware_mode or (not self.mock_mode and any(
+            descriptor.get("connector_id") for descriptor in self.device_controllers.descriptors()))
         self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
         self.vision_provider = DashScopeVisionProvider(enable_thinking=True)
         self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(adb_keyboard_registry_path)
@@ -124,7 +132,6 @@ class Runtime:
             self.vision_provider, gateway=self.model_gateway
         )
         self.device_task_registry = DeviceTaskRegistry(lease_directory=SHARED_DEVICE_LEASE_DIR)
-        runtime_database = Path(output_dir) / "runtime.sqlite3"
         self.agent_session_repository = SqliteAgentSessionRepository(runtime_database)
         self.control_plane_repository = SqliteControlPlaneRepository(runtime_database)
         self.control_plane_repository.ensure_platform_release(self.loaded_code_revision)

@@ -52,6 +52,8 @@ from agent.infrastructure import (
     ExternalIdentityProviderUnavailable,
     GitHubOAuthConfigurationError,
     GitHubOAuthProvider,
+    ConnectorProtocolError,
+    validate_result as validate_connector_result,
 )
 from agent.domain.control_plane import (
     manageable_member_roles,
@@ -1759,6 +1761,75 @@ def select_device_machine_position(
         "machine_position": body.machine_position,
         "status": status,
     }
+
+
+def _connector_store():
+    store = getattr(runtime, "connector_store", None)
+    if store is None or not store.configured:
+        raise HTTPException(status_code=503, detail="本机设备连接器尚未配置。")
+    return store
+
+
+def _connector_device_allowed(connector_id: str, device_id: str) -> None:
+    descriptors = getattr(getattr(runtime, "device_controllers", None), "descriptors", lambda: [])()
+    match = next((item for item in descriptors if item.get("device_id") == device_id), None)
+    if not match or match.get("connector_id") != connector_id:
+        raise HTTPException(status_code=403, detail="连接器未获准操作该设备。")
+
+
+@app.get("/api/device-connector/v1/poll")
+async def device_connector_poll(
+    request: Request,
+    device_id: str,
+    x_connector_id: str | None = Header(default=None, alias="X-Connector-Id"),
+    x_connector_timestamp: str | None = Header(default=None, alias="X-Connector-Timestamp"),
+    x_connector_signature: str | None = Header(default=None, alias="X-Connector-Signature"),
+    x_connector_nonce: str | None = Header(default=None, alias="X-Connector-Nonce"),
+) -> Response:
+    store = _connector_store()
+    connector_id = str(x_connector_id or "").strip()
+    _connector_device_allowed(connector_id, device_id)
+    try:
+        store.authenticate(connector_id=connector_id, method="GET",
+                           target=request.url.path + ("?" + request.url.query if request.url.query else ""),
+                           timestamp=x_connector_timestamp or "", nonce=x_connector_nonce or "",
+                           body=b"", signature=x_connector_signature or "")
+    except ConnectorProtocolError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    command = store.claim(connector_id=connector_id, device_id=device_id)
+    if command is None:
+        return Response(status_code=204)
+    return Response(content=json.dumps(command, ensure_ascii=False, separators=(",", ":")),
+                    media_type="application/json")
+
+
+@app.post("/api/device-connector/v1/result")
+async def device_connector_result(
+    request: Request,
+    x_connector_id: str | None = Header(default=None, alias="X-Connector-Id"),
+    x_connector_timestamp: str | None = Header(default=None, alias="X-Connector-Timestamp"),
+    x_connector_signature: str | None = Header(default=None, alias="X-Connector-Signature"),
+    x_connector_nonce: str | None = Header(default=None, alias="X-Connector-Nonce"),
+) -> dict[str, Any]:
+    store = _connector_store()
+    body = await request.body()
+    try:
+        store.authenticate(connector_id=x_connector_id or "", method="POST",
+                           target=request.url.path + ("?" + request.url.query if request.url.query else ""),
+                           timestamp=x_connector_timestamp or "", nonce=x_connector_nonce or "",
+                           body=body, signature=x_connector_signature or "")
+        payload = json.loads(body.decode("utf-8"))
+    except (ConnectorProtocolError, ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    try:
+        validate_connector_result(payload, connector_id=x_connector_id or "")
+    except ConnectorProtocolError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _connector_device_allowed(x_connector_id or "", payload["device_id"])
+    command_id = payload["command_id"]
+    if not store.complete(connector_id=x_connector_id or "", result=payload):
+        raise HTTPException(status_code=409, detail="连接器结果不匹配当前命令。")
+    return {"accepted": True, "command_id": command_id}
 
 
 @app.post("/api/device/{device_id}/directional-swipe")

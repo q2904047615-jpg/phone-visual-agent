@@ -24,7 +24,7 @@ class ProvisionalDeviceControllerError(DeviceControllerRegistryError):
 class DeviceControllerRegistry:
     """Resolve one controller and calibration per configured device_id."""
 
-    def __init__(self, path: Path, *, promotable_actions: Collection[str], mock: bool=False) -> None:
+    def __init__(self, path: Path, *, promotable_actions: Collection[str], mock: bool=False, connector_store=None) -> None:
         self.path = Path(path)
         self._promotable_actions = frozenset((str(action or '').strip() for action in promotable_actions))
         try:
@@ -36,6 +36,7 @@ class DeviceControllerRegistry:
         # the Windows seller-window adapter.  Real or mock controllers are
         # resolved only after the JSON contract has been validated.
         from agent.infrastructure.robot_controller import MockRobotController, RobotController
+        from agent.infrastructure.remote_connector import ConnectorCommandStore, RemoteRobotController
 
         self.default_device_id = str(payload.get('default_device_id') or '').strip()
         self._controllers: dict[str, RobotController] = {}
@@ -69,7 +70,8 @@ class DeviceControllerRegistry:
                     DeviceControllerRegistryError(f'设备 {device_id or "missing"} 的 machine_position 必须是1到10之间的整数。'))
                 machine_position = raw_machine_position
             reject_if(not device_id or device_id in self._controllers, DeviceControllerRegistryError('设备注册表存在空或重复的 device_id。'))
-            effective_window = window_title or "__default_window__"
+            connector_id = str(raw.get("connector_id") or "").strip()
+            effective_window = connector_id + ":" + (window_title or "__default_window__")
             existing_positions = window_positions.get(effective_window)
             if existing_positions is not None:
                 if machine_position is None or None in existing_positions:
@@ -86,7 +88,17 @@ class DeviceControllerRegistry:
             if not calibration_path.is_absolute():
                 calibration_path = self.path.parent / calibration_path
             controller: RobotController
-            if mock:
+            connector_id = str(raw.get("connector_id") or "").strip()
+            if connector_id and mock:
+                raise DeviceControllerRegistryError("模拟模式不能配置远程设备连接器。")
+            if connector_id:
+                if connector_store is None:
+                    connector_store = ConnectorCommandStore(self.path.parent / "connector.sqlite3")
+                controller = RemoteRobotController(device_id=device_id, connector_id=connector_id, store=connector_store,
+                    verified_actions=verified_actions, machine_position=machine_position,
+                    operation_lock=operation_lock, capture_lock=capture_lock,
+                    calibration_path=calibration_path, **({"title": window_title} if window_title else {}))
+            elif mock:
                 controller = MockRobotController(device_id=device_id)
             elif window_title:
                 controller = RobotController(window_title, calibration_path=calibration_path,
@@ -98,6 +110,7 @@ class DeviceControllerRegistry:
                     capture_lock=capture_lock)
             self._controllers[device_id] = controller
             self._descriptors[device_id] = {'device_id': device_id, 'window_title': window_title,
+                'connector_id': connector_id,
                 'machine_position': machine_position, 'calibration_path': str(calibration_path),
                 'verified_actions': sorted(controller.verified_actions)}
         reject_if(not self._controllers or self.default_device_id not in self._controllers, DeviceControllerRegistryError('设备注册表必须包含已启用的 default_device_id。'))
@@ -141,6 +154,12 @@ class DeviceControllerRegistry:
         verified_actions = set(original.verified_actions) | {physical_action}
         if isinstance(original, MockRobotController):
             return MockRobotController(verified_actions=verified_actions, device_id=resolved_device)
+        from agent.infrastructure.remote_connector import RemoteRobotController
+        if isinstance(original, RemoteRobotController):
+            return RemoteRobotController(device_id=resolved_device, connector_id=original.connector_id,
+                store=original.store, title=original.title, calibration_path=original.calibration_path,
+                verified_actions=verified_actions, machine_position=original.machine_position,
+                operation_lock=original.operation_lock, capture_lock=original.capture_lock)
         return RobotController(descriptor['window_title'] or original.title,
             calibration_path=Path(descriptor['calibration_path']), verified_actions=verified_actions,
             device_id=resolved_device)

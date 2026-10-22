@@ -23,6 +23,10 @@ from .github_oauth_provider import (
     GitHubOAuthConfigurationError,
     GitHubOAuthProvider,
 )
+from .remote_connector import (
+    CONNECTOR_OPERATIONS, ConnectorCommandStore, ConnectorProtocolError,
+    RemoteRobotController, PROTOCOL, verify_message, validate_result,
+)
 
 __all__ = ['AdbPairingError', 'AdbPairingService', 'DeviceTaskRegistry', 'CameraPreviewUnavailable', 'DeviceCameraCoordinator', 'DeviceControllerRegistry',
     'DeviceControllerRegistryError', 'DeviceRuntimeResourceError', 'DeviceRuntimeResourceRegistry',
@@ -31,4 +35,6 @@ __all__ = ['AdbPairingError', 'AdbPairingService', 'DeviceTaskRegistry', 'Camera
     'ExternalIdentityMappingNotFound', 'ExternalIdentityProviderUnavailable',
     'GitHubIdentityMapping', 'GitHubOAuthConfigurationError', 'GitHubOAuthProvider',
     'InterProcessLease', 'ReplayDeviceExecutor',
-    'RobotDeviceExecutor', 'ProvisionalDeviceControllerError', 'SHARED_DEVICE_LEASE_DIR']
+    'RobotDeviceExecutor', 'ProvisionalDeviceControllerError', 'SHARED_DEVICE_LEASE_DIR',
+    'CONNECTOR_OPERATIONS', 'ConnectorCommandStore', 'ConnectorProtocolError',
+    'RemoteRobotController', 'PROTOCOL', 'verify_message', 'validate_result']

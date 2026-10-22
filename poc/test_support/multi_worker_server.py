@@ -18,7 +18,7 @@ def try_second_executor(directory, reply):
         reply.send({"rejected":False})
 
 
-def run_server(role, directory, listener, executor_port, ready):
+def run_server(role, directory, listener, executor_port, ready, connector_mode=False):
     directory = Path(directory)
     os.environ.update(ROBOT_WEB_MOCK="1", ROBOT_WEB_NO_BROWSER="1",
                       PHONE_AGENT_STATE_DIR=str(directory),
@@ -95,6 +95,15 @@ def run_server(role, directory, listener, executor_port, ready):
         service._ensure_device_ready = lambda _: None
         service._exclusive_device_session = lambda _: nullcontext()
         service._begin_new_task = lambda _: None
+        if connector_mode:
+            from agent.infrastructure.remote_connector import ConnectorCommandStore, RemoteRobotController
+            bridge = ConnectorCommandStore(directory / "connector.sqlite3", secret="isolated-connector-secret")
+            remote = RemoteRobotController(device_id="device-local-01", connector_id="windows-local-01",
+                                          store=bridge, machine_position=1)
+            web_app.runtime.connector_store = bridge
+            web_app.runtime.controller = remote
+            web_app.runtime.device_controllers._controllers["device-local-01"] = remote
+            web_app.runtime.device_controllers._descriptors["device-local-01"]["connector_id"] = "windows-local-01"
         ready.send({"pid":os.getpid(), "role":"executor", "identities":identities})
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False,
                                           proxy_headers=True, forwarded_allow_ips="127.0.0.1"))

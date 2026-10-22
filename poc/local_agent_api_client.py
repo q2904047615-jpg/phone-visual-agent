@@ -167,6 +167,11 @@ class LocalAgentApiClient:
     def device_status(self) -> JsonObject:
         return self._request("GET", self.DEVICE_ROUTE, read_only=True)
 
+    def select_machine_position(self, device_id: str, machine_position: int) -> JsonObject:
+        return self._request("POST", "/api/device/{device_id}/machine-position",
+            path_params={"device_id": self._resource_id(device_id)},
+            payload={"machine_position": machine_position}, read_only=False)
+
     def control_plane_organization(self, organization_id: str) -> JsonObject:
         return self._request(
             "GET", self.CONTROL_PLANE_ORGANIZATION_ROUTE,

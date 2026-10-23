@@ -255,6 +255,24 @@ class ConnectorCommandStore:
             raise ConnectorProtocolError("连接器未领取命令，未派发。")
         raise ConnectorProtocolError("连接器结果未知，不能自动重放。")
 
+    def last_confirmed_machine_position(self, *, connector_id: str, device_id: str) -> int | None:
+        """Restore the latest completed selection; never send a recovery action."""
+        if not self.path.exists():
+            return None
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT args_json,status,result_json FROM connector_commands_v2 "
+                "WHERE connector_id=? AND device_id=? AND operation='select_machine_position' "
+                "ORDER BY created_at DESC,rowid DESC LIMIT 1", (connector_id, device_id),
+            ).fetchone()
+        if not row or row[1] != 'completed' or not row[2]:
+            return None
+        if json.loads(row[2]).get('ok') is not True:
+            return None
+        args = json.loads(row[0])
+        validate_args('select_machine_position', args)
+        return args['machine_position']
+
 
 class RemoteRobotController(RobotController):
     """RobotController-shaped proxy backed by the authenticated command queue."""
@@ -264,6 +282,9 @@ class RemoteRobotController(RobotController):
         super().__init__(device_id=device_id, verified_actions=verified_actions, **controller_options)
         self.connector_id = connector_id
         self.store = store
+        selected = store.last_confirmed_machine_position(connector_id=connector_id, device_id=device_id)
+        if selected is not None:
+            self.machine_position = selected
         self._remote_frame: Image.Image | None = None
         self._remote_capture_id: str | None = None
 

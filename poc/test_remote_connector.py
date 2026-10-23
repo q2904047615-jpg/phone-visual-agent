@@ -156,6 +156,39 @@ class RemoteConnectorTests(unittest.TestCase):
         with patch.object(self.store, "wait", side_effect=ConnectorProtocolError("offline")):
             self.assertFalse(proxy.device_status()["controller_online"])
 
+    def test_restart_restores_completed_position_without_replaying_a_command(self):
+        proxy = RemoteRobotController(device_id=DEVICE, connector_id=CONNECTOR, store=self.store, machine_position=1)
+        self.assertEqual(proxy.machine_position, 1)
+        self.assertFalse(self.store.path.exists())
+        for position in (2, 10):
+            cid = self.enqueue(args={'machine_position': position})
+            self.store.claim(connector_id=CONNECTOR, device_id=DEVICE)
+            self.assertTrue(self.store.complete(connector_id=CONNECTOR, result=self.result(cid)))
+            restarted = ConnectorCommandStore(self.store.path, secret='fixture-secret')
+            restored = RemoteRobotController(device_id=DEVICE, connector_id=CONNECTOR, store=restarted, machine_position=1)
+            self.assertEqual(restored.machine_position, position)
+            self.assertIsNone(restarted.claim(connector_id=CONNECTOR, device_id=DEVICE))
+        self.assertIsNone(self.store.last_confirmed_machine_position(connector_id='other', device_id=DEVICE))
+        self.assertIsNone(self.store.last_confirmed_machine_position(connector_id=CONNECTOR, device_id='other'))
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM connector_commands_v2').fetchone()[0], 2)
+
+    def test_failed_or_uncertain_latest_selection_is_not_restored_as_success(self):
+        for outcome in ('queued', 'failed', 'late'):
+            with self.subTest(outcome=outcome):
+                store = ConnectorCommandStore(self.path / (outcome + '.sqlite3'), secret='fixture-secret')
+                prior = store.enqueue(connector_id=CONNECTOR, device_id=DEVICE, operation='select_machine_position', args={'machine_position': 2})
+                store.claim(connector_id=CONNECTOR, device_id=DEVICE)
+                store.complete(connector_id=CONNECTOR, result=self.result(prior))
+                latest = store.enqueue(connector_id=CONNECTOR, device_id=DEVICE, operation='select_machine_position', args={'machine_position': 10})
+                if outcome != 'queued':
+                    store.claim(connector_id=CONNECTOR, device_id=DEVICE)
+                    if outcome == 'late':
+                        with self.assertRaises(ConnectorProtocolError):
+                            store.wait(latest, timeout=0)
+                    store.complete(connector_id=CONNECTOR, result={**self.result(latest), 'ok': outcome == 'late'})
+                self.assertIsNone(store.last_confirmed_machine_position(connector_id=CONNECTOR, device_id=DEVICE))
+
 
 class FakeHardware(RobotController):
     """Exercises the actual physical gate without Windows, models or devices."""

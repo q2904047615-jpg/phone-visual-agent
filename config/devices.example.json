@@ -1,0 +1,154 @@
+{
+  "_说明": "复制为 devices.json 后修改。adb_serial 只用于 ADB Keyboard 文字输入和 apps 包名直启；apps 格式 {\"抖音\": \"com.ss.android.ugc.aweme\"}。driver: robot=机械臂+相机, adb=纯ADB(可选), mock=模拟手机。",
+  "default_device": "device-local-01",
+  "adb_executable": "adb",
+  "controller": {
+    "window_title": "智联新途",
+    "tap_hold_seconds": 0.35,
+    "long_press_seconds": 0.8,
+    "nav": {
+      "home": [
+        0.5,
+        0.976
+      ],
+      "back": [
+        0.685,
+        0.976
+      ],
+      "recents": [
+        0.33,
+        0.976
+      ]
+    },
+    "swipe": {
+      "touch_down_seconds": 0.35,
+      "movement_seconds": 0.3,
+      "steps": 6
+    },
+    "drag_seconds": 0.8
+  },
+  "agent": {
+    "max_actions": 100,
+    "max_observations": 200,
+    "settle_seconds": 1.2,
+    "history_thumbnail": [
+      360,
+      640
+    ],
+    "current_image_max": [
+      1080,
+      1920
+    ],
+    "model_timeout_seconds": 180,
+    "max_consecutive_model_errors": 3,
+    "enable_thinking": false
+  },
+  "devices": [
+    {
+      "id": "device-local-01",
+      "name": "1号机位",
+      "driver": "robot",
+      "enabled": true,
+      "machine_position": 1,
+      "calibration": "calibration/device-local-01.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-02",
+      "name": "2号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 2,
+      "calibration": "calibration/device-local-02.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-03",
+      "name": "3号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 3,
+      "calibration": "calibration/device-local-03.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-04",
+      "name": "4号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 4,
+      "calibration": "calibration/device-local-04.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-05",
+      "name": "5号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 5,
+      "calibration": "calibration/device-local-05.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-06",
+      "name": "6号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 6,
+      "calibration": "calibration/device-local-06.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-07",
+      "name": "7号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 7,
+      "calibration": "calibration/device-local-07.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-08",
+      "name": "8号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 8,
+      "calibration": "calibration/device-local-08.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-09",
+      "name": "9号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 9,
+      "calibration": "calibration/device-local-09.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "device-local-10",
+      "name": "10号机位",
+      "driver": "robot",
+      "enabled": false,
+      "machine_position": 10,
+      "calibration": "calibration/device-local-10.json",
+      "adb_serial": "",
+      "apps": {}
+    },
+    {
+      "id": "sim-phone",
+      "name": "模拟手机（无硬件演示）",
+      "driver": "mock",
+      "enabled": true
+    }
+  ]
+}

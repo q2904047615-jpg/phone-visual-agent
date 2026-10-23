@@ -5,7 +5,6 @@
 .tmp_order_analysis/
 .tmp_orders_analysis/
 tmp/
-tools/
 
 # Python environments and caches
 **/__pycache__/
@@ -53,3 +52,10 @@ Desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# New layout: runtime data and local device config
+output/
+external/
+config/devices.json
+.claude/
+trial-service.log

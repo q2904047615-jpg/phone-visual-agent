@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手机视觉 Agent</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◎</span>
+    <div>
+      <h1>手机视觉 Agent</h1>
+      <p>用一句话让手机完成任务 · 千问看图决策 · 机械臂执行</p>
+    </div>
+  </div>
+  <div class="top-status">
+    <span id="modelBadge" class="badge">模型…</span>
+    <span id="modeBadge" class="badge">…</span>
+    <button id="stopAll" class="btn danger" title="停止所有任务并中断当前动作">■ 全部停止</button>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- Device column -->
+  <section class="panel device-panel">
+    <div class="panel-head">
+      <h2>设备</h2>
+      <span id="deviceState" class="pill">…</span>
+    </div>
+    <div id="deviceList" class="device-list"></div>
+    <div class="screen-wrap">
+      <img id="preview" alt="手机画面" draggable="false">
+      <div id="previewMsg" class="screen-msg">正在连接画面…</div>
+      <div id="tapMarker" class="tap-marker" hidden></div>
+    </div>
+    <label class="switch-row">
+      <input type="checkbox" id="manualToggle">
+      <span>手动控制：点画面即点击手机（仅空闲时）</span>
+    </label>
+    <div class="manual-buttons">
+      <button data-manual="back">返回</button>
+      <button data-manual="home">桌面</button>
+      <button data-manual="recents">最近任务</button>
+      <button data-manual="scroll-up" title="手指上划，查看下方内容">上划</button>
+      <button data-manual="scroll-down" title="手指下划，查看上方内容">下划</button>
+    </div>
+    <div id="positionRow" class="position-row" hidden>
+      <span>机位</span>
+      <div id="positionButtons"></div>
+    </div>
+    <dl id="deviceInfo" class="info-list"></dl>
+  </section>
+
+  <!-- Task column -->
+  <section class="panel task-panel">
+    <nav class="tabs">
+      <button class="tab active" data-tab="task">任务</button>
+      <button class="tab" data-tab="history">历史记录</button>
+      <button class="tab" data-tab="plugins">插件</button>
+    </nav>
+
+    <div id="tab-task" class="tab-body">
+      <form id="taskForm" class="composer">
+        <textarea id="taskInput" rows="3" placeholder="告诉手机要做什么，例如：打开设置，把蓝牙打开"></textarea>
+        <div class="examples" id="examples"></div>
+        <div class="options">
+          <label>模式
+            <select id="modeSelect">
+              <option value="auto">自动执行</option>
+              <option value="step">逐步确认</option>
+            </select>
+          </label>
+          <label>动作上限 <input id="maxActions" type="number" min="1" max="10000"></label>
+          <label>观察上限 <input id="maxObservations" type="number" min="1" max="20000"></label>
+          <label class="check"><input id="thinking" type="checkbox"> 深度思考</label>
+          <button id="startBtn" class="btn primary" type="submit">开始任务</button>
+        </div>
+      </form>
+
+      <div id="taskCard" class="task-card" hidden>
+        <div class="task-card-head">
+          <span id="taskStatus" class="pill">…</span>
+          <span id="taskMeta" class="muted"></span>
+        </div>
+        <p id="taskText" class="task-text"></p>
+        <div class="progress"><div id="progressBar"></div></div>
+        <div class="reply">
+          <span class="reply-label">千问</span>
+          <p id="taskReply">…</p>
+        </div>
+        <p id="taskDetail" class="detail"></p>
+        <div id="confirmBox" class="confirm-box" hidden>
+          <div>
+            <strong id="confirmTitle">等待确认</strong>
+            <p id="confirmText"></p>
+          </div>
+          <div class="confirm-actions">
+            <button id="approveBtn" class="btn primary">执行</button>
+            <button id="rejectBtn" class="btn">不执行</button>
+          </div>
+        </div>
+        <div class="task-actions">
+          <button id="pauseBtn" class="btn">暂停</button>
+          <button id="resumeBtn" class="btn">继续</button>
+          <button id="observeBtn" class="btn" title="重新截图并让千问重新判断">重新观察</button>
+          <button id="cancelBtn" class="btn danger-outline">停止任务</button>
+          <button id="closeBtn" class="btn ghost">关闭</button>
+        </div>
+        <form id="noteForm" class="note-form">
+          <input id="noteInput" placeholder="给千问补充说明，例如：联系人是“张三（同事）”">
+          <button class="btn" type="submit">发送</button>
+        </form>
+      </div>
+      <div id="emptyHint" class="empty-hint">
+        <p>输入任务后点“开始任务”。每一步都会截图交给千问判断，执行一个动作后重新截图，直到任务完成。</p>
+        <p>只有<strong>登录/身份认证</strong>和<strong>付款</strong>会停下来等你确认。</p>
+      </div>
+    </div>
+
+    <div id="tab-history" class="tab-body" hidden>
+      <div class="panel-head"><h2>最近任务</h2><button id="refreshHistory" class="btn ghost">刷新</button></div>
+      <ul id="historyList" class="history-list"></ul>
+    </div>
+
+    <div id="tab-plugins" class="tab-body" hidden>
+      <div id="pluginLuckyBag" class="plugin-card"></div>
+      <div id="pluginQishui" class="plugin-card"></div>
+    </div>
+  </section>
+
+  <!-- Timeline column -->
+  <section class="panel timeline-panel">
+    <div class="panel-head">
+      <h2>执行轨迹</h2>
+      <span id="timelineMeta" class="muted"></span>
+    </div>
+    <ol id="timeline" class="timeline"></ol>
+    <p id="timelineEmpty" class="muted center">还没有步骤</p>
+  </section>
+</main>
+
+<div id="lightbox" class="lightbox" hidden><img id="lightboxImg" alt=""></div>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

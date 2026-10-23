@@ -85,6 +85,11 @@ def _online_copy(source: Path, destination: Path) -> None:
             with closing(sqlite3.connect(temporary)) as destination_connection:
                 source_connection.backup(destination_connection, pages=128, sleep=0.01)
                 destination_connection.commit()
+                # The private snapshot must be self-contained before its main
+                # file is renamed. A WAL-mode source can otherwise leave temp
+                # -wal/-shm files and make a backup depend on those sidecars.
+                destination_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                destination_connection.execute("PRAGMA journal_mode=DELETE")
         # Validate before making the snapshot visible to a consumer.
         verify_sqlite_database(temporary)
         os.replace(temporary, destination)

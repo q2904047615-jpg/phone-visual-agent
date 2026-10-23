@@ -43,6 +43,10 @@ def decision(kind=None, *, meaning='open_details', role='button', text=None, out
         'state_action_consistent': True,
         'postcondition': {'status': {'matched':'confirmed', 'unmatched':'not_confirmed', 'uncertain':'unknown'}[outcome],
             'fact': '测试夹具动作后状态'},
+        # Finish candidates report the Runtime goal-fallback plan condition c1.
+        'success_conditions': None,
+        'condition_results': ([{'id': 'c1', 'status': 'met', 'evidence': '测试夹具当前画面满足任务'}]
+            if kind is None else None),
     }
     return value
 

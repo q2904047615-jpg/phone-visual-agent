@@ -651,6 +651,20 @@ LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
     "退出控件，不是本地清空图标；必须meaning=cancel且goal_relevant:false，绝不能标成clear_local_text。"
 )
 
+TASK_PLAN_RULE = (
+    "--- TASK PLAN RULE ---\n"
+    "平台计划在任务上下文entities.task_plan中，由平台冻结并编号为c1、c2……。"
+    "task_plan为null（任务第一轮）时，在decision.success_conditions中列出判断整任务完成所需的、"
+    "能在手机截图中看到的完成条件（每条一句，覆盖用户要求的对象、数量、正文和顺序）；"
+    "用户补充了新要求时可给出完整的新条件列表；其余情况success_conditions为null。"
+    "decision.status=finish时必须在decision.condition_results中逐条报告task_plan的每个条件："
+    "{\"id\":\"c1\",\"status\":\"met|not_met|unknown\",\"evidence\":\"支持结论的可见事实\"}；"
+    "第一轮若同时finish，按你本次success_conditions的顺序使用c1、c2……编号。"
+    "只有全部条件met且有证据时平台才会结束任务，否则会继续观察；"
+    "不得为了结束任务而把看不见的结果写成met。"
+)
+
+
 def _single_step_observation_prompt(context: dict[str, Any], *, include_input_structure: bool,
     image_count: int, request_image_size: tuple[int, int],
     available_action_kinds: tuple[str, ...], reference_image_count: int = 0) -> str:
@@ -692,7 +706,7 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
         + "。只能从该集合中选择一个动作；集合外动作不可选择。动作和观察共用整任务预算，"
         "不得按手势类型单独计数或重放旧scope。"
     )
-    return rendered + "\n\n" + runtime_action_rule + "\n\n--- REFERENCE IMAGE RULE ---\n" + reference_rule + "\n\n" + conversation_rule + (
+    return rendered + "\n\n" + runtime_action_rule + "\n\n" + TASK_PLAN_RULE + "\n\n--- REFERENCE IMAGE RULE ---\n" + reference_rule + "\n\n" + conversation_rule + (
         "\n\n本次响应必须同时填写reply和decision：reply是给用户看的自然中文；"
         "decision.action只有在用户目标确实需要改变手机状态时才填写。"
         "询问‘能看到吗’、‘是什么’、‘怎么判断’等查看或解释问题，不要为了验证而点击，"
@@ -881,6 +895,12 @@ def _decision_response_properties(available_action_kinds: tuple[str, ...]) -> di
             'status': {'type': 'string', 'enum': ['confirmed', 'not_confirmed', 'unknown', 'not_applicable']},
             'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False},
         'confidence': {'type': 'number'}, 'reason': {'type': 'string'},
+        'success_conditions': {'type': ['array', 'null'], 'items': {'type': 'string'}, 'description': (
+            '仅当task_plan为null或用户补充了新要求时填写：判断整任务完成所需的可观察完成条件；否则为null。')},
+        'condition_results': {'type': ['array', 'null'], 'description': (
+            'finish时逐条报告task_plan每个条件；action时可为null。'), 'items': {'type': 'object', 'properties': {
+            'id': {'type': 'string'}, 'status': {'type': 'string', 'enum': ['met', 'not_met', 'unknown']},
+            'evidence': {'type': 'string'}}, 'required': ['id', 'status', 'evidence'], 'additionalProperties': False}},
     }
     _make_decision_fields_nullable(decision_properties)
     return decision_properties
@@ -1070,6 +1090,8 @@ def _wire_decision_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
         "previous_action_outcome": decision.get("previous_action_outcome"),
         "state_action_consistent": decision.get("state_action_consistent"),
         "postcondition": decision.get("postcondition"),
+        "success_conditions": decision.get("success_conditions"),
+        "condition_results": decision.get("condition_results"),
     }
 
 

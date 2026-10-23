@@ -44,6 +44,8 @@ from agent.domain.qwen_task_context import (
     QwenTaskContext, action_effect_kind, execution_history_entry,
 )
 from agent.domain.session import TERMINAL_SESSION_STATUSES
+from agent.domain.task_plan import ExecutionPermit, TaskPlan, TaskPlanError
+from agent.domain.validation import canonical_digest
 
 
 def _model_history(session: UniversalAgentSessionState) -> list[dict[str, Any]]:
@@ -58,6 +60,14 @@ def _model_history(session: UniversalAgentSessionState) -> list[dict[str, Any]]:
         for item in session.history]
 
 
+def _verifier_feedback(session: UniversalAgentSessionState) -> dict[str, Any] | None:
+    """Tell the model why its last finish candidate was not accepted (facts only)."""
+    verification = session.last_verification
+    if verification is None or getattr(verification, 'evidence_kind', '') != 'plan_conditions_unmet':
+        return None
+    return {'state': verification.state, 'reason': verification.reason, 'unmet': list(verification.unmet)}
+
+
 class ObservationBridge:
     """Supply the whole task and only actually executed actions; no hidden plan."""
     def goal_draft(self, session: UniversalAgentSessionState) -> GenericIntentDraft:
@@ -70,6 +80,8 @@ class ObservationBridge:
                 "required_action_kind": session.exact_action_kind,
                 "exact_target_label": session.exact_target_label,
                 "launch_app_aliases": list(aliases()) if callable(aliases) else [],
+                "task_plan": session.task_plan.prompt_view() if session.task_plan is not None else None,
+                "verifier_feedback": _verifier_feedback(session),
             })
 
 
@@ -129,9 +141,13 @@ class UniversalAgentOrchestrator:
         if session.confirmation_authority is not None:
             session.confirmation_authority.consumed = True
             session.confirmation_authority.invalid_reason = 'reobserve'
+        if session.execution_permit is not None and not session.execution_permit.consumed:
+            session.execution_permit.consumed = True
+            session.execution_permit.invalid_reason = 'reobserve'
         session.qwen_decision = None
         session.tool_intent = None
         session.confirmation_authority = None
+        session.execution_permit = None
 
     @staticmethod
     def _record_qwen_reply(session: UniversalAgentSessionState, model_decision: Mapping[str, Any]) -> dict[str, Any]:
@@ -315,6 +331,7 @@ class UniversalAgentOrchestrator:
     def _stage_decision(self, session: UniversalAgentSessionState, *, decision: Any,
         executed_effect: bool=False) -> Any:
         self._validate_decision_binding(session, session.trusted_observation, decision)
+        self._commit_plan(session, decision)
         session.tool_intent = decision
         model_decision = getattr(decision, 'model_decision', decision)
         session.qwen_decision = model_decision
@@ -353,7 +370,7 @@ class UniversalAgentOrchestrator:
             return decision
         if decision.proposal.status == "finish":
             verification = self.verifier.verify_finish(intent=decision,
-                observation=session.trusted_observation, history=session.history)
+                observation=session.trusted_observation, history=session.history, plan=session.task_plan)
             session.last_verification = verification
             self._remember(session, session.evidence_store.write_json(
                 f'verification_step_{session.step_number}.json', verification.to_dict()))
@@ -413,6 +430,16 @@ class UniversalAgentOrchestrator:
             step_id=scope['step_id'], effect_ids=tuple(scope['effect_ids']),
             observation_id=scope['observation_id'], fingerprint=scope['fingerprint'],
             decision_node_id=scope['decision_node_id'], action_digest=scope['action_digest'])
+        policy = session.last_policy_decision
+        reject_if(session.task_plan is None or policy is None,
+            UniversalAgentOrchestratorError('签发执行许可前缺少已提交计划或Policy结论。'))
+        session.execution_permit = ExecutionPermit.issue(task_id=session.session_id, device_id=session.device_id,
+            lease_epoch=session.lease_epoch, revision=session.step_number, plan=session.task_plan,
+            observation_id=scope['observation_id'], fingerprint=scope['fingerprint'],
+            intent_digest=canonical_digest(session.tool_intent.to_dict()), action_digest=scope['action_digest'],
+            policy_version=policy.policy_version, policy_status=policy.status, effect_ids=scope['effect_ids'])
+        self._remember(session, session.evidence_store.write_json(
+            f'execution_permit_step_{session.step_number}.json', session.execution_permit.to_dict()))
 
     @staticmethod
     def _normalize_scope(value: Mapping[str, Any], *, required: set[str], digest_key: str,
@@ -448,7 +475,31 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError('动作scope与当前截图或canonical动作不一致。')
         authority.consumed = True
         authority.invalid_reason = 'consumed_before_execution'
+        permit = session.execution_permit
+        reject_if(permit is None, UniversalAgentOrchestratorError('当前动作没有Runtime签发的执行许可。'))
+        try:
+            permit.consume(task_id=session.session_id, device_id=session.device_id, lease_epoch=session.lease_epoch,
+                revision=session.step_number, plan=session.task_plan, observation_id=current['observation_id'],
+                fingerprint=current['fingerprint'], intent_digest=canonical_digest(session.tool_intent.to_dict()),
+                action_digest=current['action_digest'], confirmed_effect_ids=session.confirmed_effect_ids)
+        except TaskPlanError as exc:
+            raise UniversalAgentOrchestratorError(str(exc)) from exc
         return authority
+
+    def _commit_plan(self, session: UniversalAgentSessionState, decision: Any) -> None:
+        """Runtime-only plan commit: first decision, or a user-requested revision."""
+        user_messages = sum(1 for item in session.conversation if item.get('role') == 'user')
+        current = session.task_plan
+        proposed = getattr(decision, 'proposed_conditions', None)
+        if current is not None:
+            descriptions = tuple(item.description for item in current.success_conditions)
+            if not (proposed and user_messages > session.task_plan_user_messages and tuple(proposed) != descriptions):
+                return
+        session.task_plan = TaskPlan.commit(task_id=session.session_id, device_id=session.device_id,
+            goal=session.raw_goal, revision=session.step_number, proposed_conditions=proposed, previous=current)
+        session.task_plan_user_messages = user_messages
+        self._remember(session, session.evidence_store.write_json(
+            f'task_plan_v{session.task_plan.version}.json', session.task_plan.to_dict()))
 
     def _bind_effect_confirmation(self, session: UniversalAgentSessionState) -> None:
         scope = self._current_confirmation_scope(session)

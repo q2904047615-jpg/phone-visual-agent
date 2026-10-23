@@ -34,7 +34,8 @@ MODEL_WIRE_ACTIONS = (frozenset(CANONICAL_ACTION_KINDS) - {
     "tap_semantic", "dismiss_overlay", "swipe_element", "input_verified_text", "clear_verified_text",
 }) | frozenset(MODEL_ACTION_ALIASES)
 MODEL_STEP_DECISION_FIELDS = frozenset({"status", "action", "point", "direction", "start", "end", "effect", "confidence",
-    "reason", "text", "app", "wait_seconds", "previous_action_outcome", "state_action_consistent", "postcondition"})
+    "reason", "text", "app", "wait_seconds", "previous_action_outcome", "state_action_consistent", "postcondition",
+    "success_conditions", "condition_results"})
 MODEL_STEP_SINGLE_ELEMENT_ACTIONS = frozenset({"tap_semantic", "dismiss_overlay", "input_verified_text",
     "press_enter", "clear_verified_text", "double_tap", "long_press"})
 MODEL_STEP_DIRECT_POINT_ACTIONS = frozenset({"tap_semantic", "dismiss_overlay",
@@ -77,7 +78,21 @@ def normalize_model_step_decision(value: Any) -> dict[str, Any]:
         "previous_action_outcome": metadata["outcome"],
         "state_action_consistent": metadata["state_action_consistent"],
         "postcondition": metadata["postcondition"],
+        # Plan fields are model proposals/reports only; the Runtime commits plans and
+        # the Verifier judges them. Malformed values degrade to None instead of vetoing.
+        "success_conditions": metadata["success_conditions"],
+        "condition_results": metadata["condition_results"],
     }
+
+
+def _plan_wire_value(value: Any, *, results: bool) -> list[Any] | None:
+    from agent.domain.task_plan import parse_condition_results, parse_proposed_conditions
+
+    if results:
+        parsed = parse_condition_results(value)
+        return None if parsed is None else [item.to_dict() for item in parsed]
+    proposed = parse_proposed_conditions(value)
+    return None if proposed is None else list(proposed)
 
 
 def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
@@ -135,6 +150,8 @@ def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
         "status": status, "confidence": float(confidence), "reason": reason if isinstance(reason, str) else "",
         "action": action, "effect": effect, "text": text, "app": app, "wait_seconds": wait_seconds, "outcome": outcome,
         "state_action_consistent": state_action_consistent, "postcondition": postcondition,
+        "success_conditions": _plan_wire_value(value.get("success_conditions"), results=False),
+        "condition_results": _plan_wire_value(value.get("condition_results"), results=True),
     }
 
 

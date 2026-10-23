@@ -43,6 +43,9 @@ class UniversalAgentSessionState:
     tool_intent: Any = field(default=None, repr=False)
     last_policy_decision: Any = field(default=None, repr=False)
     last_verification: Any = field(default=None, repr=False)
+    task_plan: Any = field(default=None, repr=False)
+    task_plan_user_messages: int = 0
+    execution_permit: Any = field(default=None, repr=False)
     qwen_decision: Any = None
     confirmation_authority: ConfirmationAuthority | None = field(default=None, repr=False)
     effect_confirmation_authority: EffectConfirmationAuthority | None = field(default=None, repr=False)
@@ -123,6 +126,8 @@ class UniversalAgentSessionState:
             'goal': self._serialize(self.goal_draft), 'trusted_observation': observation, 'current_scene': scene,
             'qwen_decision': decision, 'tool_intent': tool_intent, 'proposal': proposal,
             'policy_decision': policy, 'last_verification': verification,
+            'task_plan': self._serialize(self.task_plan),
+            'execution_permit': self._serialize(self.execution_permit),
             'authority': 'platform_planner', 'controller_decision': controller,
             'qwen_reply': self.qwen_reply, 'history': list(self.history),
             'conversation': [dict(item) for item in self.conversation],

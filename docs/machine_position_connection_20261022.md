@@ -22,6 +22,15 @@
 
 ## 2026-10-23 实际加载记录
 
+### 最终复核（21696e1）
+
+- 后续修复提交：52ef11b（设备恢复在线后的机位按钮刷新）与 21696e1（API 重载后从持久成功回执恢复机位）。公网 current 已切至 /opt/phone-agent/releases/20261023-21696e1/poc，两个服务均 active，官方 SDK 引导验证通过。
+- 加载前本机相关回归 44 项通过；完整发布包包含 trial.json，Linux 新发布目录隔离回归 23 项通过。备份在 /opt/phone-agent/state/backups/station-recovery-20261023-21696e1，包含原 current、owner 环境、前端版本记录及 Runtime/dispatch/connector 三个 SQLite 备份。旧发布目录保留。
+- 前轮最终浏览器刷新被自动审批用量限制中断，未执行；本轮恢复后继续验证。新会话开始时网站未登录、连接器进程不在；未证明退出原因。核对本机控制端在线、无活动任务且无重复连接器后重新隐藏启动（检查时 PID 22912），正常 GitHub 登录后显示 local-owner。
+- 再执行完整浏览器刷新，页面提示 API 已重载，登录保持 local-owner，机位仍为 2、按钮可用、控制端在线且空闲，手机预览 810×1440。已通过 OpenCLI 截图并目视核对，证据为 poc/output/connector-live/station2-after-reload.png。
+- 远程命令库与本机交付记录分别只读核对：select_machine_position 均只有一次，position=2、completed/ok=true，本机 acknowledged=1。没有为刷新验证重发机位命令，没有 App 内动作或模型调用。
+- 本批代码已提交并加载，未推送 GitHub。本轮只补证据文档，不重跑不相关全量测试。真实刷新与机位恢复子项通过，不代表全量 GA 或全部远程工具适配完成。原机位首次切换与原始发布证据如下，旧版本/PID/阻断描述按历史记录理解。
+
 - 本地提交：9a955a2（连接器/机位入口），b379ac4（官方 SDK 与多入口完整 HTTP 验收）。未推送 GitHub。
 - 公网 current：/opt/phone-agent/releases/20261023-b379ac4/poc；执行器和两个 API 入口沿用原 systemd 单元及端口。已核对两项服务 active、官方客户端 OpenAPI 引导通过，最近五分钟 warning 日志为空。
 - 新发布包最初仅包含 poc，Linux HTTP 测试发现漏打包根目录 trial.json。补齐同一提交的配置后，服务器隔离测试 21 项通过，再进行加载；没有用缺失配置的版本切换公网。

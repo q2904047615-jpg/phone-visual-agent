@@ -1128,7 +1128,8 @@ function renderMachinePositions() {
   const controllerOnline = Boolean(currentDeviceDescriptor()?.controller_online ?? state.device?.controller_online);
   // Position selection targets the seller controller toolbar; camera readiness
   // is required for task execution and preview, but not for this control.
-  const disabled = state.busy || Boolean(view && !view.isTerminal) || !controllerOnline;
+  const disabled = !accountReady || !accountPermissions.includes('task.create')
+    || state.busy || Boolean(view && !view.isTerminal) || !controllerOnline;
   container.replaceChildren(...Array.from({ length: 10 }, (_, index) => {
     const position = index + 1;
     const button = document.createElement("button");
@@ -1343,6 +1344,7 @@ async function refreshDevice() {
   state.token = String(runtimeSession.token || "");
   state.mock = Boolean(runtimeSession.mock);
   await reconcileSupervisedSession();
+  renderMachinePositions();
   renderTaskRunStatus();
   renderStatus();
   renderPairingPanel();

@@ -91,6 +91,8 @@ test('viewer gets a read-only workbench; expiry removes private view', async t =
   await page.goto('http://website.test/');
   await page.getByText('当前账号为只读权限', { exact: true }).waitFor();
   assert.equal(await page.locator('#startSupervisedAgent').isEnabled(), false);
+  await page.evaluate(() => refreshDevice());
+  assert.equal(await page.getByRole('button', { name: '切换到2号机位', exact: true }).isDisabled(), true);
   state.account = { authenticated: false, github_available: true, session: null };
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.getByText('未登录', { exact: true }).waitFor();

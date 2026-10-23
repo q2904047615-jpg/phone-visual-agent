@@ -55,8 +55,16 @@ test("machine position controls select a position and refresh its preview", { ti
     assert.deepEqual(submitted, [{ machine_position: 2 }, { machine_position: 10 }]);
     assert.ok(requests.previewDevices.includes("phone-01"));
     online = false;
-    await page.evaluate(async () => { await refreshDevice(); render(); });
+    await page.evaluate(() => refreshDevice());
     assert.equal(await page.getByRole("button", { name: "切换到2号机位", exact: true }).isDisabled(), true);
+    online = true;
+    await page.evaluate(() => refreshDevice());
+    assert.equal(await page.getByRole("button", { name: "切换到2号机位", exact: true }).isEnabled(), true);
+    await page.evaluate(async () => { state.busy = true; await refreshDevice(); });
+    assert.equal(await page.getByRole("button", { name: "切换到2号机位", exact: true }).isDisabled(), true);
+    await page.evaluate(async () => { state.busy = false; await refreshDevice(); });
+    assert.equal(await page.getByRole("button", { name: "切换到10号机位", exact: true }).getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(submitted, [{ machine_position: 2 }, { machine_position: 10 }]);
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   } finally {
@@ -692,7 +700,7 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20260927-main-chain-cleanup-v1"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=20261023-position-refresh-v1"));
     assert.ok(requests.assets.includes("/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"));
     assert.ok(requests.assets.includes("/assets/styles.css?v=20260927-main-chain-cleanup-v1"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);

@@ -110,6 +110,12 @@ class AdbPackageLauncher:
         """Expose only local semantic names, never commands, serial or executable."""
         return tuple(sorted(self._by_alias)) if self.enabled else ()
 
+    def catalog(self) -> list[dict[str, str]]:
+        """Registered targets for a remote adapter; no executable or argv."""
+        return [{"alias": alias, "launch_ref": self._by_alias[alias].launch_ref,
+                 "expected_app_id": self._by_alias[alias].expected_app_id}
+                for alias in self.aliases()]
+
     def resolve(self, app_id: str, app_name: str) -> AppLaunchTarget | None:
         if not self.enabled:
             return None

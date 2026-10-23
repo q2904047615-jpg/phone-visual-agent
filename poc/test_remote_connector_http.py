@@ -12,6 +12,8 @@ from pathlib import Path
 import httpx
 
 from agent.infrastructure.remote_connector import ConnectorCommandStore
+from agent.infrastructure.remote_connector import RemoteRobotController
+from agent.infrastructure.remote_device_tools import RemoteTextTransport, RemoteAppLauncher, describe_remote_tools
 from agent.infrastructure.remote_connector_worker import DeviceConnector
 from local_agent_api_client import LocalAgentApiClient, LocalAgentApiError
 from test_remote_connector import FakeHardware
@@ -106,10 +108,17 @@ class RemoteConnectorHttpTests(unittest.TestCase):
         client = httpx.Client(transport=transport, timeout=10)
         stop = threading.Event()
         errors = []
+        # Reuse only the isolated registry/ADB fixtures; all delivery below uses
+        # real TCP through the two ingress processes and the Runtime process.
+        from test_remote_device_tools import RemoteDeviceToolsTests
+        tools_fixture = RemoteDeviceToolsTests()
+        tools_fixture.setUp()
+        self.addCleanup(tools_fixture.doCleanups)
         worker = DeviceConnector(base_url="https://connector.test", connector_id="windows-local-01",
             secret="isolated-connector-secret", device_id="device-local-01", controller=hardware,
             registry_path=self.directory / "unused", journal_path=self.directory / "windows.sqlite3",
             lease_directory=self.directory / "windows-leases", client=client)
+        worker.tools = tools_fixture.worker.tools
 
         def run_connector():
             with worker:
@@ -146,6 +155,21 @@ class RemoteConnectorHttpTests(unittest.TestCase):
             result = store.wait(cid, timeout=10)
             self.assertTrue(result["ok"])
             self.assertEqual(result["value"]["capture_id"], cid)
+            proxy = RemoteRobotController(device_id="device-local-01", connector_id="windows-local-01", store=store, machine_position=10)
+            proxy.select_machine_position(2)
+            description = describe_remote_tools(proxy)
+            text = RemoteTextTransport(proxy, description)
+            launcher = RemoteAppLauncher(proxy, description)
+            for value in ("跨入口中文 🌍", "\n", ""):
+                proxy.vision_capture()
+                scope = tools_fixture.scope(text, value)
+                receipt = text.append_text(scope, value) if value else text.clear_text(scope)
+                self.assertTrue(receipt.accepted)
+            proxy.vision_capture()
+            launcher.launch(launcher.resolve("", "测试应用").launch_ref)
+            self.assertEqual(len(tools_fixture.broadcasts()), 3)
+            self.assertTrue(all(call[2] == "serial-2" for call in tools_fixture.calls))
+            self.assertEqual(sum("monkey" in call for call in tools_fixture.calls), 1)
         finally:
             stop.set()
             thread.join(12)

@@ -283,6 +283,29 @@ class ConnectorWorkerTests(unittest.TestCase):
             self.proxy.vision_tap_relative(321, 654)
         self.assertEqual(self.hardware.calls, [("tap", 321, 654)])
 
+    def test_cloud_capability_authority_is_scoped_and_does_not_promote_local_registry(self):
+        self.hardware.verified_actions = frozenset()
+        frame = self.roundtrip(self.proxy.vision_capture)
+        credential = _mint_single_step_scene_credential(device_id=DEVICE, scene_fingerprint="scene", frame=frame)
+        self.proxy.arm_physical_execution(credential, action="tap_semantic", scene_fingerprint="scene")
+        original = self.hardware.vision_tap_relative
+        def checked_tap(**args):
+            self.hardware._require_verified_action("tap_semantic", "tap")
+            return original(**args)
+        with patch.object(self.hardware, "vision_tap_relative", side_effect=checked_tap):
+            self.roundtrip(self.proxy.vision_tap_relative, 321, 654)
+        self.assertEqual(self.hardware.verified_actions, frozenset())
+        self.assertEqual(self.hardware.calls, [("tap", 321, 654)])
+
+    def test_capture_from_previous_station_cannot_execute_on_new_station(self):
+        frame = self.roundtrip(self.proxy.vision_capture)
+        credential = _mint_single_step_scene_credential(device_id=DEVICE, scene_fingerprint="scene", frame=frame)
+        authority = {"capture_id": self.proxy._remote_capture_id, "credential": credential.to_dict()}
+        self.roundtrip(self.proxy.select_machine_position, 2)
+        result = self.worker.execute({**command("vision_tap_relative", {"x": 10, "y": 20}), "authority": authority})
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.hardware.calls, [("position", 2)])
+
     def test_home_variation_and_changed_canvas_rejected_by_original_gate(self):
         for change in (False, True):
             frame = self.roundtrip(self.proxy.vision_capture)

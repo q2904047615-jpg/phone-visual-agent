@@ -27,9 +27,12 @@ from PIL import Image
 from .robot_controller import RobotController
 
 
-PROTOCOL = "2026-10-23-remote-device-connector-v2"
+PROTOCOL = "2026-10-23-remote-device-connector-v3"
 COMMAND_TTL_SECONDS = 30.0
 RESULT_WAIT_SECONDS = 35.0
+# Existing ADB text profiles permit up to 30s for each of three preflight
+# reads and the single broadcast. Keep the queue alive for that contract.
+TOOL_RESULT_WAIT_SECONDS = 135.0
 CONNECTOR_OPERATIONS = frozenset({
     "device_status", "capture_preview", "vision_capture", "select_machine_position",
     "begin_new_task", "prepare_machine_position", "request_stop",
@@ -39,7 +42,10 @@ CONNECTOR_OPERATIONS = frozenset({
     "vision_android_back", "vision_android_recent_apps",
     "vision_swipe_up", "vision_swipe_down", "vision_swipe_left",
     "vision_swipe_right", "vision_reveal_system_navigation",
+    "tool_describe", "text_status", "text_append", "text_clear", "app_launch",
 })
+TOOL_OPERATIONS = frozenset({"tool_describe", "text_status", "text_append", "text_clear", "app_launch"})
+TOOL_EFFECTS = frozenset({"text_append", "text_clear", "app_launch"})
 PHYSICAL_ACTIONS = {
     "vision_tap_relative": "tap_semantic", "vision_dismiss_overlay_relative": "dismiss_overlay",
     "vision_double_tap_relative": "double_tap", "vision_long_press_relative": "long_press",
@@ -51,7 +57,9 @@ PHYSICAL_ACTIONS = {
 
 
 class ConnectorProtocolError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, attempted: bool = True):
+        super().__init__(message)
+        self.attempted = attempted
 
 
 def _canonical(value: Any) -> bytes:
@@ -85,6 +93,10 @@ def verify_message(secret: str, method: str, path: str, timestamp: str, body: by
 def validate_args(operation: str, args: Any) -> None:
     if not isinstance(operation, str) or operation not in CONNECTOR_OPERATIONS or not isinstance(args, dict):
         raise ConnectorProtocolError("连接器操作或参数无效。")
+    if operation in TOOL_OPERATIONS:
+        from .remote_device_tools import validate_tool_args
+        validate_tool_args(operation, args)
+        return
     fields = {
         "select_machine_position": {"machine_position"}, "capture_preview": {"quality"},
         "vision_tap_relative": {"x", "y"}, "vision_dismiss_overlay_relative": {"x", "y"},
@@ -126,6 +138,12 @@ def validate_command(value: Any, *, connector_id: str | None = None, device_id: 
         credential = OrientationCredential.from_dict(authority["credential"])
         credential.assert_authorizes(device_id=value["device_id"], scene_fingerprint=credential.scene_fingerprint,
                                      frame_size=credential.frame_size, action=PHYSICAL_ACTIONS[value["operation"]])
+    elif value["operation"] in TOOL_EFFECTS:
+        if (not isinstance(authority, dict) or set(authority) != {"capture_id"}
+                or not isinstance(authority["capture_id"], str) or not authority["capture_id"]):
+            raise ConnectorProtocolError("远程工具缺少当前观察。", attempted=False)
+        if value["operation"] in {"text_append", "text_clear"} and value["args"]["scope"]["device_id"] != value["device_id"]:
+            raise ConnectorProtocolError("文字 scope 不属于当前设备。", attempted=False)
     elif authority is not None:
         raise ConnectorProtocolError("非物理命令不应携带动作凭据。")
     if type(value["expires_at"]) not in (int, float) or not math.isfinite(value["expires_at"]) or value["expires_at"] <= time.time():
@@ -180,12 +198,13 @@ class ConnectorCommandStore:
     def enqueue(self, *, connector_id: str, device_id: str, operation: str, args: dict[str, Any], authority: Any = None) -> str:
         command_id = secrets.token_hex(16)
         now = time.time()
+        expires_at = now + (TOOL_RESULT_WAIT_SECONDS - 5 if operation in TOOL_EFFECTS or operation == "text_status" else COMMAND_TTL_SECONDS)
         validate_command(dict(protocol=PROTOCOL, command_id=command_id, connector_id=connector_id,
-                              device_id=device_id, operation=operation, args=args, authority=authority, expires_at=now + COMMAND_TTL_SECONDS))
+                              device_id=device_id, operation=operation, args=args, authority=authority, expires_at=expires_at))
         with self.connect() as db:
             db.execute("INSERT INTO connector_commands_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                        (command_id, connector_id, device_id, operation, _canonical(args).decode(), _canonical(authority).decode(), "queued", None,
-                        now, now + COMMAND_TTL_SECONDS, None, now))
+                        now, expires_at, None, now))
         with self._condition:
             self._condition.notify_all()
         return command_id
@@ -252,7 +271,7 @@ class ConnectorCommandStore:
         if row and row[0] == "completed":
             return json.loads(row[1])
         if row and row[0] == "not_dispatched":
-            raise ConnectorProtocolError("连接器未领取命令，未派发。")
+            raise ConnectorProtocolError("连接器未领取命令，未派发。", attempted=False)
         raise ConnectorProtocolError("连接器结果未知，不能自动重放。")
 
     def last_confirmed_machine_position(self, *, connector_id: str, device_id: str) -> int | None:
@@ -302,10 +321,19 @@ class RemoteRobotController(RobotController):
             authority = {"capture_id": self._remote_capture_id, "credential": credential.to_dict()}
             self._remote_frame = None
             self._remote_capture_id = None
+        elif operation in TOOL_EFFECTS:
+            if self.stop_event.is_set() or not self._remote_capture_id:
+                raise ConnectorProtocolError("远程工具已停止或缺少当前观察。", attempted=False)
+            authority = {"capture_id": self._remote_capture_id}
+            self._remote_frame = None
+            self._remote_capture_id = None
         command_id = self.store.enqueue(connector_id=self.connector_id, device_id=self.device_id, operation=operation, args=args, authority=authority)
-        result = self.store.wait(command_id, timeout=3 if operation == "device_status" else RESULT_WAIT_SECONDS)
+        timeout = TOOL_RESULT_WAIT_SECONDS if operation in TOOL_EFFECTS or operation == "text_status" else RESULT_WAIT_SECONDS
+        result = self.store.wait(command_id, timeout=3 if operation == "device_status" else timeout)
         if not result.get("ok"):
-            raise ConnectorProtocolError(str(result.get("error") or "连接器操作失败。"))
+            value = result.get("value")
+            raise ConnectorProtocolError(str(result.get("error") or "连接器操作失败。"),
+                attempted=not (isinstance(value, dict) and value.get("attempted") is False))
         value = result.get("value")
         if operation in PHYSICAL_ACTIONS:
             if not isinstance(value, dict) or set(value) != {"return_value", "click_receipt", "long_press_receipt", "swipe_receipt"}:
@@ -346,6 +374,7 @@ class RemoteRobotController(RobotController):
     def begin_new_task(self) -> None:
         super().begin_new_task()
         self._remote_frame = None
+        self._remote_capture_id = None
         self._call("begin_new_task")
 
     def prepare_machine_position(self) -> None:
@@ -362,6 +391,7 @@ class RemoteRobotController(RobotController):
         self.machine_position = machine_position
         self._machine_position_ready = True
         self._remote_frame = None
+        self._remote_capture_id = None
         return value
 
     def vision_tap_relative(self, x: int, y: int):

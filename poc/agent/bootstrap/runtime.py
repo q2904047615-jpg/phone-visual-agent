@@ -188,6 +188,12 @@ class Runtime:
         return self.device_controllers.controller(device_id)
 
     def app_launcher_for_device(self, device_id: str) -> AdbPackageLauncher | None:
+        from agent.infrastructure.remote_connector import RemoteRobotController
+        from agent.infrastructure.remote_device_tools import RemoteAppLauncher, describe_remote_tools
+        controller = self.controller_for_device(device_id)
+        if isinstance(controller, RemoteRobotController):
+            description = describe_remote_tools(controller)
+            return RemoteAppLauncher(controller, description) if description and description["apps"] else None
         if not self.app_package_registry_path.exists():
             return None
         if device_id not in self._app_launchers:
@@ -198,10 +204,20 @@ class Runtime:
         return self._app_launchers[device_id]
 
     def text_transport_for_device(self, device_id: str):
+        from agent.infrastructure.remote_connector import RemoteRobotController
+        from agent.infrastructure.remote_device_tools import RemoteTextTransport, describe_remote_tools
+        controller = self.controller_for_device(device_id)
+        if isinstance(controller, RemoteRobotController):
+            description = describe_remote_tools(controller)
+            return RemoteTextTransport(controller, description) if description and description["text_profile"] else None
         return self.adb_keyboard_runtime.transport_for_device(device_id)
 
     def adb_pairing_service_for_device(self, device_id: str) -> AdbPairingService | None:
         resolved = str(device_id or '').strip()
+        from agent.infrastructure.remote_connector import RemoteRobotController
+        if isinstance(self.controller_for_device(resolved), RemoteRobotController):
+            from agent.infrastructure.adb_pairing import AdbPairingError
+            raise AdbPairingError("远程手机请在 Windows 连接器主机完成 ADB 配对；云端不会运行本机 ADB。", code="pair_on_connector_host")
         if resolved not in self._adb_pairing_services:
             transport = self.text_transport_for_device(resolved)
             self._adb_pairing_services[resolved] = (

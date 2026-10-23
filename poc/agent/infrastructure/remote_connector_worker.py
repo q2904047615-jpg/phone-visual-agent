@@ -21,7 +21,7 @@ from agent.infrastructure.orientation_safety import (
     OrientationCredential, _mint_single_step_scene_credential, frame_fingerprint,
 )
 from agent.infrastructure.remote_connector import (
-    CONNECTOR_OPERATIONS, PHYSICAL_ACTIONS, ConnectorProtocolError,
+    PHYSICAL_ACTIONS, TOOL_OPERATIONS, ConnectorProtocolError,
     result_payload, sign_message, validate_command,
 )
 
@@ -29,6 +29,7 @@ from agent.infrastructure.remote_connector import (
 class DeviceConnector:
     def __init__(self, *, base_url: str, connector_id: str, secret: str, registry_path: Path,
                  device_id: str, journal_path: Path, controller=None, client=None,
+                 text_registry_path: Path | None = None, app_registry_path: Path | None = None,
                  lease_directory: Path = SHARED_DEVICE_LEASE_DIR):
         url = urlsplit(base_url)
         if url.scheme != "https" or not url.hostname or url.username or url.password or url.path not in ("", "/") or url.query or url.fragment:
@@ -43,8 +44,18 @@ class DeviceConnector:
                 raise ConnectorProtocolError("Windows 连接器注册表必须指向本机控制器，不能递归代理。")
             controller = registry.controller(device_id)
         self.controller = controller
+        self.tools = None
+        if Path(registry_path).exists():
+            from .remote_device_tools import LocalDeviceTools
+            self.tools = LocalDeviceTools(registry_path=registry_path, device_id=device_id,
+                text_registry_path=text_registry_path or Path(registry_path).with_name("adb_keyboard_registry.json"),
+                app_registry_path=app_registry_path or Path(registry_path).with_name("app_package_registry.json"))
         self.client = client or httpx.Client(timeout=httpx.Timeout(40, connect=8), follow_redirects=False, trust_env=False)
         self.journal = ConnectorJournal(journal_path)
+        selected = self.journal.last_confirmed_machine_position(connector_id=connector_id, device_id=device_id)
+        if selected is not None:
+            self.controller.machine_position = selected
+            self.controller._machine_position_ready = False
         self.lease_directory = Path(lease_directory)
         self._ownership = None
 
@@ -87,11 +98,18 @@ class DeviceConnector:
 
     def _execute_operation(self, command):
         operation, args = command["operation"], command["args"]
+        if operation in TOOL_OPERATIONS:
+            if self.tools is None:
+                raise ConnectorProtocolError("本机工具配置未提供。", attempted=False)
+            return self.tools.execute(command, controller=self.controller, journal=self.journal)
         if operation == "vision_capture":
             frame = self.controller.vision_capture().convert("RGB")
             buffer = BytesIO()
             frame.save(buffer, format="PNG")
-            return {"png": base64.b64encode(buffer.getvalue()).decode(), "capture_id": command["command_id"]}
+            position = self.controller.machine_position
+            return {"png": base64.b64encode(buffer.getvalue()).decode(), "capture_id": command["command_id"],
+                    "machine_position": position,
+                    "tool_binding": self.tools.describe(position)["binding"] if self.tools else None}
         if operation == "capture_preview":
             return base64.b64encode(self.controller.capture_preview(**args)).decode()
         if operation == "device_status":
@@ -99,6 +117,8 @@ class DeviceConnector:
         if operation in PHYSICAL_ACTIONS:
             authority = command["authority"]
             capture = self.journal.consume_capture(authority["capture_id"], connector_id=self.connector_id, device_id=self.device_id)
+            if capture.get("machine_position") != self.controller.machine_position:
+                raise ConnectorProtocolError("观察后机位已变化。", attempted=False)
             with Image.open(BytesIO(base64.b64decode(capture["png"], validate=True))) as image:
                 frame = image.convert("RGB")
             credential = OrientationCredential.from_dict(authority["credential"])
@@ -109,15 +129,21 @@ class DeviceConnector:
                 raise ConnectorProtocolError("平台单步凭据未绑定本机原始观察帧。")
             local = _mint_single_step_scene_credential(device_id=self.device_id, scene_fingerprint=credential.scene_fingerprint, frame=frame)
             self.controller.arm_physical_execution(local, action=action, scene_fingerprint=credential.scene_fingerprint)
-        methods = {name: getattr(self.controller, name) for name in CONNECTOR_OPERATIONS}
+        original_actions = self.controller.verified_actions
         try:
-            value = methods[operation](**args)
+            # Cloud Registry/Policy is the single capability authority. Grant
+            # only this authenticated, observation-bound operation locally;
+            # do not permanently promote the Windows registry or bypass geometry.
+            if operation in PHYSICAL_ACTIONS:
+                self.controller.verified_actions = original_actions | {PHYSICAL_ACTIONS[operation]}
+            value = getattr(self.controller, operation)(**args)
             if operation in PHYSICAL_ACTIONS:
                 return {"return_value": value, "click_receipt": self.controller.consume_last_click_receipt(),
                         "long_press_receipt": self.controller.consume_last_long_press_receipt(),
                         "swipe_receipt": self.controller.consume_last_swipe_receipt()}
             return value
         finally:
+            self.controller.verified_actions = original_actions
             self.controller.clear_physical_execution_authorization()
 
     def execute(self, command: dict) -> dict:
@@ -132,9 +158,11 @@ class DeviceConnector:
             payload = result_payload(command_id=command["command_id"], connector_id=self.connector_id,
                                      device_id=self.device_id, ok=True, value=value)
         except Exception as exc:
+            attempted = getattr(exc, "attempted", True)
             payload = result_payload(command_id=command["command_id"], connector_id=self.connector_id,
                                      device_id=self.device_id, ok=False,
-                                     error="operation_failed_effect_unknown:" + type(exc).__name__)
+                                     value={"attempted": attempted},
+                                     error=("operation_failed_effect_unknown:" if attempted else "operation_not_dispatched:") + type(exc).__name__)
         self.journal.finish(payload)
         return payload
 

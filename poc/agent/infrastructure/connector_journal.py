@@ -19,6 +19,14 @@ class ConnectorJournal:
                 command_id TEXT PRIMARY KEY, command_json TEXT NOT NULL, digest TEXT NOT NULL,
                 result_json TEXT, acknowledged INTEGER NOT NULL DEFAULT 0)""")
             db.execute("CREATE TABLE IF NOT EXISTS used_captures (capture_id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE IF NOT EXISTS used_tool_scopes (device_id TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(device_id,nonce))")
+
+    def consume_tool_scope(self, scope):
+        with self.connect() as db:
+            try:
+                db.execute("INSERT INTO used_tool_scopes VALUES (?,?)", (scope.device_id, scope.nonce))
+            except sqlite3.IntegrityError as exc:
+                raise ConnectorProtocolError("文字 scope 已消费，不能重放。", attempted=False) from exc
 
     @contextmanager
     def connect(self):
@@ -65,6 +73,21 @@ class ConnectorJournal:
     def acknowledge(self, command_id: str):
         with self.connect() as db:
             db.execute("UPDATE deliveries SET acknowledged=1 WHERE command_id=?", (command_id,))
+
+    def last_confirmed_machine_position(self, *, connector_id, device_id):
+        """Restore state without issuing another selection after a restart."""
+        with self.connect() as db:
+            rows = db.execute("SELECT command_json,result_json FROM deliveries ORDER BY rowid DESC")
+            for raw_command, raw_result in rows:
+                command = json.loads(raw_command)
+                if (command["operation"] != "select_machine_position" or command["connector_id"] != connector_id
+                        or command["device_id"] != device_id):
+                    continue
+                result = json.loads(raw_result) if raw_result else None
+                if result and result.get("ok") is True:
+                    return command["args"]["machine_position"]
+                return None
+        return None
 
     def consume_capture(self, capture_id: str, *, connector_id: str, device_id: str) -> dict:
         with self.connect() as db:

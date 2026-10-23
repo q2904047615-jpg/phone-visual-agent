@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from agent.infrastructure import seller_window_adapter as seller_gui
 from agent.infrastructure.orientation_safety import (
@@ -507,7 +507,11 @@ class RobotController:
 
 
 class MockRobotController(RobotController):
-    """No-hardware controller for API tests and UI demonstrations."""
+    """No-hardware controller for API tests and UI demonstrations.
+
+    Physical primitives are still gated by the same execution credential, then
+    applied to an attached ``SimPhone`` so later observations show the effect.
+    """
 
     def select_machine_position(self, machine_position: int) -> None:
         reject_if(isinstance(machine_position, bool) or not isinstance(machine_position, int)
@@ -526,6 +530,9 @@ class MockRobotController(RobotController):
         super().__init__(title='MOCK', verified_actions=all_actions if verified_actions is None else verified_actions,
             device_id=device_id)
         self.executions: list[dict[str, Any]] = []
+        from agent.infrastructure.simulated_phone import SimPhone
+
+        self.phone = SimPhone()
 
     def device_status(self) -> dict[str, Any]:
         return {'controller_online': True, 'camera_online': True, 'window_title': 'MOCK 智联新途机械臂控制端',
@@ -536,18 +543,12 @@ class MockRobotController(RobotController):
     def capture_preview(self, quality: int=72) -> bytes:
         from io import BytesIO
 
-        image = Image.new("RGB", (540, 960), (18, 24, 38))
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((68, 90, 472, 870), radius=42, fill=(31, 40, 58))
-        draw.text((174, 450), "MOCK PHONE", fill=(228, 234, 247))
         buffer = BytesIO()
-        image.save(buffer, format="JPEG", quality=quality)
+        self.phone.render().save(buffer, format="JPEG", quality=quality)
         return buffer.getvalue()
 
     def vision_capture(self) -> Image.Image:
-        from io import BytesIO
-
-        return Image.open(BytesIO(self.capture_preview())).convert("RGB")
+        return self.phone.render().convert("RGB")
 
     def _consume_mock_execution(self, action: str) -> None:
         self._consume_physical_execution(action, self.vision_capture())
@@ -570,19 +571,24 @@ class MockRobotController(RobotController):
         del label
         recorded = {'tap_semantic': 'tap', 'dismiss_overlay': 'dismiss_overlay',
             'double_tap': 'double_tap'}[action]
-        return self._mock(action, recorded, result=(x, y), click_count=click_count, coordinate=[x, y])
+        result = self._mock(action, recorded, result=(x, y), click_count=click_count, coordinate=[x, y])
+        self.phone.tap(*self.phone.grid_to_pixel(x, y))
+        return result
 
     def vision_long_press_relative(self, x: int, y: int, hold_seconds: float=0.8) -> tuple[int, int]:
         self._consume_mock_execution("long_press")
         self.executions.append({'action': 'long_press', 'coordinate': [x, y], 'hold_seconds': hold_seconds})
+        self.phone.tap(*self.phone.grid_to_pixel(x, y))
         self._last_long_press_receipt = {'version': '2026-08-25-mock-long-press-barrier-v1',
             'input_events_dispatched': True, 'mechanical_contact_ack': False}
         return x, y
 
     def vision_drag_relative(self, start_x: int, start_y: int, end_x: int, end_y: int) -> tuple[tuple[int, int],
         tuple[int, int]]:
-        return self._mock('drag', 'drag', result=((start_x, start_y), (end_x, end_y)), start=[start_x, start_y],
+        result = self._mock('drag', 'drag', result=((start_x, start_y), (end_x, end_y)), start=[start_x, start_y],
             end=[end_x, end_y])
+        self.phone.swipe(self.phone.grid_to_pixel(start_x, start_y), self.phone.grid_to_pixel(end_x, end_y))
+        return result
 
     def vision_swipe_relative(self, start_x: int, start_y: int, end_x: int, end_y: int,
         direction: str) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -595,6 +601,7 @@ class MockRobotController(RobotController):
             'touch_down_seconds': 0.35, 'movement_seconds': 0.3, 'step_count': 6,
             'client_start': [start_x, start_y], 'client_end': [end_x, end_y],
             'mechanical_contact_ack': False, 'requested_direction': direction}
+        self.phone.swipe(self.phone.grid_to_pixel(start_x, start_y), self.phone.grid_to_pixel(end_x, end_y))
         return result
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
@@ -610,7 +617,14 @@ class MockRobotController(RobotController):
         del config_prefix, label
         recorded, point = {'home': ('android_home', (500, 976)), 'back': ('android_back', (910, 976)),
             'open_recent_apps': ('android_recent_apps', (315, 976))}[action]
-        return self._mock(action, recorded, result=point, click_count=1)
+        result = self._mock(action, recorded, result=point, click_count=1)
+        with self.phone.lock:
+            self.phone.navigate({'open_recent_apps': 'recents'}.get(action, action))
+        return result
 
     def _vision_swipe(self, direction: str) -> None:
         self._mock('swipe', f'swipe_{direction}')
+        # Seller preset swipes: the finger moves in the named direction.
+        start, end = {'up': ((500, 750), (500, 300)), 'down': ((500, 300), (500, 750)),
+            'left': ((800, 500), (200, 500)), 'right': ((200, 500), (800, 500))}[direction]
+        self.phone.swipe(self.phone.grid_to_pixel(*start), self.phone.grid_to_pixel(*end))

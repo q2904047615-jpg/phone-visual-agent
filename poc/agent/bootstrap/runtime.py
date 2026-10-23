@@ -91,6 +91,8 @@ class Runtime:
         self.exclusive_device_session = exclusive_device_session
         self.code_revision_provider = code_revision_provider
         self.mock_mode = os.environ.get("ROBOT_WEB_MOCK") == "1"
+        # Opt-in demo/evaluation mode: simulated ADB Keyboard and app launch on the mock phone.
+        self.simulated_phone_tools = self.mock_mode and os.environ.get("ROBOT_WEB_SIMULATED_TOOLS") == "1"
         self.hardware_mode = (not self.mock_mode) and seller_gui.IS_WINDOWS
         self.loaded_code_revision = code_revision_provider()
         cleanup_evidence_runs(output_dir)
@@ -110,6 +112,7 @@ class Runtime:
         self.hardware_mode = self.hardware_mode or (not self.mock_mode and any(
             descriptor.get("connector_id") for descriptor in self.device_controllers.descriptors()))
         self._app_launchers: dict[str, AdbPackageLauncher | None] = {}
+        self._simulated_tools: dict[tuple[int, str], tuple[Any, Any]] = {}
         self.vision_provider = DashScopeVisionProvider(enable_thinking=True)
         self.adb_keyboard_runtime = AdbKeyboardRuntimeRegistry(adb_keyboard_registry_path)
         self._adb_pairing_services: dict[str, AdbPairingService | None] = {}
@@ -194,6 +197,8 @@ class Runtime:
         if isinstance(controller, RemoteRobotController):
             description = describe_remote_tools(controller)
             return RemoteAppLauncher(controller, description) if description and description["apps"] else None
+        if self.simulated_phone_tools and isinstance(controller, MockRobotController):
+            return self._simulated_tools_for(controller, device_id)[1]
         if not self.app_package_registry_path.exists():
             return None
         if device_id not in self._app_launchers:
@@ -210,7 +215,18 @@ class Runtime:
         if isinstance(controller, RemoteRobotController):
             description = describe_remote_tools(controller)
             return RemoteTextTransport(controller, description) if description and description["text_profile"] else None
+        if self.simulated_phone_tools and isinstance(controller, MockRobotController):
+            return self._simulated_tools_for(controller, device_id)[0]
         return self.adb_keyboard_runtime.transport_for_device(device_id)
+
+    def _simulated_tools_for(self, controller: MockRobotController, device_id: str) -> tuple[Any, Any]:
+        """Mock mode only: text/launch tools bound to the mock controller's simulated phone."""
+        from agent.infrastructure.simulated_device_tools import SimulatedAppLauncher, SimulatedTextTransport
+        key = (id(controller), str(device_id or "").strip())
+        if key not in self._simulated_tools:
+            self._simulated_tools[key] = (SimulatedTextTransport(controller.phone, device_id),
+                                          SimulatedAppLauncher(controller.phone))
+        return self._simulated_tools[key]
 
     def adb_pairing_service_for_device(self, device_id: str) -> AdbPairingService | None:
         resolved = str(device_id or '').strip()

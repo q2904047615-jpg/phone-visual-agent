@@ -24,6 +24,10 @@ Linux/macOS 使用 `python3 -m unittest discover -s . -p 'test_*.py'`。CI 会�
 
 npm test 覆盖协议、触摸页、浏览器合同和控制台四个测试入口。自动测试及 Mock 不替代真实任务。
 
+### 模拟手机（离线）
+
+`ROBOT_WEB_MOCK=1` 时，`MockRobotController` 的截图来自 `agent/infrastructure/simulated_phone.py` 的模拟安卓手机（桌面、设置、备忘录、消息、最近任务），点击、滑动、返回/Home/最近任务在通过原有单步执行凭据后作用到模拟界面，下一次观察能看到效果。再设置 `ROBOT_WEB_SIMULATED_TOOLS=1`，会为 Mock 设备提供模拟 ADB Keyboard（复用原 `AdbKeyboardTextTransport` 的 scope/nonce/摘要校验，只解释固定 `ADB_INPUT_B64` / `ADB_CLEAR_TEXT` 广播）和模拟可信包名启动。该模式用于离线全链路测试和模型评测，属于 Mock 证据，不能替代真机验收。
+
 ## 八个正式入口
 
 | 文件 | 用途 |

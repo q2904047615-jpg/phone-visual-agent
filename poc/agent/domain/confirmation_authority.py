@@ -39,12 +39,30 @@ class ConfirmationAuthority:
     action_digest: str
     consumed: bool = False
     invalid_reason: str = ""
+    # Server-side execution-permit bindings (never part of the client scope wire).
+    plan_id: str = ""
+    plan_version: int = 0
+    lease_epoch: int = 0
+    policy_status: str = ""
 
     def scope(self) -> dict[str, Any]:
         return {'session_id': self.session_id, 'task_id': self.task_id, 'device_id': self.device_id,
             'revision': self.revision, 'step_id': self.step_id, 'effect_ids': sorted(self.effect_ids),
             'observation_id': self.observation_id, 'fingerprint': self.fingerprint,
             'decision_node_id': self.decision_node_id, 'action_digest': self.action_digest}
+
+    def permit_problems(self, *, plan: Any, lease_epoch: int, confirmed_effect_ids: tuple[str, ...]) -> list[str]:
+        """Permit checks beyond the scope match: plan version, device lease and Policy confirmation."""
+        problems = []
+        if plan is None or (plan.plan_id, plan.version) != (self.plan_id, self.plan_version):
+            problems.append('计划版本已变化')
+        if int(lease_epoch) != self.lease_epoch:
+            problems.append('设备租约已变化')
+        if self.policy_status not in {'auto_execute', 'requires_user_confirmation'}:
+            problems.append('Policy没有允许该动作')
+        elif self.policy_status == 'requires_user_confirmation' and not set(self.effect_ids) <= set(confirmed_effect_ids):
+            problems.append('登录/付款尚未获得用户确认')
+        return problems
 
 
 @dataclass

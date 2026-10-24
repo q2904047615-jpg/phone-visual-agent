@@ -16,6 +16,7 @@ from .semantic_action import SemanticAction
 from .text_transport import TextTransportProfile
 from .qwen_task_context import EFFECT_KINDS
 from .ui_scene import UIElement
+from .task_plan import parse_condition_results, parse_proposed_conditions
 from .validation import dataclass_wire, reject_if
 
 CANONICAL_ACTION_PROTOCOL = "2026-09-06-canonical-whole-task-v10"
@@ -85,14 +86,8 @@ def normalize_model_step_decision(value: Any) -> dict[str, Any]:
     }
 
 
-def _plan_wire_value(value: Any, *, results: bool) -> list[Any] | None:
-    from agent.domain.task_plan import parse_condition_results, parse_proposed_conditions
-
-    if results:
-        parsed = parse_condition_results(value)
-        return None if parsed is None else [item.to_dict() for item in parsed]
-    proposed = parse_proposed_conditions(value)
-    return None if proposed is None else list(proposed)
+def _as_list(value: tuple[Any, ...] | None) -> list[Any] | None:
+    return None if value is None else list(value)
 
 
 def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
@@ -150,8 +145,8 @@ def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
         "status": status, "confidence": float(confidence), "reason": reason if isinstance(reason, str) else "",
         "action": action, "effect": effect, "text": text, "app": app, "wait_seconds": wait_seconds, "outcome": outcome,
         "state_action_consistent": state_action_consistent, "postcondition": postcondition,
-        "success_conditions": _plan_wire_value(value.get("success_conditions"), results=False),
-        "condition_results": _plan_wire_value(value.get("condition_results"), results=True),
+        "success_conditions": _as_list(parse_proposed_conditions(value.get("success_conditions"))),
+        "condition_results": _as_list(parse_condition_results(value.get("condition_results"))),
     }
 
 

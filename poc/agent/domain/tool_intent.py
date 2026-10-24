@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent.domain.canonical_action_protocol import GenericStepProposal
-from agent.domain.task_plan import ConditionResult, parse_condition_results, parse_proposed_conditions
 from agent.domain.validation import reject_if
 
 
@@ -35,13 +34,12 @@ class ToolIntent:
     trusted_observation: Any = field(default=None, repr=False, compare=False)
     # Model proposals for the Runtime plan and the Verifier; never execution authority.
     proposed_conditions: tuple[str, ...] | None = None
-    condition_results: tuple[ConditionResult, ...] | None = None
+    condition_results: tuple[dict[str, str], ...] | None = None
 
     @classmethod
-    def from_model_decision(cls, decision: Any, model_fields: Any = None) -> "ToolIntent":
+    def from_model_decision(cls, decision: Any) -> "ToolIntent":
         proposal = getattr(decision, "proposal", None)
         reject_if(proposal is None, ToolIntentError("Planner输入缺少模型观察建议。"))
-        fields = model_fields if isinstance(model_fields, dict) else {}
         return cls(
             task_id=str(decision.task_id),
             device_id=str(decision.device_id),
@@ -51,8 +49,8 @@ class ToolIntent:
             proposal=proposal,
             model_decision=decision,
             trusted_observation=getattr(decision, "trusted_observation", None),
-            proposed_conditions=parse_proposed_conditions(fields.get("success_conditions")),
-            condition_results=parse_condition_results(fields.get("condition_results")),
+            proposed_conditions=getattr(decision, "success_conditions", None),
+            condition_results=getattr(decision, "condition_results", None),
         )
 
     @property
@@ -105,9 +103,8 @@ class ToolIntent:
             "status": self.status,
             "proposal": self.proposal.to_dict(),
             "decision_source": self.decision_source,
-            "proposed_conditions": list(self.proposed_conditions) if self.proposed_conditions is not None else None,
-            "condition_results": ([item.to_dict() for item in self.condition_results]
-                if self.condition_results is not None else None),
+            "proposed_conditions": list(self.proposed_conditions or ()) or None,
+            "condition_results": None if self.condition_results is None else list(self.condition_results),
         }
 
 

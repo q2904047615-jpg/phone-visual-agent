@@ -1,8 +1,7 @@
 """Simulated Android phone behind the mock controller.
 
 It renders real 540x960 pixels (home screen, Settings, Notes, Messages, Recents)
-and reacts to grid taps, swipes, navigation, ADB Keyboard text and trusted app
-launches. Mock mode can therefore run the full platform chain (Observation ->
+and reacts to grid taps, swipes, navigation and ADB Keyboard text. Mock mode can therefore run the full platform chain (Observation ->
 Planner -> Policy -> Executor -> Observation -> Verifier) and real-model
 evaluation without hardware. It is offline evidence only, never device evidence.
 Rendering is a pure function of ``PhoneState`` so repeated captures of an
@@ -43,7 +42,7 @@ def font(size: int) -> ImageFont.ImageFont:
     return _fonts[size]
 
 
-APPS = [("设置", (90, 110, 140)), ("备忘录", (235, 170, 40)), ("消息", (50, 170, 90)), ("相册", (200, 80, 120))]
+APPS = [("设置", (90, 110, 140)), ("备忘录", (235, 170, 40)), ("消息", (50, 170, 90))]
 SETTINGS = [("WLAN", True), ("蓝牙", False), ("飞行模式", False), ("显示与亮度", None), ("声音与振动", None),
             ("通知", None), ("电池", None), ("存储", None), ("隐私", None), ("应用管理", None),
             ("深色模式", False), ("关于手机", None)]
@@ -61,7 +60,6 @@ class PhoneState:
     chat_draft: str = ""
     focused: str | None = None      # "draft" | "chat" | None
     recent_apps: list[str] = field(default_factory=list)
-    toast: str = ""
 
 
 Hit = tuple[tuple[int, int, int, int], Callable[[], None]]
@@ -94,14 +92,8 @@ class SimPhone:
                 self._notes(draw)
             elif screen == "app:消息":
                 self._messages(draw)
-            else:
-                self._title(draw, screen[4:])
-                draw.text((W // 2, 400), "暂无内容", fill=(150, 150, 150), font=font(24), anchor="mm")
             if self.state.focused:
                 self._keyboard(draw)
-            if self.state.toast:
-                draw.rounded_rectangle((120, 780, 420, 830), 20, fill=(60, 60, 60))
-                draw.text((W // 2, 805), self.state.toast, fill="white", font=font(20), anchor="mm")
             self._chrome(draw)
             return image
 
@@ -239,22 +231,12 @@ class SimPhone:
 
     def _keyboard(self, draw) -> None:
         draw.rectangle((0, KEYBOARD_TOP, W, NAV_TOP), fill=(214, 217, 222))
-        rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-        for r, keys in enumerate(rows):
-            x0 = 8 + (W - 16 - len(keys) * 52) // 2
-            for c, key in enumerate(keys):
-                x = x0 + c * 52
-                y = KEYBOARD_TOP + 20 + r * 70
-                draw.rounded_rectangle((x + 3, y, x + 49, y + 58), 6, fill="white")
-                draw.text((x + 26, y + 29), key, fill=(30, 30, 30), font=font(22), anchor="mm")
-        draw.text((W // 2, NAV_TOP - 32), "ADB Keyboard", fill=(120, 120, 120), font=font(18), anchor="mm")
+        draw.text((W // 2, (KEYBOARD_TOP + NAV_TOP) // 2), "ADB Keyboard", fill=(110, 110, 110),
+                  font=font(26), anchor="mm")
         # Taps on the keyboard area are swallowed (text goes through ADB Keyboard).
         self._hits.append(((0, KEYBOARD_TOP, W, NAV_TOP), lambda: None))
 
     # -- behaviour ----------------------------------------------------------------
-    def _set_toast(self, text: str = "") -> None:
-        self.state.toast = text
-
     def open_app(self, name: str) -> None:
         self.state.screen = f"app:{name}"
         self.state.focused = None
@@ -290,7 +272,6 @@ class SimPhone:
     def save_note(self) -> None:
         if self.state.draft.strip():
             self.state.notes.append(self.state.draft.strip())
-            self._set_toast("已保存")
         self.state.screen, self.state.draft, self.state.focused = "app:备忘录", "", None
 
     def open_chat(self, name: str) -> None:
@@ -313,7 +294,6 @@ class SimPhone:
     def tap(self, x: int, y: int) -> None:
         with self.lock:
             self.render()
-            self._set_toast()
             for (x0, y0, x1, y1), callback in reversed(self._hits):
                 if x0 <= x <= x1 and y0 <= y <= y1:
                     callback()
@@ -321,7 +301,6 @@ class SimPhone:
 
     def swipe(self, start: tuple[int, int], end: tuple[int, int]) -> None:
         with self.lock:
-            self._set_toast()
             dy = end[1] - start[1]
             if start[1] > NAV_TOP - 20 and dy < -150:
                 self.navigate("home")
@@ -344,8 +323,4 @@ class SimPhone:
                 self.state.chat_draft = ""
 
 
-# Trusted package names for the simulated launcher (local registry equivalent).
-SIMULATED_APP_PACKAGES = {name: f"com.simulated.{slug}" for name, slug in
-                          (("设置", "settings"), ("备忘录", "notes"), ("消息", "messages"), ("相册", "gallery"))}
-
-__all__ = ["APPS", "SIMULATED_APP_PACKAGES", "SimPhone", "PhoneState"]
+__all__ = ["APPS", "SimPhone", "PhoneState"]

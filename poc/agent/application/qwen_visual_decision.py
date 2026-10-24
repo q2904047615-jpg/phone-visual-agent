@@ -43,6 +43,9 @@ class QwenVisualDecision:
     previous_action_outcome: str | None = None
     protocol_version: str = QWEN_VISUAL_DECISION_PROTOCOL_VERSION
     decision_source: str = 'model_gateway'
+    # Already normalized by normalize_model_step_decision; proposals/evidence only.
+    success_conditions: tuple[str, ...] | None = None
+    condition_results: tuple[dict[str, str], ...] | None = None
 
     def validate(self, context: qwen_task_context_domain.QwenTaskContext) -> None:
         expected_scope = (context.task_id, context.device_id, context.revision,
@@ -167,8 +170,13 @@ def _action_decision(payload: Mapping[str, Any], *, context: qwen_task_context_d
     return QwenVisualDecision(task_id=context.task_id, device_id=context.device_id,
         revision=context.revision, observation_id=observation.observation_id,
         fingerprint=observation.fingerprint, trusted_observation=observation,
-        previous_action_outcome=payload.get("previous_action_outcome"),
+        previous_action_outcome=payload.get("previous_action_outcome"), **_plan_fields(payload),
         proposal=GenericStepProposal(status="action", action=action, reason=reason))
+
+
+def _plan_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: tuple(payload[key]) if payload.get(key) is not None else None
+        for key in ("success_conditions", "condition_results")}
 
 
 def _null_context():
@@ -185,7 +193,7 @@ def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_d
     return QwenVisualDecision(task_id=context.task_id, device_id=context.device_id,
         revision=context.revision, observation_id=observation.observation_id,
         fingerprint=observation.fingerprint, trusted_observation=observation,
-        previous_action_outcome=payload.get("previous_action_outcome"),
+        previous_action_outcome=payload.get("previous_action_outcome"), **_plan_fields(payload),
         proposal=GenericStepProposal(status="finish", reason=reason))
 
 

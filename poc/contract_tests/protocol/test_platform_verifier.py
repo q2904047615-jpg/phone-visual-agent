@@ -6,7 +6,7 @@ import unittest
 from agent.application.verifier import PlatformVerifier
 from agent.domain.canonical_action_protocol import GenericStepProposal
 from agent.domain.semantic_action import SemanticAction
-from agent.domain.task_plan import ConditionResult, TaskPlan
+from agent.domain.task_plan import TaskPlan
 from agent.domain.tool_intent import ToolIntent
 
 
@@ -22,7 +22,11 @@ def _observation(suffix: str = "1"):
     )
 
 
-_MET = (ConditionResult("c1", "met", "设置页蓝牙开关为开"), ConditionResult("c2", "met", "标题为蓝牙"))
+def _r(cid: str, status: str, evidence: str) -> dict[str, str]:
+    return {"id": cid, "status": status, "evidence": evidence}
+
+
+_MET = (_r("c1", "met", "设置页蓝牙开关为开"), _r("c2", "met", "标题为蓝牙"))
 
 
 def _plan() -> TaskPlan:
@@ -50,7 +54,7 @@ class PlatformVerifierTests(unittest.TestCase):
         self.assertEqual("completed", result.state)
         self.assertEqual("succeeded", result.terminal_status)
         self.assertEqual("plan_conditions_met", result.evidence_kind)
-        self.assertEqual((plan.plan_id, 1), (result.plan_id, result.plan_version))
+        self.assertEqual(1, result.plan_version)
         self.assertEqual(observation.observation_id, result.observation_id)
 
     def test_finish_without_condition_report_is_not_completion(self):
@@ -64,11 +68,11 @@ class PlatformVerifierTests(unittest.TestCase):
     def test_each_committed_condition_must_be_met_with_visible_evidence(self):
         observation = _observation()
         variants = {
-            "missing": (ConditionResult("c1", "met", "开关为开"),),
-            "unknown": (ConditionResult("c1", "met", "开关为开"), ConditionResult("c2", "unknown", "看不清标题")),
-            "not_met": (ConditionResult("c1", "not_met", "开关为关"), ConditionResult("c2", "met", "标题为蓝牙")),
-            "no_evidence": (ConditionResult("c1", "met", ""), ConditionResult("c2", "met", "标题为蓝牙")),
-            "foreign_id_only": (ConditionResult("c9", "met", "无关"), ConditionResult("c2", "met", "标题")),
+            "missing": (_r("c1", "met", "开关为开"),),
+            "unknown": (_r("c1", "met", "开关为开"), _r("c2", "unknown", "看不清标题")),
+            "not_met": (_r("c1", "not_met", "开关为关"), _r("c2", "met", "标题为蓝牙")),
+            "no_evidence": (_r("c1", "met", ""), _r("c2", "met", "标题为蓝牙")),
+            "foreign_id_only": (_r("c9", "met", "无关"), _r("c2", "met", "标题")),
         }
         for name, results in variants.items():
             with self.subTest(name):

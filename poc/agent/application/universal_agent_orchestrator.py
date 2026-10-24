@@ -44,8 +44,7 @@ from agent.domain.qwen_task_context import (
     QwenTaskContext, action_effect_kind, execution_history_entry,
 )
 from agent.domain.session import TERMINAL_SESSION_STATUSES
-from agent.domain.task_plan import ExecutionPermit, TaskPlan, TaskPlanError
-from agent.domain.validation import canonical_digest
+from agent.domain.task_plan import TaskPlan
 
 
 def _model_history(session: UniversalAgentSessionState) -> list[dict[str, Any]]:
@@ -141,13 +140,9 @@ class UniversalAgentOrchestrator:
         if session.confirmation_authority is not None:
             session.confirmation_authority.consumed = True
             session.confirmation_authority.invalid_reason = 'reobserve'
-        if session.execution_permit is not None and not session.execution_permit.consumed:
-            session.execution_permit.consumed = True
-            session.execution_permit.invalid_reason = 'reobserve'
         session.qwen_decision = None
         session.tool_intent = None
         session.confirmation_authority = None
-        session.execution_permit = None
 
     @staticmethod
     def _record_qwen_reply(session: UniversalAgentSessionState, model_decision: Mapping[str, Any]) -> dict[str, Any]:
@@ -429,17 +424,9 @@ class UniversalAgentOrchestrator:
             task_id=scope['task_id'], device_id=scope['device_id'], revision=scope['revision'],
             step_id=scope['step_id'], effect_ids=tuple(scope['effect_ids']),
             observation_id=scope['observation_id'], fingerprint=scope['fingerprint'],
-            decision_node_id=scope['decision_node_id'], action_digest=scope['action_digest'])
-        policy = session.last_policy_decision
-        reject_if(session.task_plan is None or policy is None,
-            UniversalAgentOrchestratorError('签发执行许可前缺少已提交计划或Policy结论。'))
-        session.execution_permit = ExecutionPermit.issue(task_id=session.session_id, device_id=session.device_id,
-            lease_epoch=session.lease_epoch, revision=session.step_number, plan=session.task_plan,
-            observation_id=scope['observation_id'], fingerprint=scope['fingerprint'],
-            intent_digest=canonical_digest(session.tool_intent.to_dict()), action_digest=scope['action_digest'],
-            policy_version=policy.policy_version, policy_status=policy.status, effect_ids=scope['effect_ids'])
-        self._remember(session, session.evidence_store.write_json(
-            f'execution_permit_step_{session.step_number}.json', session.execution_permit.to_dict()))
+            decision_node_id=scope['decision_node_id'], action_digest=scope['action_digest'],
+            plan_id=session.task_plan.plan_id, plan_version=session.task_plan.version,
+            lease_epoch=session.lease_epoch, policy_status=session.last_policy_decision.status)
 
     @staticmethod
     def _normalize_scope(value: Mapping[str, Any], *, required: set[str], digest_key: str,
@@ -474,16 +461,16 @@ class UniversalAgentOrchestrator:
             authority.invalid_reason = 'scope_mismatch'
             raise UniversalAgentOrchestratorError('动作scope与当前截图或canonical动作不一致。')
         authority.consumed = True
+        problems = authority.permit_problems(plan=session.task_plan, lease_epoch=session.lease_epoch,
+            confirmed_effect_ids=session.confirmed_effect_ids)
+        if problems:
+            # Nothing was dispatched: drop the stale intent and reobserve instead of failing the task.
+            message = '执行许可无效：' + '；'.join(problems) + '。'
+            authority.invalid_reason = message
+            self._clear_action(session)
+            self._set_status(session, 'needs_reobservation', message)
+            raise UniversalAgentOrchestratorError(message)
         authority.invalid_reason = 'consumed_before_execution'
-        permit = session.execution_permit
-        reject_if(permit is None, UniversalAgentOrchestratorError('当前动作没有Runtime签发的执行许可。'))
-        try:
-            permit.consume(task_id=session.session_id, device_id=session.device_id, lease_epoch=session.lease_epoch,
-                revision=session.step_number, plan=session.task_plan, observation_id=current['observation_id'],
-                fingerprint=current['fingerprint'], intent_digest=canonical_digest(session.tool_intent.to_dict()),
-                action_digest=current['action_digest'], confirmed_effect_ids=session.confirmed_effect_ids)
-        except TaskPlanError as exc:
-            raise UniversalAgentOrchestratorError(str(exc)) from exc
         return authority
 
     def _commit_plan(self, session: UniversalAgentSessionState, decision: Any) -> None:
@@ -492,8 +479,7 @@ class UniversalAgentOrchestrator:
         current = session.task_plan
         proposed = getattr(decision, 'proposed_conditions', None)
         if current is not None:
-            descriptions = tuple(item.description for item in current.success_conditions)
-            if not (proposed and user_messages > session.task_plan_user_messages and tuple(proposed) != descriptions):
+            if not (proposed and user_messages > session.task_plan_user_messages and proposed != current.conditions):
                 return
         session.task_plan = TaskPlan.commit(task_id=session.session_id, device_id=session.device_id,
             goal=session.raw_goal, revision=session.step_number, proposed_conditions=proposed, previous=current)

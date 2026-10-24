@@ -1,4 +1,4 @@
-"""Runtime plan commit, Verifier plan conditions and one-shot execution permits."""
+"""Runtime plan commit, Verifier plan conditions and execution-permit bindings."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import json
 import unittest
 from pathlib import Path
 
-from agent.domain.task_plan import (
-    ExecutionPermit, GOAL_FALLBACK_SOURCE, MODEL_PROPOSAL_SOURCE, TaskPlan, TaskPlanError,
-)
+from agent.domain.task_plan import GOAL_FALLBACK_SOURCE, MODEL_PROPOSAL_SOURCE, TaskPlan
 from test_single_visual_loop import LoopHarness, decision, scene
 
 
@@ -32,7 +30,7 @@ class RuntimePlanCommitTests(LoopHarness):
         plan = session.task_plan
         self.assertEqual((1, MODEL_PROPOSAL_SOURCE), (plan.version, plan.source))
         self.assertEqual(('c1', 'c2'), plan.condition_ids)
-        self.assertEqual(CONDITIONS, tuple(item.description for item in plan.success_conditions))
+        self.assertEqual(CONDITIONS, plan.conditions)
         self.assertEqual(plan.to_dict(), session.snapshot()['task_plan'])
         evidence = json.loads(Path(session.run_dir, 'task_plan_v1.json').read_text(encoding='utf-8'))
         self.assertEqual(plan.plan_id, evidence['plan_id'])
@@ -46,7 +44,7 @@ class RuntimePlanCommitTests(LoopHarness):
         loop, session, _ = self.start([(scene(0), decision('home')), (scene(1), decision())], goal='回到桌面')
         self.assertEqual(GOAL_FALLBACK_SOURCE, session.task_plan.source)
         self.assertEqual(('c1',), session.task_plan.condition_ids)
-        self.assertIn('回到桌面', session.task_plan.success_conditions[0].description)
+        self.assertIn('回到桌面', session.task_plan.conditions[0])
         loop.run_autonomous_safe_loop(session)
         self.assertEqual('succeeded', session.status)
 
@@ -56,7 +54,7 @@ class RuntimePlanCommitTests(LoopHarness):
         loop, session, _ = self.start(rows, goal='打开蓝牙')
         loop.run_autonomous_safe_loop(session)
         self.assertEqual(1, session.task_plan.version)
-        self.assertEqual(CONDITIONS, tuple(item.description for item in session.task_plan.success_conditions))
+        self.assertEqual(CONDITIONS, session.task_plan.conditions)
 
     def test_user_message_allows_one_revised_plan_version(self):
         revised = ('当前页面是WLAN设置', 'WLAN开关显示为开启')
@@ -70,7 +68,7 @@ class RuntimePlanCommitTests(LoopHarness):
         loop.run_autonomous_safe_loop(session)
         self.assertEqual('succeeded', session.status)
         self.assertEqual((first_id, 2), (session.task_plan.plan_id, session.task_plan.version))
-        self.assertEqual(revised, tuple(item.description for item in session.task_plan.success_conditions))
+        self.assertEqual(revised, session.task_plan.conditions)
 
 
 class VerifierPlanConditionTests(LoopHarness):
@@ -102,60 +100,46 @@ class VerifierPlanConditionTests(LoopHarness):
 
 
 class ExecutionPermitTests(LoopHarness):
-    def test_permit_is_issued_with_policy_and_consumed_exactly_once(self):
+    def test_authority_carries_plan_lease_and_policy_and_is_consumed_once(self):
         loop, session, adapter = self.start([(scene(0), decision('home')), (scene(1), decision())])
-        permit = session.execution_permit
-        self.assertEqual((session.task_plan.plan_id, 1), (permit.plan_id, permit.plan_version))
-        self.assertEqual('auto_execute', permit.policy_status)
-        self.assertEqual(session.confirmation_authority.action_digest, permit.action_digest)
-        self.assertTrue(Path(session.run_dir, 'execution_permit_step_1.json').is_file())
-        loop.confirm_one(session, session.confirmation_authority.scope())
-        self.assertTrue(permit.consumed)
+        authority = session.confirmation_authority
+        self.assertEqual((session.task_plan.plan_id, 1, 'auto_execute'),
+            (authority.plan_id, authority.plan_version, authority.policy_status))
+        self.assertNotIn('plan_id', authority.scope())  # client scope wire unchanged
+        loop.confirm_one(session, authority.scope())
+        self.assertTrue(authority.consumed)
         self.assertEqual(1, len(adapter.calls))
 
-    def test_plan_change_after_issue_invalidates_permit_without_dispatch(self):
-        loop, session, adapter = self.start([(scene(0), decision('home')), (scene(1), decision())])
-        session.task_plan = TaskPlan.commit(task_id=session.session_id, device_id=session.device_id,
-            goal='另一个目标', revision=1, proposed_conditions=('别的条件',), previous=session.task_plan)
-        with self.assertRaisesRegex(Exception, '计划版本已变化'):
-            loop.confirm_one(session, session.confirmation_authority.scope())
-        self.assertEqual([], adapter.calls)
-        self.assertEqual(0, session.physical_actions)
+    def test_changed_plan_or_lease_dispatches_nothing_and_reobserves(self):
+        for name in ('plan', 'lease'):
+            with self.subTest(name):
+                loop, session, adapter = self.start([(scene(0), decision('home')), (scene(1), decision())])
+                scope = session.confirmation_authority.scope()
+                if name == 'plan':
+                    session.task_plan = TaskPlan.commit(task_id=session.session_id, device_id=session.device_id,
+                        goal='另一个目标', revision=1, proposed_conditions=('别的条件',), previous=session.task_plan)
+                else:
+                    session.lease_epoch += 1
+                with self.assertRaisesRegex(Exception, '执行许可无效'):
+                    loop.confirm_one(session, scope)
+                self.assertEqual([], adapter.calls)
+                self.assertEqual(0, session.physical_actions)
+                self.assertEqual('needs_reobservation', session.status)
+                self.assertIsNone(session.confirmation_authority)
+                session.lease_epoch = 0
+                loop.device_registry.release('device-1', 'session-1')
 
-    def test_lease_change_after_issue_invalidates_permit_without_dispatch(self):
-        loop, session, adapter = self.start([(scene(0), decision('home')), (scene(1), decision())])
-        session.execution_permit.lease_epoch += 1
-        with self.assertRaisesRegex(Exception, '租约'):
-            loop.confirm_one(session, session.confirmation_authority.scope())
-        self.assertEqual([], adapter.calls)
-
-    def test_reobservation_revokes_the_unused_permit(self):
-        loop, session, _ = self.start([(scene(0), decision('home')), (scene(1), decision())])
-        permit = session.execution_permit
-        loop._clear_action(session)
-        self.assertTrue(permit.consumed)
-        self.assertEqual('reobserve', permit.invalid_reason)
-        self.assertIsNone(session.execution_permit)
-
-    def test_authentication_permit_needs_the_user_effect_confirmation(self):
+    def test_authentication_needs_the_user_effect_confirmation(self):
         loop, session, adapter = self.start([(scene(0), decision('tap_semantic', meaning='authentication')),
             (scene(1), decision())], goal='登录账号')
-        self.assertEqual('requires_user_confirmation', session.execution_permit.policy_status)
-        with self.assertRaises(TaskPlanError):
-            ExecutionPermit.consume(session.execution_permit, task_id=session.session_id,
-                device_id=session.device_id, lease_epoch=session.lease_epoch, revision=session.step_number,
-                plan=session.task_plan, observation_id=session.execution_permit.observation_id,
-                fingerprint=session.execution_permit.fingerprint,
-                intent_digest=session.execution_permit.intent_digest,
-                action_digest=session.execution_permit.action_digest, confirmed_effect_ids=())
+        authority = session.confirmation_authority
+        self.assertEqual('requires_user_confirmation', authority.policy_status)
+        problems = authority.permit_problems(plan=session.task_plan, lease_epoch=session.lease_epoch,
+            confirmed_effect_ids=())
+        self.assertEqual(['登录/付款尚未获得用户确认'], problems)
+        self.assertEqual([], authority.permit_problems(plan=session.task_plan, lease_epoch=session.lease_epoch,
+            confirmed_effect_ids=('authentication',)))
         self.assertEqual([], adapter.calls)
-
-    def test_terminal_candidates_never_receive_a_permit(self):
-        with self.assertRaises(TaskPlanError):
-            plan = TaskPlan.commit(task_id='t', device_id='d', goal='g', revision=1, proposed_conditions=None)
-            ExecutionPermit.issue(task_id='t', device_id='d', lease_epoch=0, revision=1, plan=plan,
-                observation_id='o', fingerprint='f', intent_digest='i', action_digest='a',
-                policy_version='p', policy_status='terminal_candidate', effect_ids=())
 
 
 if __name__ == '__main__':

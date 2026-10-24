@@ -7,11 +7,10 @@ from unittest.mock import patch
 from PIL import Image
 
 from agent.domain.text_transport import TextTransportReplayError, text_digest, EMPTY_TEXT_DIGEST
-from agent.infrastructure.adb_package_launcher import AdbPackageLauncherError
 from agent.infrastructure.observation_images import local_frame_fingerprint
 from agent.infrastructure.orientation_safety import _mint_single_step_scene_credential
 from agent.infrastructure.robot_controller import MockRobotController
-from agent.infrastructure.simulated_device_tools import SimulatedAppLauncher, SimulatedTextTransport
+from agent.infrastructure.simulated_text_transport import SimulatedTextTransport
 from agent.infrastructure.simulated_phone import SimPhone
 
 
@@ -101,41 +100,33 @@ class SimulatedToolTests(unittest.TestCase):
         cleared = transport.clear_text(_scope(transport, action_id="a2", fragment="", expected="", prior="买牛奶🥛"))
         self.assertTrue(cleared.accepted)
         self.assertEqual("", phone.state.draft)
-        broadcasts = [cmd for cmd in transport.simulated_adb.commands if "broadcast" in cmd]
-        self.assertEqual(["ADB_INPUT_B64", "ADB_CLEAR_TEXT"], [cmd[4] for cmd in broadcasts])
+        self.assertEqual(["ADB_INPUT_B64", "ADB_CLEAR_TEXT"], transport.broadcasts)
 
-    def test_launcher_only_accepts_registered_targets(self) -> None:
-        phone = SimPhone()
-        launcher = SimulatedAppLauncher(phone)
-        target = launcher.resolve("", "备忘录")
-        self.assertIsNotNone(target)
-        launcher.launch(target.launch_ref)
-        self.assertEqual("app:备忘录", phone.state.screen)
-        self.assertIsNone(launcher.resolve("", "微信"))
-        with self.assertRaises(AdbPackageLauncherError):
-            launcher.launch("com.tencent.mm")
+    def test_only_the_two_fixed_broadcasts_are_interpreted(self) -> None:
+        transport = SimulatedTextTransport(SimPhone(), "device-local-01")
+        result = transport._broadcast_runner(["adb", "-s", "x", "shell", "input", "tap", "1", "1"])
+        self.assertEqual(1, result.returncode)
+        self.assertEqual([], transport.broadcasts)
 
 
 class RuntimeSimulatedToolGatingTests(unittest.TestCase):
-    def test_simulated_tools_are_opt_in_and_bound_per_device(self) -> None:
+    def test_simulated_text_is_opt_in_and_bound_per_device(self) -> None:
         import web_app
 
         runtime = web_app.runtime
         controller = MockRobotController(device_id="device-local-01")
         with patch.object(runtime, "controller_for_device", return_value=controller), \
-             patch.object(runtime, "_simulated_tools", {}), \
+             patch.object(runtime, "_simulated_text", {}), \
              patch.object(runtime.adb_keyboard_runtime, "transport_for_device", return_value=None):
             with patch.object(runtime, "simulated_phone_tools", False):
                 self.assertIsNone(runtime.text_transport_for_device("device-local-01"))
             with patch.object(runtime, "simulated_phone_tools", True):
                 text = runtime.text_transport_for_device("device-local-01")
                 other = runtime.text_transport_for_device("device-local-02")
-                launcher = runtime.app_launcher_for_device("device-local-01")
                 self.assertIsInstance(text, SimulatedTextTransport)
+                self.assertIs(text.phone, controller.phone)
                 self.assertEqual("device-local-02", other.profile.device_id)
                 self.assertIs(text, runtime.text_transport_for_device("device-local-01"))
-                self.assertIsInstance(launcher, SimulatedAppLauncher)
-                self.assertIs(launcher.phone, controller.phone)
 
 
 if __name__ == "__main__":

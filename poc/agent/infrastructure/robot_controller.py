@@ -564,31 +564,47 @@ class MockRobotController(RobotController):
         self.executions.append({'action': action, **payload})
         if click_count:
             self._record_mock_click_receipt(click_count)
+        self._apply_to_phone(authority, action, payload)
         return result
+
+    # Seller preset swipes move the finger in the named direction (0..1000 grid).
+    _PRESET_SWIPES = {'up': ((500, 750), (500, 300)), 'down': ((500, 300), (500, 750)),
+        'left': ((800, 500), (200, 500)), 'right': ((200, 500), (800, 500))}
+    _NAVIGATION = {'home': 'home', 'back': 'back', 'open_recent_apps': 'recents'}
+
+    def _apply_to_phone(self, authority: str, action: str, payload: dict[str, Any]) -> None:
+        """Show the already-authorized primitive on the simulated phone."""
+        phone, grid = self.phone, self.phone.grid_to_pixel
+        if 'coordinate' in payload:
+            phone.tap(*grid(*payload['coordinate']))
+        elif 'start' in payload:
+            phone.swipe(grid(*payload['start']), grid(*payload['end']))
+        elif authority in self._NAVIGATION:
+            with phone.lock:
+                phone.navigate(self._NAVIGATION[authority])
+        elif action.startswith('swipe_'):
+            start, end = self._PRESET_SWIPES[action[6:]]
+            phone.swipe(grid(*start), grid(*end))
 
     def _verified_click(self, x: int, y: int, *, action: str, label: str,
         click_count: int=1) -> tuple[int, int]:
         del label
         recorded = {'tap_semantic': 'tap', 'dismiss_overlay': 'dismiss_overlay',
             'double_tap': 'double_tap'}[action]
-        result = self._mock(action, recorded, result=(x, y), click_count=click_count, coordinate=[x, y])
-        self.phone.tap(*self.phone.grid_to_pixel(x, y))
-        return result
+        return self._mock(action, recorded, result=(x, y), click_count=click_count, coordinate=[x, y])
 
     def vision_long_press_relative(self, x: int, y: int, hold_seconds: float=0.8) -> tuple[int, int]:
         self._consume_mock_execution("long_press")
         self.executions.append({'action': 'long_press', 'coordinate': [x, y], 'hold_seconds': hold_seconds})
-        self.phone.tap(*self.phone.grid_to_pixel(x, y))
+        self._apply_to_phone('long_press', 'long_press', {'coordinate': [x, y]})
         self._last_long_press_receipt = {'version': '2026-08-25-mock-long-press-barrier-v1',
             'input_events_dispatched': True, 'mechanical_contact_ack': False}
         return x, y
 
     def vision_drag_relative(self, start_x: int, start_y: int, end_x: int, end_y: int) -> tuple[tuple[int, int],
         tuple[int, int]]:
-        result = self._mock('drag', 'drag', result=((start_x, start_y), (end_x, end_y)), start=[start_x, start_y],
+        return self._mock('drag', 'drag', result=((start_x, start_y), (end_x, end_y)), start=[start_x, start_y],
             end=[end_x, end_y])
-        self.phone.swipe(self.phone.grid_to_pixel(start_x, start_y), self.phone.grid_to_pixel(end_x, end_y))
-        return result
 
     def vision_swipe_relative(self, start_x: int, start_y: int, end_x: int, end_y: int,
         direction: str) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -601,7 +617,6 @@ class MockRobotController(RobotController):
             'touch_down_seconds': 0.35, 'movement_seconds': 0.3, 'step_count': 6,
             'client_start': [start_x, start_y], 'client_end': [end_x, end_y],
             'mechanical_contact_ack': False, 'requested_direction': direction}
-        self.phone.swipe(self.phone.grid_to_pixel(start_x, start_y), self.phone.grid_to_pixel(end_x, end_y))
         return result
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
@@ -617,14 +632,7 @@ class MockRobotController(RobotController):
         del config_prefix, label
         recorded, point = {'home': ('android_home', (500, 976)), 'back': ('android_back', (910, 976)),
             'open_recent_apps': ('android_recent_apps', (315, 976))}[action]
-        result = self._mock(action, recorded, result=point, click_count=1)
-        with self.phone.lock:
-            self.phone.navigate({'open_recent_apps': 'recents'}.get(action, action))
-        return result
+        return self._mock(action, recorded, result=point, click_count=1)
 
     def _vision_swipe(self, direction: str) -> None:
         self._mock('swipe', f'swipe_{direction}')
-        # Seller preset swipes: the finger moves in the named direction.
-        start, end = {'up': ((500, 750), (500, 300)), 'down': ((500, 300), (500, 750)),
-            'left': ((800, 500), (200, 500)), 'right': ((200, 500), (800, 500))}[direction]
-        self.phone.swipe(self.phone.grid_to_pixel(*start), self.phone.grid_to_pixel(*end))

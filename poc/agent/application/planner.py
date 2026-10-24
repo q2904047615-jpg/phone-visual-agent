@@ -59,7 +59,7 @@ class ModelAssistedPlanner:
             text_transport_profile=text_transport_profile,
             decision_source=decision_source,
         )
-        intent = ToolIntent.from_model_decision(gateway_decision, model_fields=dict(model_decision))
+        intent = ToolIntent.from_model_decision(gateway_decision)
         intent.validate(trusted_observation)
         return intent
 

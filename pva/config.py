@@ -47,6 +47,7 @@ DEFAULT_AGENT: dict[str, Any] = {
     "current_image_max": [1080, 1920],
     "model_timeout_seconds": 180,
     "max_consecutive_model_errors": 3,
+    "approval_timeout_seconds": 60,
     "enable_thinking": False,
 }
 

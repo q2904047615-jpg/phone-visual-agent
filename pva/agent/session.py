@@ -45,6 +45,7 @@ class TaskOptions:
     thumbnail: tuple[int, int] = (360, 640)
     current_max: tuple[int, int] = (1080, 1920)
     max_consecutive_model_errors: int = 3
+    approval_timeout_seconds: float = 60.0  # an older approval re-observes instead of executing
 
 
 @dataclass
@@ -93,6 +94,7 @@ class Session:
         self.tokens = 0
         self.pending: Action | None = None
         self._pending_frame_size: tuple[int, int] | None = None
+        self._pending_at = 0.0
         self._shots: list[tuple[str, str]] = []      # (file name, label) for every saved screenshot
         self._lock = threading.RLock()
         self._wake = threading.Event()
@@ -228,7 +230,13 @@ class Session:
         try:
             if self._approved and self.pending is not None:
                 self._approved = False
-                if not self._execute_pending():
+                if time.monotonic() - self._pending_at > self.options.approval_timeout_seconds:
+                    # The screen may have changed while waiting; decide again on a new screenshot.
+                    with self._lock:
+                        self.steps[-1].status = "rejected"
+                        self._history_result(self.steps[-1], "未执行（确认超时，画面可能已变化，重新截图判断）")
+                        self.pending = None
+                elif not self._execute_pending():
                     return
             while not self._stop.is_set():
                 if not self._iteration():
@@ -276,6 +284,7 @@ class Session:
                 return False
             self.pending = action
             self._pending_frame_size = frame.size
+            self._pending_at = time.monotonic()
             if risk in {"authentication", "payment"}:
                 step.status = "proposed"
                 label = "登录/身份认证" if risk == "authentication" else "付款/资金交易"

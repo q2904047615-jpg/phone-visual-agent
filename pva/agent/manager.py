@@ -39,6 +39,7 @@ class TaskManager:
             settle_seconds=float(agent["settle_seconds"]),
             thumbnail=tuple(agent["history_thumbnail"]), current_max=tuple(agent["current_image_max"]),
             max_consecutive_model_errors=int(agent["max_consecutive_model_errors"]),
+            approval_timeout_seconds=float(agent["approval_timeout_seconds"]),
         )
         if options.max_actions < 1 or options.max_observations < 1:
             raise ValueError("动作和观察上限必须大于 0。")

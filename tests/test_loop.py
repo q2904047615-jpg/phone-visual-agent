@@ -76,6 +76,37 @@ def test_payment_requires_confirmation(mock_config, tmp_path):
     assert session.actions_used == 1
 
 
+def test_stale_approval_reobserves_instead_of_executing(mock_config, tmp_path):
+    replies = [step({"type": "tap", "point": [500, 500]}, risk="payment"),
+               step({"type": "finish", "message": "done"})]
+    tasks, _, model = manager(mock_config, tmp_path, replies)
+    session = tasks.start(device_id="sim", task="付款")
+    assert wait_for(session, {"needs_confirmation"}) == "needs_confirmation"
+    session._pending_at -= 61    # the user approves after the 60 s default
+    session.approve()
+    assert wait_for(session, {"succeeded"}) == "succeeded"
+    assert session.actions_used == 0
+    assert session.observations_used == 2
+    assert session.steps[0].status == "rejected"
+    assert "确认超时" in session.steps[0].result_text
+    # The model is told the action was not executed before it decides again.
+    assert "确认超时" in model.requests[-1][1]["content"][0]["text"]
+
+
+def test_stale_step_mode_approval_reobserves(mock_config, tmp_path):
+    replies = [step({"type": "home"}), step({"type": "back"}), step({"type": "finish"})]
+    tasks, _, _ = manager(mock_config, tmp_path, replies)
+    session = tasks.start(device_id="sim", task="回桌面", mode="step")
+    wait_for(session, {"awaiting_approval"})
+    session._pending_at -= 61    # the user approves after the 60 s default
+    session.approve()
+    wait_for(session, {"awaiting_approval"})
+    assert session.actions_used == 0 and session.pending.type == "back"
+    session.approve()            # a prompt approval still executes
+    assert wait_for(session, {"succeeded"}) == "succeeded"
+    assert session.actions_used == 1
+
+
 def test_step_mode_and_reject(mock_config, tmp_path):
     replies = [step({"type": "home"}), step({"type": "back"}), step({"type": "finish"})]
     tasks, devices, _ = manager(mock_config, tmp_path, replies)

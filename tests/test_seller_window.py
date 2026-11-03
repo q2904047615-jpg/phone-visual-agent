@@ -260,5 +260,84 @@ class SellerDpiScalingTests(unittest.TestCase):
             seller.cursor_parking_screen_point((0, 0, 10, 10), (0, 0, 0, 0))
 
 
+class _FakeWindowsUser32:
+    """Top-level windows as (hwnd, title, owner)."""
+
+    def __init__(self, windows):
+        self.windows = windows
+
+    def EnumWindows(self, callback, _lparam):
+        for hwnd, _title, _owner in self.windows:
+            callback(hwnd, 0)
+        return 1
+
+    def IsWindowVisible(self, _hwnd):
+        return 1
+
+    def _get(self, hwnd):
+        return next(w for w in self.windows if w[0] == hwnd)
+
+    def GetWindowTextLengthW(self, hwnd):
+        return len(self._get(hwnd)[1])
+
+    def GetWindowTextW(self, hwnd, buffer, _size):
+        buffer.value = self._get(hwnd)[1]
+        return len(buffer.value)
+
+    def GetWindow(self, hwnd, command):
+        assert command == seller.GW_OWNER
+        return self._get(hwnd)[2]
+
+    def __getattr__(self, name):
+        raise AssertionError(f"unexpected Win32 call {name}")   # e.g. any keyboard input
+
+
+class _FakeValueField:
+    def __init__(self, value, accepts=True):
+        self.CurrentValue = value
+        self.accepts = accepts
+        self.writes = []
+
+    def SetValue(self, value):
+        self.writes.append(value)
+        if self.accepts:
+            self.CurrentValue = value
+
+
+class SellerControllerWindowTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(seller, "IS_WINDOWS", True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.windows = _FakeWindowsUser32([(7, "智联新途AI机械臂控制端", 5), (5, "智联新途AI机械臂控制端v1.0.1018", 0),
+                                           (9, "记事本", 0)])
+        user32_patch = patch.object(seller, "user32", self.windows)
+        user32_patch.start()
+        self.addCleanup(user32_patch.stop)
+
+    def test_find_window_skips_the_controllers_message_boxes(self) -> None:
+        # The message box comes first in z-order and shares the title prefix.
+        self.assertEqual(seller.find_window("智联新途"), (5, "智联新途AI机械臂控制端v1.0.1018"))
+        self.assertEqual(seller.seller_popups(5), [7])
+
+    def test_click_count_is_written_without_keystrokes_and_read_back(self) -> None:
+        field = _FakeValueField("1 ")   # a stray space typed into the field
+        with patch.object(seller, "_click_count_field", return_value=field), patch.object(seller.time, "sleep"):
+            seller.configure_single_click_count(5)
+            self.assertEqual((field.CurrentValue, field.writes), ("1", ["1"]))
+            seller.configure_single_click_count(5)   # already right: read only
+            self.assertEqual(field.writes, ["1"])
+
+    def test_click_count_fails_when_the_field_does_not_take_the_value(self) -> None:
+        field = _FakeValueField("1 ", accepts=False)
+        with patch.object(seller, "_click_count_field", return_value=field), patch.object(seller.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "没能设为 2（现在是“1 ”）"):
+                seller.configure_click_count(5, 2)
+
+    def test_no_keyboard_helpers_remain(self) -> None:
+        for name in ("press_virtual_key", "type_unicode_text", "configure_swipe", "trigger_selected_action"):
+            self.assertFalse(hasattr(seller, name), name)
+
+
 if __name__ == "__main__":
     unittest.main()

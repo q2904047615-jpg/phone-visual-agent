@@ -49,7 +49,8 @@ legacy/                旧版代码与文档（只读）
 - 共用一个卖家窗口的多个机位共用一个 `hardware_key`：同一时间只有一个任务/插件持有（`reserve`），每个物理操作都在该控制端的锁内（`hardware`）。不同控制端、模拟手机之间可以并行。
 - 真机的 `reserve` 同时持有跨进程设备锁（`pva/devices/lease.py`，文件名和格式与 `legacy/poc` 及平台连接器一致），三者不会同时操作同一台设备；模拟手机不加锁。
 - 每次截图先经 `Device.check_frame` 自检（真机见 `pva/devices/frame_check.py`）：有问题就暂停任务并保存 `frame_check_*.jpg`，不调用模型。
-- 任务开始时 `prepare()`：切换到该设备的机位、把卖家“连点次数”设为 1。
+- 任务开始时 `prepare()`：切换到该设备的机位、把卖家“连点次数”设为 1。连点次数用 UI Automation 写入并回读（`seller_window.configure_click_count`），每次单击前再核对一次；整个驱动不发送任何键盘输入。
+- 每个动作前后、每次截图前检查卖家控制端是否弹出提示框（`seller_popup_text`）；有就停止任务并报告提示原文。`find_window` 跳过这些属于控制端的提示框。
 
 ## 与旧版的差异
 

@@ -22,6 +22,7 @@ from pva.config import DeviceConfig
 from pva.devices import seller_window as seller
 from pva.devices.base import Device, DeviceError, StopRequested, grid_to_pixel
 from pva.devices.calibration import Calibration, CalibrationError
+from pva.devices.frame_check import check_frame
 from pva.util import jpeg_bytes
 
 # Which machine position each vendor window currently shows.
@@ -75,6 +76,9 @@ class RobotDevice(Device):
                 return seller.camera_crop(seller.capture_client(hwnd), seller.DEFAULT_CAMERA_HEIGHT)
         except (OSError, RuntimeError, ValueError) as exc:
             raise DeviceError(f"相机取图失败：{exc}") from exc
+
+    def check_frame(self, frame: Image.Image) -> str | None:
+        return check_frame(frame, self.config.screen_region)
 
     def preview(self) -> bytes:
         hwnd = self._window()
@@ -183,13 +187,12 @@ class RobotDevice(Device):
         return self._run("拖动", operation)
 
     def navigate(self, key, frame_size):
+        """Press the phone's own nav key where it appears in the camera frame (same calibration as taps)."""
         x_ratio, y_ratio = self.controller["nav"][key]
         if frame_size[0] > frame_size[1]:
             # Landscape camera image: portrait (x, y) maps to (y, 1 - x).
             x_ratio, y_ratio = y_ratio, 1.0 - x_ratio
-        width, height = frame_size
-        x = min(width - 1, max(0, round(width * x_ratio)))
-        y = min(height - 1, max(0, round(height * y_ratio)))
+        x, y = self._client_point((round(x_ratio * 1000), round(y_ratio * 1000)), frame_size)
         hold = float(self.controller["tap_hold_seconds"])
         return self._run("导航键", lambda hwnd: {"client": [x, y], "key": key, **(
             seller.click_client_point(hwnd, x, y, 0, hold, return_dispatch_receipt=True) or {})})

@@ -310,6 +310,13 @@ class Session:
             with self._lock:
                 self._finish("failed", f"截图尺寸异常：{frame.size}")
             return None
+        problem = self.device.check_frame(frame)
+        if problem:
+            # Never ask the model to act on a frame the device itself flags as wrong.
+            with self._lock:
+                frame.save(self.run_dir / f"frame_check_{len(self.steps) + 1:03d}.jpg", quality=90)
+                self._set("paused", f"{problem}；请检查后继续，继续时会重新截图判断。")
+            return None
         return frame
 
     def _new_step(self, frame: Image.Image) -> Step:

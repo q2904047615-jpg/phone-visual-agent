@@ -91,6 +91,7 @@ def test_affine_inverse_roundtrip():
 # -- robot device coordinate mapping (Win32 calls patched) -----------------------------
 def test_robot_tap_maps_grid_to_client_pixels(tmp_path):
     from pva.config import DEFAULT_CONTROLLER
+    from pva.devices.base import grid_to_pixel
     from pva.devices.robot import RobotDevice
 
     device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
@@ -103,7 +104,7 @@ def test_robot_tap_maps_grid_to_client_pixels(tmp_path):
         receipt = device.tap((500, 1000), (540, 960))
         device.navigate("back", (540, 960))
     assert calls[0] == (270, 959)
-    assert calls[1] == (round(540 * 0.685), round(960 * 0.976))
+    assert calls[1] == grid_to_pixel((685, 976), (540, 960))   # nav keys use the tap grid mapping
     assert receipt["channel"] == "robot"
 
 
@@ -121,3 +122,145 @@ def test_robot_double_tap_restores_click_count():
          patch("pva.devices.seller_window._check_escape"):
         device.double_tap((10, 10), (540, 960))
     assert events == [("count", 2), "click", ("count", 1)]
+
+
+def test_robot_nav_keys_use_touch_calibration():
+    from types import SimpleNamespace
+
+    from pva.config import DEFAULT_CONTROLLER
+    from pva.devices.base import grid_to_pixel
+    from pva.devices.robot import RobotDevice
+
+    device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
+    device.calibration = SimpleNamespace(correct=lambda x, y, frame_size: (x + 20, y - 30))
+    calls = []
+    with patch("pva.devices.seller_window.find_window", return_value=(1, "智联新途")), \
+         patch("pva.devices.seller_window.click_client_point",
+               side_effect=lambda hwnd, x, y, *a, **k: calls.append((x, y)) or {}), \
+         patch("pva.devices.seller_window.clear_seller_camera_overlay"), \
+         patch("pva.devices.seller_window._check_escape"):
+        device.navigate("back", (540, 960))
+        device.tap((685, 976), (540, 960))
+    # The back key is corrected exactly like a tap on the same camera grid point.
+    assert calls[0] == calls[1] == grid_to_pixel((705, 946), (540, 960))
+
+
+# -- camera frame sanity check ------------------------------------------------------
+def _frame(screen=None, *, size=(540, 960), overlays=True):
+    from PIL import ImageDraw
+    image = Image.new("RGB", size, "black")
+    draw = ImageDraw.Draw(image)
+    w, h = size
+    if screen:
+        x0, y0, x1, y1 = screen
+        draw.rectangle((x0 * w, y0 * h, x1 * w, y1 * h), fill=(200, 200, 210))
+    if overlays:   # vendor coordinate text at the top, machine-position buttons at the bottom
+        draw.rectangle((0, 0, w * 0.55, h * 0.03), fill="white")
+        draw.rectangle((0, h * 0.985, w, h), fill="white")
+    return image
+
+
+def test_frame_check_reports_black_frame():
+    from pva.devices.frame_check import check_frame
+    assert "全黑" in check_frame(_frame(None), None)
+
+
+def test_frame_check_accepts_a_lit_screen_without_expected_region():
+    from pva.devices.frame_check import check_frame, screen_region
+    image = _frame((0.07, 0.0, 0.93, 0.91))
+    assert check_frame(image, None) is None
+    x0, y0, x1, y1 = screen_region(image)
+    assert abs(x0 - 0.07) < 0.02 and abs(x1 - 0.93) < 0.02 and y0 < 0.06 and abs(y1 - 0.91) < 0.02
+
+
+def test_frame_check_compares_with_expected_region():
+    from pva.devices.frame_check import check_frame
+    expected = (0.07, 0.0, 0.93, 0.91)
+    assert check_frame(_frame((0.08, 0.0, 0.92, 0.90)), expected) is None
+    message = check_frame(_frame((0.01, 0.0, 0.87, 0.74)), expected)   # what the camera showed this morning
+    assert message and "位置" in message and "0.74" in message
+
+
+def test_device_config_parses_screen_region(tmp_path, monkeypatch):
+    from pva.config import ConfigError, load_config
+    monkeypatch.delenv("PVA_MOCK", raising=False)
+    path = tmp_path / "devices.json"
+    path.write_text(json.dumps({"devices": [{"id": "r", "driver": "robot", "screen_region": [0.07, 0, 0.93, 0.91]}]}),
+                    encoding="utf-8")
+    assert load_config(path).device("r").screen_region == (0.07, 0.0, 0.93, 0.91)
+    path.write_text(json.dumps({"devices": [{"id": "r", "driver": "robot", "screen_region": [0.9, 0, 0.1, 1]}]}),
+                    encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+# -- cross-process device lease (shared with the legacy console and the platform connector) --
+def test_lease_path_matches_legacy_naming(tmp_path):
+    from pva.devices.lease import lease_path
+    assert lease_path(tmp_path, "device-local-01").name == "device_1d4c34d50bc62ea902fdc2e4.lease"
+
+
+def _robot_manager(tmp_path, monkeypatch):
+    from pva.config import load_config
+    from pva.devices import DeviceManager
+    monkeypatch.delenv("PVA_MOCK", raising=False)
+    path = tmp_path / "devices.json"
+    path.write_text(json.dumps({"devices": [{"id": "device-local-01", "driver": "robot"},
+                                            {"id": "sim", "driver": "mock"}]}), encoding="utf-8")
+    return DeviceManager(load_config(path), lease_dir=tmp_path / "leases")
+
+
+def test_reserve_refuses_a_device_held_by_another_program(tmp_path, monkeypatch):
+    from pva.devices import DeviceBusy
+    from pva.devices.lease import InterProcessLease, lease_path
+    devices = _robot_manager(tmp_path, monkeypatch)
+    other = InterProcessLease(lease_path(tmp_path / "leases", "device-local-01"), owner_id="connector",
+                              metadata={"device_id": "device-local-01", "session_id": "connector-windows-local-01"})
+    assert other.acquire()
+    try:
+        with pytest.raises(DeviceBusy, match="connector-windows-local-01"):
+            devices.reserve("device-local-01", "task-1")
+        assert devices.owner("device-local-01") is None
+    finally:
+        other.release()
+    devices.reserve("device-local-01", "task-1")
+    devices.release("device-local-01", "task-1")
+
+
+def test_reserve_holds_the_lease_until_release(tmp_path, monkeypatch):
+    from pva.devices.lease import InterProcessLease, lease_path
+    devices = _robot_manager(tmp_path, monkeypatch)
+    path = lease_path(tmp_path / "leases", "device-local-01")
+    devices.reserve("device-local-01", "task-1")
+    devices.reserve("device-local-01", "task-1")          # resume by the same owner is fine
+    assert InterProcessLease.active_payload(path)["session_id"] == "task-1"
+    assert not InterProcessLease(path, owner_id="legacy", metadata={}).acquire()
+    devices.release("device-local-01", "task-1")
+    assert InterProcessLease.active_payload(path) is None
+    devices.reserve("sim", "task-2")                     # the simulated phone needs no lease
+    assert not lease_path(tmp_path / "leases", "sim").exists()
+
+
+def test_frame_check_does_not_flag_dark_pages():
+    from PIL import ImageDraw
+    from pva.devices.frame_check import check_frame
+    expected = (0.07, 0.0, 0.93, 0.91)
+    # A lit phone showing a black page ("直播已结束"): only a little white text and one icon.
+    image = _frame(None)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((200, 60, 340, 80), fill="white")
+    draw.ellipse((240, 110, 300, 170), outline="white", width=4)
+    assert check_frame(image, None) is None
+    assert check_frame(image, expected) is None
+    # Even on a dark page, light outside where the screen should be means the camera moved.
+    draw.rectangle((0, 300, 20, 700), fill="white")
+    assert "位置" in check_frame(image, expected)
+
+
+def test_frame_check_does_not_flag_a_bright_bottom_sheet():
+    from pva.devices.frame_check import check_frame
+    from PIL import ImageDraw
+    # Dark live room with a white panel over its lower half: the panel is page content, not a moved screen.
+    image = _frame(None)
+    ImageDraw.Draw(image).rectangle((0.07 * 540, 0.46 * 960, 0.93 * 540, 0.95 * 960), fill=(220, 220, 220))
+    assert check_frame(image, (0.07, 0.0, 0.93, 0.91)) is None

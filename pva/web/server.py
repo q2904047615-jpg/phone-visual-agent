@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from pva.actions import ActionError, describe, parse_action
 from pva.agent.manager import TaskManager
-from pva.config import AppConfig, load_config, output_dir
+from pva.config import AppConfig, load_config, model_settings, output_dir
 from pva.devices import DeviceBusy, DeviceError, DeviceManager
 from pva.model.qwen import QwenClient, VisionModel
 from pva.plugins import PluginContext, load_plugins
@@ -58,9 +58,15 @@ class Position(BaseModel):
 def create_app(config: AppConfig | None = None, model: VisionModel | None = None) -> FastAPI:
     config = config or load_config()
     devices = DeviceManager(config)
-    model = model or QwenClient(timeout=float(config.agent["model_timeout_seconds"]))
+    timeout = float(config.agent["model_timeout_seconds"])
+    if model is None:
+        model = QwenClient(timeout=timeout)
+        locator_id = model_settings()["locator_model"]
+        locator = QwenClient(model=locator_id, timeout=timeout) if locator_id else None
+    else:
+        locator = None   # an injected model (tests, demos) decides on its own
     out = output_dir()
-    tasks = TaskManager(config, devices, model, out)
+    tasks = TaskManager(config, devices, model, out, locator=locator)
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
@@ -129,6 +135,7 @@ def create_app(config: AppConfig | None = None, model: VisionModel | None = None
     def status() -> dict[str, Any]:
         return {
             "model": model.status(),
+            "locator": locator.status() if locator is not None else None,
             "mock": config.mock,
             "config_path": str(config.path),
             "output_dir": str(out),

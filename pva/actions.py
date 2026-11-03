@@ -26,7 +26,7 @@ SCROLL_PATHS = {
 
 _ALIASES = {
     "click": "tap", "press": "tap", "dismiss": "tap", "longpress": "long_press", "long_tap": "long_press",
-    "doubletap": "double_tap", "input": "type", "type_text": "type", "clear_input": "clear",
+    "doubletap": "double_tap", "input": "type", "type_text": "type", "text": "type", "clear_input": "clear",
     "press_enter": "enter", "newline": "enter", "launch_app": "launch", "open_app": "launch",
     "open_recent_apps": "recents", "recent_apps": "recents", "wait_for_change": "wait", "done": "finish",
 }
@@ -48,6 +48,7 @@ class Action:
     seconds: float | None = None
     message: str | None = None
     success: bool | None = None
+    target: str | None = None          # what a tap/double tap/long press is meant to touch, in words
 
     def to_dict(self) -> dict[str, Any]:
         return {key: list(value) if isinstance(value, tuple) else value
@@ -82,7 +83,8 @@ def parse_action(raw: Any, *, apps: list[str] | None = None, supported: set[str]
         raise ActionError(f"当前设备不支持动作 {kind}。")
 
     if kind in POINT_ACTIONS:
-        return Action(kind, point=_point(raw.get("point"), "point"))
+        target = str(raw.get("target") or "").strip()[:200] or None
+        return Action(kind, point=_point(raw.get("point"), "point"), target=target)
     if kind in PATH_ACTIONS:
         start, end = _point(raw.get("start"), "start"), _point(raw.get("end"), "end")
         if start == end:
@@ -126,12 +128,9 @@ def parse_action(raw: Any, *, apps: list[str] | None = None, supported: set[str]
 def describe(action: Action) -> str:
     """Short Chinese description for the console and the model history."""
     t = action.type
-    if t == "tap":
-        return f"点击 {list(action.point)}"
-    if t == "double_tap":
-        return f"双击 {list(action.point)}"
-    if t == "long_press":
-        return f"长按 {list(action.point)}"
+    if t in POINT_ACTIONS:
+        verb = {"tap": "点击", "double_tap": "双击", "long_press": "长按"}[t]
+        return f"{verb}{f'「{action.target}」' if action.target else ''} {list(action.point)}"
     if t == "swipe" and action.direction:
         return f"滚动（手指向{ {'up': '上', 'down': '下', 'left': '左', 'right': '右'}[action.direction] }）"
     if t in PATH_ACTIONS:

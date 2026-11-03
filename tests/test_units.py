@@ -15,6 +15,9 @@ from pva.model.qwen import ModelError, extract_json
 def test_parse_actions_and_aliases():
     assert parse_action({"type": "tap", "point": [500.4, 10]}).point == (500, 10)
     assert parse_action({"action": "click", "point": [1, 2]}).type == "tap"
+    named = parse_action({"type": "tap", "point": [1, 2], "target": " 顶部搜索框 "})
+    assert named.target == "顶部搜索框" and describe(named) == "点击「顶部搜索框」 [1, 2]"
+    assert parse_action({"type": "text", "text": "hi"}).type == "type"
     scroll = parse_action({"type": "scroll", "direction": "up"})
     assert scroll.type == "swipe" and scroll.start[1] > scroll.end[1]
     assert parse_action({"type": "launch", "app": "抖音"}, apps=["抖音"]).app == "抖音"
@@ -298,3 +301,17 @@ def test_frame_check_does_not_flag_a_bright_bottom_sheet():
     image = _frame(None)
     ImageDraw.Draw(image).rectangle((0.07 * 540, 0.46 * 960, 0.93 * 540, 0.95 * 960), fill=(220, 220, 220))
     assert check_frame(image, (0.07, 0.0, 0.93, 0.91)) is None
+
+
+def test_mark_action_draws_on_a_copy_only():
+    from pva.model.prompt import mark_action
+
+    image = Image.new("RGB", (540, 960), "white")
+    marked, note = mark_action(image, {"type": "tap", "point": [500, 500]})
+    radius = round(540 * 0.03)
+    assert marked.getpixel((round(499 * 0.539) + radius, round(959 * 0.5)))[1] < 50   # red ring edge
+    assert image.getpixel((270, 480)) == (255, 255, 255) and "红圈" in note
+    swiped, note = mark_action(image, {"type": "swipe", "start": [500, 800], "end": [500, 200]})
+    assert swiped.getpixel((270, 480))[1] < 50 and "红线" in note
+    assert mark_action(image, {"type": "home"}) == (image, "")
+    assert mark_action(image, None) == (image, "")

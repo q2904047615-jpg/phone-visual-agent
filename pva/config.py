@@ -3,7 +3,9 @@
 Environment variables
 ---------------------
 DASHSCOPE_API_KEY      Qwen (Aliyun Model Studio) key. Required for real tasks.
-VISION_MODEL           Model id, default ``qwen3-vl-plus``.
+VISION_MODEL           Decision model id, default ``qwen3.7-plus``.
+LOCATOR_MODEL          Model that places taps on the control the decision model names,
+                       default ``qwen3-vl-plus``; set it to an empty string to turn locating off.
 VISION_MODEL_BASE_URL  OpenAI-compatible endpoint, default DashScope.
 PVA_MOCK=1             Replace every device with the built-in simulated phone.
 PVA_CONFIG             Path to the device file (default ``config/devices.json``).
@@ -27,7 +29,10 @@ CONFIG_DIR = ROOT / "config"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "devices.json"
 EXAMPLE_CONFIG_PATH = CONFIG_DIR / "devices.example.json"
 
-DEFAULT_MODEL = "qwen3-vl-plus"
+# Reads screens best (it recognised the recents page where qwen3-vl-plus did not) ...
+DEFAULT_MODEL = "qwen3.7-plus"
+# ... but its coordinates drift in long contexts; qwen3-vl-plus stays precise. See pva/model/locate.py.
+DEFAULT_LOCATOR_MODEL = "qwen3-vl-plus"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 DEFAULT_CONTROLLER: dict[str, Any] = {
@@ -168,5 +173,6 @@ def model_settings() -> dict[str, str]:
     return {
         "api_key": os.environ.get("DASHSCOPE_API_KEY", "").strip(),
         "model": os.environ.get("VISION_MODEL", "").strip() or DEFAULT_MODEL,
+        "locator_model": os.environ.get("LOCATOR_MODEL", DEFAULT_LOCATOR_MODEL).strip(),
         "base_url": (os.environ.get("VISION_MODEL_BASE_URL", "").strip() or DEFAULT_BASE_URL).rstrip("/"),
     }

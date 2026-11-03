@@ -14,10 +14,12 @@ from pva.util import read_json
 
 
 class TaskManager:
-    def __init__(self, config: AppConfig, devices: DeviceManager, model: VisionModel, output_root: Path):
+    def __init__(self, config: AppConfig, devices: DeviceManager, model: VisionModel, output_root: Path,
+                 locator: VisionModel | None = None):
         self.config = config
         self.devices = devices
         self.model = model
+        self.locator = locator   # optional second model that places taps on the named control
         self.output_root = Path(output_root) / "tasks"
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, Session] = {}
@@ -43,7 +45,8 @@ class TaskManager:
         )
         if options.max_actions < 1 or options.max_observations < 1:
             raise ValueError("动作和观察上限必须大于 0。")
-        session = Session(options, devices=self.devices, model=self.model, output_root=self.output_root)
+        session = Session(options, devices=self.devices, model=self.model, output_root=self.output_root,
+                          locator=self.locator)
         session.start()
         with self._lock:
             self.sessions[session.id] = session

@@ -35,6 +35,8 @@ python -m pva --mock     # 模拟手机
 
 右上角 **全部停止** 立即停止所有任务；真机执行中按键盘 **Esc** 也会中断机械臂动作。
 
+每次截图都会先自检：画面全黑（相机没对准手机或手机熄屏），或配置了 `screen_region` 后屏幕明显移位，任务会暂停并说明原因，不会把这张图交给千问。真机任务开始时会占用与旧版控制台、平台连接器共用的跨进程设备锁（默认在系统临时目录的 `phone_visual_agent_device_leases/`，可用 `PHONE_VISUAL_AGENT_LEASE_DIR` 修改）；设备被其它程序占用时会拒绝启动。
+
 ## 设备配置
 
 第一次启动时会从 `config/devices.example.json` 生成 `config/devices.json`（不进 git），在里面改：
@@ -46,7 +48,8 @@ python -m pva --mock     # 模拟手机
 | `devices[].adb_serial` | 填了才能用 ADB Keyboard 输入文字、清空、换行，以及按包名直启 App |
 | `devices[].apps` | 可直启 App：`{"抖音": "com.ss.android.ugc.aweme"}`；不在列表里的 App 由千问在桌面点图标打开 |
 | `devices[].calibration` | 触控标定文件；未启用时坐标不纠偏 |
-| `controller` | 卖家窗口标题、点击按压时长、导航栏三键位置、滑动参数 |
+| `devices[].screen_region` | 可选：标定时手机屏幕在相机画面中的位置 `[x0, y0, x1, y1]`（0~1）。填了以后，画面里的屏幕明显移位就暂停任务，避免点偏 |
+| `controller` | 卖家窗口标题、点击按压时长、滑动参数；`nav` 是手机导航栏三键在相机画面中的位置（0~1 比例，和点击一样经过触控标定修正；换手机或调整相机后要重新量） |
 | `agent` | 默认动作/观察上限（100/200）、动作后等待时间、截图尺寸、模型超时等 |
 
 从旧版迁移（会读取旧的设备登记和你本机的 ADB/包名注册表）：

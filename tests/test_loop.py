@@ -156,3 +156,14 @@ def test_recents_goes_home_first(mock_config, tmp_path):
     assert session.steps[1].extra_screenshots == ["step_002_home.jpg"]
     labels = [part["text"] for part in model.requests[-1][1]["content"] if part["type"] == "text"]
     assert any("先回到桌面" in label for label in labels)
+
+
+def test_bad_camera_frame_pauses_before_asking_the_model(mock_config, tmp_path):
+    tasks, devices, model = manager(mock_config, tmp_path, [step({"type": "home"})])
+    devices.get("sim").check_frame = lambda frame: "相机画面几乎全黑"
+    session = tasks.start(device_id="sim", task="回桌面")
+    assert wait_for(session, {"paused"}) == "paused"
+    assert "相机画面几乎全黑" in session.detail
+    assert model.requests == [] and session.observations_used == 0 and session.actions_used == 0
+    assert devices.owner("sim") is None
+    assert list(session.run_dir.glob("frame_check_*.jpg"))

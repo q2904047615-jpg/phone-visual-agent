@@ -66,6 +66,7 @@ class DeviceConfig:
     calibration: Path | None = None
     adb_serial: str = ""
     apps: dict[str, str] = field(default_factory=dict)
+    screen_region: tuple[float, float, float, float] | None = None  # lit screen in the camera frame, 0..1
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,13 @@ def _parse_device(raw: dict[str, Any], base: Path, mock: bool) -> DeviceConfig:
     apps = raw.get("apps") or {}
     if not isinstance(apps, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in apps.items()):
         raise ConfigError(f"设备 {device_id} 的 apps 必须是 {{名称: 包名}}。")
+    region = raw.get("screen_region")
+    if region is not None:
+        if (not isinstance(region, list) or len(region) != 4
+                or not all(isinstance(v, (int, float)) and 0 <= v <= 1 for v in region)
+                or not (region[0] < region[2] and region[1] < region[3])):
+            raise ConfigError(f"设备 {device_id} 的 screen_region 必须是 [x0, y0, x1, y1]，取值 0~1 且 x0<x1、y0<y1。")
+        region = tuple(float(v) for v in region)
     return DeviceConfig(
         id=device_id,
         name=str(raw.get("name") or device_id),
@@ -118,6 +126,7 @@ def _parse_device(raw: dict[str, Any], base: Path, mock: bool) -> DeviceConfig:
         calibration=(base / calibration) if calibration else None,
         adb_serial=str(raw.get("adb_serial") or "").strip(),
         apps=dict(apps),
+        screen_region=region,
     )
 
 

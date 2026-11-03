@@ -74,6 +74,10 @@ class Device(ABC):
         """Lightweight JPEG for the console; must not disturb the desktop."""
         return jpeg_bytes(self.capture(), quality=70, max_size=(540, 960))
 
+    def check_frame(self, frame: Image.Image) -> str | None:
+        """Problem with a captured frame that must stop the task, or None."""
+        return None
+
     # -- control --------------------------------------------------------------
     def request_stop(self) -> None:
         self._stop.set()

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator
 
 from pva.config import AppConfig
 from pva.devices.base import Device, DeviceError, StopRequested
+from pva.devices.lease import DEFAULT_LEASE_DIR, InterProcessLease, lease_path
 
 
 class DeviceBusy(RuntimeError):
@@ -32,11 +34,15 @@ class DeviceManager:
     ``reserve`` gives one owner (a task or plugin) exclusive use of a physical
     controller; devices that share a robot window share that reservation.
     ``hardware`` serialises individual physical operations (including preview
-    capture and manual actions) on that controller.
+    capture and manual actions) on that controller. A reservation of a real
+    phone also holds that device's cross-process lease, so the legacy console
+    and the platform connector cannot drive it at the same time.
     """
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, lease_dir: Path | None = None):
         self.config = config
+        self.lease_dir = Path(lease_dir or DEFAULT_LEASE_DIR)
+        self._leases: dict[str, InterProcessLease] = {}   # hardware_key -> lease held for the owner
         self.devices: dict[str, Device] = {
             entry.id: build_device(config, entry.id) for entry in config.devices if entry.enabled
         }
@@ -66,6 +72,15 @@ class DeviceManager:
                 holder = self.devices.get(current[0])
                 raise DeviceBusy(f"{holder.name if holder else current[0]} 正在被任务 {current[1][:8]} 使用；"
                                  "同一控制端同时只能运行一个任务。")
+            if not current and device.driver != "mock":
+                path = lease_path(self.lease_dir, device.id)
+                lease = InterProcessLease(path, owner_id=owner, metadata={
+                    "device_id": device.id, "session_id": owner, "program": "pva"})
+                if not lease.acquire():
+                    holder = (InterProcessLease.active_payload(path) or {}).get("session_id") or "另一个程序"
+                    raise DeviceBusy(f"{device.name} 已被另一个程序占用（{holder}）；"
+                                     "请先停止旧版控制台或平台连接器在这台设备上的任务。")
+                self._leases[device.hardware_key] = lease
             self._owners[device.hardware_key] = (device.id, owner)
         return device
 
@@ -74,6 +89,9 @@ class DeviceManager:
         with self._guard:
             if self._owners.get(device.hardware_key, (None, None))[1] == owner:
                 del self._owners[device.hardware_key]
+                lease = self._leases.pop(device.hardware_key, None)
+                if lease is not None:
+                    lease.release()
 
     @contextmanager
     def hardware(self, device_id: str, timeout: float | None = None) -> Iterator[Device]:

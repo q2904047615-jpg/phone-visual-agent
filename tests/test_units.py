@@ -89,6 +89,19 @@ def test_affine_inverse_roundtrip():
 
 
 # -- robot device coordinate mapping (Win32 calls patched) -----------------------------
+def _seller_stubs(**overrides):
+    """Patch every Win32-touching seller call a robot action makes; override any by name."""
+    from contextlib import ExitStack
+
+    defaults = {"find_window": (1, "智联新途"), "clear_seller_camera_overlay": None, "_check_escape": None,
+                "seller_popup_text": None, "configure_single_click_count": None}
+    stack = ExitStack()
+    for name, value in {**defaults, **overrides}.items():
+        target = f"pva.devices.seller_window.{name}"
+        stack.enter_context(patch(target, side_effect=value) if callable(value) else patch(target, return_value=value))
+    return stack
+
+
 def test_robot_tap_maps_grid_to_client_pixels(tmp_path):
     from pva.config import DEFAULT_CONTROLLER
     from pva.devices.base import grid_to_pixel
@@ -96,11 +109,8 @@ def test_robot_tap_maps_grid_to_client_pixels(tmp_path):
 
     device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
     calls = []
-    with patch("pva.devices.seller_window.find_window", return_value=(1, "智联新途")), \
-         patch("pva.devices.seller_window.click_client_point",
-               side_effect=lambda hwnd, x, y, *a, **k: calls.append((x, y)) or {"input_events_dispatched": True}), \
-         patch("pva.devices.seller_window.clear_seller_camera_overlay"), \
-         patch("pva.devices.seller_window._check_escape"):
+    with _seller_stubs(click_client_point=lambda hwnd, x, y, *a, **k: calls.append((x, y)) or {
+            "input_events_dispatched": True}):
         receipt = device.tap((500, 1000), (540, 960))
         device.navigate("back", (540, 960))
     assert calls[0] == (270, 959)
@@ -114,14 +124,42 @@ def test_robot_double_tap_restores_click_count():
 
     device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
     events = []
-    with patch("pva.devices.seller_window.find_window", return_value=(1, "t")), \
-         patch("pva.devices.seller_window.configure_click_count", side_effect=lambda h, n: events.append(("count", n))), \
-         patch("pva.devices.seller_window.configure_single_click_count", side_effect=lambda h: events.append(("count", 1))), \
-         patch("pva.devices.seller_window.click_client_point", side_effect=lambda *a, **k: events.append("click") or {}), \
-         patch("pva.devices.seller_window.clear_seller_camera_overlay"), \
-         patch("pva.devices.seller_window._check_escape"):
+    with _seller_stubs(configure_click_count=lambda h, n: events.append(("count", n)),
+                       configure_single_click_count=lambda h: events.append(("count", 1)),
+                       click_client_point=lambda *a, **k: events.append("click") or {}):
         device.double_tap((10, 10), (540, 960))
     assert events == [("count", 2), "click", ("count", 1)]
+
+
+def test_robot_single_clicks_recheck_click_count_first():
+    from pva.config import DEFAULT_CONTROLLER
+    from pva.devices.robot import RobotDevice
+
+    device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
+    events = []
+    with _seller_stubs(configure_single_click_count=lambda h: events.append("count"),
+                       click_client_point=lambda *a, **k: events.append("click") or {}):
+        device.tap((10, 10), (540, 960))
+        device.navigate("home", (540, 960))
+    assert events == ["count", "click", "count", "click"]
+
+
+def test_robot_stops_on_controller_message_box():
+    from pva.config import DEFAULT_CONTROLLER
+    from pva.devices.base import DeviceError
+    from pva.devices.robot import RobotDevice
+
+    device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
+    popups = iter([None, "点击次数必须是一个整数"])   # none before the click, one right after it
+    with _seller_stubs(seller_popup_text=lambda h: next(popups), click_client_point=lambda *a, **k: {}):
+        with pytest.raises(DeviceError, match="点击后控制端弹出提示“点击次数必须是一个整数”"):
+            device.tap((10, 10), (540, 960))
+    clicks = []
+    with _seller_stubs(seller_popup_text="点击次数必须是一个整数",
+                       click_client_point=lambda *a, **k: clicks.append(1) or {}):
+        with pytest.raises(DeviceError, match="点击前"):
+            device.tap((10, 10), (540, 960))
+    assert clicks == []   # an open message box blocks the next action before it is sent
 
 
 def test_robot_nav_keys_use_touch_calibration():
@@ -134,11 +172,7 @@ def test_robot_nav_keys_use_touch_calibration():
     device = RobotDevice(DeviceConfig(id="r", name="r", driver="robot"), DEFAULT_CONTROLLER)
     device.calibration = SimpleNamespace(correct=lambda x, y, frame_size: (x + 20, y - 30))
     calls = []
-    with patch("pva.devices.seller_window.find_window", return_value=(1, "智联新途")), \
-         patch("pva.devices.seller_window.click_client_point",
-               side_effect=lambda hwnd, x, y, *a, **k: calls.append((x, y)) or {}), \
-         patch("pva.devices.seller_window.clear_seller_camera_overlay"), \
-         patch("pva.devices.seller_window._check_escape"):
+    with _seller_stubs(click_client_point=lambda hwnd, x, y, *a, **k: calls.append((x, y)) or {}):
         device.navigate("back", (540, 960))
         device.tap((685, 976), (540, 960))
     # The back key is corrected exactly like a tap on the same camera grid point.

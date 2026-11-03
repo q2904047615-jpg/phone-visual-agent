@@ -63,6 +63,9 @@ class RobotDevice(Device):
                 width >= 800 and height >= 450)
             if not info["camera"]:
                 info["error"] = "控制端没有显示完整的相机画面和底部操作栏。"
+            popup = seller.seller_popup_text(hwnd)
+            if popup:
+                info["error"] = f"控制端弹出提示“{popup}”，点掉之前不会执行任何动作。"
         except (DeviceError, OSError, RuntimeError, ValueError) as exc:
             info["error"] = str(exc)
         if self.adb is not None:
@@ -71,6 +74,7 @@ class RobotDevice(Device):
 
     def capture(self) -> Image.Image:
         hwnd = self._window()
+        self._check_popup(hwnd, "截图时")
         try:
             with self._capture_lock, seller.temporarily_park_cursor_outside_camera(hwnd):
                 return seller.camera_crop(seller.capture_client(hwnd), seller.DEFAULT_CAMERA_HEIGHT)
@@ -93,6 +97,7 @@ class RobotDevice(Device):
     def prepare(self) -> None:
         super().prepare()
         hwnd = self._window()
+        self._check_popup(hwnd, "任务开始时")
         try:
             position = self.config.machine_position
             if position is not None and _selected_positions.get(self.title) != position:
@@ -118,9 +123,16 @@ class RobotDevice(Device):
         # The camera crop starts at the client origin, so frame pixels are client pixels.
         return grid_to_pixel(corrected, frame_size)
 
+    def _check_popup(self, hwnd: int, when: str) -> None:
+        """A controller message box means main.exe refuses input until someone dismisses it."""
+        text = seller.seller_popup_text(hwnd)
+        if text:
+            raise DeviceError(f"{when}控制端弹出提示“{text}”，动作可能没有执行；请在控制端点掉提示后再继续。")
+
     def _run(self, label: str, operation) -> dict[str, Any]:
         hwnd = self._window()
         self.checkpoint()
+        self._check_popup(hwnd, f"{label}前")
         try:
             receipt = operation(hwnd) or {}
         except RuntimeError as exc:
@@ -134,6 +146,7 @@ class RobotDevice(Device):
                 seller.clear_seller_camera_overlay(hwnd)
             except (OSError, RuntimeError, ValueError):
                 pass
+        self._check_popup(hwnd, f"{label}后")
         return {"channel": "robot", **receipt}
 
     def _click(self, point: tuple[int, int], frame_size: tuple[int, int], count: int) -> dict[str, Any]:
@@ -142,6 +155,7 @@ class RobotDevice(Device):
 
         def operation(hwnd: int) -> dict[str, Any]:
             if count == 1:
+                seller.configure_single_click_count(hwnd)   # a read when it is already 1
                 receipt = seller.click_client_point(hwnd, x, y, 0, hold, return_dispatch_receipt=True)
             else:
                 seller.configure_click_count(hwnd, count)
@@ -194,5 +208,10 @@ class RobotDevice(Device):
             x_ratio, y_ratio = y_ratio, 1.0 - x_ratio
         x, y = self._client_point((round(x_ratio * 1000), round(y_ratio * 1000)), frame_size)
         hold = float(self.controller["tap_hold_seconds"])
-        return self._run("导航键", lambda hwnd: {"client": [x, y], "key": key, **(
-            seller.click_client_point(hwnd, x, y, 0, hold, return_dispatch_receipt=True) or {})})
+
+        def operation(hwnd: int) -> dict[str, Any]:
+            seller.configure_single_click_count(hwnd)
+            receipt = seller.click_client_point(hwnd, x, y, 0, hold, return_dispatch_receipt=True)
+            return {"client": [x, y], "key": key, **(receipt or {})}
+
+        return self._run("导航键", operation)

@@ -166,4 +166,55 @@ def test_bad_camera_frame_pauses_before_asking_the_model(mock_config, tmp_path):
     assert "相机画面几乎全黑" in session.detail
     assert model.requests == [] and session.observations_used == 0 and session.actions_used == 0
     assert devices.owner("sim") is None
-    assert list(session.run_dir.glob("frame_check_*.jpg"))
+    assert len(list(session.run_dir.glob("frame_check_*.jpg"))) == 2   # looked twice before pausing
+
+
+def test_passing_bad_frame_is_looked_at_again_before_pausing(mock_config, tmp_path):
+    tasks, devices, model = manager(mock_config, tmp_path, [step({"type": "finish", "success": True, "message": "ok"})])
+    verdicts = iter(["相机画面几乎全黑"])   # only the first frame is bad (e.g. the screen dimmed for a moment)
+    devices.get("sim").check_frame = lambda frame: next(verdicts, None)
+    session = tasks.start(device_id="sim", task="看一眼")
+    assert wait_for(session, {"succeeded"}) == "succeeded"
+    assert len(model.requests) == 1 and session.observations_used == 1
+    assert [p.name for p in session.run_dir.glob("frame_check_*.jpg")] == ["frame_check_001_1.jpg"]
+
+
+def test_history_shots_mark_where_the_last_action_touched(mock_config, tmp_path):
+    tasks, devices, model = manager(mock_config, tmp_path, [
+        step({"type": "tap", "point": [500, 500]}),
+        step({"type": "finish", "success": True, "message": "ok"})])
+    session = tasks.start(device_id="sim", task="点一下中间")
+    assert wait_for(session, {"succeeded"}) == "succeeded"
+    texts = [part["text"] for part in model.requests[1][1]["content"] if part["type"] == "text"]
+    assert any("第1步决策前" in t and "红圈是这一步实际点按的位置" in t for t in texts)
+
+
+def _locating_manager(mock_config, tmp_path, replies, located):
+    devices = DeviceManager(mock_config)
+    model, locator = ScriptedModel(replies), ScriptedModel(located)
+    return TaskManager(mock_config, devices, model, tmp_path / "out", locator=locator), model, locator
+
+
+def test_named_tap_is_placed_by_the_locator(mock_config, tmp_path):
+    tasks, model, locator = _locating_manager(mock_config, tmp_path, [
+        {**step({"type": "tap", "target": "右下角加号按钮", "point": [848, 862]})},
+        step({"type": "finish", "success": True, "message": "ok"})], [{"point": [790, 795]}])
+    session = tasks.start(device_id="sim", task="点加号")
+    assert wait_for(session, {"succeeded"}) == "succeeded"
+    first = session.steps[0]
+    assert first.action["point"] == [790, 795] and first.action["target"] == "右下角加号按钮"
+    assert first.locate == {"target": "右下角加号按钮", "decision_point": [848, 862], "point": [790, 795],
+                            "elapsed_seconds": 0.0}
+    assert "右下角加号按钮" in locator.requests[0][1]["content"][1]["text"]
+    assert session.model_calls == 3   # two decisions + one locate
+
+
+def test_locator_failure_falls_back_to_the_decision_point(mock_config, tmp_path):
+    tasks, model, locator = _locating_manager(mock_config, tmp_path, [
+        step({"type": "tap", "target": "不存在的按钮", "point": [500, 500]}),
+        step({"type": "tap", "point": [100, 100]}),        # no target: the locator is not asked
+        step({"type": "finish", "success": True, "message": "ok"})], [{"point": None}])
+    session = tasks.start(device_id="sim", task="点一下")
+    assert wait_for(session, {"succeeded"}) == "succeeded"
+    assert session.steps[0].action["point"] == [500, 500] and "找不到" in session.steps[0].locate["error"]
+    assert session.steps[1].locate is None and len(locator.requests) == 1

@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from pva.util import jpeg_bytes
 
@@ -20,11 +20,13 @@ SYSTEM_PROMPT = """你是一个通过摄像头画面操作安卓手机的智能�
 
 ## 坐标
 所有坐标都是 CURRENT 截图上的 0~1000 归一化坐标：左上角 [0,0]，右下角 [1000,1000]，x 向右，y 向下。点按要点在控件中心。HISTORY 截图只用来核对进度，坐标、页面状态、输入框内容一律以 CURRENT 为准。
+HISTORY 截图上的红圈（滑动是红线）标出了那一步实际点到的位置。上一步没有生效时，先看红圈是否落在目标控件上：偏了就对照 CURRENT 重新估计控件中心，不要在同一位置附近反复点。
 
 ## 可用动作（action 字段）
-- {"type":"tap","point":[x,y]}  点击
-- {"type":"double_tap","point":[x,y]}  双击
-- {"type":"long_press","point":[x,y]}  长按
+- {"type":"tap","target":"要点的控件","point":[x,y]}  点击
+- {"type":"double_tap","target":"要点的控件","point":[x,y]}  双击
+- {"type":"long_press","target":"要点的控件","point":[x,y]}  长按
+  target 用一句话写清要点的是哪个控件：位置 + 外观 + 文字，例如“右下角黄色圆形加号按钮”“顶部搜索框”“列表第二行‘蓝牙’”。系统会按 target 在 CURRENT 截图上重新精确定位，所以 target 必须准确、唯一。
 - {"type":"swipe","start":[x,y],"end":[x,y]}  从 start 滑到 end（翻页、划走卡片、滑动滑块等）
 - {"type":"scroll","direction":"up|down|left|right"}  在屏幕中部滚动；direction 是手指移动方向，"up"=手指上划=查看下方内容
 - {"type":"drag","start":[x,y],"end":[x,y]}  按住拖动（拖动图标、排序）
@@ -34,7 +36,7 @@ SYSTEM_PROMPT = """你是一个通过摄像头画面操作安卓手机的智能�
 - {"type":"back"} / {"type":"home"} / {"type":"recents"}  系统返回 / 回到桌面 / 打开最近任务
 - {"type":"launch","app":"名称"}  直接打开 App，只能用下面“可直启 App”列表里的名称；不在列表里就在桌面找图标点击
 - {"type":"wait","seconds":2}  等待页面加载或动画结束
-- {"type":"finish","success":true,"message":"..."}  结束整个任务。success=true 表示截图已能证明整个任务全部完成；success=false 表示确实无法继续（例如需要用户提供的信息、账号不存在），message 说明原因
+- {"type":"finish","success":true,"message":"..."}  结束整个任务。success=true 表示截图已能证明整个任务全部完成，任务里写明的每一步都做到了（不能因为某一步难就跳过）；success=false 表示确实无法继续（例如需要用户提供的信息、账号不存在），message 说明原因
 
 ## 输入文字
 - 输入前先点击输入框使其聚焦（出现光标、键盘或高亮），再用 type。type 是追加，不会自动清空；框里有不需要的旧内容时先 clear。
@@ -47,6 +49,11 @@ SYSTEM_PROMPT = """你是一个通过摄像头画面操作安卓手机的智能�
 - 页面上已经存在的旧内容不能证明这次操作成功；要看本次动作带来的变化。
 - 同一动作连续无效时换一种方式（换位置、先返回、滚动寻找），不要原地反复。
 - 用户中途发来的补充说明优先于原任务里的冲突部分。
+- 只做任务要求的事。任务只要求查看、查找或告诉用户什么时，不要改动任何东西；任务没要求时，不要点“清理/清除/删除/卸载/关闭全部/清空”这类会丢掉内容或状态的控件。认不准一个控件是做什么的，就不要点它。
+- 最近任务（多任务）页面长这样：一张或几张缩小的 App 画面卡片排在页面中间，卡片上方有 App 图标和名称，背景是变暗或模糊的桌面。刚执行 recents 后看到这种画面，就是最近任务页面——只有一张卡片时也一样，不是弹窗或浮层。每张卡片就是一个后台 App。页面底部的 × 或垃圾桶是“一键清理全部”，点了会关掉所有后台 App；要离开这个页面就用 home 或 back 动作，任务没要求清理时不要点它。
+- 返回上一级优先用 back 动作。只有截图上确实看得到返回箭头时才去点它，不要点没有控件的空白处。
+- 桌面上的 App 分布在左右多页里，用左右滑动翻页；上滑不一定能打开应用列表，滑了画面没变就不要再上滑。
+- 查找 App、联系人、设置项等目标时：先看当前画面和其中的文件夹（文件夹要点开看）；翻页或滚动时记住已经看过哪些内容，画面不再变化或页码不再前进就说明到头了，不要重复同一手势；该看的地方都看过仍没有，就用 finish（success=false）如实说明没找到，并说明找过哪些地方。
 
 ## 风险确认（risk 字段）
 只有两类动作需要用户确认：登录/身份认证（输入密码、验证码、确认登录授权）填 "authentication"；付款/转账/购买支付填 "payment"。其余（发送、评论、关注、删除、设置变更等）一律填 "none"，直接执行。
@@ -61,6 +68,34 @@ class Shot:
     """One saved task screenshot."""
     image: Image.Image
     label: str
+
+
+def mark_action(image: Image.Image, action: dict[str, Any] | None) -> tuple[Image.Image, str]:
+    """Draw where a past action touched its screenshot (red ring, or red line for a swipe/drag).
+
+    Returns the marked copy and a label note. Only HISTORY shots are marked; CURRENT stays clean.
+    """
+    if not action:
+        return image, ""
+    marked = image.copy()
+    draw = ImageDraw.Draw(marked)
+    width, height = marked.size
+    radius = max(6, round(width * 0.03))
+    line = max(3, round(width * 0.008))
+
+    def pixel(point: Any) -> tuple[float, float]:
+        return point[0] * (width - 1) / 1000, point[1] * (height - 1) / 1000
+
+    if action.get("point"):
+        x, y = pixel(action["point"])
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(255, 0, 0), width=line)
+        return marked, "（红圈是这一步实际点按的位置）"
+    if action.get("start") and action.get("end"):
+        (x0, y0), (x1, y1) = pixel(action["start"]), pixel(action["end"])
+        draw.line((x0, y0, x1, y1), fill=(255, 0, 0), width=line)
+        draw.ellipse((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=(255, 0, 0), width=line)
+        return marked, "（红线是这一步的滑动轨迹，圆圈是起点）"
+    return image, ""
 
 
 def _image_part(image: Image.Image, max_size: tuple[int, int], quality: int) -> dict[str, Any]:

@@ -7,7 +7,8 @@ pva/
   actions.py           唯一的动作词表：解析、校验、中文描述
   model/
     qwen.py            DashScope OpenAI 兼容客户端；从回复中提取 JSON
-    prompt.py          系统提示词；把任务、历史、全部截图拼成一次请求
+    prompt.py          系统提示词；把任务、历史、全部截图拼成一次请求（历史图上标出当步点按位置）
+    locate.py          定位模型：按决策模型给的 target 在 CURRENT 截图上取点按坐标
   agent/
     session.py         一个任务的循环与状态机
     manager.py         创建/查询任务；历史任务从 output/ 读取
@@ -36,6 +37,7 @@ legacy/                旧版代码与文档（只读）
 2. 在控制端锁内截图，保存为 `step_NNN.jpg`。
 3. 构造请求：系统提示词 + 任务 + 用户补充说明 + 可直启 App + 设备支持的动作 + 已执行动作（真实记录）+ **本任务全部历史截图（缩略图，按时间顺序）** + CURRENT 截图（原尺寸）。请求（图片已省略）与回复写入任务目录。
 4. 解析回复 JSON：`observation / last_result / reply / reason / action / risk`。动作由 `actions.parse_action` 校验（类型、坐标 0–1000、App 是否登记、设备是否支持）。无法解析时不执行任何动作，重新截图再问；连续 3 次失败则任务失败。
+   点按、双击、长按带 `target`（要点的控件，文字描述）时，再请定位模型（默认 `qwen3-vl-plus`）在同一张 CURRENT 截图上找这个控件，用它给的坐标执行；定位失败就用决策模型自己的坐标，并在该步 `locate` 里记录原因。决策模型（默认 `qwen3.7-plus`）看页面更准，但长上下文里坐标会向右下漂移；`qwen3-vl-plus` 坐标准、页面判断弱，所以分工。
 5. `finish`：`success=true` → 成功；`success=false` → 失败并显示原因。
 6. `risk` 为 `authentication` / `payment` → 等待用户确认；逐步模式下每个动作都等待确认。
 7. 在控制端锁内执行**一个**动作；设备故障直接停止任务并报告原因（不重试，避免重复发送）。
@@ -48,7 +50,7 @@ legacy/                旧版代码与文档（只读）
 - 坐标统一是截图上的 0–1000 网格。机械臂设备：网格 → 标定纠偏 → 相机像素（相机区域从卖家窗口客户区左上角开始，因此像素即客户区坐标）→ 鼠标事件。
 - 共用一个卖家窗口的多个机位共用一个 `hardware_key`：同一时间只有一个任务/插件持有（`reserve`），每个物理操作都在该控制端的锁内（`hardware`）。不同控制端、模拟手机之间可以并行。
 - 真机的 `reserve` 同时持有跨进程设备锁（`pva/devices/lease.py`，文件名和格式与 `legacy/poc` 及平台连接器一致），三者不会同时操作同一台设备；模拟手机不加锁。
-- 每次截图先经 `Device.check_frame` 自检（真机见 `pva/devices/frame_check.py`）：有问题就暂停任务并保存 `frame_check_*.jpg`，不调用模型。
+- 每次截图先经 `Device.check_frame` 自检（真机见 `pva/devices/frame_check.py`）：有问题就隔 `settle_seconds` 再拍一次（屏幕变暗、转场常常只是一瞬间），仍有问题才暂停任务并保存 `frame_check_*.jpg`，不调用模型。
 - 任务开始时 `prepare()`：切换到该设备的机位、把卖家“连点次数”设为 1。连点次数用 UI Automation 写入并回读（`seller_window.configure_click_count`），每次单击前再核对一次；整个驱动不发送任何键盘输入。
 - 每个动作前后、每次截图前检查卖家控制端是否弹出提示框（`seller_popup_text`）；有就停止任务并报告提示原文。`find_window` 跳过这些属于控制端的提示框。
 

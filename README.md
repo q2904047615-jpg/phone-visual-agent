@@ -35,7 +35,7 @@ python -m pva --mock     # 模拟手机
 
 右上角 **全部停止** 立即停止所有任务；真机执行中按键盘 **Esc** 也会中断机械臂动作。
 
-每次截图都会先自检：画面全黑（相机没对准手机或手机熄屏），或配置了 `screen_region` 后屏幕明显移位，任务会暂停并说明原因，不会把这张图交给千问。真机任务开始时会占用与旧版控制台、平台连接器共用的跨进程设备锁（默认在系统临时目录的 `phone_visual_agent_device_leases/`，可用 `PHONE_VISUAL_AGENT_LEASE_DIR` 修改）；设备被其它程序占用时会拒绝启动。卖家控制端弹出提示框（例如“点击次数必须是一个整数”）时，任务会停下并显示提示原文，点掉后再继续；“连点次数”通过 Windows UI Automation 写入并回读，不模拟键盘，不会把按键打进别的窗口。
+每次截图都会先自检：画面全黑（相机没对准手机或手机熄屏），或配置了 `screen_region` 后屏幕明显移位，会隔一会儿再拍一次，仍不正常才暂停任务并说明原因，不会把这张图交给千问。真机任务开始时会占用与旧版控制台、平台连接器共用的跨进程设备锁（默认在系统临时目录的 `phone_visual_agent_device_leases/`，可用 `PHONE_VISUAL_AGENT_LEASE_DIR` 修改）；设备被其它程序占用时会拒绝启动。卖家控制端弹出提示框（例如“点击次数必须是一个整数”）时，任务会停下并显示提示原文，点掉后再继续；“连点次数”通过 Windows UI Automation 写入并回读，不模拟键盘，不会把按键打进别的窗口。
 
 ## 设备配置
 
@@ -58,7 +58,7 @@ python -m pva --mock     # 模拟手机
 python -m pva.tools.migrate_config --adb-registry 你的adb_keyboard_registry.json --app-registry 你的app_package_registry.json
 ```
 
-环境变量：`DASHSCOPE_API_KEY`（必需）、`VISION_MODEL`（默认 `qwen3-vl-plus`）、`VISION_MODEL_BASE_URL`、`PVA_PORT`（默认 8765）、`PVA_OUTPUT`、`PVA_MOCK=1`。
+环境变量：`DASHSCOPE_API_KEY`（必需）、`VISION_MODEL`（决策模型，默认 `qwen3.7-plus`）、`LOCATOR_MODEL`（按决策模型说的控件取点按坐标，默认 `qwen3-vl-plus`；设为空字符串则直接用决策模型的坐标）、`VISION_MODEL_BASE_URL`、`PVA_PORT`（默认 8765）、`PVA_OUTPUT`、`PVA_MOCK=1`。
 
 ### 文字输入
 
@@ -95,4 +95,6 @@ python -m pytest tests -q        # 不需要硬件、模型密钥或网络
 ## 状态说明
 
 - 离线测试覆盖：动作解析、标定数学、机械臂坐标换算（Win32 调用打桩）、任务循环、预算/暂停/确认、HTTP API、插件流程、模拟手机端到端。
-- **尚未在真机上验证本版本**：机械臂、相机、ADB Keyboard 和真实千问调用需要在接好硬件的电脑上验收。底层机械臂驱动（`pva/devices/seller_window.py`）沿用旧版经过真机验证的实现。
+- **真机验收（2026-11-04，1 号机位，小米 HyperOS 极简模式；决策 `qwen3.7-plus` + 定位 `qwen3-vl-plus`）**：点击、长按、滑动翻页、返回、桌面、最近任务（先回桌面再打开）、ADB Keyboard 输入中英文/清空/换行、按包名直启均通过；整任务循环通过——读取系统版本、进入蓝牙页后只用返回键退回桌面、查看最近任务里的后台 App、浏览器搜索框输入并清空、便签新建两行再删除、找不存在的 App 时如实报告失败。画面自检、跨进程设备锁、卖家弹窗检测在真机上生效。
+- **尚未真机验收**：拖动。
+- 已知现象：偶尔有一次点击没有生效（下一轮截图会看出来并重试，原因未查明）；极简模式桌面上，长按系统 App 图标没有任何菜单，长按普通 App 会弹出卸载确认。手机通过无线 ADB 连接，`adb tcpip 5555` 在手机重启后失效，需要重新打开无线调试并配对。

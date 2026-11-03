@@ -17,15 +17,16 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from PIL import Image
 
-from pva.actions import Action, ActionError, describe, parse_action
+from pva.actions import POINT_ACTIONS, Action, ActionError, describe, parse_action
 from pva.devices import Device, DeviceError, DeviceManager, StopRequested
-from pva.model.prompt import Shot, build_messages, redact_images
+from pva.model.locate import locate
+from pva.model.prompt import Shot, build_messages, mark_action, redact_images
 from pva.model.qwen import ModelError, VisionModel, extract_json
 from pva.util import now_iso, write_json
 
@@ -66,6 +67,7 @@ class Step:
     result_text: str = ""      # what the model sees in the history for this action
     model: dict[str, Any] = field(default_factory=dict)
     extra_screenshots: list[str] = field(default_factory=list)
+    locate: dict[str, Any] | None = None   # target re-located by the locator model
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -73,9 +75,11 @@ class Step:
 
 class Session:
     def __init__(self, options: TaskOptions, *, devices: DeviceManager, model: VisionModel,
-                 output_root: Path, on_change: Callable[["Session"], None] | None = None):
+                 output_root: Path, on_change: Callable[["Session"], None] | None = None,
+                 locator: VisionModel | None = None):
         self.id = uuid.uuid4().hex[:12]
         self.options = options
+        self.locator = locator
         self.devices = devices
         self.device: Device = devices.get(options.device_id)
         self.model = model
@@ -297,27 +301,31 @@ class Session:
         return self._execute_pending()
 
     def _capture(self) -> Image.Image | None:
-        try:
-            with self.devices.hardware(self.device.id):
-                frame = self.device.capture()
-        except StopRequested:
-            raise
-        except DeviceError as exc:
-            with self._lock:
-                self._finish("failed", f"截图失败：{exc}")
-            return None
-        if frame.width < 100 or frame.height < 100:
-            with self._lock:
-                self._finish("failed", f"截图尺寸异常：{frame.size}")
-            return None
-        problem = self.device.check_frame(frame)
-        if problem:
-            # Never ask the model to act on a frame the device itself flags as wrong.
-            with self._lock:
-                frame.save(self.run_dir / f"frame_check_{len(self.steps) + 1:03d}.jpg", quality=90)
-                self._set("paused", f"{problem}；请检查后继续，继续时会重新截图判断。")
-            return None
-        return frame
+        # A flagged frame is often a passing moment (screen dimming, a transition), so look once more.
+        for attempt in range(2):
+            if attempt and self._stop.wait(self.options.settle_seconds):
+                return None
+            try:
+                with self.devices.hardware(self.device.id):
+                    frame = self.device.capture()
+            except StopRequested:
+                raise
+            except DeviceError as exc:
+                with self._lock:
+                    self._finish("failed", f"截图失败：{exc}")
+                return None
+            if frame.width < 100 or frame.height < 100:
+                with self._lock:
+                    self._finish("failed", f"截图尺寸异常：{frame.size}")
+                return None
+            problem = self.device.check_frame(frame)
+            if not problem:
+                return frame
+            frame.save(self.run_dir / f"frame_check_{len(self.steps) + 1:03d}_{attempt + 1}.jpg", quality=90)
+        # Never ask the model to act on a frame the device itself flags as wrong.
+        with self._lock:
+            self._set("paused", f"{problem}；请检查后继续，继续时会重新截图判断。")
+        return None
 
     def _new_step(self, frame: Image.Image) -> Step:
         with self._lock:
@@ -338,12 +346,15 @@ class Session:
         step.result_text = text
 
     def _past_shots(self, current_name: str) -> list[Shot]:
+        # Mark where each executed action touched, so a tap that missed its control can be corrected.
+        executed = {s.screenshot: s.action for s in self.steps if s.status == "executed" and s.action}
         shots = []
         for name, label in self._shots:
             if name == current_name:
                 continue
             with Image.open(self.run_dir / name) as image:
-                shots.append(Shot(image=image.copy(), label=label))
+                marked, note = mark_action(image.convert("RGB"), executed.get(name))
+                shots.append(Shot(image=marked, label=label + note))
         return shots
 
     def _decide(self, step: Step, frame: Image.Image) -> tuple[Action, str] | None:
@@ -379,11 +390,30 @@ class Session:
         except (ModelError, ActionError) as exc:
             return self._model_failure(step, f"模型输出无法执行：{exc}")
         self._model_errors = 0
+        action = self._locate(step, frame, action)
         with self._lock:
             step.action = action.to_dict()
             step.action_text = describe(action)
             self._save()
         return action, step.risk
+
+    def _locate(self, step: Step, frame: Image.Image, action: Action) -> Action:
+        """Let the locator model place a tap on the control the decision model named."""
+        if self.locator is None or action.type not in POINT_ACTIONS or not action.target:
+            return action
+        record: dict[str, Any] = {"target": action.target, "decision_point": list(action.point)}
+        try:
+            found = locate(self.locator, frame, action.target, max_size=self.options.current_max)
+        except ModelError as exc:
+            record["error"] = f"{exc}；使用决策模型的坐标"
+        else:
+            record.update(point=list(found.point), elapsed_seconds=found.elapsed_seconds)
+            with self._lock:
+                self.model_calls += 1
+                self.tokens += found.tokens
+            action = replace(action, point=found.point)
+        step.locate = record
+        return action
 
     def _model_failure(self, step: Step, message: str) -> None:
         with self._lock:
@@ -429,7 +459,9 @@ class Session:
         with self._lock:
             step.status = "executed"
             step.receipt = receipt
-            self._history_result(step, "已执行")
+            # The recents rule is run locally, so say plainly what the next screenshot shows.
+            self._history_result(step, "已执行（已回桌面再打开最近任务；下一张截图就是最近任务页面，"
+                                       "上面的 App 卡片都是后台 App）" if action.type == "recents" else "已执行")
             self.detail = ""
             self._save()
         settle = 0 if action.type == "wait" else self.options.settle_seconds

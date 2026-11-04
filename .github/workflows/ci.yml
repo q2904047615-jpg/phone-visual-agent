@@ -55,7 +55,8 @@ jobs:
         run: python -m pip check
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # package.json runs `node --test --test-isolation=none`; Node 20 rejects that flag.
+          node-version: "24"
           cache: npm
           cache-dependency-path: poc/package-lock.json
       - name: Install JavaScript dependencies

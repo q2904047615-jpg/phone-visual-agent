@@ -24,7 +24,14 @@ def scene(number, *, text=None, focused=True, app='notes'):
         elements=elements, stable=True, confidence=1., fingerprint=f'frame_{number}')
 
 
-def decision(kind=None, *, meaning='open_details', role='button', text=None, outcome='matched'):
+def decision(kind=None, *, meaning='open_details', role='button', text=None, outcome='matched',
+    goal_status=None):
+    """One gateway decision. ``outcome`` is the previous action's visual result.
+
+    For a finish, ``postcondition`` is the model's verdict on the whole goal, not
+    on the last action, so it defaults to confirmed; pass ``goal_status`` to
+    model a finish whose CURRENT frame does not confirm the goal.
+    """
     wire_kind = {
         'tap_semantic': 'tap', 'dismiss_overlay': 'dismiss',
         'swipe_element': 'swipe', 'input_verified_text': 'input',
@@ -41,7 +48,8 @@ def decision(kind=None, *, meaning='open_details', role='button', text=None, out
         'text': text if kind == 'input_verified_text' else None,
         'app': None, 'wait_seconds': 300 if kind == 'wait_for_change' else None,
         'state_action_consistent': True,
-        'postcondition': {'status': {'matched':'confirmed', 'unmatched':'not_confirmed', 'uncertain':'unknown'}[outcome],
+        'postcondition': {'status': goal_status or ('confirmed' if kind is None else
+            {'matched':'confirmed', 'unmatched':'not_confirmed', 'uncertain':'unknown'}[outcome]),
             'fact': '测试夹具动作后状态'},
     }
     return value

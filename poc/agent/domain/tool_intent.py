@@ -65,6 +65,11 @@ class ToolIntent:
         return getattr(self.model_decision, "previous_action_outcome", None)
 
     @property
+    def postcondition(self) -> Any:
+        """The model's structured CURRENT-frame verdict for a finish, if it gave one."""
+        return getattr(self.model_decision, "postcondition", None)
+
+    @property
     def decision_source(self) -> str:
         return str(getattr(self.model_decision, "decision_source", "model_gateway"))
 

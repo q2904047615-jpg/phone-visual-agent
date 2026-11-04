@@ -46,6 +46,11 @@ from agent.domain.qwen_task_context import (
 from agent.domain.session import TERMINAL_SESSION_STATUSES
 
 
+#: A finish the Verifier refuses goes back to the model once with the reason;
+#: a second refusal in a row pauses instead of spending the rest of the budget.
+MAX_REJECTED_FINISH_STREAK = 2
+
+
 def _model_history(session: UniversalAgentSessionState) -> list[dict[str, Any]]:
     return [execution_history_entry(step=item["step_number"],
         requested_action=item["execution"]["requested_action"],
@@ -69,6 +74,7 @@ class ObservationBridge:
                 "exact_input_text": session.exact_input_text,
                 "required_action_kind": session.exact_action_kind,
                 "exact_target_label": session.exact_target_label,
+                "verifier_feedback": session.verifier_feedback,
                 "launch_app_aliases": list(aliases()) if callable(aliases) else [],
             })
 
@@ -353,7 +359,8 @@ class UniversalAgentOrchestrator:
             return decision
         if decision.proposal.status == "finish":
             verification = self.verifier.verify_finish(intent=decision,
-                observation=session.trusted_observation, history=session.history)
+                observation=session.trusted_observation, history=session.history,
+                physical_actions=session.physical_actions)
             session.last_verification = verification
             self._remember(session, session.evidence_store.write_json(
                 f'verification_step_{session.step_number}.json', verification.to_dict()))
@@ -361,13 +368,26 @@ class UniversalAgentOrchestrator:
                 self._clear_action(session)
                 session.tool_intent = decision
                 session.qwen_decision = getattr(decision, 'model_decision', decision)
+                if verification.evidence_kind == "terminal_candidate_rejected":
+                    session.rejected_finish_streak += 1
+                    session.verifier_feedback = verification.reason
+                    if session.rejected_finish_streak >= MAX_REJECTED_FINISH_STREAK:
+                        session.auto_pause_reason = (
+                            f"模型连续{session.rejected_finish_streak}次结束任务，但当前画面都未确认目标达成；"
+                            f"已暂停，未判定成功。{verification.reason}")
+                        self._set_status(session, "paused", session.auto_pause_reason)
+                        return decision
                 self._set_status(session, "needs_reobservation", verification.reason)
                 return decision
+            session.verifier_feedback = ""
+            session.rejected_finish_streak = 0
             self._clear_action(session)
             session.tool_intent = decision
             session.qwen_decision = getattr(decision, 'model_decision', decision)
             self._set_status(session, verification.terminal_status or "succeeded")
             return decision
+        # The model chose a corrective action: the rejection has been acted on.
+        session.rejected_finish_streak = 0
         self._bind_confirmation(session)
         kind = action_effect_kind(decision.proposal.action)
         if policy_decision.requires_user_confirmation:

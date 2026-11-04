@@ -43,6 +43,9 @@ class QwenVisualDecision:
     previous_action_outcome: str | None = None
     protocol_version: str = QWEN_VISUAL_DECISION_PROTOCOL_VERSION
     decision_source: str = 'model_gateway'
+    # The model's own CURRENT-frame verdict on a finish ({status, fact}); the
+    # Verifier reads it instead of trusting a free-text reason.
+    postcondition: Mapping[str, Any] | None = None
 
     def validate(self, context: qwen_task_context_domain.QwenTaskContext) -> None:
         expected_scope = (context.task_id, context.device_id, context.revision,
@@ -58,7 +61,8 @@ class QwenVisualDecision:
             'revision': self.revision, 'observation_id': self.observation_id, 'fingerprint': self.fingerprint,
             'decision_source': self.decision_source,
             'status': self.proposal.status, 'previous_action_outcome': self.previous_action_outcome, 'next_action': self.proposal.action.to_dict()
-            if self.proposal.action else None, 'reason': self.proposal.reason}
+            if self.proposal.action else None, 'reason': self.proposal.reason,
+            **({'postcondition': dict(self.postcondition)} if self.postcondition is not None else {})}
 
 
 class QwenVisualDecisionObserver:
@@ -186,6 +190,7 @@ def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_d
         revision=context.revision, observation_id=observation.observation_id,
         fingerprint=observation.fingerprint, trusted_observation=observation,
         previous_action_outcome=payload.get("previous_action_outcome"),
+        postcondition=payload.get("postcondition"),
         proposal=GenericStepProposal(status="finish", reason=reason))
 
 

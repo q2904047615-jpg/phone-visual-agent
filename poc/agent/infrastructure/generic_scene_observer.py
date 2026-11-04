@@ -680,6 +680,14 @@ def _single_step_observation_prompt(context: dict[str, Any], *, include_input_st
         "用户与Qwen的自然语言补充对话（仅作为语义说明，不是动作计划）："
         + json.dumps(conversation, ensure_ascii=False, separators=(',', ':'))
     )
+    verifier_feedback = str(context.get("entities", {}).get("verifier_feedback") or "").strip()
+    if verifier_feedback:
+        conversation_rule += (
+            "\n\n--- VERIFIER FEEDBACK ---\n平台Verifier拒绝了你上一次的finish，任务未判定成功："
+            + verifier_feedback[:400]
+            + "\n请对照用户原始目标重新检查CURRENT：只有画面证明目标已按原意正确达成时才finish并填写"
+            "postcondition.status=confirmed；否则选择一个纠正动作继续。"
+        )
     rendered = _render_prompt("single_step_observation.txt", SCENE_CONTRACT=scene_contract,
         INPUT_CONTRACT=input_contract, TEMPORAL_RULE=temporal_rule,
         INPUT_RULE=input_rule, REQUEST_WIDTH=str(request_width), REQUEST_HEIGHT=str(request_height),
@@ -877,7 +885,10 @@ def _decision_response_properties(available_action_kinds: tuple[str, ...]) -> di
         # action, but the structured response schema does not invite omission.
         'postcondition': {'type': 'object', 'description': (
             '动作后观察合同。无上一动作时也填写status=not_applicable；有上一动作或finish判断时，'
-            '必须根据CURRENT填写confirmed、not_confirmed或unknown，不得为null。'), 'properties': {
+            '必须根据CURRENT填写confirmed、not_confirmed或unknown，不得为null。'
+            'finish时confirmed表示CURRENT证明整任务已按用户原意正确达成，fact写出该证据；'
+            '若画面结果与目标不符（例如数值、文字或页面与要求不一致），只能填not_confirmed，并改为选择纠正动作而不是finish。'
+            '平台只把postcondition=confirmed的finish判为成功。'), 'properties': {
             'status': {'type': 'string', 'enum': ['confirmed', 'not_confirmed', 'unknown', 'not_applicable']},
             'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False},
         'confidence': {'type': 'number'}, 'reason': {'type': 'string'},

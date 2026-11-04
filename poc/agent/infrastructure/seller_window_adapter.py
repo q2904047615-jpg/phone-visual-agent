@@ -735,6 +735,13 @@ class MachinePositionNotConfirmed(RuntimeError):
     """A station request was dispatched but its native selector did not confirm it."""
 
 
+# The 1-10 tabs fill only the top ~39% of the toolbar strip (measured on the
+# real 810x1515 controller: red rows 0-29 of 75, then a pale border row).
+# Sampling at 40% hit that border, so a selected tab scored 4/6 and was never
+# confirmed. Keep every sample row well inside the tab.
+TOOLBAR_TAB_SAMPLE_ROWS = (.10, .20, .30)
+
+
 def machine_position_from_toolbar(toolbar: Image.Image) -> int | None:
     """Read the vendor's red 1-10 selector, never the phone/app image.
 
@@ -749,7 +756,7 @@ def machine_position_from_toolbar(toolbar: Image.Image) -> int | None:
     selected = []
     for position in range(1, 11):
         samples = [rgb.getpixel((int((position - 1 + x) * width / 10), int(y * height)))
-                   for x in (.22, .78) for y in (.16, .28, .40)]
+                   for x in (.22, .78) for y in TOOLBAR_TAB_SAMPLE_ROWS]
         red = sum(r >= 150 and r > g * 1.6 and r > b * 1.6 for r, g, b in samples)
         if red >= 5:
             selected.append(position)
@@ -768,7 +775,7 @@ def read_machine_position(hwnd: int) -> int | None:
     strip_top = top + height - strip_height
     for position in range(10):
         for x in (.22, .78):
-            for y in (.16, .28, .40):
+            for y in TOOLBAR_TAB_SAMPLE_ROWS:
                 if _root_window_at(left + int((position + x) * width / 10),
                                    strip_top + int(y * strip_height)) != int(hwnd):
                     return None

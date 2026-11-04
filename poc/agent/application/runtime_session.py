@@ -56,6 +56,10 @@ class UniversalAgentSessionState:
     pause_requested: Event = field(default_factory=Event, repr=False)
     automatic_loop_enabled: bool = False
     auto_pause_reason: str = ""
+    # Why the Verifier last refused a finish; shown to the model on the next
+    # observation so it corrects the result instead of finishing again.
+    verifier_feedback: str = ""
+    rejected_finish_streak: int = 0
     conversation: list[dict[str, str]] = field(default_factory=list)
     qwen_reply: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -129,6 +133,7 @@ class UniversalAgentSessionState:
             'evidence': list(dict.fromkeys(self.evidence_paths)),
             'pause_requested': self.pause_requested.is_set(),
             'automatic_loop_enabled': self.automatic_loop_enabled, 'auto_pause_reason': self.auto_pause_reason,
+            'verifier_feedback': self.verifier_feedback, 'rejected_finish_streak': self.rejected_finish_streak,
             'execution_budget': self.execution_budget.snapshot(self.physical_actions),
             'recent_navigation': self.recent_navigation.to_dict(),
             'post_action_transition_protocol': POST_ACTION_TRANSITION_PROTOCOL_VERSION,

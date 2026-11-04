@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -9,7 +10,7 @@ from agent.domain.tool_intent import ToolIntent
 from agent.domain.validation import dataclass_wire, reject_if
 
 
-VERIFIER_PROTOCOL_VERSION = "2026-10-13-platform-verifier-v1"
+VERIFIER_PROTOCOL_VERSION = "2026-11-05-platform-verifier-v2"
 VerificationState = Literal["continue", "completed", "needs_reobservation"]
 
 
@@ -44,8 +45,16 @@ class PlatformVerifier:
         validator()
 
     def verify_finish(self, *, intent: ToolIntent, observation: Any,
-        history: list[dict[str, Any]] | tuple[dict[str, Any], ...] = ()) -> VerificationResult:
-        """Accept a terminal candidate only when it is bound to fresh evidence."""
+        history: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+        physical_actions: int = 0) -> VerificationResult:
+        """Accept a terminal candidate only when it is bound to fresh evidence.
+
+        The model's free-text reason is not completion evidence. Its structured
+        CURRENT-frame verdict (postcondition.status) is: a finish the model
+        itself marks not_confirmed/unknown is never a success, and once the task
+        has changed the phone the verdict must be confirmed. A view-only finish
+        with no physical action may still be not_applicable.
+        """
 
         self._validate_observation(observation)
         intent.validate(observation)
@@ -58,6 +67,13 @@ class PlatformVerifier:
                 observation_id=observation.observation_id, fingerprint=observation.fingerprint,
                 evidence_kind="terminal_candidate_deferred",
                 reason="历史末步效果仍不确定，Verifier要求重新观察后再判断终态。",
+            )
+        rejection = self._unconfirmed_goal_reason(intent.postcondition, physical_actions)
+        if rejection:
+            return VerificationResult(
+                state="continue", terminal_status=None,
+                observation_id=observation.observation_id, fingerprint=observation.fingerprint,
+                evidence_kind="terminal_candidate_rejected", reason=rejection,
             )
         return VerificationResult(
             state="completed", terminal_status="succeeded",
@@ -87,6 +103,19 @@ class PlatformVerifier:
             observation_id=after.observation_id, fingerprint=after.fingerprint,
             evidence_kind="tool_result_observed", reason="工具结果与动作后Observation已绑定。",
         )
+
+    @staticmethod
+    def _unconfirmed_goal_reason(postcondition: Any, physical_actions: int) -> str:
+        status = str(postcondition.get("status") or "") if isinstance(postcondition, Mapping) else ""
+        fact = str(postcondition.get("fact") or "").strip() if isinstance(postcondition, Mapping) else ""
+        detail = f"（模型给出的事实：{fact[:200]}）" if fact else ""
+        if status in {"not_confirmed", "unknown"}:
+            return f"模型的finish报告当前画面未确认目标达成（postcondition={status}），不判定成功{detail}。"
+        if int(physical_actions or 0) > 0 and status != "confirmed":
+            shown = status or "缺失"
+            return (f"任务已改变手机状态，finish必须由当前画面确认目标达成（postcondition=confirmed），"
+                    f"实际为{shown}，不判定成功{detail}。")
+        return ""
 
     @staticmethod
     def _has_uncertain_tail(entry: dict[str, Any]) -> bool:

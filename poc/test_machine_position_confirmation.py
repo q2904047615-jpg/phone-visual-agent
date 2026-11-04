@@ -10,11 +10,20 @@ from test_seller_dpi_scaling import _FakeCursorUser32
 
 
 def toolbar(selected, width=540, height=50):
-    image = Image.new('RGB', (width, height), '#dddddd')
+    """Mirror the real strip: tabs over the top ~39%, a pale border row, then the control row.
+
+    Measured on the live 810x1515 controller (strip 810x75): the selected tab is
+    red on rows 0-29, row 30 is pale pink (235, 209, 209), the rest is grey.
+    """
+    image = Image.new('RGB', (width, height), (224, 224, 224))
     draw = ImageDraw.Draw(image)
+    tab_bottom = round(height * .39)
+    draw.rectangle((0, 0, width - 1, tab_bottom), fill=(185, 185, 185))
     for position in selected:
         draw.rectangle(((position - 1) * width / 10, 0,
-                        position * width / 10 - 1, height * .58), fill='#ef4343')
+                        position * width / 10 - 1, tab_bottom), fill=(233, 65, 62))
+        draw.rectangle(((position - 1) * width / 10, tab_bottom + 1,
+                        position * width / 10 - 1, tab_bottom + 2), fill=(235, 209, 209))
     return image
 
 
@@ -96,6 +105,22 @@ class MachinePositionConfirmationTests(unittest.TestCase):
                     self.assertEqual(position, seller.machine_position_from_toolbar(toolbar([position], width, height)))
         for selected in ([], [1, 2]):
             self.assertIsNone(seller.machine_position_from_toolbar(toolbar(selected)))
+
+    def test_selected_tab_is_read_inside_the_tab_not_on_its_border(self):
+        # Regression (2026-11-05): button 1 was red on the real controller, but the
+        # 40% sample row hit the pale border, scoring 4/6, so the switch was
+        # reported as MachinePositionNotConfirmed.
+        image = Image.new('RGB', (810, 75), (224, 224, 224))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 809, 29), fill=(185, 185, 185))
+        for row in range(28):
+            draw.line((0, row, 80, row), fill=(246 - row // 2, 90 - row, 89 - row))
+        draw.line((0, 28, 80, 28), fill=(198, 40, 40))
+        draw.line((0, 29, 80, 29), fill=(198, 40, 40))
+        draw.line((0, 30, 80, 30), fill=(235, 209, 209))
+        self.assertEqual(1, seller.machine_position_from_toolbar(image))
+        for y in seller.TOOLBAR_TAB_SAMPLE_ROWS:
+            self.assertLess(int(y * 75), 30)
 
     def test_toolbar_read_is_passive_and_excludes_phone_pixels(self):
         with (patch.object(seller, '_window_is_minimized', return_value=False),

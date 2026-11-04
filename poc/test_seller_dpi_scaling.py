@@ -114,6 +114,7 @@ class SellerDpiScalingTests(unittest.TestCase):
             patch.object(seller, "ensure_window_fully_visible"),
             patch.object(seller, "client_geometry", return_value=(0, 0, 540, 1010)),
             patch.object(seller, "click_client_control", side_effect=lambda hwnd, x, y: clicks.append((hwnd, x, y))),
+            patch.object(seller, "read_machine_position", side_effect=[1, 10]),
             patch.object(seller.time, "sleep"),
         ):
             seller.select_machine_position(123, 1)

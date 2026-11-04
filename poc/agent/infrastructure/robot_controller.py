@@ -216,6 +216,7 @@ class RobotController:
         """Select a seller position from an explicit console request."""
         reject_if(isinstance(machine_position, bool) or not isinstance(machine_position, int)
             or not 1 <= machine_position <= 10, ValueError("卖家机位必须是1到10之间的整数。"))
+        self._machine_position_ready = False
         hwnd, _title = seller_gui.find_window(self.title)
         seller_gui.select_machine_position(hwnd, machine_position)
         self.machine_position = machine_position

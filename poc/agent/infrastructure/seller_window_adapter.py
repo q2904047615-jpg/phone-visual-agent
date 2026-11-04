@@ -608,13 +608,32 @@ def click_client_control(hwnd: int, x: int, y: int, hold: float=0.08) -> None:
     _, _, width, height = client_geometry(hwnd)
     reject_if(not (0 <= x < width and 0 <= y < height), ValueError(f"控制点 ({x}, {y}) 超出窗口客户区 {width}×{height}。"))
 
-    point = POINT(x, y)
-    reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(point)), _win_error())
     with _active_cursor_lease(hwnd):
-        user32.SetCursorPos(point.x, point.y)
-        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-        time.sleep(hold)
-        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        # Restoring/activating can move a window. Never reuse pre-activation
+        # screen coordinates, and never send a global click into an occluder.
+        _, _, current_width, current_height = client_geometry(hwnd)
+        reject_if((current_width, current_height) != (width, height),
+            RuntimeError('控制端尺寸在激活期间发生变化，未发送点击。'))
+        point = POINT(x, y)
+        reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(point)), _win_error())
+        reject_if(_root_window_at(point.x, point.y) != int(hwnd),
+            RuntimeError('控制端按钮被其他窗口遮挡，未发送点击。'))
+        reject_if(not user32.SetCursorPos(point.x, point.y), _win_error())
+        actual = POINT()
+        reject_if(not user32.GetCursorPos(ctypes.byref(actual)), _win_error())
+        reject_if((actual.x, actual.y) != (point.x, point.y),
+            RuntimeError('鼠标未到达控制端按钮，未发送点击。'))
+        reject_if(_root_window_at(actual.x, actual.y) != int(hwnd),
+            RuntimeError('控制端按钮被其他窗口遮挡，未发送点击。'))
+        events = (INPUT * 1)()
+        events[0].type = 0  # INPUT_MOUSE; coordinates were checked above.
+        events[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN
+        reject_if(user32.SendInput(1, events, ctypes.sizeof(INPUT)) != 1, _win_error())
+        try:
+            time.sleep(hold)
+        finally:
+            events[0].mi.dwFlags = MOUSEEVENTF_LEFTUP
+            reject_if(user32.SendInput(1, events, ctypes.sizeof(INPUT)) != 1, _win_error())
         time.sleep(0.12)
 
 
@@ -649,6 +668,51 @@ def type_unicode_text(text: str) -> None:
     time.sleep(0.08)
 
 
+class MachinePositionNotConfirmed(RuntimeError):
+    """A station request was dispatched but its native selector did not confirm it."""
+
+
+def machine_position_from_toolbar(toolbar: Image.Image) -> int | None:
+    """Read the vendor's red 1-10 selector, never the phone/app image.
+
+    Only a single unambiguous red button is accepted. Sampling both sides of
+    each digit avoids text/hover borders and scales with the existing toolbar.
+    This confirms UI selection only, not camera travel or mechanical contact.
+    """
+    width, height = toolbar.size
+    if width < 100 or height < 20:
+        return None
+    rgb = toolbar.convert('RGB')
+    selected = []
+    for position in range(1, 11):
+        samples = [rgb.getpixel((int((position - 1 + x) * width / 10), int(y * height)))
+                   for x in (.22, .78) for y in (.16, .28, .40)]
+        red = sum(r >= 150 and r > g * 1.6 and r > b * 1.6 for r, g, b in samples)
+        if red >= 5:
+            selected.append(position)
+    return selected[0] if len(selected) == 1 else None
+
+
+def read_machine_position(hwnd: int) -> int | None:
+    """Read only the unobscured native toolbar, without activating the window."""
+    _require_windows()
+    if _window_is_minimized(hwnd):
+        return None
+    left, top, width, height = client_geometry(hwnd)
+    if not seller_layout_has_full_camera(width, height):
+        return None
+    strip_height = scale_seller_vertical_value(BASELINE_TOOLBAR_HEIGHT, width, height)
+    strip_top = top + height - strip_height
+    for position in range(10):
+        for x in (.22, .78):
+            for y in (.16, .28, .40):
+                if _root_window_at(left + int((position + x) * width / 10),
+                                   strip_top + int(y * strip_height)) != int(hwnd):
+                    return None
+    image = ImageGrab.grab(bbox=(left, strip_top, left + width, top + height), all_screens=True)
+    return machine_position_from_toolbar(image)
+
+
 def select_machine_position(hwnd: int, machine_position: int) -> None:
     """Select one of the seller control window's documented 1-10 positions."""
 
@@ -664,7 +728,15 @@ def select_machine_position(hwnd: int, machine_position: int) -> None:
     reject_if(not (0 <= x < width and 0 <= y < height),
         ValueError(f"机位按钮坐标 ({x}, {y}) 超出窗口客户区 {width}×{height}。"))
     click_client_control(hwnd, x, y)
-    time.sleep(0.45)
+    # Observe only: never replay a click whose physical outcome is uncertain.
+    observed = None
+    for _ in range(10):
+        time.sleep(0.2)
+        observed = read_machine_position(hwnd)
+        if observed == machine_position:
+            return
+    raise MachinePositionNotConfirmed(
+        f'控制端未确认切换到{machine_position}号机位（当前选中：{observed or "未知"}）；未自动重复点击。')
 
 
 def configure_click_count(hwnd: int, click_count: int) -> None:

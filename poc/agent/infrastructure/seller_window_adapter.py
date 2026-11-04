@@ -84,11 +84,13 @@ EnumWindowsProc = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
 
 SW_RESTORE = 9
 GA_ROOT = 2
+GA_ROOTOWNER = 3
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 VK_ESCAPE = 0x1B
+GW_OWNER = 4
 VK_HOME = 0x24
 VK_DOWN = 0x28
 VK_RETURN = 0x0D
@@ -124,6 +126,7 @@ if IS_WINDOWS:
     user32.GetAncestor.restype = wintypes.HWND
     user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.GetWindow.restype = wintypes.HWND
+    user32.GetForegroundWindow.restype = wintypes.HWND
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -173,7 +176,10 @@ def find_window(title_fragment: str) -> tuple[int, str]:
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         title = buffer.value
         visible_titles.append(title)
-        if title_fragment.lower() in title.lower():
+        # The controller's message boxes carry the same title but are owned windows; when main.exe
+        # hangs, Windows shows a same-titled "Ghost" stand-in that belongs to dwm.exe.
+        if (title_fragment.lower() in title.lower() and not user32.GetWindow(hwnd, GW_OWNER)
+                and _class_name(hwnd) != "Ghost"):
             matches.append((hwnd, title))
         return True
 
@@ -185,7 +191,77 @@ def find_window(title_fragment: str) -> tuple[int, str]:
             f'当前服务桌面可见窗口数={len(visible_titles)}，标题样本={sample}。'
             "请在运行服务的同一交互式桌面保持 main.exe 窗口可见。"
         )
+    # Any message to a hung window blocks until it recovers, so stop before sending one.
+    reject_if(user32.IsHungAppWindow(matches[0][0]),
+              RuntimeError("卖家控制端 main.exe 没有响应（Windows 已标记为“未响应”）；请等它恢复或重启 main.exe 后再继续。"))
     return matches[0]
+
+
+def _class_name(hwnd: int) -> str:
+    buffer = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(hwnd, buffer, 64)
+    return buffer.value
+
+
+def _uia():
+    """UI Automation client for this thread (reads and writes seller controls without keystrokes)."""
+
+    import comtypes
+    import comtypes.client
+
+    try:
+        comtypes.CoInitialize()
+    except OSError:
+        pass   # this thread already joined another COM apartment
+    comtypes.client.GetModule("UIAutomationCore.dll")
+    from comtypes.gen import UIAutomationClient as uia
+
+    return uia, comtypes.client.CreateObject(uia.CUIAutomation, interface=uia.IUIAutomation)
+
+
+class SellerPopupOpen(RuntimeError):
+    """The controller shows a message box; main.exe refuses input until someone dismisses it."""
+
+
+def seller_popups(hwnd: int) -> list[int]:
+    """Visible windows owned by the controller, i.e. its message boxes."""
+
+    if sys.platform != "win32":
+        return []   # no seller controller (or its message boxes) exists off Windows, even when tests fake it
+    popups: list[int] = []
+
+    @EnumWindowsProc
+    def callback(candidate: int, _lparam: int) -> bool:
+        if user32.IsWindowVisible(candidate) and user32.GetWindow(candidate, GW_OWNER) == hwnd:
+            popups.append(candidate)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return popups
+
+
+def seller_popup_text(hwnd: int) -> str | None:
+    """The text of any message box the controller is showing, or None."""
+
+    texts = []
+    for popup in seller_popups(hwnd):
+        try:
+            uia, client = _uia()
+            condition = client.CreatePropertyCondition(uia.UIA_ControlTypePropertyId, uia.UIA_TextControlTypeId)
+            found = client.ElementFromHandle(popup).FindAll(uia.TreeScope_Descendants, condition)
+            text = "".join(found.GetElement(i).CurrentName for i in range(found.Length)).strip()
+        except Exception:   # best effort: the popup itself is what blocks the controller
+            text = ""
+        texts.append(text or "（无法读取提示文字）")
+    return "；".join(texts) or None
+
+
+def require_no_seller_popup(hwnd: int, when: str) -> None:
+    """Fail before touching the controller while one of its message boxes is open."""
+
+    text = seller_popup_text(hwnd)
+    reject_if(bool(text), SellerPopupOpen(
+        f"{when}控制端弹出提示“{text}”，在点掉之前控制端不会执行任何动作；请在控制端点掉提示后再继续。"))
 
 
 def client_geometry(hwnd: int) -> tuple[int, int, int, int]:
@@ -608,13 +684,32 @@ def click_client_control(hwnd: int, x: int, y: int, hold: float=0.08) -> None:
     _, _, width, height = client_geometry(hwnd)
     reject_if(not (0 <= x < width and 0 <= y < height), ValueError(f"控制点 ({x}, {y}) 超出窗口客户区 {width}×{height}。"))
 
-    point = POINT(x, y)
-    reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(point)), _win_error())
     with _active_cursor_lease(hwnd):
-        user32.SetCursorPos(point.x, point.y)
-        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-        time.sleep(hold)
-        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        # Restoring/activating can move a window. Never reuse pre-activation
+        # screen coordinates, and never send a global click into an occluder.
+        _, _, current_width, current_height = client_geometry(hwnd)
+        reject_if((current_width, current_height) != (width, height),
+            RuntimeError('控制端尺寸在激活期间发生变化，未发送点击。'))
+        point = POINT(x, y)
+        reject_if(not user32.ClientToScreen(hwnd, ctypes.byref(point)), _win_error())
+        reject_if(_root_window_at(point.x, point.y) != int(hwnd),
+            RuntimeError('控制端按钮被其他窗口遮挡，未发送点击。'))
+        reject_if(not user32.SetCursorPos(point.x, point.y), _win_error())
+        actual = POINT()
+        reject_if(not user32.GetCursorPos(ctypes.byref(actual)), _win_error())
+        reject_if((actual.x, actual.y) != (point.x, point.y),
+            RuntimeError('鼠标未到达控制端按钮，未发送点击。'))
+        reject_if(_root_window_at(actual.x, actual.y) != int(hwnd),
+            RuntimeError('控制端按钮被其他窗口遮挡，未发送点击。'))
+        events = (INPUT * 1)()
+        events[0].type = 0  # INPUT_MOUSE; coordinates were checked above.
+        events[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN
+        reject_if(user32.SendInput(1, events, ctypes.sizeof(INPUT)) != 1, _win_error())
+        try:
+            time.sleep(hold)
+        finally:
+            events[0].mi.dwFlags = MOUSEEVENTF_LEFTUP
+            reject_if(user32.SendInput(1, events, ctypes.sizeof(INPUT)) != 1, _win_error())
         time.sleep(0.12)
 
 
@@ -626,27 +721,59 @@ def press_virtual_key(key_code: int) -> None:
     time.sleep(0.08)
 
 
-def type_unicode_text(text: str) -> None:
-    """Type bounded BMP text into the focused seller control."""
+def _require_seller_foreground(hwnd: int) -> None:
+    """Keystrokes go to the foreground window; refuse unless that is the controller itself."""
 
+    foreground = user32.GetForegroundWindow()
+    # An open Qt dropdown list is its own top-level window owned by the controller, hence GA_ROOTOWNER.
+    root = user32.GetAncestor(foreground, GA_ROOTOWNER) if foreground else 0
+    reject_if(int(root or 0) != int(hwnd),
+              RuntimeError("控制端不在前台，已拒绝发送按键（避免把按键打进其他窗口）。"))
+
+
+class MachinePositionNotConfirmed(RuntimeError):
+    """A station request was dispatched but its native selector did not confirm it."""
+
+
+def machine_position_from_toolbar(toolbar: Image.Image) -> int | None:
+    """Read the vendor's red 1-10 selector, never the phone/app image.
+
+    Only a single unambiguous red button is accepted. Sampling both sides of
+    each digit avoids text/hover borders and scales with the existing toolbar.
+    This confirms UI selection only, not camera travel or mechanical contact.
+    """
+    width, height = toolbar.size
+    if width < 100 or height < 20:
+        return None
+    rgb = toolbar.convert('RGB')
+    selected = []
+    for position in range(1, 11):
+        samples = [rgb.getpixel((int((position - 1 + x) * width / 10), int(y * height)))
+                   for x in (.22, .78) for y in (.16, .28, .40)]
+        red = sum(r >= 150 and r > g * 1.6 and r > b * 1.6 for r, g, b in samples)
+        if red >= 5:
+            selected.append(position)
+    return selected[0] if len(selected) == 1 else None
+
+
+def read_machine_position(hwnd: int) -> int | None:
+    """Read only the unobscured native toolbar, without activating the window."""
     _require_windows()
-
-    reject_if(
-        not isinstance(text, str) or not 1 <= len(text) <= 100 or any((char in '\r\n\x00' or ord(char) > 65535 for char
-        in text)),
-        ValueError("控制端文字必须是1～100个无换行 BMP 字符。"),
-    )
-
-    events = (INPUT * (len(text) * 2))()
-    event_index = 0
-    for char in text:
-        for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
-            events[event_index].type = INPUT_KEYBOARD
-            events[event_index].ki = KEYBDINPUT(wVk=0, wScan=ord(char), dwFlags=flags, time=0, dwExtraInfo=0)
-            event_index += 1
-    sent = user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
-    reject_if(sent != len(events), _win_error())
-    time.sleep(0.08)
+    if _window_is_minimized(hwnd):
+        return None
+    left, top, width, height = client_geometry(hwnd)
+    if not seller_layout_has_full_camera(width, height):
+        return None
+    strip_height = scale_seller_vertical_value(BASELINE_TOOLBAR_HEIGHT, width, height)
+    strip_top = top + height - strip_height
+    for position in range(10):
+        for x in (.22, .78):
+            for y in (.16, .28, .40):
+                if _root_window_at(left + int((position + x) * width / 10),
+                                   strip_top + int(y * strip_height)) != int(hwnd):
+                    return None
+    image = ImageGrab.grab(bbox=(left, strip_top, left + width, top + height), all_screens=True)
+    return machine_position_from_toolbar(image)
 
 
 def select_machine_position(hwnd: int, machine_position: int) -> None:
@@ -664,23 +791,55 @@ def select_machine_position(hwnd: int, machine_position: int) -> None:
     reject_if(not (0 <= x < width and 0 <= y < height),
         ValueError(f"机位按钮坐标 ({x}, {y}) 超出窗口客户区 {width}×{height}。"))
     click_client_control(hwnd, x, y)
-    time.sleep(0.45)
+    # Observe only: never replay a click whose physical outcome is uncertain.
+    observed = None
+    for _ in range(10):
+        time.sleep(0.2)
+        observed = read_machine_position(hwnd)
+        if observed == machine_position:
+            return
+    raise MachinePositionNotConfirmed(
+        f'控制端未确认切换到{machine_position}号机位（当前选中：{observed or "未知"}）；未自动重复点击。')
+
+
+def _click_count_field(hwnd: int):
+    """UI Automation value pattern of the 连点次数 input (the edit box under its toolbar point)."""
+
+    left, top, width, height = client_geometry(hwnd)
+    control_x, control_y = seller_control_point(width, height, CLICK_COUNT_INPUT_X)
+    x, y = left + control_x, top + control_y
+    try:
+        uia, client = _uia()
+        condition = client.CreatePropertyCondition(uia.UIA_ControlTypePropertyId, uia.UIA_EditControlTypeId)
+        edits = client.ElementFromHandle(hwnd).FindAll(uia.TreeScope_Descendants, condition)
+        for index in range(edits.Length):
+            edit = edits.GetElement(index)
+            rect = edit.CurrentBoundingRectangle
+            if rect.left <= x < rect.right and rect.top <= y < rect.bottom:
+                return edit.GetCurrentPattern(uia.UIA_ValuePatternId).QueryInterface(uia.IUIAutomationValuePattern)
+    except Exception as exc:   # comtypes missing, COM failure
+        raise RuntimeError(f"无法通过 UI Automation 读取控制端连点次数：{exc}") from exc
+    raise RuntimeError("在控制端底栏找不到连点次数输入框。")
 
 
 def configure_click_count(hwnd: int, click_count: int) -> None:
-    """Set the seller software's 连点次数 field to one or two."""
+    """Make the seller software's 连点次数 field exactly one or two.
+
+    Written through UI Automation and read back. Never typed: keystrokes go to
+    whichever window has focus, which is not main.exe when it cannot be brought
+    to the foreground, and a stray key left in the field (e.g. "1 ") makes
+    main.exe reject every click with a message box. Seen on the real rig on
+    2026-11-04 (the keys went into a chat window); a read when already correct.
+    """
     _require_windows()
     reject_if(click_count not in {1, 2}, ValueError("控制端连点次数只允许1或2。"))
-    ensure_window_fully_visible(hwnd)
-    _, _, width, height = client_geometry(hwnd)
-    control_x, control_y = seller_control_point(width, height, CLICK_COUNT_INPUT_X)
-    click_client_control(hwnd, control_x, control_y)
-    user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    press_virtual_key(VK_A)
-    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-    type_unicode_text(str(click_count))
-    press_virtual_key(VK_RETURN)
-    time.sleep(0.25)
+    field = _click_count_field(hwnd)
+    wanted = str(click_count)
+    if field.CurrentValue != wanted:
+        field.SetValue(wanted)
+        time.sleep(0.05)
+    value = field.CurrentValue
+    reject_if(value != wanted, RuntimeError(f"控制端连点次数没能设为 {wanted}（现在是“{value}”）。"))
 
 
 def configure_single_click_count(hwnd: int) -> None:
@@ -770,11 +929,10 @@ def configure_swipe(hwnd: int, direction: str) -> None:
     _, _, width, height = client_geometry(hwnd)
     control_x, control_y = seller_control_point(width, height, ACTION_DROPDOWN_X)
     click_client_control(hwnd, control_x, control_y)
-    # 下拉顺序：上划、下划、左划、右划、下拉、起点。
-    press_virtual_key(VK_HOME)
-    for _ in range(index):
-        press_virtual_key(VK_DOWN)
-    press_virtual_key(VK_RETURN)
+    # 下拉顺序：上划、下划、左划、右划、下拉、起点。Every key is checked against the foreground window.
+    for key in (VK_HOME, *([VK_DOWN] * index), VK_RETURN):
+        _require_seller_foreground(hwnd)
+        press_virtual_key(key)
     time.sleep(0.25)
 
 

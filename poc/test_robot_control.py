@@ -427,53 +427,129 @@ class PhysicalNavigationSafetyTests(_BasePhysicalNavigationSafetyTests):
                      "_round_trip_position_barrier", "_capture_seller_position_overlay"):
             self.assertFalse(hasattr(robot_gui_poc, name), name)
 
-    def test_unicode_text_transport_emits_down_and_up_for_every_character(self):
-        class FakeUser32:
-            def __init__(self):
-                self.events = []
+    def test_click_count_is_written_without_keystrokes_and_read_back(self):
+        class Field:
+            def __init__(self, value, accepts=True):
+                self.CurrentValue, self.accepts, self.writes = value, accepts, []
 
-            def SendInput(self, count, events, _size):
-                self.events = [
-                    (events[index].ki.wScan, events[index].ki.dwFlags)
-                    for index in range(count)
-                ]
-                return count
+            def SetValue(self, value):
+                self.writes.append(value)
+                if self.accepts:
+                    self.CurrentValue = value
 
-        fake = FakeUser32()
+        stray = Field("1 ")   # a stray space typed into the field makes main.exe reject every click
         with (
-            patch.object(robot_gui_poc, "user32", fake),
-            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
-        ):
-            robot_gui_poc.type_unicode_text("ab1")
-
-        self.assertEqual(
-            [ord("a"), ord("a"), ord("b"), ord("b"), ord("1"), ord("1")],
-            [item[0] for item in fake.events],
-        )
-        self.assertEqual(
-            [
-                robot_gui_poc.KEYEVENTF_UNICODE,
-                robot_gui_poc.KEYEVENTF_UNICODE | robot_gui_poc.KEYEVENTF_KEYUP,
-            ]
-            * 3,
-            [item[1] for item in fake.events],
-        )
-
-    def test_single_click_configuration_uses_current_unicode_helper(self):
-        with (
-            patch("agent.infrastructure.seller_window_adapter.ensure_window_fully_visible"),
-            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1010)),
-            patch("agent.infrastructure.seller_window_adapter.seller_control_point", return_value=(308, 992)),
-            patch("agent.infrastructure.seller_window_adapter.click_client_control"),
-            patch.object(robot_gui_poc.user32, "keybd_event"),
+            patch("agent.infrastructure.seller_window_adapter._click_count_field", return_value=stray),
             patch("agent.infrastructure.seller_window_adapter.press_virtual_key") as press,
-            patch("agent.infrastructure.seller_window_adapter.type_unicode_text") as type_text,
+            patch("agent.infrastructure.seller_window_adapter.click_client_control") as click,
             patch("agent.infrastructure.seller_window_adapter.time.sleep"),
         ):
             robot_gui_poc.configure_single_click_count(123)
+            self.assertEqual(("1", ["1"]), (stray.CurrentValue, stray.writes))
+            robot_gui_poc.configure_single_click_count(123)   # already right: read only
+            self.assertEqual(["1"], stray.writes)
+            stuck = Field("1 ", accepts=False)
+            with (
+                patch("agent.infrastructure.seller_window_adapter._click_count_field", return_value=stuck),
+                self.assertRaisesRegex(RuntimeError, "没能设为 2（现在是“1 ”）"),
+            ):
+                robot_gui_poc.configure_click_count(123, 2)
+        press.assert_not_called()
+        click.assert_not_called()
+        self.assertFalse(hasattr(robot_gui_poc, "type_unicode_text"))
 
-        type_text.assert_called_once_with("1")
-        self.assertEqual(robot_gui_poc.VK_RETURN, press.call_args_list[-1].args[0])
+    def test_find_window_skips_message_boxes_and_ghosts_and_fails_fast_when_hung(self):
+        class Windows:
+            """Top-level windows in z-order as (hwnd, title, owner, class)."""
+
+            def __init__(self, rows, hung=()):
+                self.rows, self.hung = rows, set(hung)
+
+            def _row(self, hwnd):
+                return next(row for row in self.rows if row[0] == hwnd)
+
+            def EnumWindows(self, callback, _lparam):
+                for row in self.rows:
+                    callback(row[0], 0)
+                return 1
+
+            def IsWindowVisible(self, _hwnd):
+                return 1
+
+            def GetWindowTextLengthW(self, hwnd):
+                return len(self._row(hwnd)[1])
+
+            def GetWindowTextW(self, hwnd, buffer, _size):
+                buffer.value = self._row(hwnd)[1]
+                return len(buffer.value)
+
+            def GetWindow(self, hwnd, _command):
+                return self._row(hwnd)[2]
+
+            def GetClassNameW(self, hwnd, buffer, _size):
+                buffer.value = self._row(hwnd)[3]
+                return len(buffer.value)
+
+            def IsHungAppWindow(self, hwnd):
+                return int(hwnd in self.hung)
+
+        title = "智联新途AI机械臂控制端v1.0.1018"
+        fake = Windows([(7, "智联新途AI机械臂控制端", 5, "Qt6110QWindowIcon"),   # its message box
+                        (8, title, 0, "Ghost"),                                 # dwm stand-in while hung
+                        (5, title, 0, "Qt6110QWindowIcon")], hung={5})
+        with patch.object(robot_gui_poc, "user32", fake):
+            with self.assertRaisesRegex(RuntimeError, "main.exe 没有响应"):
+                robot_gui_poc.find_window("智联新途")
+            fake.hung = set()
+            self.assertEqual((5, title), robot_gui_poc.find_window("智联新途"))
+
+    def test_actions_stop_before_dispatch_while_a_seller_message_box_is_open(self):
+        controller = RobotController(title="test", verified_actions={"tap_semantic"})
+        with (
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
+            patch(
+                "agent.infrastructure.robot_controller.seller_gui.seller_popup_text",
+                return_value="点击次数必须是一个整数",
+            ),
+            patch.object(controller, "_capture_phone") as capture,
+            patch("agent.infrastructure.robot_controller.seller_gui.click_client_point") as click,
+        ):
+            with self.assertRaisesRegex(robot_gui_poc.SellerPopupOpen, "动作前控制端弹出提示“点击次数必须是一个整数”"):
+                controller.vision_tap_relative(500, 500)
+            with self.assertRaisesRegex(robot_gui_poc.SellerPopupOpen, "截图前"):
+                controller.vision_capture()
+        capture.assert_not_called()
+        click.assert_not_called()
+
+    def test_swipe_dropdown_refuses_keystrokes_unless_the_controller_is_foreground(self):
+        class Foreground:
+            def __init__(self, owner):
+                self.owner = owner
+
+            def GetForegroundWindow(self):
+                return 999
+
+            def GetAncestor(self, hwnd, flag):
+                assert (hwnd, flag) == (999, robot_gui_poc.GA_ROOTOWNER)
+                return self.owner
+
+        with (
+            patch("agent.infrastructure.seller_window_adapter.ensure_window_fully_visible"),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1010)),
+            patch("agent.infrastructure.seller_window_adapter.click_client_control"),
+            patch("agent.infrastructure.seller_window_adapter.press_virtual_key") as press,
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
+        ):
+            with patch.object(robot_gui_poc, "user32", Foreground(owner=42)):   # some other program
+                with self.assertRaisesRegex(RuntimeError, "控制端不在前台"):
+                    robot_gui_poc.configure_swipe(123, "left")
+            press.assert_not_called()
+            with patch.object(robot_gui_poc, "user32", Foreground(owner=123)):  # its own dropdown list
+                robot_gui_poc.configure_swipe(123, "left")
+        self.assertEqual(
+            [robot_gui_poc.VK_HOME, robot_gui_poc.VK_DOWN, robot_gui_poc.VK_DOWN, robot_gui_poc.VK_RETURN],
+            [call.args[0] for call in press.call_args_list],
+        )
 
     def test_every_unverified_physical_primitive_fails_before_hardware_access(self):
         controller = RobotController(title="test", verified_actions=set())

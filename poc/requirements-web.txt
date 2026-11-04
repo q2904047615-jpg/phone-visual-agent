@@ -3,3 +3,4 @@ uvicorn==0.35.0
 httpx==0.28.1
 Pillow==11.3.0
 numpy==2.3.3
+comtypes==1.4.17; sys_platform == "win32"

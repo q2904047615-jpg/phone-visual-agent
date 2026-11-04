@@ -86,7 +86,9 @@ class FixedAppRetirementTests(unittest.TestCase):
             "BM_CLICK",
             "IDOK",
             "TEXT_INPUT_BUTTON_X_FROM_RIGHT",
-            "GW_OWNER",
+            # GW_OWNER is no longer banned (2026-11-05): seller_window_adapter uses it read-only to
+            # recognise the controller's own message boxes and stop before dispatching input. The
+            # retired dialog text transport stays banned through the names above.
         ):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, text)

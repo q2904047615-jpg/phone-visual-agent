@@ -216,6 +216,7 @@ class RobotController:
         """Select a seller position from an explicit console request."""
         reject_if(isinstance(machine_position, bool) or not isinstance(machine_position, int)
             or not 1 <= machine_position <= 10, ValueError("卖家机位必须是1到10之间的整数。"))
+        self._machine_position_ready = False
         hwnd, _title = seller_gui.find_window(self.title)
         seller_gui.select_machine_position(hwnd, machine_position)
         self.machine_position = machine_position
@@ -237,7 +238,8 @@ class RobotController:
             _left, _top, width, height = seller_gui.client_geometry(hwnd)
             online = width > 0 and height > 0
             camera_online = online and controller_client_has_camera(width, height)
-            error = None
+            popup = seller_gui.seller_popup_text(hwnd)
+            error = f"控制端弹出提示“{popup}”，点掉之前不会执行任何动作。" if popup else None
             camera_error = None if camera_online else '控制端当前显示启动/报错对话框，未检测到可用的手机摄像头画面。' if online else '控制端窗口不可用。'
         except Exception as exc:  # Device status must stay readable while offline.
             hwnd = 0
@@ -272,11 +274,14 @@ class RobotController:
     def vision_capture(self) -> Image.Image:
         """Capture exactly the phone region seen by the visual agent."""
         hwnd, _title = seller_gui.find_window(self.title)
+        seller_gui.require_no_seller_popup(hwnd, "截图前")
         with seller_gui.temporarily_park_cursor_outside_camera(hwnd):
             return self._capture_phone(hwnd)
 
     def _authorized_frame(self, action: str) -> tuple[int, Image.Image]:
         hwnd, _title = seller_gui.find_window(self.title)
+        # An open controller message box swallows every click; stop before dispatching one.
+        seller_gui.require_no_seller_popup(hwnd, "动作前")
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
         return hwnd, frame

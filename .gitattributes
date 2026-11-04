@@ -1,0 +1,3 @@
+# Windows cmd misreads LF-only batch files that contain UTF-8 text after `chcp 65001`
+# (lines get split mid-word), so the launchers are stored and checked out with CRLF as-is.
+*.cmd -text

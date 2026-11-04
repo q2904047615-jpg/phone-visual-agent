@@ -138,8 +138,10 @@ def find_window(title_fragment: str) -> tuple[int, str]:
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         title = buffer.value
         visible_titles.append(title)
-        # The controller's message boxes carry the same title but are owned windows.
-        if title_fragment.lower() in title.lower() and not user32.GetWindow(hwnd, GW_OWNER):
+        # The controller's message boxes carry the same title but are owned windows; when main.exe
+        # hangs, Windows shows a same-titled "Ghost" stand-in that belongs to dwm.exe.
+        if (title_fragment.lower() in title.lower() and not user32.GetWindow(hwnd, GW_OWNER)
+                and _class_name(hwnd) != "Ghost"):
             matches.append((hwnd, title))
         return True
 
@@ -151,7 +153,16 @@ def find_window(title_fragment: str) -> tuple[int, str]:
             f'当前服务桌面可见窗口数={len(visible_titles)}，标题样本={sample}。'
             "请在运行服务的同一交互式桌面保持 main.exe 窗口可见。"
         )
+    # Any message to a hung window blocks until it recovers, so stop before sending one.
+    reject_if(user32.IsHungAppWindow(matches[0][0]),
+              RuntimeError("卖家控制端 main.exe 没有响应（Windows 已标记为“未响应”）；请等它恢复或重启 main.exe 后再继续。"))
     return matches[0]
+
+
+def _class_name(hwnd: int) -> str:
+    buffer = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(hwnd, buffer, 64)
+    return buffer.value
 
 
 def _uia():

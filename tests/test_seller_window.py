@@ -261,10 +261,18 @@ class SellerDpiScalingTests(unittest.TestCase):
 
 
 class _FakeWindowsUser32:
-    """Top-level windows as (hwnd, title, owner)."""
+    """Top-level windows as (hwnd, title, owner); `ghosts` and `hung` list hwnds."""
 
-    def __init__(self, windows):
+    def __init__(self, windows, ghosts=(), hung=()):
         self.windows = windows
+        self.ghosts, self.hung = set(ghosts), set(hung)
+
+    def GetClassNameW(self, hwnd, buffer, _size):
+        buffer.value = "Ghost" if hwnd in self.ghosts else "Qt6110QWindowIcon"
+        return len(buffer.value)
+
+    def IsHungAppWindow(self, hwnd):
+        return int(hwnd in self.hung)
 
     def EnumWindows(self, callback, _lparam):
         for hwnd, _title, _owner in self.windows:
@@ -319,6 +327,15 @@ class SellerControllerWindowTests(unittest.TestCase):
         # The message box comes first in z-order and shares the title prefix.
         self.assertEqual(seller.find_window("智联新途"), (5, "智联新途AI机械臂控制端v1.0.1018"))
         self.assertEqual(seller.seller_popups(5), [7])
+
+    def test_hung_controller_fails_fast_and_its_ghost_window_is_skipped(self) -> None:
+        # When main.exe hangs, dwm puts a same-titled "Ghost" window on top and the real one is hung.
+        self.windows.windows.insert(0, (8, "智联新途AI机械臂控制端v1.0.1018", 0))
+        self.windows.ghosts, self.windows.hung = {8}, {5}
+        with self.assertRaisesRegex(RuntimeError, "main.exe 没有响应"):
+            seller.find_window("智联新途")
+        self.windows.hung = set()
+        self.assertEqual(seller.find_window("智联新途")[0], 5)
 
     def test_click_count_is_written_without_keystrokes_and_read_back(self) -> None:
         field = _FakeValueField("1 ")   # a stray space typed into the field

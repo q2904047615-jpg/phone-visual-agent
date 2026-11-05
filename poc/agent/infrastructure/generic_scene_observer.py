@@ -853,6 +853,15 @@ def _decision_response_schema(decision_properties: dict[str, Any],
     trajectory_actions = {'swipe', 'drag'}
     null_action_fields = ('point', 'direction', 'start', 'end', 'text', 'app', 'wait_seconds')
 
+    def complete(props: dict[str, Any]) -> dict[str, Any]:
+        # DashScope's structured decoding emits only the keys declared in the
+        # matching anyOf branch. Branches that listed just their action fields
+        # silently dropped postcondition, reason, confidence and
+        # previous_action_outcome from every live response (seen 2026-11-05).
+        # Each branch therefore carries the full decision object.
+        merged = {**decision_properties, **props}
+        return {'type': 'object', 'properties': merged, 'required': list(merged), 'additionalProperties': False}
+
     def branch(action: str, *, required: dict[str, Any] | None = None,
         nulls: tuple[str, ...] = ()) -> dict[str, Any]:
         props: dict[str, Any] = {'status': {'enum': ['action']}, 'action': {'enum': [action]}}
@@ -860,7 +869,7 @@ def _decision_response_schema(decision_properties: dict[str, Any],
             props.update(required)
         for name in nulls:
             props[name] = {'type': 'null'}
-        return {'properties': props, 'required': ['status', 'action'],}
+        return complete(props)
 
     branches: list[dict[str, Any]] = []
     for action in wire_actions:
@@ -888,11 +897,8 @@ def _decision_response_schema(decision_properties: dict[str, Any],
         else:
             branches.append(branch(action, nulls=null_action_fields))
 
-    finish = {
-        'properties': {'status': {'enum': ['finish']}, 'action': {'type': 'null'},
-            **{name: {'type': 'null'} for name in null_action_fields}},
-        'required': ['status', 'action'],
-    }
+    finish = complete({'status': {'enum': ['finish']}, 'action': {'type': 'null'},
+        'target_description': {'type': 'null'}, **{name: {'type': 'null'} for name in null_action_fields}})
     return {
         'type': 'object',
         'properties': decision_properties,

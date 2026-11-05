@@ -65,9 +65,21 @@ class EvalProvider:
 
 
 class SuccessfulEvalProvider(EvalProvider):
+    locator_calls = 0
+    last_response = None
+
     def _chat(self, messages, max_tokens, **kwargs) -> str:
+        from test_support.generic_scene_observer import is_tap_locator_request, locator_echo
+
+        if is_tap_locator_request(messages):
+            self.locator_calls += 1
+            return locator_echo(self.last_response)
         del messages, max_tokens, kwargs
         self.calls += 1
+        self.last_response = self._observation()
+        return self.last_response
+
+    def _observation(self) -> str:
         return json.dumps(
             {
                 "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
@@ -236,9 +248,12 @@ class QwenOfflineReportTests(unittest.TestCase):
 
         self.assertTrue(result["score"]["passed"])
         self.assertEqual(result["status"], "action")
-        self.assertEqual(result["observation_diagnostics"]["model_calls"], 1)
+        # One whole-task observation plus the CURRENT-frame tap locator (2026-11-05).
+        self.assertEqual(result["observation_diagnostics"]["model_calls"], 2)
+        self.assertEqual(result["observation_diagnostics"]["tap_locator"]["called"], True)
         self.assertTrue(result["decision_diagnostics"]["decision_from_same_observation_response"])
         self.assertEqual(providers[0].calls, 1)
+        self.assertEqual(providers[0].locator_calls, 1)
 
     def test_coordinate_target_scoring_rejects_missing_outside_and_wrong_evidence(self):
         expected = {'accepted_statuses': ['action'], 'accepted_actions': ['tap_semantic'],

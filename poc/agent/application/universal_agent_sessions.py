@@ -302,8 +302,14 @@ class UniversalAgentSessionApplicationService:
         with self._sessions.locked(session_id) as session:
             self._ensure_recoverable(session)
             require_session_device(session, requested_device_id)
-            self._orchestrator().cancel(session)
-            result = AgentSessionOperationResult(session=session)
+        # Lock order: the automatic loop holds the device lock and then saves
+        # each step through the repository lock. Calling into the orchestrator
+        # (which may take the device lock) while still holding the repository
+        # lock inverted that order and deadlocked the executor on 2026-11-05.
+        self._orchestrator().cancel(session)
+        with self._sessions.locked(session_id):
+            pass  # persist the outcome (or the recorded cancel request)
+        result = AgentSessionOperationResult(session=session)
         self._settle_if_terminal(session)
         return result
 
@@ -394,5 +400,9 @@ class UniversalAgentSessionApplicationService:
         with self._sessions.locked(session_id) as session:
             self._ensure_recoverable(session)
             require_session_device(session, requested_device_id)
-            self._orchestrator().pause(session)
-            return AgentSessionOperationResult(session=session)
+        # Same lock order as cancel: never wait for the device lock while
+        # holding the repository lock.
+        self._orchestrator().pause(session)
+        with self._sessions.locked(session_id):
+            pass
+        return AgentSessionOperationResult(session=session)

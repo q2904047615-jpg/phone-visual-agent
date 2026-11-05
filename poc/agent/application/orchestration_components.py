@@ -431,7 +431,15 @@ class SessionLifecycleCoordinator:
         finally:
             host.device_registry.release(session.device_id, session.session_id)
     def apply_pause_request(self, host, session: UniversalAgentSessionState) -> bool:
-        if not session.pause_requested.is_set() or session.status in host.device_registry.TERMINAL_STATUSES:
+        if session.status in host.device_registry.TERMINAL_STATUSES:
+            return False
+        if session.cancel_requested.is_set():
+            # A cancel that arrived mid-operation is applied here, by the thread
+            # that already holds the device lock, after the real result of the
+            # in-flight action has been recorded. Nothing is replayed.
+            host._terminate(session, status='cancelled', message='用户已取消任务。')
+            return True
+        if not session.pause_requested.is_set():
             return False
         host._clear_action(session)
         if session.effect_confirmation_authority is not None:
@@ -453,6 +461,17 @@ class SessionLifecycleCoordinator:
         with host.device_registry.device_lock(session.device_id):
             host._apply_pause_request(session)
     def cancel(self, host, session: UniversalAgentSessionState) -> None:
+        if session.status in host.device_registry.TERMINAL_STATUSES:
+            return
+        # Like pause: never wait for the device lock behind an in-flight
+        # action/loop. The caller holds the session repository lock, and the
+        # loop needs that lock to save each step, so waiting here deadlocked
+        # the executor (2026-11-05). Signal instead; the loop terminates the
+        # session at its next pause checkpoint.
+        if session.automatic_loop_enabled or session.status in {'observing', 'executing_one_action'}:
+            session.cancel_requested.set()
+            session.pause_requested.set()
+            return
         host._terminate(session, status='cancelled', message='用户已取消任务。')
     def invalidate_confirmation(self, host, session: UniversalAgentSessionState, *, reason: str) -> None:
         if host.device_registry.active_session(session.device_id) != session.session_id:

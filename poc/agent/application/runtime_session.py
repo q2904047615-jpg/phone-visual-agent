@@ -54,6 +54,9 @@ class UniversalAgentSessionState:
     recent_navigation: RecentAppsNavigation = field(default_factory=RecentAppsNavigation)
     local_exact_input_authority: bool = field(default=False, repr=False)
     pause_requested: Event = field(default_factory=Event, repr=False)
+    # Set when a cancel arrives while an action or the automatic loop is in
+    # flight; that operation terminates the session at its next safe point.
+    cancel_requested: Event = field(default_factory=Event, repr=False)
     automatic_loop_enabled: bool = False
     auto_pause_reason: str = ""
     # Why the Verifier last refused a finish; shown to the model on the next
@@ -132,6 +135,7 @@ class UniversalAgentSessionState:
             'conversation': [dict(item) for item in self.conversation],
             'evidence': list(dict.fromkeys(self.evidence_paths)),
             'pause_requested': self.pause_requested.is_set(),
+            'cancel_requested': self.cancel_requested.is_set(),
             'automatic_loop_enabled': self.automatic_loop_enabled, 'auto_pause_reason': self.auto_pause_reason,
             'verifier_feedback': self.verifier_feedback, 'rejected_finish_streak': self.rejected_finish_streak,
             'execution_budget': self.execution_budget.snapshot(self.physical_actions),

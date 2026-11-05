@@ -35,6 +35,12 @@ class LocatorProvider:
         self.locator_replies = list(locator_replies)
         self.observation_calls = 0
         self.locator_messages = []
+        self.stages = []
+
+    def call_scope(self, *, stage, fingerprint='', request_evidence_path=None):
+        from contextlib import nullcontext
+        self.stages.append(stage)
+        return nullcontext()
 
     def status(self):
         return {'configured': True, 'model': 'offline-locator'}
@@ -122,11 +128,43 @@ class TapLocatorTests(unittest.TestCase):
                 self.assertFalse(observer.last_diagnostics['tap_locator']['called'])
                 self.assertEqual(1, observer.last_diagnostics['model_calls'])
 
+    def test_locator_outcome_is_written_to_the_run_evidence(self):
+        import tempfile
+        from pathlib import Path
+        provider = LocatorProvider(deepcopy(wire(decision(point=[228, 700], target_description='数字2键'))),
+                                   [{'point': [410, 790]}])
+        observer = SingleStepGenericSceneObserver(provider)
+        with tempfile.TemporaryDirectory() as tmp:
+            observer.observe_with_decision(frames=frames(), goal_context={'objective': 'x', 'entities': {'history': []}},
+                device_id='device-1', available_action_kinds=ALLOWED, response_evidence_dir=Path(tmp))
+            saved = [json.loads(p.read_text(encoding='utf-8')) for p in Path(tmp).glob('*_tap_locator.json')]
+        self.assertEqual(1, len(saved))
+        self.assertEqual(([228, 700], [410.0, 790.0], True), (saved[0]['decision_point'], saved[0]['located_point'], saved[0]['applied']))
+
     def test_locator_can_be_switched_off(self):
         with patch.object(observer_module, 'TAP_LOCATOR_ENABLED', False):
             provider, _, _, choice, _ = observe(decision(point=[228, 700], target_description='数字2键'), [])
         self.assertEqual([], provider.locator_messages)
         self.assertEqual([228, 700], choice['point'])
+
+
+class LocatorUsageContractTests(unittest.TestCase):
+    """Regression (2026-11-05 live run): the formal usage ledger rejected every
+    locator request before it left the server, so taps silently kept the
+    drifted point. The stage the observer uses must be one the ledger allows."""
+
+    def test_observer_stage_is_allowed_by_the_session_usage_ledger(self):
+        from agent.application.vision_usage import (
+            QWEN_PLUS_MODEL, SINGLE_STEP_ALLOWED_REQUEST_STAGES, VisionSessionUsageLedger, VisionStepContractViolation,
+        )
+        provider, _, _, _, _ = observe(decision(point=[228, 700], target_description='数字2键'), [{'point': [410, 790]}])
+        self.assertEqual(['single_step_observation', 'tap_locator'], provider.stages)
+        self.assertTrue(set(provider.stages) <= SINGLE_STEP_ALLOWED_REQUEST_STAGES)
+        ledger = VisionSessionUsageLedger(session_id='s1')
+        for stage in provider.stages:
+            ledger.reserve_request(model=QWEN_PLUS_MODEL, stage=stage, fingerprint='f', max_completion_tokens=None)
+        with self.assertRaises(VisionStepContractViolation):
+            ledger.reserve_request(model=QWEN_PLUS_MODEL, stage='visual_audit', fingerprint='f', max_completion_tokens=None)
 
 
 class TargetDescriptionProtocolTests(unittest.TestCase):

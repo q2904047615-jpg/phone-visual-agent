@@ -536,8 +536,16 @@ class SingleStepGenericSceneObserver():
                 record.update(located_point=located, applied=True)
                 model_decision["point"] = located
         except Exception as exc:  # A locator failure never blocks the chosen action.
-            record["error"] = f"定位请求失败（{type(exc).__name__}），沿用决策坐标。"
+            record["error"] = f"定位请求失败（{type(exc).__name__}: {str(exc)[:160]}），沿用决策坐标。"
         record["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        if response_evidence_dir is not None:
+            try:
+                atomic_replace_bytes(Path(response_evidence_dir) / f"{uuid4().hex}_tap_locator.json", json_bytes({
+                    "artifact_version": "2026-11-05-tap-locator-v1", "fingerprint": prepared["fingerprint"],
+                    **{key: value for key, value in record.items() if key != "called"}, "called": record["called"],
+                }))
+            except OSError:
+                record["evidence_error"] = "定位记录写入失败。"
         return record
 
     def _record_observation_success(

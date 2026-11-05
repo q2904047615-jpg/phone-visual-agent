@@ -14,7 +14,9 @@ from agent.domain.vision_model import DEFAULT_VISION_MODEL
 
 VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v4"
 QWEN_PLUS_MODEL = DEFAULT_VISION_MODEL
-SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
+#: Per closed-loop step: the whole-task observation, plus (2026-11-05) the
+#: CURRENT-frame-only tap locator that may move a tap point and nothing else.
+SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation", "tap_locator"})
 
 # Beijing non-thinking prices verified 2026-09-09; reports keep list/promo estimates, not invoice claims.
 QWEN_PLUS_PRICING_VERSION = "cn-beijing-qwen3-vl-plus-2026-09-09"
@@ -112,7 +114,7 @@ class VisionSessionUsageLedger:
                     'network_attempts': 0})
                 raise VisionStepContractViolation(
                     "vision_step_contract_violation: 正式会话每个闭环步骤"
-                    "只允许 single_step_observation；旧视觉审计或动作选择"
+                    "只允许 single_step_observation 和点击定位 tap_locator；旧视觉审计或动作选择"
                     f"阶段 {stage} 已在联网前拒绝。"
                 )
             local_request_id = f"qwen_local_{uuid.uuid4().hex}"

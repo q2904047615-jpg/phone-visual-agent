@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import sqlite3
@@ -36,6 +37,28 @@ from agent.domain.control_plane import (
 CONTROL_PLANE_SCHEMA_VERSION = "control-plane-sqlite-v2"
 LOCAL_ORGANIZATION_ID = "local-org"
 IDENTITY_SESSION_TTL_SECONDS = 3600
+#: Upper bound for a configured login lifetime (31 days).
+IDENTITY_SESSION_MAX_TTL_SECONDS = 31 * 86400
+#: Deployment setting for how long a website/API login stays valid, in seconds.
+IDENTITY_SESSION_TTL_ENV = "PHONE_AGENT_IDENTITY_SESSION_TTL_SECONDS"
+
+
+def configured_identity_session_ttl() -> int:
+    """Login lifetime from the deployment environment; 1 hour when unset."""
+    raw = str(os.environ.get(IDENTITY_SESSION_TTL_ENV) or "").strip()
+    if not raw:
+        return IDENTITY_SESSION_TTL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{IDENTITY_SESSION_TTL_ENV} 必须是整数秒。") from None
+    _validate_identity_session_ttl(value)
+    return value
+
+
+def _validate_identity_session_ttl(value: int) -> None:
+    if isinstance(value, bool) or not 60 <= int(value) <= IDENTITY_SESSION_MAX_TTL_SECONDS:
+        raise ValueError(f"身份会话有效期必须在 60-{IDENTITY_SESSION_MAX_TTL_SECONDS} 秒。")
 
 
 def _now() -> str:
@@ -662,10 +685,14 @@ class SqliteControlPlaneRepository:
         return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
     def issue_identity_session(self, *, organization_id: str, user_id: str,
-                               ttl_seconds: int = IDENTITY_SESSION_TTL_SECONDS) -> dict[str, Any]:
-        """Issue an opaque principal session; only its hash is persisted."""
-        if ttl_seconds < 60 or ttl_seconds > 86400:
-            raise ValueError("身份会话有效期必须在 60-86400 秒。")
+                               ttl_seconds: int | None = None) -> dict[str, Any]:
+        """Issue an opaque principal session; only its hash is persisted.
+
+        Without an explicit ttl the deployment setting applies (default 1 hour).
+        """
+        if ttl_seconds is None:
+            ttl_seconds = configured_identity_session_ttl()
+        _validate_identity_session_ttl(ttl_seconds)
         with self._lock:
             row = self._connection.execute(
                 "SELECT user_id, organization_id, role, team_ids_json FROM control_plane_principals "
@@ -1388,4 +1415,6 @@ class SqliteControlPlaneRepository:
             self._connection.close()
 
 
-__all__ = ["CONTROL_PLANE_SCHEMA_VERSION", "IDENTITY_SESSION_TTL_SECONDS", "LOCAL_ORGANIZATION_ID", "SqliteControlPlaneRepository"]
+__all__ = ["CONTROL_PLANE_SCHEMA_VERSION", "IDENTITY_SESSION_MAX_TTL_SECONDS", "IDENTITY_SESSION_TTL_ENV",
+           "IDENTITY_SESSION_TTL_SECONDS", "LOCAL_ORGANIZATION_ID", "SqliteControlPlaneRepository",
+           "configured_identity_session_ttl"]

@@ -47,6 +47,30 @@ class FinishVerdictTests(unittest.TestCase):
         self.assertEqual('', self.reason('confirmed', 0))
 
 
+class DecisionSchemaBranchTests(unittest.TestCase):
+    """Regression (2026-11-05 live runs): DashScope emits only the keys of the
+    matching anyOf branch, so branches that listed just their action fields
+    dropped postcondition from every response and no action task could ever
+    be judged successful."""
+
+    def test_every_branch_carries_the_full_decision_object(self):
+        from agent.infrastructure.generic_scene_observer import _single_step_response_format
+        response_format = _single_step_response_format(
+            {'objective': 'x', 'entities': {}}, input_structure_required=False, request_height=1000,
+            available_action_kinds=('tap_semantic', 'scroll', 'home', 'swipe_element', 'wait_for_change'))
+        decision = response_format['json_schema']['schema']['properties']['decision']
+        for branch in decision['anyOf']:
+            label = branch['properties']['status'].get('enum'), branch['properties']['action']
+            with self.subTest(branch=str(label)):
+                for field in ('postcondition', 'reason', 'confidence', 'previous_action_outcome',
+                              'state_action_consistent', 'effect', 'target_description'):
+                    self.assertIn(field, branch['properties'])
+                    self.assertIn(field, branch['required'])
+                self.assertFalse(branch['additionalProperties'])
+        finish = next(b for b in decision['anyOf'] if b['properties']['status'].get('enum') == ['finish'])
+        self.assertEqual('object', finish['properties']['postcondition']['type'])
+
+
 class FinishVerificationLoopTests(LoopHarness):
     def test_wrong_result_is_rejected_then_corrected_with_feedback(self):
         adapter = ReobservingAdapter([

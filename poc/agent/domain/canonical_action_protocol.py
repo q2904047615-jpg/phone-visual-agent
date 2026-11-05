@@ -34,7 +34,8 @@ MODEL_WIRE_ACTIONS = (frozenset(CANONICAL_ACTION_KINDS) - {
     "tap_semantic", "dismiss_overlay", "swipe_element", "input_verified_text", "clear_verified_text",
 }) | frozenset(MODEL_ACTION_ALIASES)
 MODEL_STEP_DECISION_FIELDS = frozenset({"status", "action", "point", "direction", "start", "end", "effect", "confidence",
-    "reason", "text", "app", "wait_seconds", "previous_action_outcome", "state_action_consistent", "postcondition"})
+    "reason", "text", "app", "wait_seconds", "previous_action_outcome", "state_action_consistent", "postcondition",
+    "target_description"})
 MODEL_STEP_SINGLE_ELEMENT_ACTIONS = frozenset({"tap_semantic", "dismiss_overlay", "input_verified_text",
     "press_enter", "clear_verified_text", "double_tap", "long_press"})
 MODEL_STEP_DIRECT_POINT_ACTIONS = frozenset({"tap_semantic", "dismiss_overlay",
@@ -77,6 +78,7 @@ def normalize_model_step_decision(value: Any) -> dict[str, Any]:
         "previous_action_outcome": metadata["outcome"],
         "state_action_consistent": metadata["state_action_consistent"],
         "postcondition": metadata["postcondition"],
+        "target_description": metadata["target_description"],
     }
 
 
@@ -131,10 +133,17 @@ def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
         CanonicalActionProtocolError("launch_app必须提供本地注册的App语义名称。"),
     )
     reject_if(action != "launch_app" and app is not None, CanonicalActionProtocolError("非启动动作不得携带App参数。"))
+    target_description = value.get("target_description")
+    reject_if(target_description is not None and not isinstance(target_description, str),
+        CanonicalActionProtocolError("target_description必须是字符串或null。"))
+    # Only a direct-point action names one control for the coordinate locator.
+    target_description = (target_description.strip()[:200] or None
+        if isinstance(target_description, str) and action in MODEL_STEP_DIRECT_POINT_ACTIONS else None)
     return {
         "status": status, "confidence": float(confidence), "reason": reason if isinstance(reason, str) else "",
         "action": action, "effect": effect, "text": text, "app": app, "wait_seconds": wait_seconds, "outcome": outcome,
         "state_action_consistent": state_action_consistent, "postcondition": postcondition,
+        "target_description": target_description,
     }
 
 

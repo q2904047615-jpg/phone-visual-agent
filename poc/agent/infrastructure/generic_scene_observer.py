@@ -164,7 +164,23 @@ def _contains_action_like_extra(value: Mapping[str, Any], allowed: Iterable[str]
 
 
 STAGE_LABELS = {'idle': '空闲', 'checking_stability': '检查当前画面', 'waiting_single_step_observation': '等待千问单步完整观察',
-    'parsing_single_step_observation': '解析单步完整观察', 'completed': '观察完成', 'failed': '观察安全停止'}
+    'parsing_single_step_observation': '解析单步完整观察', 'locating_tap_target': '按当前截图定位点击点',
+    'completed': '观察完成', 'failed': '观察安全停止'}
+
+# The whole-task observation sends every task screenshot; in that long
+# multi-image context the model's tap coordinates drift (real-phone runs on
+# 2026-11-05 tapped "4" for "2" and "C" for "+"). A second, short request with
+# only the CURRENT frame and the chosen control's description re-locates the
+# point. It never chooses or changes the action, and never judges completion.
+TAP_LOCATOR_ENABLED = os.environ.get("PHONE_AGENT_TAP_LOCATOR", "1").strip() != "0"
+TAP_LOCATOR_TIMEOUT_SECONDS = _positive_env_float("PHONE_AGENT_TAP_LOCATOR_TIMEOUT_SECONDS", 45.0)
+TAP_LOCATOR_MAX_ATTEMPTS = _positive_env_int("PHONE_AGENT_TAP_LOCATOR_MAX_ATTEMPTS", 2)
+TAP_LOCATOR_WIRE_ACTIONS = frozenset({'tap', 'dismiss', 'double_tap', 'long_press'})
+TAP_LOCATOR_PROMPT = (
+    "你在一张手机截图上定位一个控件。坐标使用截图上的0~1000归一化网格：左上角[0,0]，右下角[1000,1000]，"
+    "x向右、y向下。用户给出的是对本次点击目标的描述，可能附带上下文；只找它要点击的那一个控件。"
+    "只输出JSON：{\"point\":[x,y]}，point是该控件可点击区域的中心。截图上找不到这个控件时输出{\"point\":null}。"
+)
 
 
 class SingleStepGenericSceneObserver():
@@ -209,7 +225,9 @@ class SingleStepGenericSceneObserver():
             'model_role': 'single_step_current_scene_observation', 'supported_app_scope': 'dynamic',
             'hardware_actions_enabled': False, 'current_stage': current_stage,
             'current_stage_label': STAGE_LABELS.get(current_stage, current_stage), 'last_stage': last_stage,
-            'last_stage_label': STAGE_LABELS.get(last_stage, last_stage), 'max_online_calls_per_observation': 1,
+            'last_stage_label': STAGE_LABELS.get(last_stage, last_stage),
+            'max_online_calls_per_observation': 2 if TAP_LOCATOR_ENABLED else 1,
+            'tap_locator_enabled': TAP_LOCATOR_ENABLED,
             'single_step_output_tokens': SINGLE_STEP_OUTPUT_TOKENS,
             'observation_timeout_seconds': OBSERVATION_TIMEOUT_SECONDS,
             'observation_max_attempts': OBSERVATION_MAX_ATTEMPTS,
@@ -467,6 +485,69 @@ class SingleStepGenericSceneObserver():
             )
         return scene, model_decision, envelope, model_foreground_app_id, obstructions
 
+    def _locate_tap(self, prepared: dict[str, Any], model_decision: dict[str, Any], *,
+        response_evidence_dir: Path | None) -> dict[str, Any]:
+        """Re-locate a direct tap on the CURRENT frame alone; keep the model's point if that fails.
+
+        Only ``model_decision['point']`` may change. The action, its target and
+        every other field stay exactly as the whole-task observation chose them.
+        """
+        action = model_decision.get("action")
+        if not TAP_LOCATOR_ENABLED or model_decision.get("status") != "action" or action not in TAP_LOCATOR_WIRE_ACTIONS:
+            return {"called": False}
+        target = str(model_decision.get("target_description") or "").strip()
+        source = "target_description"
+        if not target:
+            target, source = str(model_decision.get("reason") or "").strip()[:300], "reason"
+        decision_point = list(model_decision.get("point") or [])
+        record: dict[str, Any] = {"called": False, "target": target, "target_source": source,
+            "decision_point": decision_point, "located_point": None, "applied": False, "error": None}
+        if not target:
+            record["error"] = "决策没有描述点击目标，沿用决策坐标。"
+            return record
+        self._set_stage("locating_tap_target")
+        request_evidence_path = (
+            Path(response_evidence_dir) / f"{uuid4().hex}_tap_locator_request.json"
+            if response_evidence_dir is not None else None
+        )
+        scope_factory = getattr(self.gateway, "call_scope", None)
+        scope = (scope_factory(stage="tap_locator", fingerprint=prepared["fingerprint"],
+            request_evidence_path=request_evidence_path) if callable(scope_factory) else nullcontext())
+        messages = [
+            {"role": "system", "content": TAP_LOCATOR_PROMPT},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": _image_data_url(prepared["frame"])}},
+                {"type": "text", "text": "点击目标：" + target},
+            ]},
+        ]
+        started = time.perf_counter()
+        record["called"] = True
+        try:
+            with scope:
+                raw = self.gateway.chat(messages, max_tokens=None, timeout=TAP_LOCATOR_TIMEOUT_SECONDS,
+                    max_attempts=TAP_LOCATOR_MAX_ATTEMPTS, response_format={'type': 'json_object'})
+            record["raw_response"] = redact_model_failure_response(str(raw))[:300]
+            point = _extract_json_object(str(raw), reject_duplicate_keys=True,
+                unwrap_singleton_object_array=True).get("point")
+            if point is None:
+                record["error"] = "定位请求在当前截图上找不到该控件，沿用决策坐标。"
+            else:
+                located = _tap_locator_point(point)
+                record.update(located_point=located, applied=True)
+                model_decision["point"] = located
+        except Exception as exc:  # A locator failure never blocks the chosen action.
+            record["error"] = f"定位请求失败（{type(exc).__name__}: {str(exc)[:160]}），沿用决策坐标。"
+        record["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        if response_evidence_dir is not None:
+            try:
+                atomic_replace_bytes(Path(response_evidence_dir) / f"{uuid4().hex}_tap_locator.json", json_bytes({
+                    "artifact_version": "2026-11-05-tap-locator-v1", "fingerprint": prepared["fingerprint"],
+                    **{key: value for key, value in record.items() if key != "called"}, "called": record["called"],
+                }))
+            except OSError:
+                record["evidence_error"] = "定位记录写入失败。"
+        return record
+
     def _record_observation_success(
         self,
         prepared: dict[str, Any],
@@ -598,10 +679,19 @@ class SingleStepGenericSceneObserver():
             scene, model_decision, envelope, model_foreground_app_id, obstructions = self._parse_observation(
                 raw, prepared
             )
+            locator = self._locate_tap(prepared, model_decision, response_evidence_dir=response_evidence_dir)
+            if locator.get("called"):
+                model_calls = 2
             self._record_observation_success(
                 prepared, scene, model_decision, envelope, model_foreground_app_id, obstructions,
                 screenshot_manifest, call_elapsed, started,
             )
+            self.last_diagnostics["tap_locator"] = locator
+            if locator.get("called"):
+                self.last_diagnostics["model_calls"] = 2
+                self.last_diagnostics["online_stages"] = ["single_step_observation", "tap_locator"]
+                self.last_diagnostics["model_call_elapsed_seconds"].append(locator.get("elapsed_seconds"))
+                self.last_diagnostics["model_call_token_budgets"].append(None)
             self._set_stage("completed")
             return scene, model_decision
         except Exception as exc:
@@ -763,6 +853,15 @@ def _decision_response_schema(decision_properties: dict[str, Any],
     trajectory_actions = {'swipe', 'drag'}
     null_action_fields = ('point', 'direction', 'start', 'end', 'text', 'app', 'wait_seconds')
 
+    def complete(props: dict[str, Any]) -> dict[str, Any]:
+        # DashScope's structured decoding emits only the keys declared in the
+        # matching anyOf branch. Branches that listed just their action fields
+        # silently dropped postcondition, reason, confidence and
+        # previous_action_outcome from every live response (seen 2026-11-05).
+        # Each branch therefore carries the full decision object.
+        merged = {**decision_properties, **props}
+        return {'type': 'object', 'properties': merged, 'required': list(merged), 'additionalProperties': False}
+
     def branch(action: str, *, required: dict[str, Any] | None = None,
         nulls: tuple[str, ...] = ()) -> dict[str, Any]:
         props: dict[str, Any] = {'status': {'enum': ['action']}, 'action': {'enum': [action]}}
@@ -770,13 +869,14 @@ def _decision_response_schema(decision_properties: dict[str, Any],
             props.update(required)
         for name in nulls:
             props[name] = {'type': 'null'}
-        return {'properties': props, 'required': ['status', 'action'],}
+        return complete(props)
 
     branches: list[dict[str, Any]] = []
     for action in wire_actions:
         if action in direct_actions:
             branches.append(branch(action, required={'point': {'type': 'array', 'items': {'type': 'number'},
-                'minItems': 2, 'maxItems': 2}}, nulls=('direction', 'start', 'end', 'text', 'app', 'wait_seconds')))
+                'minItems': 2, 'maxItems': 2}, 'target_description': {'type': 'string', 'minLength': 1}},
+                nulls=('direction', 'start', 'end', 'text', 'app', 'wait_seconds')))
         elif action in trajectory_actions:
             branches.append(branch(action, required={
                 'start': {'type': 'array', 'items': {'type': 'number'}, 'minItems': 2, 'maxItems': 2},
@@ -797,11 +897,8 @@ def _decision_response_schema(decision_properties: dict[str, Any],
         else:
             branches.append(branch(action, nulls=null_action_fields))
 
-    finish = {
-        'properties': {'status': {'enum': ['finish']}, 'action': {'type': 'null'},
-            **{name: {'type': 'null'} for name in null_action_fields}},
-        'required': ['status', 'action'],
-    }
+    finish = complete({'status': {'enum': ['finish']}, 'action': {'type': 'null'},
+        'target_description': {'type': 'null'}, **{name: {'type': 'null'} for name in null_action_fields}})
     return {
         'type': 'object',
         'properties': decision_properties,
@@ -892,6 +989,9 @@ def _decision_response_properties(available_action_kinds: tuple[str, ...]) -> di
             'status': {'type': 'string', 'enum': ['confirmed', 'not_confirmed', 'unknown', 'not_applicable']},
             'fact': {'type': 'string'}}, 'required': ['status', 'fact'], 'additionalProperties': False},
         'confidence': {'type': 'number'}, 'reason': {'type': 'string'},
+        'target_description': {'type': ['string', 'null'], 'description': (
+            '仅tap/dismiss/double_tap/long_press填写：用一句话描述要点击的那一个控件，写出它的可见文字或图标和大致位置，'
+            '例如“键盘第四行最右侧的+号键”。平台会只用CURRENT截图按这句描述重新定位点击点。其他动作和finish填null。')},
     }
     _make_decision_fields_nullable(decision_properties)
     return decision_properties
@@ -1061,6 +1161,16 @@ def _parse_single_step_observation_envelope(raw: str, *, input_structure_require
         raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
 
 
+def _tap_locator_point(value: Any) -> list[float]:
+    reject_if(
+        not isinstance(value, (list, tuple)) or len(value) != 2
+        or any(isinstance(part, bool) or not isinstance(part, (int, float)) or not math.isfinite(float(part))
+               or not 0 <= float(part) <= 1000 for part in value),
+        VisionAgentError("定位请求的point必须是0~1000范围内的两个数字。"),
+    )
+    return [float(value[0]), float(value[1])]
+
+
 def _wire_decision_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
     """Project normalized internal fields back to the public Qwen wire shape."""
     action = str(decision.get("action") or "")
@@ -1081,6 +1191,7 @@ def _wire_decision_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
         "previous_action_outcome": decision.get("previous_action_outcome"),
         "state_action_consistent": decision.get("state_action_consistent"),
         "postcondition": decision.get("postcondition"),
+        "target_description": decision.get("target_description"),
     }
 
 

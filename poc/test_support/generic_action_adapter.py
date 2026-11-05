@@ -58,14 +58,23 @@ class RawSceneProvider:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
+        self.locator_calls = 0
         self.max_tokens_seen = []
+        self.last_response = None
 
     def chat(self, messages, *, max_tokens, **_kwargs):
+        from test_support.generic_scene_observer import is_tap_locator_request, locator_echo
+
+        if is_tap_locator_request(messages):
+            # The CURRENT-frame tap locator agrees with the decision point.
+            self.locator_calls += 1
+            return locator_echo(self.last_response)
         self.calls += 1
         self.max_tokens_seen.append(max_tokens)
         value = self.responses.pop(0)
         if isinstance(value, dict):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        self.last_response = value
         return value
 
     def status(self):

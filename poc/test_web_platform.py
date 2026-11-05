@@ -226,7 +226,9 @@ class ApiEndToEndTests(_BaseApiEndToEndTests):
             observer["observer_version"],
             SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
-        self.assertEqual(observer["max_online_calls_per_observation"], 1)
+        # Whole-task observation + CURRENT-frame tap locator (2026-11-05 decision).
+        self.assertEqual(observer["max_online_calls_per_observation"], 2)
+        self.assertTrue(observer["tap_locator_enabled"])
         self.assertEqual(
             observer["model_role"],
             "single_step_current_scene_observation",

@@ -98,12 +98,34 @@ def request_axis_height(messages: list[dict]) -> int:
     return int(match.group(1))
 
 
+def is_tap_locator_request(messages: list[dict]) -> bool:
+    """The observer's second, CURRENT-frame-only request for a tap point."""
+    from agent.infrastructure.generic_scene_observer import TAP_LOCATOR_PROMPT
+
+    return bool(messages) and messages[0].get("content") == TAP_LOCATOR_PROMPT
+
+
+def locator_echo(last_response: str | dict | None) -> str:
+    """Answer a locator request with the decision's own point, so the tap is unchanged."""
+    payload = last_response
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = None
+    decision = payload.get("decision") if isinstance(payload, dict) else None
+    point = decision.get("point") if isinstance(decision, dict) else None
+    return json.dumps({"point": point})
+
+
 class FakeProvider:
     configured = True
 
     def __init__(self, payload: dict) -> None:
         self.payload = payload
         self.calls = 0
+        self.locator_calls = 0
+        self.last_response: str | None = None
 
     def status(self) -> dict:
         return {"configured": True, "model": "fake-qwen"}
@@ -117,6 +139,9 @@ class FakeProvider:
         max_attempts: int | None = None,
         response_format: dict | None = None,
     ) -> str:
+        if is_tap_locator_request(messages):
+            self.locator_calls += 1
+            return locator_echo(self.last_response)
         self.calls += 1
         self.messages = messages
         self.max_tokens = max_tokens
@@ -129,7 +154,8 @@ class FakeProvider:
             self.payload,
             request_height=request_axis_height(messages),
         )
-        return json.dumps(payload, ensure_ascii=False)
+        self.last_response = json.dumps(payload, ensure_ascii=False)
+        return self.last_response
 
 
 class SequenceProvider(FakeProvider):
@@ -148,6 +174,9 @@ class SequenceProvider(FakeProvider):
         max_attempts: int | None = None,
         response_format: dict | None = None,
     ) -> str:
+        if is_tap_locator_request(messages):
+            self.locator_calls += 1
+            return locator_echo(self.last_response)
         self.calls += 1
         self.messages_seen.append(messages)
         self.max_tokens_seen.append(max_tokens)
@@ -164,7 +193,8 @@ class SequenceProvider(FakeProvider):
                 value,
                 request_height=request_axis_height(messages),
             )
-        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        self.last_response = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return self.last_response
 
 
 class _BaseStructuredDecisionContractTests(unittest.TestCase):

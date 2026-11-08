@@ -28,6 +28,68 @@ CONNECTOR = "windows-local-01"
 DEVICE = "device-local-01"
 
 
+class JournalMaintenanceTests(unittest.TestCase):
+    """The Windows journal must stay fast: indexed per-poll queries, bounded size."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "windows.sqlite3"
+
+    @staticmethod
+    def deliver(journal, index, operation="device_status", *, acknowledge=True, finish=True, args=None):
+        command = {"command_id": f"cmd-{index:05d}", "connector_id": CONNECTOR, "device_id": DEVICE,
+                   "operation": operation, "args": args or {}}
+        journal.begin(command)
+        if finish:
+            journal.finish(result_payload(command_id=command["command_id"], connector_id=CONNECTOR,
+                                          device_id=DEVICE, ok=True, value={"blob": "x" * 2000}))
+        if finish and acknowledge:
+            journal.acknowledge(command["command_id"])
+        return command["command_id"]
+
+    def test_per_poll_queries_use_partial_indexes(self):
+        journal = ConnectorJournal(self.path)
+        with journal.connect() as db:
+            unfinished = " ".join(str(r) for r in db.execute(
+                "EXPLAIN QUERY PLAN SELECT command_json FROM deliveries WHERE result_json IS NULL"))
+            unacked = " ".join(str(r) for r in db.execute(
+                "EXPLAIN QUERY PLAN SELECT result_json FROM deliveries "
+                "WHERE acknowledged=0 AND result_json IS NOT NULL LIMIT 20"))
+        self.assertIn("deliveries_unfinished", unfinished)
+        self.assertIn("deliveries_unacknowledged", unacked)
+
+    def test_prune_keeps_recent_unsettled_and_latest_position_rows(self):
+        journal = ConnectorJournal(self.path, keep_recent=3)
+        self.deliver(journal, 0, "select_machine_position", args={"machine_position": 2})
+        unacked = self.deliver(journal, 1, acknowledge=False)
+        unfinished = self.deliver(journal, 2, finish=False)
+        for index in range(3, 20):
+            self.deliver(journal, index)
+        removed = journal.prune(compact=True)
+        with journal.connect() as db:
+            kept = {row[0] for row in db.execute("SELECT command_id FROM deliveries")}
+        self.assertEqual(14, removed)
+        self.assertEqual({"cmd-00000", unacked, unfinished, "cmd-00017", "cmd-00018", "cmd-00019"}, kept)
+        # Restart behaviour is unchanged: the machine position survives and nothing is replayed.
+        reopened = ConnectorJournal(self.path, keep_recent=3)
+        self.assertEqual(2, reopened.last_confirmed_machine_position(connector_id=CONNECTOR, device_id=DEVICE))
+        pending = {item["command_id"]: item for item in reopened.pending()}
+        self.assertEqual({unacked, unfinished}, set(pending))
+        # An unfinished command is still reported as unknown after a restart, never re-executed.
+        self.assertEqual("execution_unknown_after_restart", pending[unfinished]["error"])
+
+    def test_finish_prunes_periodically(self):
+        journal = ConnectorJournal(self.path, keep_recent=10)
+        with patch("agent.infrastructure.connector_journal.PRUNE_EVERY_FINISHES", 25):
+            for index in range(60):
+                self.deliver(journal, index)
+        with journal.connect() as db:
+            count = db.execute("SELECT count(*) FROM deliveries").fetchone()[0]
+        self.assertLess(count, 60)
+        self.assertGreaterEqual(count, 10)
+
+
 def command(operation="select_machine_position", args=None, **extra):
     return dict(protocol=PROTOCOL, connector_id=CONNECTOR, device_id=DEVICE,
                 command_id=secrets.token_hex(16), operation=operation,

@@ -353,6 +353,8 @@ function createServer({
   runtimeSession = { token: "browser-contract-token" },
   enforceToken = false,
   reloadSupported = false,
+  deviceDelayMs = 0,
+  deviceLoad = { active: 0, max: 0, total: 0 },
 } = {}) {
   let currentCapabilityTrial = null;
   let capabilityShouldFail = false;
@@ -396,6 +398,11 @@ function createServer({
       return;
     }
     if (url.pathname === "/api/device") {
+      deviceLoad.total += 1;
+      deviceLoad.active += 1;
+      deviceLoad.max = Math.max(deviceLoad.max, deviceLoad.active);
+      if (deviceDelayMs) await new Promise(resolve => setTimeout(resolve, deviceDelayMs));
+      deviceLoad.active -= 1;
       const registeredDevices = devices || [{
         device_id: "phone-01",
         verified_actions: ["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"],
@@ -459,7 +466,8 @@ function createServer({
       }
       const body = await readBody(request);
       requests.start.push(body);
-      if (body.text.includes("slow")) await new Promise(resolve => setTimeout(resolve, 300));
+      if (body.text.includes("slow chat")) await new Promise(resolve => setTimeout(resolve, 8000));
+      else if (body.text.includes("slow")) await new Promise(resolve => setTimeout(resolve, 300));
       const taskId = `browser-start-${genericStartTasks.size + 1}`;
       if (body.text.includes("live progress")) {
         // An automatic run whose ticket stays "running" while the session
@@ -721,7 +729,7 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20261109-live-progress-v1"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=20261109-device-poll-v1"));
     assert.ok(requests.assets.includes("/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"));
     assert.ok(requests.assets.includes("/assets/styles.css?v=20260927-main-chain-cleanup-v1"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);
@@ -883,6 +891,36 @@ test("an automatic run shows live steps while its start ticket is still running"
     assert.ok(requests.restore.includes("session-browser-action"));
     // The ticket then completes normally instead of being reported as a failure.
     await page.locator("#taskRunStatusLabel").getByText("成功", { exact: true }).waitFor({ timeout: 8000 });
+  } finally {
+    await browser.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("a slow device-status endpoint is polled one request at a time", { timeout: 40000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const deviceLoad = { active: 0, max: 0, total: 0 };
+  const server = createServer({ deviceDelayMs: 4000, deviceLoad });
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    // The browser queues identical GETs, so a pile-up shows up as page-side requests
+    // that have been issued but not answered, not as server-side concurrency.
+    let pending = 0;
+    let maxPending = 0;
+    const isDevice = request => new URL(request.url()).pathname === "/api/device";
+    page.on("request", request => { if (isDevice(request)) maxPending = Math.max(maxPending, ++pending); });
+    const settle = request => { if (isDevice(request)) pending -= 1; };
+    page.on("requestfinished", settle);
+    page.on("requestfailed", settle);
+    // Let the first load finish, then an 8 s request: the 750 ms progress poll and the
+    // 3 s refresh must not stack requests behind a 4 s device-status response.
+    await page.waitForTimeout(5000);
+    maxPending = pending;
+    await page.locator("#agentText").fill("slow chat succeeded");
+    await page.locator("#startSupervisedAgent").click();
+    await page.waitForTimeout(10000);
+    assert.ok(maxPending <= 1, `at most one /api/device request outstanding, saw ${maxPending}`);
   } finally {
     await browser.close();
     server.closeAllConnections();

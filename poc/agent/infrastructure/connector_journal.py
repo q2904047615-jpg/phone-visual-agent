@@ -9,17 +9,60 @@ from pathlib import Path
 
 from .remote_connector import ConnectorProtocolError, _canonical, result_payload
 
+#: Acknowledged deliveries beyond the newest this-many rows are pruned.
+#: Replay protection only needs recent command ids (the cloud expires a command
+#: within seconds) and a capture is consumed in the same observe/act cycle, so
+#: older rows only cost time: every poll used to scan all of them, including
+#: every preview image. Unfinished or unacknowledged rows are never pruned.
+KEEP_RECENT_DELIVERIES = 5000
+PRUNE_EVERY_FINISHES = 500
+
 
 class ConnectorJournal:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, keep_recent: int = KEEP_RECENT_DELIVERIES):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.keep_recent = int(keep_recent)
+        self._finished_since_prune = 0
         with self.connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
                 command_id TEXT PRIMARY KEY, command_json TEXT NOT NULL, digest TEXT NOT NULL,
                 result_json TEXT, acknowledged INTEGER NOT NULL DEFAULT 0)""")
             db.execute("CREATE TABLE IF NOT EXISTS used_captures (capture_id TEXT PRIMARY KEY)")
             db.execute("CREATE TABLE IF NOT EXISTS used_tool_scopes (device_id TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(device_id,nonce))")
+        self.prune(compact=True)
+        with self.connect() as db:
+            # Partial indexes matching the two per-poll queries in pending(),
+            # so each poll reads only the rows it needs.
+            db.execute("CREATE INDEX IF NOT EXISTS deliveries_unfinished ON deliveries(command_id) "
+                       "WHERE result_json IS NULL")
+            db.execute("CREATE INDEX IF NOT EXISTS deliveries_unacknowledged ON deliveries(command_id) "
+                       "WHERE acknowledged=0 AND result_json IS NOT NULL")
+
+    def prune(self, *, compact: bool = False) -> int:
+        """Delete old acknowledged deliveries; keep the latest machine-position record."""
+        with self.connect() as db:
+            top = db.execute("SELECT max(rowid) FROM deliveries").fetchone()[0]
+            if top is None:
+                return 0
+            latest_position = db.execute(
+                "SELECT max(rowid) FROM deliveries "
+                "WHERE json_extract(command_json,'$.operation')='select_machine_position'").fetchone()[0]
+            removed = db.execute(
+                "DELETE FROM deliveries WHERE rowid<=? AND acknowledged=1 AND result_json IS NOT NULL AND rowid<>?",
+                (top - self.keep_recent, latest_position if latest_position is not None else -1)).rowcount
+            if removed:
+                # A pruned capture cannot be consumed any more anyway ("观察帧在本机不存在").
+                db.execute("DELETE FROM used_captures WHERE capture_id NOT IN (SELECT command_id FROM deliveries)")
+        if compact and removed:
+            db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+            try:
+                pages, free = (db.execute(f"PRAGMA {name}").fetchone()[0] for name in ("page_count", "freelist_count"))
+                if pages and free * 2 >= pages:
+                    db.execute("VACUUM")
+            finally:
+                db.close()
+        return removed
 
     def consume_tool_scope(self, scope):
         with self.connect() as db:
@@ -59,6 +102,10 @@ class ConnectorJournal:
         with self.connect() as db:
             db.execute("UPDATE deliveries SET result_json=? WHERE command_id=? AND result_json IS NULL",
                        (_canonical(payload).decode(), payload["command_id"]))
+        self._finished_since_prune += 1
+        if self._finished_since_prune >= PRUNE_EVERY_FINISHES:
+            self._finished_since_prune = 0
+            self.prune()
 
     def pending(self) -> list[dict]:
         # Caller holds the single connector OS lease during crash recovery.

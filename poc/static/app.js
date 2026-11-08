@@ -1324,10 +1324,21 @@ function render() {
   }
 }
 
+// Each /api/device read is a round trip to the phone connector. The periodic
+// polls (every 3 s, and every 750 ms while a request runs) share one in-flight
+// request instead of stacking new ones while the connector is slow.
+let deviceStatusRequest = null;
+function pollDeviceStatus() {
+  if (!deviceStatusRequest) {
+    deviceStatusRequest = api("/api/device").finally(() => { deviceStatusRequest = null; });
+  }
+  return deviceStatusRequest;
+}
+
 async function refreshDevice() {
   if (!accountReady) return;
   const [device, runtimeSession] = await Promise.all([
-    api("/api/device"),
+    pollDeviceStatus(),
     api("/api/session"),
   ]);
   state.device = device;
@@ -1403,7 +1414,7 @@ function refreshPreview() {
 
 async function pollVisionStage() {
   try {
-    state.device = await api("/api/device");
+    state.device = await pollDeviceStatus();
     const observer = observerStatus();
     if (observer.current_stage && observer.current_stage !== "idle") {
       state.visionStage = observer.current_stage_label || observer.current_stage;

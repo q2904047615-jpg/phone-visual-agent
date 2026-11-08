@@ -37,8 +37,8 @@ from agent.domain.control_plane import (
 CONTROL_PLANE_SCHEMA_VERSION = "control-plane-sqlite-v2"
 LOCAL_ORGANIZATION_ID = "local-org"
 IDENTITY_SESSION_TTL_SECONDS = 3600
-#: Upper bound for a configured login lifetime (31 days).
-IDENTITY_SESSION_MAX_TTL_SECONDS = 31 * 86400
+#: Upper bound for a configured login lifetime (92 days, a little over 3 months).
+IDENTITY_SESSION_MAX_TTL_SECONDS = 92 * 86400
 #: Deployment setting for how long a website/API login stays valid, in seconds.
 IDENTITY_SESSION_TTL_ENV = "PHONE_AGENT_IDENTITY_SESSION_TTL_SECONDS"
 

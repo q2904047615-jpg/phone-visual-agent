@@ -569,7 +569,7 @@ function taskRunPresentation() {
       state: "running",
       label: "进行中",
       detail: state.taskAttemptStatus.detail || state.visionStage || "正在理解目标并观察当前画面。",
-      sessionId: "",
+      sessionId: state.taskAttemptStatus.sessionId || "",
       updatedAt: state.taskAttemptStatus.updatedAt,
       phase: state.taskAttemptStatus.phase || "",
       code: state.taskAttemptStatus.code || "",
@@ -1466,7 +1466,60 @@ async function continueBudgetAgent() {
   }
 }
 
+// Only applies while the ticket has not produced a session yet. Once the
+// session exists, an automatic run can legitimately take far longer than five
+// minutes (a real-phone step takes minutes), so the page keeps following it.
 const START_TICKET_TIMEOUT_MS = 5 * 60 * 1000;
+const LIVE_SESSION_POLL_MS = 3000;
+const LIVE_SESSION_STALL_NOTICE_MS = 10 * 60 * 1000;
+
+function liveSessionProgressKey(session) {
+  const history = Array.isArray(session?.history) ? session.history.length : 0;
+  return [session?.status || "", Number(session?.physical_actions || 0), history].join("|");
+}
+
+function formatElapsed(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+}
+
+async function followLiveSession(pending, sessionId) {
+  let response;
+  try {
+    response = await api(`/api/agent/generic-supervised/${encodeURIComponent(sessionId)}`, {
+      signal: pending.controller.signal,
+    });
+  } catch (error) {
+    if (pending.controller.signal.aborted) throw error;
+    return; // Not created yet (404) or a transient read error: try again next poll.
+  }
+  if (pending.cancelled || !response?.session) return;
+  const now = Date.now();
+  const key = liveSessionProgressKey(response.session);
+  if (key !== pending.liveProgressKey) {
+    pending.liveProgressKey = key;
+    pending.lastProgressAt = now;
+  }
+  pending.sessionSeen = true;
+  state.supervisedSession = response.session;
+  state.sessionDeviceId = state.deviceId;
+  if (state.taskAttemptStatus?.state === "running" && !state.stopRequested) {
+    const actions = Number(response.session.physical_actions || 0);
+    const rounds = Array.isArray(response.session.history) ? response.session.history.length : 0;
+    const stalled = now - pending.lastProgressAt >= LIVE_SESSION_STALL_NOTICE_MS;
+    state.taskAttemptStatus = {
+      ...state.taskAttemptStatus,
+      phase: "auto_running",
+      sessionId,
+      detail: stalled
+        ? `任务仍在后台运行，但已 ${formatElapsed(now - pending.lastProgressAt)} 没有新进展（已执行 ${actions} 个动作）；可以点击“停止”。`
+        : `任务在后台运行中：已完成 ${rounds} 轮，执行 ${actions} 个动作，已运行 ${formatElapsed(now - pending.startedAt)}。`,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  render();
+}
 
 function cancelPendingStart(reason = "已停止等待任务启动结果。") {
   const pending = state.pendingStartTicket;
@@ -1489,7 +1542,11 @@ async function waitForStartTicket(taskId) {
   const startedAt = Date.now();
   let nextProgressNoticeAt = startedAt + 120000;
   const controller = new AbortController();
-  const pending = { taskId: String(taskId), controller, startedAt, cancelled: false };
+  const pending = {
+    taskId: String(taskId), controller, startedAt, cancelled: false,
+    sessionId: "", sessionSeen: false, liveProgressKey: "", lastProgressAt: startedAt,
+  };
+  let nextLiveSessionPollAt = startedAt;
   state.pendingStartTicket = pending;
   try {
     while (true) {
@@ -1500,8 +1557,8 @@ async function waitForStartTicket(taskId) {
         cancelled.recoverable = true;
         throw cancelled;
       }
-      if (Date.now() - startedAt >= START_TICKET_TIMEOUT_MS) {
-        const timeout = new Error("启动任务超过5分钟仍未返回首轮结果；已停止继续轮询。可重新发送，但服务端票据可能仍需单独清理。");
+      if (!pending.sessionSeen && Date.now() - startedAt >= START_TICKET_TIMEOUT_MS) {
+        const timeout = new Error("启动任务超过5分钟仍未创建会话；已停止继续轮询。可重新发送，但服务端票据可能仍需单独清理。");
         timeout.code = "START_TICKET_TIMEOUT";
         timeout.phase = "start_ticket_polling";
         timeout.recoverable = true;
@@ -1535,7 +1592,12 @@ async function waitForStartTicket(taskId) {
         cancelled.detail = status.detail || status.error;
         throw cancelled;
       }
-      if (Date.now() >= nextProgressNoticeAt) {
+      if (status.session_id) pending.sessionId = String(status.session_id);
+      if (pending.sessionId && Date.now() >= nextLiveSessionPollAt) {
+        nextLiveSessionPollAt = Date.now() + LIVE_SESSION_POLL_MS;
+        await followLiveSession(pending, pending.sessionId);
+      }
+      if (!pending.sessionSeen && Date.now() >= nextProgressNoticeAt) {
         const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
         if (state.taskAttemptStatus?.state === "running" && !state.stopRequested) {
           state.taskAttemptStatus = {

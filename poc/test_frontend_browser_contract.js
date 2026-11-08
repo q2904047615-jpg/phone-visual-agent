@@ -461,6 +461,20 @@ function createServer({
       requests.start.push(body);
       if (body.text.includes("slow")) await new Promise(resolve => setTimeout(resolve, 300));
       const taskId = `browser-start-${genericStartTasks.size + 1}`;
+      if (body.text.includes("live progress")) {
+        // An automatic run whose ticket stays "running" while the session
+        // already exists and has executed one step.
+        const live = afterActionSession();
+        const finished = afterActionSession();
+        finished.status = "succeeded";
+        restoredSessions[live.session_id] = live;
+        genericStartTasks.set(taskId, {
+          status: "running", session_id: live.session_id, pollsLeft: 6,
+          finalResult: { session: finished },
+        });
+        json(response, 200, { task_id: taskId, status: "running" });
+        return;
+      }
       if (body.text.includes("start failure")) {
         genericStartTasks.set(taskId, { status: "failed", error: "规划服务暂时不可用" });
       } else {
@@ -518,8 +532,15 @@ function createServer({
     if (request.method === "GET" && genericStartMatch) {
       const taskId = decodeURIComponent(genericStartMatch[1]);
       const task = genericStartTasks.get(taskId);
+      if (task?.status === "running" && task.pollsLeft !== undefined && --task.pollsLeft <= 0) {
+        task.status = "completed";
+        task.result = task.finalResult;
+      }
       if (!task) json(response, 404, { detail: "not found" });
-      else json(response, 200, { task_id: taskId, ...task });
+      else {
+        const { pollsLeft, finalResult, ...publicTask } = task;
+        json(response, 200, { task_id: taskId, ...publicTask });
+      }
       return;
     }
     const restoredMatch = url.pathname.match(/^\/api\/agent\/generic-supervised\/([^/]+)$/);
@@ -700,7 +721,7 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20261023-position-refresh-v1"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=20261109-live-progress-v1"));
     assert.ok(requests.assets.includes("/assets/protocol_adapter.js?v=20260927-main-chain-cleanup-v1"));
     assert.ok(requests.assets.includes("/assets/styles.css?v=20260927-main-chain-cleanup-v1"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);
@@ -837,6 +858,31 @@ test("ordinary task status stays explicit through running success failure and re
     await page.locator("#taskRunStatusLabel").getByText("当前没有任务", { exact: true }).waitFor({ timeout: 5000 });
     assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "not-started");
     assert.doesNotMatch(await page.locator("#taskRunStatusDetail").innerText(), /规划服务暂时不可用/);
+  } finally {
+    await browser.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("an automatic run shows live steps while its start ticket is still running", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#agentText").fill("live progress");
+    await page.locator("#startSupervisedAgent").click();
+    // Before the ticket completes, the page reads the live session and shows its executed step.
+    // (one executed round plus the current decision round)
+    // (#traceCount lives in a collapsed panel, so wait on its text rather than visibility)
+    await page.waitForFunction(() => document.querySelector("#traceCount")?.textContent === "2 个轮次",
+      null, { timeout: 6000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "running");
+    assert.match(await page.locator("#taskRunStatusDetail").innerText(), /已完成 1 轮，执行 1 个动作/);
+    assert.equal(await page.locator("#taskRunSessionId").innerText(), "session-browser-action");
+    assert.ok(requests.restore.includes("session-browser-action"));
+    // The ticket then completes normally instead of being reported as a failure.
+    await page.locator("#taskRunStatusLabel").getByText("成功", { exact: true }).waitFor({ timeout: 8000 });
   } finally {
     await browser.close();
     server.closeAllConnections();

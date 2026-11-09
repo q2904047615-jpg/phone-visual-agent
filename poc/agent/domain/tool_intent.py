@@ -70,6 +70,11 @@ class ToolIntent:
         return getattr(self.model_decision, "postcondition", None)
 
     @property
+    def state_action_consistent(self) -> bool | None:
+        """False when the model says its own finish contradicts the current frame."""
+        return getattr(self.model_decision, "state_action_consistent", None)
+
+    @property
     def decision_source(self) -> str:
         return str(getattr(self.model_decision, "decision_source", "model_gateway"))
 

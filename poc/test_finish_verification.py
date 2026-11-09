@@ -110,5 +110,61 @@ class FinishVerificationLoopTests(LoopHarness):
         self.assertEqual([], adapter.calls)
 
 
+
+def contradictory_finish():
+    """The 2026-11-09 live reply (run 2f88b96f): the screen showed 112+13=125, the
+    model said the goal was not met and still answered ``finish`` with
+    ``state_action_consistent: false``. It used to be a protocol fault that left
+    the task stuck before step one."""
+    value = decision(goal_status='not_confirmed')
+    value['state_action_consistent'] = False
+    return value
+
+
+class ContradictoryFinishTests(LoopHarness):
+    def test_protocol_keeps_a_contradictory_finish_but_still_rejects_such_an_action(self):
+        from agent.domain.canonical_action_protocol import (
+            CanonicalActionProtocolError, normalize_model_step_decision)
+        self.assertIs(False, normalize_model_step_decision(contradictory_finish())['state_action_consistent'])
+        action = decision('tap_semantic')
+        action['state_action_consistent'] = False
+        with self.assertRaisesRegex(CanonicalActionProtocolError, '矛盾'):
+            normalize_model_step_decision(action)
+
+    def test_contradictory_finish_is_never_success_even_if_marked_confirmed(self):
+        reason = PlatformVerifier._unconfirmed_goal_reason(
+            {'status': 'confirmed', 'fact': 'x'}, 3, state_action_consistent=False)
+        self.assertIn('state_action_consistent=false', reason)
+        for actions in (0, 3):
+            with self.subTest(actions=actions):
+                self.assertTrue(PlatformVerifier._unconfirmed_goal_reason(
+                    None, actions, state_action_consistent=False))
+
+    def test_first_screen_contradiction_is_fed_back_and_the_task_carries_on(self):
+        adapter = ReobservingAdapter([
+            (scene(0), contradictory_finish()),
+            (scene(1), decision('tap_semantic')),
+            (scene(2), decision()),
+        ])
+        loop, session, _ = self.start([], goal='先清空计算器，再计算 12+34', adapter=adapter,
+            max_observations=10)
+        self.assertEqual('needs_reobservation', session.status)
+        self.assertEqual(1, session.rejected_finish_streak)
+        loop.run_autonomous_safe_loop(session)
+        self.assertEqual('succeeded', session.status)
+        self.assertEqual(1, len(adapter.calls))
+        fed_back = [ctx.get('verifier_feedback') for ctx in adapter.contexts if ctx.get('verifier_feedback')]
+        self.assertTrue(fed_back)
+        self.assertIn('state_action_consistent=false', fed_back[0])
+
+    def test_repeated_contradictory_finish_pauses_instead_of_looping(self):
+        loop, session, adapter = self.start([(scene(0), contradictory_finish())],
+            goal='计算 12+34', max_observations=10)
+        loop.run_autonomous_safe_loop(session)
+        self.assertEqual('paused', session.status)
+        self.assertEqual([], adapter.calls)
+        self.assertIn('未判定成功', session.auto_pause_reason)
+
+
 if __name__ == '__main__':
     unittest.main()

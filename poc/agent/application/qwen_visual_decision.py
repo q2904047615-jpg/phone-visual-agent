@@ -46,6 +46,8 @@ class QwenVisualDecision:
     # The model's own CURRENT-frame verdict on a finish ({status, fact}); the
     # Verifier reads it instead of trusting a free-text reason.
     postcondition: Mapping[str, Any] | None = None
+    # False when the model says its own finish contradicts the current frame.
+    state_action_consistent: bool | None = None
 
     def validate(self, context: qwen_task_context_domain.QwenTaskContext) -> None:
         expected_scope = (context.task_id, context.device_id, context.revision,
@@ -62,7 +64,8 @@ class QwenVisualDecision:
             'decision_source': self.decision_source,
             'status': self.proposal.status, 'previous_action_outcome': self.previous_action_outcome, 'next_action': self.proposal.action.to_dict()
             if self.proposal.action else None, 'reason': self.proposal.reason,
-            **({'postcondition': dict(self.postcondition)} if self.postcondition is not None else {})}
+            **({'postcondition': dict(self.postcondition)} if self.postcondition is not None else {}),
+            **({'state_action_consistent': False} if self.state_action_consistent is False else {})}
 
 
 class QwenVisualDecisionObserver:
@@ -191,6 +194,7 @@ def _finish_decision(payload: Mapping[str, Any], *, context: qwen_task_context_d
         fingerprint=observation.fingerprint, trusted_observation=observation,
         previous_action_outcome=payload.get("previous_action_outcome"),
         postcondition=payload.get("postcondition"),
+        state_action_consistent=payload.get("state_action_consistent"),
         proposal=GenericStepProposal(status="finish", reason=reason))
 
 

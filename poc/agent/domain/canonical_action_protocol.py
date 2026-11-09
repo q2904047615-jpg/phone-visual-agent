@@ -113,7 +113,12 @@ def _normalize_decision_metadata(value: Any) -> dict[str, Any]:
         CanonicalActionProtocolError("只有wait_for_change可以携带wait_seconds。"))
     outcome = value.get("previous_action_outcome")
     state_action_consistent = value.get("state_action_consistent")
-    reject_if(state_action_consistent is False, CanonicalActionProtocolError("模型网关明确报告当前状态与所选动作矛盾。"))
+    # An action the model itself calls inconsistent is never executed. A finish
+    # it calls inconsistent is the model saying "not done yet": it stays a
+    # non-terminal candidate that the Verifier rejects with feedback, instead of
+    # a protocol fault that stalls the session (2026-11-09 live run 2f88b96f).
+    reject_if(state_action_consistent is False and status != "finish",
+        CanonicalActionProtocolError("模型网关明确报告当前状态与所选动作矛盾。"))
     reject_if(
         state_action_consistent is not None and not isinstance(state_action_consistent, bool),
         CanonicalActionProtocolError("state_action_consistent必须是boolean或null。"),

@@ -68,7 +68,8 @@ class PlatformVerifier:
                 evidence_kind="terminal_candidate_deferred",
                 reason="历史末步效果仍不确定，Verifier要求重新观察后再判断终态。",
             )
-        rejection = self._unconfirmed_goal_reason(intent.postcondition, physical_actions)
+        rejection = self._unconfirmed_goal_reason(intent.postcondition, physical_actions,
+            state_action_consistent=getattr(intent, "state_action_consistent", None))
         if rejection:
             return VerificationResult(
                 state="continue", terminal_status=None,
@@ -105,10 +106,14 @@ class PlatformVerifier:
         )
 
     @staticmethod
-    def _unconfirmed_goal_reason(postcondition: Any, physical_actions: int) -> str:
+    def _unconfirmed_goal_reason(postcondition: Any, physical_actions: int, *,
+        state_action_consistent: bool | None = None) -> str:
         status = str(postcondition.get("status") or "") if isinstance(postcondition, Mapping) else ""
         fact = str(postcondition.get("fact") or "").strip() if isinstance(postcondition, Mapping) else ""
         detail = f"（模型给出的事实：{fact[:200]}）" if fact else ""
+        if state_action_consistent is False:
+            return ("模型的finish自报与当前画面矛盾（state_action_consistent=false），不判定成功；"
+                    f"请按当前画面选择下一步动作{detail}。")
         if status in {"not_confirmed", "unknown"}:
             return f"模型的finish报告当前画面未确认目标达成（postcondition={status}），不判定成功{detail}。"
         if int(physical_actions or 0) > 0 and status != "confirmed":

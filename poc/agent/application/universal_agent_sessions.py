@@ -222,16 +222,24 @@ class UniversalAgentSessionApplicationService:
                 # the repository so the HTTP layer can return evidence instead of
                 # losing the whole attempt.
                 failed_session = getattr(exc, 'session', None)
-                if failed_session is not None:
-                    try:
-                        self._sessions.add(failed_session)
-                    except Exception:
-                        pass
-                    if getattr(failed_session, 'status', '') in getattr(orchestrator, 'TERMINAL_STATUSES', frozenset()):
-                        self._settle_if_terminal(failed_session)
-                elif self._runtime_quota_billing is not None:
-                    self._runtime_quota_billing.release(command.session_id, reason=type(exc).__name__)
-                raise
+                if (command.auto_advance and failed_session is not None
+                        and getattr(failed_session, 'status', '') == 'needs_reobservation'):
+                    # A zero-action fault on the first screenshot is the same
+                    # recoverable state the automatic loop already retries mid-task
+                    # (fresh screenshot, bounded by the observation budget). Hand it
+                    # to the loop instead of stranding the task before step one.
+                    session = failed_session
+                else:
+                    if failed_session is not None:
+                        try:
+                            self._sessions.add(failed_session)
+                        except Exception:
+                            pass
+                        if getattr(failed_session, 'status', '') in getattr(orchestrator, 'TERMINAL_STATUSES', frozenset()):
+                            self._settle_if_terminal(failed_session)
+                    elif self._runtime_quota_billing is not None:
+                        self._runtime_quota_billing.release(command.session_id, reason=type(exc).__name__)
+                    raise
             self._sessions.add(session)
             automatic_progress = {
                 'physical_actions': 0,

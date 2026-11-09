@@ -58,6 +58,45 @@ class AgentSessionApplicationTests(_BaseAgentSessionApplicationTests):
         self.assertEqual(0, orchestrator.auto_calls)
         self.assertEqual(0, result.automatic_progress["physical_actions"])
 
+    def _first_observation_fault_service(self):
+        class FirstObservationFaultOrchestrator(FakeOrchestrator):
+            TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+            def start(self, **kwargs):
+                session = super().start(**kwargs)
+                session.status = "needs_reobservation"
+                error = RuntimeError("单步完整观察结果不符合协议")
+                error.session = session
+                raise error
+
+        orchestrator = FirstObservationFaultOrchestrator(FakeDeviceRegistry())
+        repository = InMemoryAgentSessionRepository()
+        service = self._service(orchestrator, repository, ready_calls=[], lease_calls=[], task_calls=[])
+        return orchestrator, repository, service
+
+    def _fault_command(self, run_dir, *, auto_advance):
+        return StartUniversalAgentSessionCommand(
+            session_id="session-fault", raw_goal="计算 12+34", exact_input_text=None,
+            exact_action_kind=None, exact_target_label="", device_id="phone-01",
+            run_dir=run_dir, auto_advance=auto_advance)
+
+    def test_automatic_start_retries_a_zero_action_fault_on_the_first_screenshot(self) -> None:
+        # 2026-11-09 live run 2f88b96f stayed in needs_reobservation forever
+        # because only the mid-task loop retried such faults.
+        orchestrator, repository, service = self._first_observation_fault_service()
+        with tempfile.TemporaryDirectory() as temp:
+            result = service.start(self._fault_command(Path(temp) / "run", auto_advance=True))
+        self.assertIs(result.session, repository.require("session-fault"))
+        self.assertEqual(1, orchestrator.auto_calls)
+
+    def test_manual_start_still_reports_the_first_screenshot_fault(self) -> None:
+        orchestrator, repository, service = self._first_observation_fault_service()
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, "不符合协议"):
+                service.start(self._fault_command(Path(temp) / "run", auto_advance=False))
+        self.assertEqual("needs_reobservation", repository.require("session-fault").status)
+        self.assertEqual(0, orchestrator.auto_calls)
+
     def test_active_device_conflict_stops_before_output_or_model_work(self) -> None:
         registry = FakeDeviceRegistry("existing-session")
         orchestrator = FakeOrchestrator(registry)

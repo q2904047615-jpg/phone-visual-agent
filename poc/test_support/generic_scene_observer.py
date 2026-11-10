@@ -138,6 +138,7 @@ class FakeProvider:
         timeout: float | None = None,
         max_attempts: int | None = None,
         response_format: dict | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         if is_tap_locator_request(messages):
             self.locator_calls += 1
@@ -173,6 +174,7 @@ class SequenceProvider(FakeProvider):
         timeout: float | None = None,
         max_attempts: int | None = None,
         response_format: dict | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         if is_tap_locator_request(messages):
             self.locator_calls += 1

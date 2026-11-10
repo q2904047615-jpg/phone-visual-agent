@@ -96,6 +96,24 @@ class TapLocatorTests(unittest.TestCase):
         # The binder stores the canonical point as a 0..1 fraction of the frame.
         self.assertEqual((0.41, 0.79), tuple(result.proposal.action.params['tap_point']))
 
+    def test_locator_request_pins_the_model_thinking_mode_off(self):
+        # Replaying 28 labelled live taps (2026-11-10): with thinking inherited
+        # from the provider (on) the locator moved 8 correct taps off their key
+        # (median 22 s); with it off all 28 were located (median 4 s).
+        provider, observer, _, _, _ = observe(
+            decision(point=[228, 700], target_description='数字2键'), [{'point': [410, 790]}])
+        _, options = provider.locator_messages[0]
+        self.assertIs(False, options['enable_thinking'])
+        self.assertIs(False, observer.last_diagnostics['tap_locator']['thinking'])
+        self.assertIs(False, observer.status()['tap_locator_thinking'])
+
+    def test_thinking_can_be_restored_for_a_controlled_comparison(self):
+        with patch.object(observer_module, 'TAP_LOCATOR_THINKING', True):
+            provider, observer, _, _, _ = observe(
+                decision(point=[228, 700], target_description='数字2键'), [{'point': [410, 790]}])
+        self.assertIs(True, provider.locator_messages[0][1]['enable_thinking'])
+        self.assertIs(True, observer.last_diagnostics['tap_locator']['thinking'])
+
     def test_locator_failures_keep_the_decision_point_and_action(self):
         for reply in ({'point': None}, {'point': [1200, 50]}, {'point': ['a', 'b']}, 'not json',
                       TimeoutError('slow')):

@@ -16,6 +16,7 @@ class VisionProviderPort(Protocol):
         timeout: float | None = None,
         max_attempts: int | None = None,
         response_format: dict[str, Any] | None = None,
+        enable_thinking: bool | None = None,
     ) -> str: ...
 
     def status(self) -> dict[str, Any]: ...

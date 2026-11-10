@@ -177,6 +177,22 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
                            response_format=response_format)
         self.assertFalse(mocked.call_args.kwargs["json"]["enable_thinking"])
 
+    def test_one_call_can_pin_thinking_off_on_a_thinking_provider(self) -> None:
+        # The platform provider is built with thinking on. A json_object call
+        # (the tap locator) inherited that until 2026-11-10; it must be able to
+        # switch it off for itself, and other calls keep the provider default.
+        provider = DashScopeVisionProvider(api_key="test-key", enable_thinking=True, max_attempts=1)
+        sent = []
+        for override in (False, None, True):
+            with patch(
+                "agent.infrastructure.dashscope_vision_provider.httpx.post",
+                return_value=self._response(),
+            ) as mocked:
+                provider.chat([{"role": "user", "content": "JSON"}], None,
+                              response_format={"type": "json_object"}, enable_thinking=override)
+            sent.append(mocked.call_args.kwargs["json"]["enable_thinking"])
+        self.assertEqual([False, True, True], sent)
+
     def test_malformed_json_schema_is_rejected_before_network(self) -> None:
         provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
         with patch("agent.infrastructure.dashscope_vision_provider.httpx.post") as mocked:

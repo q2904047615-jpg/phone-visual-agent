@@ -160,6 +160,7 @@ class DashScopeVisionProvider:
         timeout: float | None = None,
         max_attempts: int | None = None,
         response_format: dict[str, Any] | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         # This provider instance is shared by all device sessions.  Its
         # response metadata is intentionally serialized with the request so a
@@ -167,7 +168,7 @@ class DashScopeVisionProvider:
         # session ledger records them.
         with self._request_lock:
             return self._chat_locked(messages, max_tokens, timeout=timeout, max_attempts=max_attempts,
-                response_format=response_format)
+                response_format=response_format, enable_thinking=enable_thinking)
 
     def chat(
         self,
@@ -177,13 +178,15 @@ class DashScopeVisionProvider:
         timeout: float | None = None,
         max_attempts: int | None = None,
         response_format: dict[str, Any] | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         """Public provider-neutral boundary used by visual observers."""
         return self._chat(messages, max_tokens, timeout=timeout, max_attempts=max_attempts,
-            response_format=response_format)
+            response_format=response_format, enable_thinking=enable_thinking)
 
     def _chat_locked(self, messages: list[dict[str, Any]], max_tokens: int | None, *, timeout: float | None=None,
-        max_attempts: int | None=None, response_format: dict[str, Any] | None=None) -> str:
+        max_attempts: int | None=None, response_format: dict[str, Any] | None=None,
+        enable_thinking: bool | None=None) -> str:
         reject_if(not self.configured, VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"))
         ledger = self._active_usage_ledger.get()
         stage, fingerprint = self._active_call_metadata.get()
@@ -194,7 +197,7 @@ class DashScopeVisionProvider:
         request_started = time.perf_counter()
         try:
             content = self._chat_untracked(messages, max_tokens, timeout=timeout, max_attempts=max_attempts,
-                response_format=response_format)
+                response_format=response_format, enable_thinking=enable_thinking)
         except Exception as exc:
             if ledger is not None and local_request_id:
                 # A provider response is only successful after message.content
@@ -212,7 +215,8 @@ class DashScopeVisionProvider:
         return content
 
     def _chat_untracked(self, messages: list[dict[str, Any]], max_tokens: int | None, *, timeout: float | None=None,
-        max_attempts: int | None=None, response_format: dict[str, Any] | None=None) -> str:
+        max_attempts: int | None=None, response_format: dict[str, Any] | None=None,
+        enable_thinking: bool | None=None) -> str:
         reject_if(not self.configured, VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"))
         self.last_usage = {}
         self.last_request_id = ""
@@ -225,6 +229,10 @@ class DashScopeVisionProvider:
             or max_tokens <= 0), VisionAgentError("千问视觉 max_tokens 必须为正整数或省略。"))
         response_format = _validated_response_format(response_format)
         request_options = self.model_config.request_options()
+        # A caller may pin the reasoning mode for one request instead of
+        # inheriting the provider default (the tap locator does).
+        if enable_thinking is not None:
+            request_options["enable_thinking"] = bool(enable_thinking)
         # DashScope documents Qwen3-VL structured output for non-thinking mode.
         # Keep thinking enabled for free-form calls, but make strict JSON
         # requests deterministic so the final message.content carries JSON.

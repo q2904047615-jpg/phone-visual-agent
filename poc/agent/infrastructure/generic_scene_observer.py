@@ -176,6 +176,16 @@ TAP_LOCATOR_ENABLED = os.environ.get("PHONE_AGENT_TAP_LOCATOR", "1").strip() != 
 TAP_LOCATOR_TIMEOUT_SECONDS = _positive_env_float("PHONE_AGENT_TAP_LOCATOR_TIMEOUT_SECONDS", 45.0)
 TAP_LOCATOR_MAX_ATTEMPTS = _positive_env_int("PHONE_AGENT_TAP_LOCATOR_MAX_ATTEMPTS", 2)
 TAP_LOCATOR_WIRE_ACTIONS = frozenset({'tap', 'dismiss', 'double_tap', 'long_press'})
+# The locator is a one-image lookup and runs with the model's thinking mode off,
+# like the whole-task observation (its json_schema request already forces that).
+# It used to inherit the provider default (on). Replaying 28 labelled live taps
+# one at a time (2026-11-10): thinking-on moved 8 correct taps off their key (the
+# live "+" -> [875,700] reproduced exactly), timed out once and took a median
+# 22 s (max 91 s); thinking-off located all 28 in every round, median 4 s (max
+# 9 s), with about 1/90 of the output tokens. Calculator keys only, so this
+# explains the observed moves, not locator accuracy on other screens. Set the
+# variable to 1 only for a controlled comparison.
+TAP_LOCATOR_THINKING = os.environ.get("PHONE_AGENT_TAP_LOCATOR_THINKING", "0").strip() == "1"
 TAP_LOCATOR_PROMPT = (
     "你在一张手机截图上定位一个控件。坐标使用截图上的0~1000归一化网格：左上角[0,0]，右下角[1000,1000]，"
     "x向右、y向下。用户给出的是对本次点击目标的描述，可能附带上下文；只找它要点击的那一个控件。"
@@ -228,6 +238,7 @@ class SingleStepGenericSceneObserver():
             'last_stage_label': STAGE_LABELS.get(last_stage, last_stage),
             'max_online_calls_per_observation': 2 if TAP_LOCATOR_ENABLED else 1,
             'tap_locator_enabled': TAP_LOCATOR_ENABLED,
+            'tap_locator_thinking': TAP_LOCATOR_THINKING,
             'single_step_output_tokens': SINGLE_STEP_OUTPUT_TOKENS,
             'observation_timeout_seconds': OBSERVATION_TIMEOUT_SECONDS,
             'observation_max_attempts': OBSERVATION_MAX_ATTEMPTS,
@@ -501,7 +512,8 @@ class SingleStepGenericSceneObserver():
             target, source = str(model_decision.get("reason") or "").strip()[:300], "reason"
         decision_point = list(model_decision.get("point") or [])
         record: dict[str, Any] = {"called": False, "target": target, "target_source": source,
-            "decision_point": decision_point, "located_point": None, "applied": False, "error": None}
+            "decision_point": decision_point, "located_point": None, "applied": False, "error": None,
+            "thinking": TAP_LOCATOR_THINKING}
         if not target:
             record["error"] = "决策没有描述点击目标，沿用决策坐标。"
             return record
@@ -525,7 +537,8 @@ class SingleStepGenericSceneObserver():
         try:
             with scope:
                 raw = self.gateway.chat(messages, max_tokens=None, timeout=TAP_LOCATOR_TIMEOUT_SECONDS,
-                    max_attempts=TAP_LOCATOR_MAX_ATTEMPTS, response_format={'type': 'json_object'})
+                    max_attempts=TAP_LOCATOR_MAX_ATTEMPTS, response_format={'type': 'json_object'},
+                    enable_thinking=TAP_LOCATOR_THINKING)
             record["raw_response"] = redact_model_failure_response(str(raw))[:300]
             point = _extract_json_object(str(raw), reject_duplicate_keys=True,
                 unwrap_singleton_object_array=True).get("point")
